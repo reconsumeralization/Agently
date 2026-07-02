@@ -16,7 +16,7 @@ from agently.core import PluginManager, TaskBoardGraph, TaskBoardRevision, TaskB
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, AgentExecutionResult
 from agently.core.application.AgentTask import AgentTask
 from agently.core.application.AgentTask.BlockCarrier import WorkUnitResult
-from agently.types.data import AgentlyRequestData, WorkspaceContextPackage
+from agently.types.data import AgentExecutionStreamData, AgentlyRequestData, WorkspaceContextPackage
 from agently.types.options import ExecutionOptions, SkillsRouteOptions
 from agently.utils import DataFormatter
 from agently.utils import Settings
@@ -196,6 +196,61 @@ async def test_agent_execution_stream_cancel_retrieves_start_exception():
         event_loop.set_exception_handler(previous_handler)
 
     assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_instant_adds_synthetic_delta_projection_without_polluting_all():
+    phase_item = AgentExecutionStreamData(
+        path="agent_task.phase.planned",
+        value={"phase": "planned", "iteration": 1},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        route="task",
+        task_id="task-1",
+        meta={
+            "stream_kind": "phase",
+            "execution_id": "exec-1",
+            "lineage": {"task_id": "task-1"},
+        },
+    )
+    owner = SimpleNamespace(
+        _completed=True,
+        stream=SimpleNamespace(items=[phase_item]),
+    )
+
+    instant_items = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="instant")
+    ]
+    delta_chunks = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="delta")
+    ]
+    all_items = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="all")
+    ]
+
+    assert instant_items[0] is phase_item
+    synthetic_delta = instant_items[1]
+    assert isinstance(synthetic_delta, AgentExecutionStreamData)
+    assert synthetic_delta.path == "$delta"
+    assert synthetic_delta.delta == "Iteration 1: phase planned.\n\n"
+    assert synthetic_delta.value == synthetic_delta.delta
+    assert synthetic_delta.event_type == "delta"
+    assert synthetic_delta.is_complete is False
+    assert synthetic_delta.source == "agent_execution"
+    assert synthetic_delta.route == "task"
+    assert synthetic_delta.task_id == "task-1"
+    assert synthetic_delta.meta == {
+        "stream_kind": "text_projection",
+        "projection_source_path": "agent_task.phase.planned",
+        "projection_source_stream_kind": "phase",
+        "execution_id": "exec-1",
+        "lineage": {"task_id": "task-1"},
+        "projection_source_event_type": "done",
+        "projection_source": "agent_task",
+    }
+    assert delta_chunks == ["Iteration 1: phase planned.\n\n"]
+    assert all_items == [("agent_execution", phase_item)]
 
 
 class MockAgentExecutionIsolationRequester(MockAgentExecutionRequester):

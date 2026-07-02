@@ -154,6 +154,9 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "without .output()" in artifact_stream_contract
     assert "<$retry>...</$retry> is a consumer-side replay boundary" in artifact_stream_contract
     assert "targeted_readbacks" in artifact_stream_contract
+    blocks_task_loop_contract = in_development["companions"]["blocks"]["agent_task_loop_contract"]
+    assert 'AgentExecutionStreamData path="$delta"' in blocks_task_loop_contract
+    assert 'get_async_generator(type="all") remains the raw audit stream' in blocks_task_loop_contract
     execution_contract = in_development["request_input"]["agent_execution_request_scope"]
     assert "AgentExecution" in execution_contract["surface"]
     assert "AgentExecutionResult" in execution_contract["surface"]
@@ -189,6 +192,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "AgentTask does not impose model-request, iteration, TaskBoard tick, or Action round quotas" in task_loop_contract["contract"]
     assert "no-progress and idle timeouts remain liveness guards" in task_loop_contract["contract"]
     assert "TaskDAG is no longer an AgentTask bounded-step strategy" in task_loop_contract["contract"]
+    assert 'AgentExecutionStreamData path="$delta"' in task_loop_contract["contract"]
+    assert 'get_async_generator(type="all") remains the raw audit stream' in task_loop_contract["contract"]
     assert "compatibility/convenience facade over DAG" in task_loop_contract["contract"]
     assert "Agent.use_dynamic_task(...) and AgentExecution.use_dynamic_task(...) fail fast" in task_loop_contract["contract"]
     assert "Agently.create_dynamic_task(...)" in task_loop_contract["contract"]

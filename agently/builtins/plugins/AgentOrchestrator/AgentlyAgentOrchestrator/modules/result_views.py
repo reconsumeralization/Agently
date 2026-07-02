@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Generator, Mapping
 from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
 from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
+from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter, FunctionShifter
 
 from .diagnostics import build_execution_meta
@@ -84,8 +85,7 @@ async def get_async_generator(
         type = content
     if owner._completed:
         for item in owner.stream.items:
-            projected = _project_stream_item(item, type)
-            if projected is not None:
+            for projected in _project_stream_items(item, type):
                 yield projected
         return
     queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -99,8 +99,7 @@ async def get_async_generator(
             item = await queue.get()
             if item is None:
                 break
-            projected = _project_stream_item(item, type)
-            if projected is not None:
+            for projected in _project_stream_items(item, type):
                 yield projected
         await start_task
     finally:
@@ -108,12 +107,57 @@ async def get_async_generator(
             owner.stream.queues.remove(queue)
 
 
-def _project_stream_item(item: Any, type: Any) -> Any:
+def _project_stream_items(item: Any, type: Any) -> Generator[Any, None, None]:
     if type == "all":
-        return ("agent_execution", item)
+        yield ("agent_execution", item)
+        return
     if type == "delta":
-        return project_agent_execution_text_delta(item)
-    return item
+        projected = project_agent_execution_text_delta(item)
+        if projected is not None:
+            yield projected
+        return
+    yield item
+    if type == "instant":
+        projected = _project_instant_delta_item(item)
+        if projected is not None:
+            yield projected
+
+
+def _project_instant_delta_item(item: Any) -> AgentExecutionStreamData | None:
+    delta = project_agent_execution_text_delta(item)
+    if delta is None:
+        return None
+    item_meta = getattr(item, "meta", None)
+    meta_map = item_meta if isinstance(item_meta, Mapping) else {}
+    stream_kind = meta_map.get("stream_kind")
+    projection_meta: dict[str, Any] = {
+        "stream_kind": "text_projection",
+        "projection_source_path": str(getattr(item, "path", "") or ""),
+        "projection_source_stream_kind": str(stream_kind) if stream_kind not in (None, "") else None,
+    }
+    for key in ("execution_id", "lineage"):
+        if key in meta_map:
+            projection_meta[key] = meta_map[key]
+    event_type = getattr(item, "event_type", None)
+    if event_type:
+        projection_meta["projection_source_event_type"] = str(event_type)
+    source = getattr(item, "source", None)
+    if source:
+        projection_meta["projection_source"] = str(source)
+    return AgentExecutionStreamData(
+        path="$delta",
+        value=delta,
+        delta=delta,
+        event_type="delta",
+        is_complete=False,
+        source="agent_execution",
+        route=getattr(item, "route", None),
+        stage_id=getattr(item, "stage_id", None),
+        task_id=getattr(item, "task_id", None),
+        action_id=getattr(item, "action_id", None),
+        graph_id=getattr(item, "graph_id", None),
+        meta=projection_meta,
+    )
 
 
 def _retrieve_generator_start_exception(task: "asyncio.Task[Any]") -> None:

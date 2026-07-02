@@ -119,12 +119,20 @@ streams preserve model attempt facts as structured stream items. In particular,
 `response_id`, `request_run_id`, `model_run_id`, and `attempt_index`.
 `type="delta"` is the plain text projection; it yields strings and uses
 `"<$retry>{reason}</$retry>"` to mark a replay boundary.
+`type="instant"` preserves each original structured item and, when that item can
+also be projected to natural-language text, immediately appends a synthetic
+`AgentExecutionStreamData` item with `path="$delta"`, `event_type="delta"`,
+`source="agent_execution"`, and `meta["stream_kind"] == "text_projection"`.
+`type="all"` remains the raw audit stream and does not include those synthetic
+projection items.
 
 ```python
 execution = agent.input("Summarize the incident update.")
 async for item in execution.get_async_generator(type="instant"):
     if item.path == "$status":
         print(item.value["status"], item.meta["response_id"])
+    elif item.path == "$delta" and item.delta:
+        print(item.delta, end="", flush=True)
     elif item.path == "model.delta" and item.delta:
         print(item.delta, end="", flush=True)
 ```
@@ -132,7 +140,10 @@ async for item in execution.get_async_generator(type="instant"):
 The no-argument execution generator defaults to the same `delta` projection, so
 `execution.get_generator()` and `execution.get_async_generator()` yield strings.
 Use `type="instant"` or `type="all"` when the consumer needs the structured
-`$status` item instead of the text marker.
+`$status` item instead of the text marker. Use `type="instant"` when a UI needs
+both structured state updates and the derived `$delta` text slot; use
+`type="all"` for records, DevTools-style replay, or audits that must not mix
+derived items with source facts.
 
 For shared-output CLI rendering, do not treat `.is_complete` as a global
 display-order barrier. A structured parser often confirms that one path is
