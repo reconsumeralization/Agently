@@ -38,9 +38,9 @@ async def main() -> None:
             "traveler": "APAC partner success lead",
             "objective": "arrive rested for a Hangzhou client workshop and dinner",
             "fixed_commitments": [
-                "arrive at Hangzhou East Railway Station before 12:30",
-                "client workshop near Qianjiang New City starts at 14:00",
-                "client dinner near West Lake Hubin business district starts at 19:00",
+                "arrive at Hangzhou East Railway Station / 杭州东站 before 12:30",
+                "client workshop near Qianjiang New City / 钱江新城 starts at 14:00",
+                "client dinner near West Lake Hubin business district / 西湖湖滨商圈 starts at 19:00",
             ],
             "policy": [
                 "prefer rail plus short taxi over long taxi transfers",
@@ -86,7 +86,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 # Expected key output:
-# prints a [DELTA_STREAM] section from get_async_generator(type="delta");
-# status is completed, accepted is true, and the ordinary execution stream
-# shows native policy evidence, real AMap MCP evidence, Skill-guided planning,
-# and final.md delivery.
+# real LONGCAT run 2026-07-02:
+# status completed, accepted true, execution_strategy auto;
+# final.md written and read back at 3426 bytes with sha256
+# c5aee9dcb92ff99a9f15dda5aced627fc5aa29f95d0c9319c732d39fb34e2287;
+# delta stream shows get_travel_policy, AMap maps_geo/maps_weather, write_file,
+# and read_file activity. AMap evidence includes Hangzhou East Railway Station
+# 120.212600,30.290851, Qianjiang New City 120.213988,30.250397,
+# Hangzhou weather 中雨/小雨, and a West Lake Hubin fallback via 杭州西湖.

@@ -88,7 +88,12 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 # Expected key output:
-# prints a [DELTA_STREAM] section from get_async_generator(type="delta");
-# status is completed, accepted is true, and the ordinary execution stream
-# shows native board context, MCP CRM/competitor evidence, Skill-guided memo
-# structure, and final.md delivery.
+# real LONGCAT run on 2026-07-02 completed with accepted=true and
+# execution_strategy=auto. Auto selected TaskBoard, used the native
+# get_board_question_packet action, local stdio MCP crm_pipeline_snapshot and
+# competitor_signal_snapshot tools, the installed market-entry-analyst Skill,
+# and Workspace write_file/read_file. The run produced final.md
+# (5335 bytes, sha256
+# e1531a4c44bf01179ba1a61773c450d8de37706a7ad6db2feae547b82c73d838)
+# with a board decision, required question answers, CRM/competitor evidence,
+# assumptions, missing information, and explicit example-data boundaries.

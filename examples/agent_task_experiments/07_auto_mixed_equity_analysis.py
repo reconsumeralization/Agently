@@ -84,7 +84,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 # Expected key output:
-# prints a [DELTA_STREAM] section from get_async_generator(type="delta");
-# status is completed, accepted is true, and the ordinary execution stream
-# shows native mandate evidence, MCP market/news evidence, Skill-guided risk
-# framing, and final.md delivery.
+# real LONGCAT run 2026-07-02:
+# status completed, accepted true, execution_strategy auto;
+# final.md written and read back at 2564 bytes with sha256
+# 5634dec1c4d47e72f1e9618215e99e2498e6ab2748885ea68f3f0b72e85f7929;
+# delta stream shows get_portfolio_mandate, equity_market_snapshot,
+# equity_news_digest, write_file, and read_file activity. The final brief covers
+# NVDA, AMD, and AVGO, includes market facts and news digest sections, and
+# states that the example MCP data is not live data or investment advice.
