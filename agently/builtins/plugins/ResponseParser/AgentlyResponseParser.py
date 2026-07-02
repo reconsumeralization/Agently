@@ -865,7 +865,7 @@ class AgentlyResponseParser(ResponseParser):
         await self._ensure_consumer()
         consumer = cast(GeneratorConsumer, self._response_consumer)
         parsed_generator = consumer.get_async_generator()
-        _streaming_parse_path_style = self.settings.get("response.streaming_parse_path_style", "dot")
+        _streaming_parse_path_style = str(self.settings.get("response.streaming_parse_path_style", "dot") or "dot")
         streaming_json_parser = None
         streaming_flat_markdown_parser = None
         streaming_hybrid_parser = None
@@ -944,7 +944,9 @@ class AgentlyResponseParser(ResponseParser):
                                         _streaming_parse_path_style,
                                     )
                             elif event == "done":
-                                async for streaming_data in streaming_flat_markdown_parser.flush():
+                                async for streaming_data in streaming_flat_markdown_parser.flush_final_data(
+                                    self.full_result_data.get("parsed_result")
+                                ):
                                     yield self._prepare_streaming_data_for_yield(
                                         streaming_data,
                                         _streaming_parse_path_style,
@@ -1058,7 +1060,7 @@ class AgentlyResponseParser(ResponseParser):
     ) -> Generator:
         asyncio.run(self._ensure_consumer())
         parsed_generator = cast(GeneratorConsumer, self._response_consumer).get_generator()
-        _streaming_parse_path_style = self.settings.get("response.streaming_parse_path_style", "dot")
+        _streaming_parse_path_style = str(self.settings.get("response.streaming_parse_path_style", "dot") or "dot")
         streaming_json_parser = None
         streaming_flat_markdown_parser = None
         streaming_hybrid_parser = None
@@ -1143,7 +1145,9 @@ class AgentlyResponseParser(ResponseParser):
                                 )
                         elif event == "done":
                             for streaming_data in FunctionShifter.syncify_async_generator(
-                                streaming_flat_markdown_parser.flush()
+                                streaming_flat_markdown_parser.flush_final_data(
+                                    self.full_result_data.get("parsed_result")
+                                )
                             ):
                                 yield self._prepare_streaming_data_for_yield(
                                     streaming_data,
