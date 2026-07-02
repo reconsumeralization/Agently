@@ -77,7 +77,7 @@ class MockSkillsRequester:
             }
         elif "verify" in request_text and "Validate the execution output" in request_text:
             response = {"passed": True, "issues": [], "reason": "The output satisfies the selected Skill guidance."}
-        elif "### html" in request_text:
+        elif "Required sections" in request_text and "html" in request_text:
             yield "message", "### html\n<section>OK</section>"
             return
         else:

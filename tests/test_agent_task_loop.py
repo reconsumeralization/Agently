@@ -2308,7 +2308,7 @@ class MockAgentTaskRequester:
             yield "message", payload_text[:midpoint]
             yield "message", payload_text[midpoint:]
             return
-        elif "Analyze this task's execution shape for AgentTaskLoop strategy resolution" in text:
+        elif "Analyze this task's execution shape for AgentTask strategy resolution" in text:
             payload = {
                 "analysis": "This mock task is linear and can stay in the flat loop.",
                 "execution_hint": {
@@ -7368,6 +7368,173 @@ async def test_capability_evidence_gate_blocks_bypass_when_capability_unused(tmp
     assert "capability_evidence_missing" in verification.get("guard_reasons", [])
     assert "design-skill" in " ".join(verification.get("missing_capability_evidence", []))
     assert "design-skill" in " ".join(verification.get("missing_required_capabilities", []))
+
+
+@pytest.mark.asyncio
+async def test_capability_evidence_gate_reads_execution_effective_options(tmp_path):
+    """Agent.create_task routes may carry task-owned evidence requirements
+    through execution effective_options. The deterministic guard must still
+    enforce them against real action logs, not verifier prose."""
+    agent = _capability_gate_agent("agent-task-execution-option-evidence-gate")
+
+    async def prompt_only_step(iteration_index, plan, context_pack):
+        return (
+            {
+                "step_result": "claimed final.md was written",
+                "evidence": ["write_file action_succeeded"],
+                "remaining_work": [],
+            },
+            {
+                "execution_id": f"exec-{iteration_index}",
+                "status": "completed",
+                "route": {"selected_route": "skills"},
+                "logs": {
+                    "action_logs": {},
+                    "route_logs": {
+                        "plan": {"selected_skills": [{"skill_id": "report-skill"}]},
+                        "skill_logs": [{"skill_id": "report-skill", "status": "success"}],
+                    },
+                },
+                "effective_options": {
+                    "capability_evidence_requirements": [
+                        {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"}
+                    ]
+                },
+            },
+        )
+
+    task = agent.create_task(
+        task_id="execution-option-evidence-gate",
+        goal="Write a report to final.md.",
+        success_criteria=["The report is written to final.md."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": prompt_only_step}
+
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    assert result["status"] != "completed"
+    assert result["accepted"] is False
+    verification = meta["iterations"][0]["verification"]
+    assert "capability_evidence_missing" in verification.get("guard_reasons", [])
+    assert "write_file" in " ".join(verification.get("missing_capability_evidence", []))
+
+
+def test_pending_action_evidence_requirement_escalates_direct_step_to_actions(tmp_path):
+    agent = _capability_gate_agent("agent-task-action-evidence-shape")
+    task = AgentTask(
+        agent,
+        task_id="pending-action-evidence-shape",
+        goal="Write a report to final.md.",
+        success_criteria=["The report is written to final.md."],
+        workspace=tmp_path / "task-workspace",
+        options={
+            "capability_evidence_requirements": [
+                {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"}
+            ],
+            "planner_capabilities": [
+                {
+                    "id": "write_file",
+                    "kind": "action",
+                    "route": "model_request",
+                    "guidance_access": "none",
+                    "description": "write",
+                }
+            ],
+        },
+    )
+    used_actions: list[str] = []
+    route_policies: list[dict[str, Any]] = []
+
+    class DummyExecution:
+        local_action_ids: list[str] = []
+
+        def use_actions(self, action_ids):
+            used_actions.extend(action_ids)
+
+        def route_policy(self, policy):
+            route_policies.append(policy)
+
+        def record_consumed_option(self, *args, **kwargs):
+            return None
+
+    plan = {
+        "execution_shape": "direct",
+        "step_instruction": "Write the file.",
+        "expected_evidence": "final.md",
+        "rationale": "the task asks for a file",
+    }
+
+    step_execution = task._configure_step_execution(DummyExecution(), plan)
+
+    assert step_execution["effective_shape"] == "actions"
+    assert plan["effective_execution_shape"] == "actions"
+    assert plan["execution_shape_adjustment"]["reason"] == "pending_action_succeeded_evidence"
+    assert used_actions == ["write_file"]
+    assert route_policies and route_policies[0]["allowed_routes"] == ["model_request"]
+
+
+def test_pending_action_evidence_requirement_escalates_skills_step_to_actions(tmp_path):
+    agent = _capability_gate_agent("agent-task-skill-step-action-evidence-shape")
+    task = AgentTask(
+        agent,
+        task_id="pending-action-evidence-skills-shape",
+        goal="Write a report to final.md using configured Skill guidance.",
+        success_criteria=["The report is written to final.md."],
+        workspace=tmp_path / "task-workspace",
+        options={
+            "capability_evidence_requirements": [
+                {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"}
+            ],
+            "planner_capabilities": [
+                {
+                    "id": "write_file",
+                    "kind": "action",
+                    "route": "model_request",
+                    "guidance_access": "none",
+                    "description": "write",
+                },
+                {
+                    "id": "report-skill",
+                    "kind": "skill",
+                    "route": "model_request",
+                    "guidance_access": "prompt_bound",
+                    "description": "report guidance",
+                },
+            ],
+        },
+    )
+    used_actions: list[str] = []
+    route_policies: list[dict[str, Any]] = []
+
+    class DummyExecution:
+        local_action_ids: list[str] = []
+
+        def use_actions(self, action_ids):
+            used_actions.extend(action_ids)
+
+        def route_policy(self, policy):
+            route_policies.append(policy)
+
+        def record_consumed_option(self, *args, **kwargs):
+            return None
+
+    plan = {
+        "execution_shape": "skills",
+        "step_instruction": "Write the file with the configured Skill guidance.",
+        "expected_evidence": "final.md",
+        "rationale": "the task asks for a file and Skill guidance",
+    }
+
+    step_execution = task._configure_step_execution(DummyExecution(), plan)
+
+    assert step_execution["effective_shape"] == "actions"
+    assert plan["execution_shape_adjustment"]["from"] == "skills"
+    assert plan["execution_shape_adjustment"]["reason"] == "pending_action_succeeded_evidence"
+    assert used_actions == ["write_file"]
+    assert route_policies and route_policies[0]["allowed_routes"] == ["model_request"]
 
 
 @pytest.mark.asyncio

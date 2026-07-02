@@ -34,7 +34,7 @@ class Blocks(AgentlyPlugin, Protocol):
     Implementations expose planner-facing PlanBlocks, lower bounded
     ExecutionPlan or TaskDAG segments to ExecutionBlockGraph, bind those graphs
     to TriggerFlow execution, and map runtime outputs to result/evidence views.
-    They do not own AgentTaskLoop control flow, permission grants, TaskDAG
+    They do not own AgentTask control flow, permission grants, TaskDAG
     validation, TriggerFlow dispatch, or terminal task acceptance.
     """
 

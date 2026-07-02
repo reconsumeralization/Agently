@@ -16,7 +16,7 @@
 
 These contracts implement Slice 1 from
 `spec/implemented/architecture/COMPLEX_TASK_EXECUTION_LIFECYCLE_BLOCKS_PLUGIN_SPEC.md`.
-They model the AgentTaskLoop-facing plan and evidence layer only:
+They model the AgentTask-facing plan and evidence layer only:
 
     TaskFrame            -> one progressively resolved semantic unit
     PlanBlockInstance    -> one selected occurrence of a planner-facing PlanBlock
@@ -29,7 +29,7 @@ They model the AgentTaskLoop-facing plan and evidence layer only:
 ExecutionBlock and ExecutionBlockGraph live in `blocks.py`. Keeping them out of
 ExecutionPlan preserves the final architecture boundary: the Blocks plugin
 lowers PlanBlock instances into TriggerFlow-backed runtime blocks, while
-AgentTaskLoop remains the lifecycle owner.
+AgentTask remains the lifecycle owner.
 """
 
 from __future__ import annotations
@@ -329,7 +329,7 @@ class TaskFrame:
 
     A TaskFrame is not an execution engine. It may compile to one PlanBlock
     instance, a DAG-shaped segment, a TriggerFlow wait segment, or a bounded
-    child Agent step. It must not start an unrestricted nested AgentTaskLoop.
+    child Agent step. It must not start an unrestricted nested AgentTask.
     """
 
     id: str
@@ -757,7 +757,7 @@ class ReplanSignal:
     """Structured early repair/replan control signal.
 
     Blocks, TriggerFlow diagnostics, validators, and verifier checkpoints can
-    produce this signal. AgentTaskLoop owns the decision to continue, repair,
+    produce this signal. AgentTask owns the decision to continue, repair,
     replace bindings, regenerate a segment, re-enter goal planning, block, or
     clarify.
     """

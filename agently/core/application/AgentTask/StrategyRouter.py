@@ -122,7 +122,7 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
             }
         )
         request.instruct(
-            "Analyze this task's execution shape for AgentTaskLoop strategy resolution. "
+            "Analyze this task's execution shape for AgentTask strategy resolution. "
             "First provide short task_intent and decision_basis fields that frame the route choice without raw chain-of-thought. "
             "Then write flexible natural-language analysis and provide execution_hint as a thin, non-binding "
             "structured hint. Do not decide final execution by keywords. Do not treat the hint as completion evidence. "

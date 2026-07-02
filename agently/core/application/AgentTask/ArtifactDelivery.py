@@ -2009,7 +2009,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             {
                 "allowed_routes": ["model_request"],
                 "on_violation": "block",
-                "owner": "AgentTaskLoop",
+                "owner": "AgentTask",
                 "step_execution_shape": "workspace_artifact_draft",
             }
         )

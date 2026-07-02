@@ -432,7 +432,40 @@ def is_task_strategy(owner: "AgentExecution") -> bool:
     if owner.goal_items or owner.success_criteria_items:
         return True
     task_options = owner.options.get("task")
-    return isinstance(task_options, dict) and bool(task_options)
+    if isinstance(task_options, dict) and bool(task_options):
+        return True
+    return _top_level_execution_has_skills(owner)
+
+
+def _top_level_execution_has_skills(owner: "AgentExecution") -> bool:
+    lineage = getattr(owner, "lineage", {}) or {}
+    if isinstance(lineage, Mapping):
+        if lineage.get("step_id") is not None:
+            return False
+        scope = lineage.get("scope")
+        if isinstance(scope, Mapping) and scope.get("strategy_phase"):
+            return False
+
+    if getattr(owner, "local_skill_selectors", None) or getattr(owner, "local_skills_pack_selectors", None):
+        return True
+
+    agent = getattr(owner, "agent", None)
+    for method_name, kwargs in (
+        ("_collect_skill_selectors", {"skills": None, "mode": "model_decision"}),
+        ("_collect_skill_selectors", {"skills": None, "mode": "required"}),
+        ("_collect_skills_pack_selectors", {"skills_packs": None, "mode": "model_decision"}),
+        ("_collect_skills_pack_selectors", {"skills_packs": None, "mode": "required"}),
+    ):
+        collect = getattr(agent, method_name, None)
+        if not callable(collect):
+            continue
+        try:
+            values = collect(**kwargs)
+        except Exception:
+            continue
+        if isinstance(values, (list, tuple, set)) and values:
+            return True
+    return False
 
 
 def route_options(owner: "AgentExecution", route_name: str) -> dict[str, Any]:

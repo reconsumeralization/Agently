@@ -896,6 +896,15 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         if isinstance(diagnostics, dict) and diagnostics.get("execution_error"):
             execution_errors.append(_compact_agent_task_error_info(diagnostics["execution_error"]))
         replan_signals = cls._collect_replan_signals(execution_meta)
+        collect_evidence_requirements = getattr(cls, "_capability_evidence_requirements_from_mapping", None)
+        capability_evidence_requirements: list[dict[str, Any]] = []
+        if callable(collect_evidence_requirements):
+            for source in (execution_meta.get("effective_options"), execution_meta.get("options")):
+                if isinstance(source, Mapping):
+                    capability_evidence_requirements.extend(collect_evidence_requirements(source))
+            merge_evidence_requirements = getattr(cls, "_merge_capability_evidence_requirements", None)
+            if callable(merge_evidence_requirements):
+                capability_evidence_requirements = merge_evidence_requirements(capability_evidence_requirements)
         # Unified capability-evidence view (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
         # one capability id space across kinds plus per-kind evidence buckets. A
         # capability is "used" when it ran (action) or was selected (skill). The
@@ -918,6 +927,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "blocked_actions": blocked_actions,
             "approval_required_actions": approval_required_actions,
             "required_actions": required_actions,
+            "capability_evidence_requirements": capability_evidence_requirements,
             "missing_required_actions": missing_required_actions,
             "selected_skill_ids": selected_skill_ids,
             "required_skills": required_skills,
@@ -1016,19 +1026,21 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         route_logs = logs.get("route_logs", {})
         if not isinstance(route_logs, dict):
             return []
-        plan = route_logs.get("plan", {})
-        if not isinstance(plan, dict):
-            return []
-        selected = plan.get("selected_skills", [])
-        if not isinstance(selected, list):
-            return []
         skill_ids: list[str] = []
-        for item in selected:
-            if not isinstance(item, dict):
+        selected_groups: list[Any] = []
+        plan = route_logs.get("plan", {})
+        if isinstance(plan, dict):
+            selected_groups.append(plan.get("selected_skills", []))
+        selected_groups.append(route_logs.get("prompt_bound_skills", []))
+        for selected in selected_groups:
+            if not isinstance(selected, list):
                 continue
-            skill_id = str(item.get("skill_id") or item.get("id") or item.get("name") or "").strip()
-            if skill_id and skill_id not in skill_ids:
-                skill_ids.append(skill_id)
+            for item in selected:
+                if not isinstance(item, dict):
+                    continue
+                skill_id = str(item.get("skill_id") or item.get("id") or item.get("name") or "").strip()
+                if skill_id and skill_id not in skill_ids:
+                    skill_ids.append(skill_id)
         return skill_ids
 
     @classmethod

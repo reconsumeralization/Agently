@@ -126,6 +126,8 @@ class HybridRoutePlanner:
 
     async def select_route(self) -> tuple[str, dict[str, Any]]:
         skills = self.skill_candidate_summary()
+        action_candidates = self.action_candidates()
+
         if skills["required"] and self.route_allowed("skills"):
             return "skills", {
                 "mode": "required",
@@ -142,7 +144,6 @@ class HybridRoutePlanner:
                 "skills": skills.get("model_decision_skills", []),
                 "skills_packs": skills.get("model_decision_skills_packs", []),
             })
-        action_candidates = self.action_candidates()
         if action_candidates and self.route_allowed("model_request"):
             optional_candidates.append({"route": "model_request", "with_actions": True})
 

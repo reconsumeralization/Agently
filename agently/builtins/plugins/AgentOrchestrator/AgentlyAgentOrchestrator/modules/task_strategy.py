@@ -260,8 +260,10 @@ def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, 
     except Exception:
         pass
 
-    # Skills / skill packs -> skills route; their guidance (SKILL.md) reaches the
-    # model only when that route runs.
+    # AgentTask treats configured Skills as task context. The public execution
+    # entry still routes to AgentTask, while bounded work steps keep using the
+    # ordinary model_request/action path with Skill guidance bound into the
+    # prompt instead of asking the planner to pick a standalone Skills route.
     try:
         summary = execution.skill_candidate_summary()
     except Exception:
@@ -271,10 +273,24 @@ def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, 
         for mode in ("model_decision", "required"):
             for selector in summary.get(f"{mode}_skills", []) or []:
                 skill_id = _capability_id_from_selector(selector)
-                add(skill_id, "skill", "skills", "route_context", mode=mode, description=descriptions.get(skill_id, ""))
+                add(
+                    skill_id,
+                    "skill",
+                    "model_request",
+                    "prompt_bound",
+                    mode=mode,
+                    description=descriptions.get(skill_id, ""),
+                )
             for selector in summary.get(f"{mode}_skills_packs", []) or []:
                 pack_id = _capability_id_from_selector(selector)
-                add(pack_id, "skill_pack", "skills", "route_context", mode=mode, description=descriptions.get(pack_id, ""))
+                add(
+                    pack_id,
+                    "skill_pack",
+                    "model_request",
+                    "prompt_bound",
+                    mode=mode,
+                    description=descriptions.get(pack_id, ""),
+                )
 
     return capabilities
 

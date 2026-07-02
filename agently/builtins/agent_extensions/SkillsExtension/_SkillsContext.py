@@ -153,7 +153,12 @@ class AgentSkillsRuntimeContext:
             max_rounds=1,
             concurrency=concurrency,
         )
-        return [dict(item) for item in results]
+        requested_action_ids = {str(call.get("action_id") or "") for call in action_calls}
+        return [
+            dict(item)
+            for item in results
+            if str(item.get("action_id") or item.get("tool_name") or "") in requested_action_ids
+        ]
 
     async def async_execute_action_round(
         self,
