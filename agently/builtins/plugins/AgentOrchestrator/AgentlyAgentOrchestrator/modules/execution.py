@@ -870,6 +870,7 @@ class AgentExecution:
             route, route_meta = "model_request", {
                 "with_actions": True,
                 "required_actions": self.required_action_ids(),
+                "required_skills": self.required_skill_ids(),
                 "selected_by": "required_capability",
             }
         else:

@@ -182,7 +182,7 @@ task-start option. CLI adapters are marked
 `acp_session.persistence="stateless_cli"` unless a real protocol session is
 available.
 
-AgentTaskLoop can also use ACP as an opt-in recovery fallback after a bounded
+AgentTask can also use ACP as an opt-in recovery fallback after a bounded
 step or TaskBoard card fails and configured retries are exhausted. This still
 uses the registered `acp_run_task` Action plus `ExecutionResource(kind="acp")`;
 ACP is not a route that bypasses AgentExecution or task strategy policy. If the
@@ -315,7 +315,7 @@ agent.set_settings("action.planning_model_key", "task-main")
 
 This applies to the default structured-plan and native tool-call planning
 paths. It is especially important when a higher-level runtime such as
-SkillsExecutor or AgentTaskLoop delegates a bounded action round to
+SkillsExecutor or AgentTask delegates a bounded action round to
 ActionRuntime.
 
 `agent.get_action_result(..., timeout=N)` bounds the full action loop,

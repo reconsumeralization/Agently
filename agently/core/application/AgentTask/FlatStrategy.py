@@ -1002,6 +1002,44 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             effective_shape = "direct"
             warning = "dag_shape_not_agent_execution_strategy"
 
+        pending_action_requirements = self._pending_action_succeeded_requirements()
+        if effective_shape in {"direct", "skills"} and pending_action_requirements:
+            action_capability_ids = {
+                str(item.get("id") or "").strip()
+                for item in self._planner_capabilities()
+                if isinstance(item, Mapping)
+                and str(item.get("kind") or "").strip() == "action"
+                and str(item.get("id") or "").strip()
+            }
+            if not action_capability_ids:
+                action_candidates = getattr(execution, "action_candidates", None)
+                if callable(action_candidates):
+                    try:
+                        raw_action_candidates = action_candidates() or []
+                        candidates = (
+                            cast(Sequence[Any], raw_action_candidates)
+                            if isinstance(raw_action_candidates, Sequence)
+                            else []
+                        )
+                        for item in candidates:
+                            if not isinstance(item, Mapping):
+                                continue
+                            action_id = str(item.get("action_id") or item.get("name") or "").strip()
+                            if action_id:
+                                action_capability_ids.add(action_id)
+                    except Exception:
+                        action_capability_ids = set()
+            if action_capability_ids:
+                effective_shape = "actions"
+                plan["execution_shape_adjustment"] = {
+                    "from": requested_shape,
+                    "to": effective_shape,
+                    "reason": "pending_action_succeeded_evidence",
+                    "pending_action_ids": [
+                        action_id for action_id in pending_action_requirements if action_id in action_capability_ids
+                    ],
+                }
+
         plan["effective_execution_shape"] = effective_shape
         # Structured step scope (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
         # when the plan names an explicit capability allowlist, narrow this step's
@@ -1022,7 +1060,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                         local_action_ids.append(capability_id)
             sync_action_scope = getattr(execution, "_sync_action_scope", None)
             if callable(sync_action_scope):
-                sync_action_scope(source="AgentTaskLoop.step_scope")
+                sync_action_scope(source="AgentTask.step_scope")
         action_scope_source = "step_scope" if allowed_capability_ids else ""
         if effective_shape == "actions" and not allowed_capability_ids:
             action_capability_ids = [
@@ -1065,11 +1103,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         plan["step_execution"] = step_execution
         record_option = getattr(execution, "record_consumed_option", None)
         if callable(record_option):
-            record_option("agent_task.step.execution_shape", effective_shape, owner="AgentTaskLoop")
+            record_option("agent_task.step.execution_shape", effective_shape, owner="AgentTask")
             if route_policy:
-                record_option("agent_task.step.route_policy", route_policy, owner="AgentTaskLoop")
+                record_option("agent_task.step.route_policy", route_policy, owner="AgentTask")
             if policy.get("step_plan") != "direct":
-                record_option("effort.execution.step_plan", policy.get("step_plan"), owner="AgentTaskLoop")
+                record_option("effort.execution.step_plan", policy.get("step_plan"), owner="AgentTask")
         return step_execution
 
     @staticmethod
@@ -1087,7 +1125,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             # A bounded step that cannot honor its selected shape must not silently
             # run model_request: block so the loop sees the mismatch and replans.
             "on_violation": "block",
-            "owner": "AgentTaskLoop",
+            "owner": "AgentTask",
             "step_execution_shape": effective_shape,
         }
 
@@ -1096,7 +1134,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
         Read from the typed snapshot the orchestrator route injected into options
         at task construction (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC).
-        Covers AgentTaskLoop executable actions, skills, and skill packs as one
+        Covers AgentTask executable actions, skills, and skill packs as one
         capability list. AgentTask consumes only this snapshot; it does not reach
         back into the routing plugin.
         """
@@ -1129,20 +1167,17 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             capabilities.append(entry)
         return capabilities
 
-    def _capability_evidence_requirements(self) -> list[dict[str, Any]]:
-        """Structured, authored completion-evidence requirements (inert data).
-
-        The load-bearing gate's trigger
-        (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC): which capabilities
-        must appear in execution evidence for the task to be acceptable. Authored
-        as a structured option, independent of capability mode; never inferred
-        from free-text criteria. Accepts either a list of capability-id strings
-        (treated as `capability_used`) or a list of EvidenceRequirement dicts. The
-        legacy `skill_evidence_requirements` option is read as a fallback alias.
-        """
-        raw = self.options.get("capability_evidence_requirements")
+    @classmethod
+    def _capability_evidence_requirements_from_mapping(cls, source: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(source, Mapping):
+            return []
+        raw = source.get("capability_evidence_requirements")
         if raw is None:
-            raw = self.options.get("skill_evidence_requirements")
+            raw = source.get("skill_evidence_requirements")
+        return cls._normalize_capability_evidence_requirements(raw)
+
+    @classmethod
+    def _normalize_capability_evidence_requirements(cls, raw: Any) -> list[dict[str, Any]]:
         if isinstance(raw, dict):
             raw = raw.get("capabilities") or raw.get("skills")
         if not isinstance(raw, (list, tuple)):
@@ -1178,6 +1213,62 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 requirement["criterion_id"] = str(item.get("criterion_id"))
             requirements.append(requirement)
         return requirements
+
+    @classmethod
+    def _merge_capability_evidence_requirements(
+        cls,
+        *groups: Sequence[Mapping[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for group in groups:
+            if not isinstance(group, Sequence) or isinstance(group, (str, bytes, bytearray)):
+                continue
+            for item in group:
+                if not isinstance(item, Mapping):
+                    continue
+                capability_id = str(item.get("capability_id") or item.get("id") or "").strip()
+                if not capability_id:
+                    continue
+                kind = str(item.get("kind") or "capability_used")
+                capability_kind = str(item.get("capability_kind") or "")
+                criterion_id = str(item.get("criterion_id") or "")
+                key = (capability_id, kind, capability_kind, criterion_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(DataFormatter.sanitize(dict(item)))
+        return merged
+
+    def _capability_evidence_requirements(
+        self,
+        source: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Structured, authored completion-evidence requirements (inert data).
+
+        The load-bearing gate's trigger
+        (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC): which capabilities
+        must appear in execution evidence for the task to be acceptable. Authored
+        as a structured option, independent of capability mode; never inferred
+        from free-text criteria. Accepts either a list of capability-id strings
+        (treated as `capability_used`) or a list of EvidenceRequirement dicts. The
+        legacy `skill_evidence_requirements` option is read as a fallback alias.
+        """
+        option_requirements = self._capability_evidence_requirements_from_mapping(self.options)
+        source_requirements = self._capability_evidence_requirements_from_mapping(source)
+        return self._merge_capability_evidence_requirements(option_requirements, source_requirements)
+
+    def _pending_action_succeeded_requirements(self) -> list[str]:
+        pending: list[str] = []
+        for requirement in self._capability_evidence_requirements():
+            if not requirement.get("required", True):
+                continue
+            if str(requirement.get("kind") or "capability_used") != "action_succeeded":
+                continue
+            capability_id = str(requirement.get("capability_id") or "").strip()
+            if capability_id and capability_id not in self._satisfied_succeeded_actions and capability_id not in pending:
+                pending.append(capability_id)
+        return pending
 
     def _untried_read_action_continuation(
         self,
@@ -1227,7 +1318,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "failed_read_action_ids": sorted(action_id for action_id in failed_actions if action_id in read_action_ids),
         }
 
-    def _evaluate_capability_evidence(self) -> tuple[list[str], list[dict[str, Any]]]:
+    def _evaluate_capability_evidence(
+        self,
+        source: Mapping[str, Any] | None = None,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
         """Deterministically check structured evidence requirements.
 
         Returns (missing_capability_ids, unenforced_requirements). Checks run
@@ -1240,7 +1334,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         returned as an unenforced diagnostic rather than silently passing or
         false-failing.
         """
-        requirements = self._capability_evidence_requirements()
+        requirements = self._capability_evidence_requirements(source)
         if not requirements:
             return [], []
 
@@ -1306,18 +1400,16 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
         # Explanatory note only (not a guarantee): the hard guarantee is the
         # verifier evidence gate, not this prompt text. It tells the planner which
-        # capabilities exist and that some kinds (e.g. a Skill's guidance) load
-        # only on their own route.
+        # capabilities exist and how guidance reaches the bounded step.
         capability_note = (
             " Available capabilities are listed in planner_capabilities, each with a kind "
-            "(action/skill/skill_pack), the execution_shape route that exposes it, and "
-            "guidance_access. A capability whose guidance_access is route_context (such as a Skill's "
-            "guidance) only reaches the model on its own route, so choose that execution_shape when such "
-            "a capability is the intended way to satisfy a criterion."
+            "(action/skill/skill_pack), route, and guidance_access. Skill guidance whose guidance_access "
+            "is prompt_bound already reaches the model_request step prompt; choose actions when the "
+            "task needs Action, MCP, Workspace, or tool evidence."
             if planner_capabilities
             else ""
         )
-        allowed_shapes = "direct or actions" if self.execution_strategy == "flat" else "direct, actions, or skills"
+        allowed_shapes = "direct or actions"
         strategy_note = (
             " The selected execution_strategy is flat: keep the task in a linear AgentTask loop and do not plan DAG or TaskBoard steps."
             if self.execution_strategy == "flat"
@@ -1348,7 +1440,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "index/list/download/navigation pages so a more specific official source can be discovered. "
             f"Set execution_shape to {allowed_shapes}. "
             "Do not plan TaskDAG, DynamicTask, or DAG-shaped execution here; TaskDAG is an independent "
-            "manual/configured or visual-automation orchestration surface, not an AgentTaskLoop strategy."
+            "manual/configured or visual-automation orchestration surface, not an AgentTask strategy."
             + strategy_note
             + capability_note
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
@@ -1391,7 +1483,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 ),
                 "execution_shape": (
                     str,
-                    "Execution shape for this bounded step: direct, actions, or skills",
+                    "Execution shape for this bounded step: direct or actions",
                     False,
                 ),
                 "step_instruction": (str, "Instruction for one bounded AgentExecution step", True),

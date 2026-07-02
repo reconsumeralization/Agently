@@ -14,11 +14,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, TYPE_CHECKING, cast
 
 from agently.core.model.ModelRequestResultDataFlow import ModelRequestResultDataFlow
-from agently.utils import DataLocator
+from agently.utils import DataFormatter, DataLocator
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
@@ -37,6 +37,30 @@ async def run_model_request_route(
     raise_ensure_failure: bool,
 ) -> Any:
     agent_execution_run_context = await execution._async_emit_agent_execution_started_once()
+    prompt_bound_required_skills: list[dict[str, Any]] = []
+    collect_prompt_bound_skills = getattr(execution.agent, "_prompt_bound_required_skill_records", None)
+    if callable(collect_prompt_bound_skills):
+        try:
+            raw_prompt_bound_skills = collect_prompt_bound_skills()
+            if isinstance(raw_prompt_bound_skills, list):
+                prompt_bound_required_skills = [
+                    DataFormatter.sanitize(item)
+                    for item in raw_prompt_bound_skills
+                    if isinstance(item, Mapping)
+                ]
+        except Exception:
+            prompt_bound_required_skills = []
+    if prompt_bound_required_skills:
+        route_logs = execution.logs.setdefault("route_logs", {})
+        if isinstance(route_logs, dict):
+            route_logs["prompt_bound_skills"] = prompt_bound_required_skills
+        await execution.emit_stream(
+            "skills.prompt_bound",
+            {"selected_skills": prompt_bound_required_skills},
+            route="model_request",
+            source="skills_executor",
+            meta={"binding": "prompt_guidance"},
+        )
     if ensure_all_keys is not None:
         execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
     result = execution.request.get_result(parent_run_context=agent_execution_run_context)
@@ -159,7 +183,13 @@ def _structured_stream_completion_policies(
     get_auto_policies = getattr(data_flow, "get_auto_ensure_policies", None)
     if callable(get_auto_policies):
         try:
-            auto_policies = dict(get_auto_policies(key_style=key_style))
+            raw_auto_policies = get_auto_policies(key_style=key_style)
+            if isinstance(raw_auto_policies, Mapping):
+                auto_policies = {
+                    str(key): cast(Literal["presence", "not_null"], value)
+                    for key, value in raw_auto_policies.items()
+                    if value in {"presence", "not_null"}
+                }
         except Exception:
             auto_policies = {}
     if ensure_keys is None:
@@ -224,7 +254,7 @@ async def _close_structured_response_stream(result: Any) -> None:
     response_parser = getattr(result, "_response_parser", None)
     close = getattr(response_parser, "async_close", None)
     if callable(close):
-        await close()
+        await cast(Callable[[], Awaitable[Any]], close)()
 
 
 async def _required_action_failure(execution: "AgentExecution", *, route: str) -> dict[str, Any] | None:

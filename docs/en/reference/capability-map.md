@@ -19,7 +19,7 @@ This is a navigation aid: figure out which layer your problem lives at, then jum
 | 5. Knowledge and services | Do I need retrieval, HTTP, SSE, or WebSocket exposure? | [Knowledge Base](../knowledge/knowledge-base.md), [FastAPI Service Exposure](../services/fastapi.md) |
 | 6. Observability and development | Do I need observation events, DevTools, or coding-agent guidance? | [Observability Overview](../observability/overview.md), [Coding Agents](../development/coding-agents.md) |
 | 7. Agent auto-orchestration | Should one Agent turn choose among model response, Actions, or Skills? | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
-| 8. AgentTask loop | Should one business task run through plan, bounded execution, Workspace evidence, verification, and replan? | [Agent Auto-Orchestration](../start/auto-orchestration.md#agenttask-loop) |
+| 8. AgentTask strategy | Should one business task run through plan, bounded execution, Workspace evidence, verification, and replan? | [Agent Auto-Orchestration](../start/auto-orchestration.md#agenttask-strategy) |
 | 9. TaskDAG / DAG substrate | Should a model or app submit, validate, customize, and execute a DAG? | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
 | 10. Orchestration | Branching, concurrency, pause/resume, persistence | [TriggerFlow Overview](../triggerflow/overview.md) |
 
@@ -45,7 +45,7 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Need to inspect observation events | [Event Center](../observability/event-center.md) → [DevTools](../observability/devtools.md) |
 | Not sure whether to use ModelRequest, AgentExecution, TaskDAG, or TriggerFlow | [Execution Layer Selection](execution-layer-selection.md) |
 | Need one Agent turn to choose between model response, Actions, or Skills | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
-| Single business task needs plan → bounded execution → evidence → verification → replan | [Agent Auto-Orchestration](../start/auto-orchestration.md#agenttask-loop), start with `agent.create_task(...)` and consume it as an `AgentExecution` result |
+| Single business task needs plan → bounded execution → evidence → verification → replan | [Agent Auto-Orchestration](../start/auto-orchestration.md#agenttask-strategy), start with `agent.create_task(...)` and consume it as an `AgentExecution` result |
 | Need to inspect how task frames, Skills, or TaskDAG segments lower into TriggerFlow-backed blocks | [Blocks Lifecycle](blocks-lifecycle.md) |
 | Model-generated or app-generated DAG that must be planned, validated, customized, and executed | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
 | Multi-stage workflow with branching | [TriggerFlow Overview](../triggerflow/overview.md) → [Patterns](../triggerflow/patterns.md) |

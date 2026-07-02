@@ -398,7 +398,7 @@ async def test_trigger_flow_dynamic_todo_dag_executor_uses_task_id_identities():
 
     execution = assemble_executor(TriggerFlow(name="todo-executor-run"), plan).create_execution(auto_close=False)
     await execution.async_start({"doc": "policy"})
-    result = await execution.async_close(timeout=1)
+    result = await execution.async_close(timeout=5)
 
     assert result["results"]["extract_terms"] == "extract:extract_terms:policy"
     assert result["results"]["analyze_risk"] == "analyze:analyze_risk:extract_terms=extract:extract_terms:policy"

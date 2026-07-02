@@ -189,6 +189,9 @@ class TestFlatMarkdownStreamingParser:
         paths = [e.path for e in events]
         assert "html" in paths
         assert "notes" in paths
+        done_values = {e.path: e.value for e in events if e.event_type == "done"}
+        assert done_values["html"] == "<div>ok</div>"
+        assert done_values["notes"] == "summary"
 
     @pytest.mark.asyncio
     async def test_streaming_multiple_chunks(self):
@@ -208,6 +211,9 @@ class TestFlatMarkdownStreamingParser:
         # Should have completion events for both fields
         done_events = [e for e in events if e.event_type == "done"]
         assert len(done_events) >= 1
+        done_values = {e.path: e.value for e in done_events}
+        assert done_values["html"] == "<div>ok</div>"
+        assert done_values["notes"] == "summary"
 
     @pytest.mark.asyncio
     async def test_empty_schema_produces_no_events(self):
@@ -218,6 +224,18 @@ class TestFlatMarkdownStreamingParser:
         parser = FlatMarkdownStreamingParser({})
         events = await self._collect_events(parser, ["### html\ncontent"])
         assert len(events) == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_flush_final_data_replays_done_only_response(self):
+        from agently.builtins.plugins.ResponseParser.modules.flat_markdown import (
+            FlatMarkdownStreamingParser,
+        )
+
+        parser = FlatMarkdownStreamingParser(TEST_SCHEMA)
+        events = [event async for event in parser.flush_final_data({"html": "<div>ok</div>", "notes": "summary"})]
+        done_values = {event.path: event.value for event in events if event.event_type == "done"}
+        assert done_values["html"] == "<div>ok</div>"
+        assert done_values["notes"] == "summary"
 
     @pytest.mark.asyncio
     async def test_streaming_header_annotation_keeps_clean_field_path(self):

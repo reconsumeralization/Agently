@@ -160,7 +160,7 @@ class AgentTask(
         self.get_generator: Any = self._get_generator
 
     def _build_flow(self):
-        flow = TriggerFlow(name="agent-task-loop")
+        flow = TriggerFlow(name="agent-task")
 
         async def loop(data):
             await data.async_set_state("task_id", self.id, emit=False)
@@ -209,7 +209,7 @@ class AgentTask(
             await data.async_set_state("agent_task.result", self.result, emit=False)
             await data.async_set_state("agent_task.status", self.status, emit=False)
 
-        flow.to(loop, name="agent_task_loop")
+        flow.to(loop, name="agent_task")
         return flow
 
 

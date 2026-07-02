@@ -460,6 +460,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         trusted_workspace_artifacts = workspace_artifacts_from_ledger(evidence_ledger)
         evidence_summary = self._compact_verifier_evidence_summary(raw_execution_evidence_summary)
         cumulative_evidence_summary = self._compact_verifier_evidence_summary(raw_cumulative_evidence_summary)
+        capability_evidence_requirements = self._capability_evidence_requirements(raw_cumulative_evidence_summary)
         verifier_execution_result = self._workspace_artifact_execution_result_for_verifier(normalized_execution_result)
         candidate_final_result = self._candidate_final_result_from_execution_result(normalized_execution_result)
         request = self.agent.create_temp_request()
@@ -487,7 +488,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "acceptance_locator_view": acceptance_locator_view_from_ledger(evidence_ledger),
                 "grounding_guard": grounding_guard,
                 "trusted_workspace_artifacts": trusted_workspace_artifacts,
-                "capability_evidence_requirements": self._capability_evidence_requirements(),
+                "capability_evidence_requirements": capability_evidence_requirements,
                 "context_pack": self._compact_context_pack_for_verifier(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "previous_iterations": self._iteration_prompt_summaries(),
@@ -2715,6 +2716,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "blocked_actions": [],
             "approval_required_actions": [],
             "required_actions": [],
+            "capability_evidence_requirements": [],
             "missing_required_actions": [],
             "selected_skill_ids": [],
             "required_skills": [],
@@ -2760,13 +2762,20 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "blocked_actions",
                 "approval_required_actions",
                 "required_actions",
+                "capability_evidence_requirements",
                 "missing_required_actions",
                 "selected_skill_ids",
                 "required_skills",
                 "missing_required_skills",
                 "capabilities_used",
             ):
-                combined[key] = self._merge_string_lists(combined.get(key), summary.get(key))
+                if key == "capability_evidence_requirements":
+                    combined[key] = self._merge_capability_evidence_requirements(
+                        combined.get(key),
+                        summary.get(key),
+                    )
+                else:
+                    combined[key] = self._merge_string_lists(combined.get(key), summary.get(key))
             action_statuses = summary.get("action_statuses")
             if isinstance(action_statuses, Mapping):
                 combined["action_statuses"].update(DataFormatter.sanitize(action_statuses))
@@ -3259,7 +3268,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         # reading participates in the pass/fail decision. Only the kinds with a
         # deterministic check are enforced; reserved kinds are recorded as
         # unenforced diagnostics for the advisory model verifier.
-        missing_capability_evidence, unenforced_requirements = self._evaluate_capability_evidence()
+        missing_capability_evidence, unenforced_requirements = self._evaluate_capability_evidence(
+            execution_evidence_summary
+        )
         if missing_capability_evidence:
             normalized["is_complete"] = False
             guard_reasons.append("capability_evidence_missing")
@@ -3420,7 +3431,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             execution_evidence_summary.get("approval_required_actions")
         )
         required_actions = set(self._normalize_string_list(execution_evidence_summary.get("required_actions")))
-        for requirement in self._capability_evidence_requirements():
+        for requirement in self._capability_evidence_requirements(execution_evidence_summary):
             if not requirement.get("required", True):
                 continue
             if str(requirement.get("kind") or "capability_used") != "action_succeeded":

@@ -130,7 +130,7 @@ await execution.async_record_workspace(
 ```
 
 两种写法里，DAG 结果都只是 evidence。它本身不等于业务目标完成。启用 Goal
-Pursuit 时，最终完成仍由 AgentTaskLoop 的 model verifier 加 host guard 决定。
+Pursuit 时，最终完成仍由 AgentTask 的 model verifier 加 host guard 决定。
 
 ## 运行流
 

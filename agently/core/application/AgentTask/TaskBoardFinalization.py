@@ -155,6 +155,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         current_refs = self._dedupe_ref_records(
             [dict(DataFormatter.sanitize(ref)) for ref in refs if isinstance(ref, Mapping)]
         )
+        current_refs = await self._taskboard_materialize_promotion_candidate_refs(current_refs)
         required_paths = [
             str(path).strip()
             for path in self._required_workspace_deliverables()
@@ -276,6 +277,43 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             )
         )
         return self._prioritize_taskboard_final_refs([promoted_ref, *current_refs])
+
+    async def _taskboard_materialize_promotion_candidate_refs(
+        self,
+        refs: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        materialized_refs: list[dict[str, Any]] = []
+        for ref in refs:
+            current_ref = dict(DataFormatter.sanitize(ref))
+            if self._workspace_artifact_ref_has_trusted_readback(current_ref):
+                materialized_refs.append(current_ref)
+                continue
+
+            role = str(current_ref.get("role") or "").strip().lower()
+            path = str(current_ref.get("path") or "").strip()
+            if not self._is_trusted_workspace_artifact_ref(current_ref):
+                materialized_refs.append(current_ref)
+                continue
+            if role not in {"workspace_artifact", "artifact"} or not self._workspace_artifact_candidate_path_is_local(path):
+                materialized_refs.append(current_ref)
+                continue
+
+            materialized_ref, _content, failure_item = await self._taskboard_materialize_final_artifact_ref(
+                current_ref,
+                source="agent_task.workspace_artifact.taskboard_final_deliverable_source_readback",
+            )
+            if failure_item is not None:
+                self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
+                    DataFormatter.sanitize(
+                        {
+                            "status": "candidate_readback_failed",
+                            "path": path,
+                            "failure": failure_item,
+                        }
+                    )
+                )
+            materialized_refs.append(materialized_ref)
+        return self._dedupe_ref_records(materialized_refs)
 
     async def _finalize_taskboard(self, revision: Any, *, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         schedule = TaskBoard(revision, handler=lambda _context: None).schedule()

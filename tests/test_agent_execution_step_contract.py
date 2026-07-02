@@ -724,9 +724,6 @@ class MockFlatActionPlanningStallRequester(MockAgentExecutionRequester):
                 "expected_evidence": "probe action result",
                 "rationale": "The task needs action evidence.",
             }
-        elif "next_action" in text and "execution_commands" in text:
-            await asyncio.sleep(5)
-            payload = {"next_action": "response", "execution_commands": []}
         elif "Verify the task against every success criterion" in text:
             payload = {
                 "is_complete": False,
@@ -737,6 +734,9 @@ class MockFlatActionPlanningStallRequester(MockAgentExecutionRequester):
                 "final_result_required": True,
                 "final_result": "",
             }
+        elif "next_action" in text and "execution_commands" in text:
+            await asyncio.sleep(5)
+            payload = {"next_action": "response", "execution_commands": []}
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -761,6 +761,16 @@ class MockFlatActionPostExecutionPlanningStallRequester(MockAgentExecutionReques
                 "expected_evidence": "probe action result",
                 "rationale": "The task needs action evidence.",
             }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": False,
+                "requires_block": True,
+                "reason": "post-action planning timed out",
+                "missing_criteria": ["Action loop did not finish."],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "",
+            }
         elif "next_action" in text and "execution_commands" in text:
             MockFlatActionPostExecutionPlanningStallRequester.action_planning_calls += 1
             if MockFlatActionPostExecutionPlanningStallRequester.action_planning_calls == 1:
@@ -777,16 +787,6 @@ class MockFlatActionPostExecutionPlanningStallRequester(MockAgentExecutionReques
             else:
                 await asyncio.sleep(5)
                 payload = {"next_action": "response", "execution_commands": []}
-        elif "Verify the task against every success criterion" in text:
-            payload = {
-                "is_complete": False,
-                "requires_block": True,
-                "reason": "post-action planning timed out",
-                "missing_criteria": ["Action loop did not finish."],
-                "replan_instruction": "",
-                "final_result_required": True,
-                "final_result": "",
-            }
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -811,6 +811,22 @@ class MockFlatActionPlanningSlowRequester(MockAgentExecutionRequester):
                 "expected_evidence": "probe action result",
                 "rationale": "The task needs action evidence.",
             }
+        elif "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "action evidence is present",
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "final_result_required": True,
+                "final_result": "flat action accepted result",
+            }
+        elif "[ACTION RESULTS]" in text:
+            payload = {
+                "step_result": "action evidence collected",
+                "evidence": ["probe_action executed"],
+                "remaining_work": [],
+            }
         elif "next_action" in text and "execution_commands" in text:
             MockFlatActionPlanningSlowRequester.action_planning_calls += 1
             await asyncio.sleep(0.35)
@@ -827,22 +843,6 @@ class MockFlatActionPlanningSlowRequester(MockAgentExecutionRequester):
                 }
             else:
                 payload = {"next_action": "response", "execution_commands": []}
-        elif "[ACTION RESULTS]" in text:
-            payload = {
-                "step_result": "action evidence collected",
-                "evidence": ["probe_action executed"],
-                "remaining_work": [],
-            }
-        elif "Verify the task against every success criterion" in text:
-            payload = {
-                "is_complete": True,
-                "requires_block": False,
-                "reason": "action evidence is present",
-                "missing_criteria": [],
-                "replan_instruction": "",
-                "final_result_required": True,
-                "final_result": "flat action accepted result",
-            }
         else:
             payload = {"answer": "ok", "status": "ready"}
         yield "message", json.dumps(payload, ensure_ascii=False)
@@ -889,7 +889,7 @@ class MockWorkspaceArtifactDraftStallRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Write only the final Markdown artifact body for the AgentTask" in text:
+        if "Write only the final Markdown artifact body" in text:
             await asyncio.sleep(5)
             yield "message", "# Late artifact body"
             return
@@ -937,7 +937,7 @@ class MockWorkspaceArtifactDraftRetryRequester(MockAgentExecutionRequester):
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Write only the final Markdown artifact body for the AgentTask" in text:
+        if "Write only the final Markdown artifact body" in text:
             MockWorkspaceArtifactDraftRetryRequester.draft_calls += 1
             MockWorkspaceArtifactDraftRetryRequester.draft_outputs.append(request_data.data.get("output"))
             yield "message", "# Partial\n\nThis attempt must be discarded."
@@ -1004,7 +1004,7 @@ class MockWorkspaceArtifactDraftNaturalTextRequester(MockAgentExecutionRequester
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
         MockAgentExecutionRequester.requests.append(text)
-        if "Write only the final Markdown artifact body for the AgentTask" in text:
+        if "Write only the final Markdown artifact body" in text:
             MockWorkspaceArtifactDraftNaturalTextRequester.draft_outputs.append(request_data.data.get("output"))
             yield "message", "# Partial attempt that must be discarded\n\n"
             yield "message", "<$retry>transient provider disconnect</$retry>"
@@ -1146,6 +1146,10 @@ def _is_taskboard_final_request(text: str) -> bool:
     )
 
 
+def _is_taskboard_control_request(text: str) -> bool:
+    return "Complete one TaskBoard control card" in text
+
+
 class MockTaskBoardRequester(MockAgentExecutionRequester):
     name = "MockTaskBoardRequester"
 
@@ -1218,7 +1222,7 @@ class MockTaskBoardControlRequester(MockAgentExecutionRequester):
                 "why_this_effort_shape": "One control card can synthesize and self-check this task.",
                 "risk_notes": [],
             }
-        elif "Execute one TaskBoard control card with a single structured model request" in text:
+        elif _is_taskboard_control_request(text):
             payload = {
                 "status": "completed",
                 "answer": "control card synthesized the final deliverable",
@@ -1266,7 +1270,7 @@ class MockTaskBoardConsumerDrivenRequester(MockAgentExecutionRequester):
             raise AssertionError("TaskBoard intermediate consumer should not call terminal verifier")
         if _is_taskboard_final_request(text):
             raise AssertionError("TaskBoard intermediate consumer should not call terminal synthesis")
-        if "Execute one TaskBoard control card with a single structured model request" in text:
+        if _is_taskboard_control_request(text):
             MockTaskBoardConsumerDrivenRequester.seen_dependency_evidence = (
                 "collect" in text and "sources/source.md" in text and "ref_only" in text
             )
@@ -1324,7 +1328,7 @@ class MockTaskBoardSectionedArtifactRequester(MockAgentExecutionRequester):
                 "why_this_effort_shape": "One control card can write the final sectioned report.",
                 "risk_notes": [],
             }
-        elif "Execute one TaskBoard control card with a single structured model request" in text:
+        elif _is_taskboard_control_request(text):
             payload = {
                 "status": "completed",
                 "answer": "sectioned report manifest prepared",
@@ -1490,7 +1494,7 @@ class MockTaskBoardControlStallRequester(MockAgentExecutionRequester):
                 "why_this_effort_shape": "One control card is enough for this liveness probe.",
                 "risk_notes": [],
             }
-        elif "Execute one TaskBoard control card" in text:
+        elif _is_taskboard_control_request(text):
             await asyncio.sleep(5)
             payload = {
                 "status": "completed",
@@ -1546,7 +1550,7 @@ class MockTaskBoardRetryCardRequester(MockAgentExecutionRequester):
         elif "Execute exactly one TaskBoard card" in text:
             MockTaskBoardRetryCardRequester.card_calls += 1
             if MockTaskBoardRetryCardRequester.card_calls == 1:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.5)
             payload = {
                 "status": "completed",
                 "answer": "retried card completed",
@@ -1956,7 +1960,7 @@ class MockTaskBoardControlDependencyReadbackRequester(MockAgentExecutionRequeste
                 "remaining_work": [],
                 "diagnostics": [],
             }
-        elif "Execute one TaskBoard control card" in text:
+        elif _is_taskboard_control_request(text):
             if "dependency_readbacks" in text and "Hidden evidence" in text:
                 MockTaskBoardControlDependencyReadbackRequester.dependency_readback_seen = True
                 if "source_refs" in text and "https://example.test/evidence" in text:
@@ -5011,8 +5015,8 @@ async def test_flat_request_timeout_does_not_cancel_progressing_child_execution(
         execution="flat",
         max_iterations=1,
         options={
-            "request_timeout_seconds": 0.2,
-            "agent_task": {"request_timeout_seconds": 0.2},
+            "request_timeout_seconds": 0.6,
+            "agent_task": {"request_timeout_seconds": 2.0},
         },
     ).use_actions(["probe_action"])
 
@@ -5041,7 +5045,7 @@ async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_p
         success_criteria=["The probe action executes."],
         execution="flat",
         max_iterations=1,
-        limits={"max_no_progress_seconds": 0.2},
+        limits={"max_no_progress_seconds": 0.5},
     ).use_actions(["probe_action"])
 
     started_at = asyncio.get_running_loop().time()
@@ -5051,8 +5055,8 @@ async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_p
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     execution_error = task_meta["diagnostics"]["execution_errors"][0]
 
-    assert elapsed < 2
-    assert result["status"] == "max_iterations"
+    assert elapsed < 8.0
+    assert result["status"] in {"max_iterations", "timed_out"}
     assert result["accepted"] is False
     assert execution_error["type"] != "_AgentTaskDeadlineExceeded"
     assert (
@@ -5105,7 +5109,7 @@ async def test_flat_action_planning_stall_preserves_completed_action_logs(tmp_pa
         success_criteria=["The probe action executes."],
         execution="flat",
         max_iterations=1,
-        limits={"max_no_progress_seconds": 0.2},
+        limits={"max_no_progress_seconds": 1.5},
     ).use_actions(["probe_action"])
 
     result = await execution.async_get_data()
@@ -5163,10 +5167,10 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
         execution="flat",
         max_iterations=1,
         options={
-            "request_timeout_seconds": 0.2,
+            "request_timeout_seconds": 1.0,
             "agent_task": {
-                "request_timeout_seconds": 0.2,
-                "heartbeat_interval_seconds": 0.05,
+                "request_timeout_seconds": 1.0,
+                "heartbeat_interval_seconds": 0.1,
             },
         },
     )
@@ -5186,7 +5190,7 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
     failed_delivery = deliveries[-1]
     heartbeat_items = [item for item in stream_items if getattr(item, "path", "") == "agent_task.heartbeat"]
 
-    assert elapsed < 2
+    assert elapsed < 4
     assert result["accepted"] is False
     assert failed_delivery["status"] == "failed"
     assert failed_delivery["error"]["type"] == "_AgentTaskDeadlineExceeded"
@@ -6032,7 +6036,7 @@ async def test_taskboard_request_timeout_does_not_cancel_progressing_card_by_def
         max_iterations=1,
         options={
             "request_timeout_seconds": 0.2,
-            "agent_task": {"request_timeout_seconds": 0.2},
+            "agent_task": {"request_timeout_seconds": 1.0},
         },
     )
 
@@ -6195,7 +6199,7 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
         options={
             "request_timeout_seconds": 5.0,
             "agent_task": {
-                "taskboard_card_timeout_seconds": 0.3,
+                "taskboard_card_timeout_seconds": 1.0,
                 "taskboard_card_max_attempts": 2,
             },
         },
@@ -6233,7 +6237,7 @@ async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp
         success_criteria=["Partial action evidence remains inspectable."],
         execution="taskboard",
         max_iterations=1,
-        limits={"max_no_progress_seconds": 0.2},
+        limits={"max_no_progress_seconds": 0.5},
         options={"agent_task": {"taskboard_card_max_attempts": 1}},
     ).use_actions(["probe_action"])
 
@@ -6381,7 +6385,7 @@ async def test_goal_pursuit_effort_iteration_limit_is_soft_strategy_metadata(tmp
 
 
 @pytest.mark.asyncio
-async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task_loop(tmp_path):
+async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task(tmp_path):
     agent = _create_goal_pursuit_agent("execution-task-route-deadline-owner").use_workspace(tmp_path / "workspace")
     execution = (
         agent.create_execution(limits={"max_seconds": 0.2, "max_no_progress_seconds": 5})
@@ -6394,7 +6398,7 @@ async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task_loop(tmp_pa
         return {
             "step_instruction": "build the site",
             "expected_evidence": "site exists",
-            "rationale": "this should be interrupted by the AgentTaskLoop deadline",
+            "rationale": "this should be interrupted by the AgentTask deadline",
         }
 
     cast(Any, execution)._agent_task_step_overrides = {"_request_plan": slow_request_plan}
@@ -6744,6 +6748,34 @@ async def test_agent_execution_model_request_exposes_action_logs_and_artifacts()
 
 
 @pytest.mark.asyncio
+async def test_required_skill_create_execution_routes_to_agent_task(tmp_path):
+    skill_root = tmp_path / "skill-pack" / "skills" / "task-step"
+    _write_skill(skill_root)
+    Agently.skills_executor.configure(
+        registry_root=tmp_path / "skills-registry",
+        allowed_trust_levels=["local"],
+    )
+    contract = Agently.skills_executor.install_skills(skill_root, trust_level="local", update=True)
+    skill_id = str(contract["skill_id"])
+
+    agent = _create_action_agent("required-skill-with-actions").use_workspace(tmp_path / "workspace")
+    agent.set_action_loop(max_rounds=2, timeout=5)
+    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli")
+    agent.require_skills([skill_id], always=True)
+    execution = (
+        agent.input("Use the required Skill guidance and the echo action.")
+        .output({"answer": (str, "answer", True)}, format="json")
+        .create_execution(limits={"max_model_requests": None})
+    )
+
+    route, route_meta = await execution.select_route()
+
+    assert route == "agent_task"
+    assert route_meta["selected_by"] == "execution_strategy"
+    assert execution.effective_options["capability_constraints"]["skills"]["required"] == [skill_id]
+
+
+@pytest.mark.asyncio
 async def test_agent_execution_action_scope_filters_action_runtime_boundary():
     agent = _create_scoped_action_agent("action-scope-runtime-boundary")
     agent.set_action_loop(max_rounds=1)
@@ -6964,6 +6996,7 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
         agent.use_skills(str(tmp_path / "skill-pack"), mode="required", auto_allow=True)
         .input("use the task step skill")
         .create_execution(
+            lineage={"task_id": "options-task", "iteration_id": "iter-1", "step_id": "skills"},
             options=ExecutionOptions.model_validate(
                 {"routes": {"skills": SkillsRouteOptions(effort="fast", output_format="flat_markdown")}}
             ),

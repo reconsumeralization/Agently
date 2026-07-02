@@ -101,7 +101,7 @@ class AgentExecutionMeta(TypedDict):
 
 CapabilityKind: TypeAlias = Literal["action", "skill", "skill_pack"]
 CapabilityRoute: TypeAlias = Literal["model_request", "skills"]
-GuidanceAccess: TypeAlias = Literal["route_context", "context_pack", "summary_only", "none"]
+GuidanceAccess: TypeAlias = Literal["prompt_bound", "route_context", "context_pack", "summary_only", "none"]
 
 
 class PlannerCapabilityCandidate(TypedDict, total=False):
@@ -114,11 +114,12 @@ class PlannerCapabilityCandidate(TypedDict, total=False):
     the plugin (see AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC).
 
     `route` is the execution shape that exposes the capability. `guidance_access`
-    records how the capability's instructions reach the model: `route_context`
-    (only when that route runs, e.g. a Skill's SKILL.md), `context_pack`,
-    `summary_only`, or `none` (e.g. a plain Action). `mode` is kind-specific and
-    optional (e.g. `model_decision`/`required` for skills) and is not normalized
-    across kinds.
+    records how the capability's instructions reach the model: `prompt_bound`
+    (bound into the model_request prompt before execution), `route_context`
+    (only when that route runs), `context_pack`, `summary_only`, or `none`
+    (e.g. a plain Action). `mode` is kind-specific and optional
+    (e.g. `model_decision`/`required` for skills) and is not normalized across
+    kinds.
     """
 
     id: str
@@ -142,7 +143,7 @@ class PlannerCapabilitySummary(TypedDict, total=False):
 
 
 # Evidence-requirement kinds. Only the kinds with a deterministic structural
-# check are enforced by the AgentTaskLoop host guard today
+# check are enforced by the AgentTask host guard today
 # (`capability_used`, `action_succeeded`); the remainder are reserved contract
 # vocabulary that the host guard does not yet enforce and that the model verifier
 # may treat advisorily, so a requirement never claims a guarantee the guard

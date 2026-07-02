@@ -392,7 +392,7 @@ class AgentlyMain(Generic[A]):
         name: str | None = None,
         *,
         skip_exceptions: bool = False,
-    ) -> TriggerFlow:
+    ) -> TriggerFlow[Any, Any, Any]:
         return TriggerFlow(name=name, skip_exceptions=skip_exceptions)
 
     def create_workspace(

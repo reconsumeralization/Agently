@@ -8,7 +8,7 @@ keywords: Agently, Blocks, ExecutionPlan, PlanBlock, ExecutionBlock, TriggerFlow
 
 Blocks is an internal lifecycle bridge for complex task execution. It is not a
 second public task runtime. The outer task lifecycle still belongs to
-`AgentExecution` and the AgentTaskLoop strategy, while TriggerFlow remains the
+`AgentExecution` and the AgentTask strategy, while TriggerFlow remains the
 execution substrate.
 
 The lifecycle is:
@@ -20,20 +20,20 @@ TaskFrame
 -> ExecutionBlockGraph
 -> TriggerFlow execution
 -> EvidenceEnvelope and ResultAdapter output
--> AgentTaskLoop verification and host guards
+-> AgentTask verification and host guards
 ```
 
 ## Ownership
 
 | Concept | Owner | Meaning |
 |---|---|---|
-| `ExecutionPlan` | AgentTaskLoop / AgentExecution strategy | One bounded plan segment for the current task frame. |
+| `ExecutionPlan` | AgentTask / AgentExecution strategy | One bounded plan segment for the current task frame. |
 | `PlanBlock` | Blocks planning catalog | Planner-visible capability specification with inputs, outputs, capability needs, evidence contract, and runtime binding choices. |
 | `ExecutionBlock` | Blocks runtime catalog | Trusted runtime block that lowers to one TriggerFlow chunk or a fixed chunk/signal group. |
 | `ExecutionBlockGraph` | Blocks compiler output | TriggerFlow-ready lowering artifact, similar to a compiled TaskDAG. |
 | `TaskDAG` | TaskDAG modules | DAG data, validation, dependency semantics, and semantic output mapping. |
 | `TriggerFlow` | TriggerFlow | Runtime dispatch, signals, joins, concurrency, pause/resume, stream, close snapshot, and recovery. |
-| `EvidenceEnvelope` | Blocks mapper / AgentTaskLoop | Runtime facts used by the verifier and deterministic host guards. |
+| `EvidenceEnvelope` | Blocks mapper / AgentTask | Runtime facts used by the verifier and deterministic host guards. |
 
 ## Evidence Ledger
 
@@ -132,7 +132,7 @@ acceptance.
 
 If a required handler or resource is missing, the block fails closed. If a block
 emits a structured `ReplanSignal`, Blocks cancels only the named affected
-ExecutionBlocks and their downstream blocks; AgentTaskLoop still owns the next
+ExecutionBlocks and their downstream blocks; AgentTask still owns the next
 repair/replan decision.
 
 ## TaskDAG Through Blocks

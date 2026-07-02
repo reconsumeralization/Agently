@@ -372,10 +372,12 @@ def test_explicit_action_artifacts_are_preserved_without_large_output():
     assert isinstance(artifact_refs, list)
     assert len(artifact_refs) == 1
     artifact_ref = artifact_refs[0]
-    assert artifact_ref["artifact_type"] == "mcp_resource_link"
-    assert artifact_ref["path"] == "artifacts/report.md"
-    assert artifact_ref["media_type"] == "text/markdown"
-    assert artifact_ref["meta"]["source"] == "mcp"
+    assert artifact_ref.get("artifact_type") == "mcp_resource_link"
+    assert artifact_ref.get("path") == "artifacts/report.md"
+    assert artifact_ref.get("media_type") == "text/markdown"
+    meta = artifact_ref.get("meta")
+    assert isinstance(meta, dict)
+    assert meta.get("source") == "mcp"
     assert record.get("artifacts") == artifact_refs
 
 

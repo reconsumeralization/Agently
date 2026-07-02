@@ -68,7 +68,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 {
                     "action_id": capability_id,
                     "capability_id": capability_id,
-                    "source": "AgentTaskLoop.step_scope",
+                    "source": "AgentTask.step_scope",
                 }
                 for capability_id in scoped_ids
             ),
@@ -745,12 +745,12 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return CapabilityResolution(
             allowed_capabilities=tuple(scoped_ids),
             scoped_action_candidates=tuple(
-                {"action_id": capability_id, "capability_id": capability_id, "source": "AgentTaskLoop.step_scope"}
+                {"action_id": capability_id, "capability_id": capability_id, "source": "AgentTask.step_scope"}
                 for capability_id in scoped_ids
             ),
             diagnostics=(
                 {
-                    "source": "AgentTaskLoop",
+                    "source": "AgentTask",
                     "step_execution_shape": str(
                         plan.get("effective_execution_shape") or plan.get("execution_shape") or "direct"
                     ),

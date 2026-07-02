@@ -128,6 +128,9 @@ rules. Then map each requirement to the evidence that proves it:
 - docs, compatibility manifests, spec reconciliation, and companion guidance
 - DevTools or other companion validation when runtime events, observation
   payloads, lineage, or companion protocols changed
+- public typing and IDE metadata checks when public APIs, data contracts,
+  stream payloads, callbacks, handlers, facades, or companion package surfaces
+  changed
 
 Examples prove that the release solves a real scenario. They must not be the
 only proof for compatibility behavior, protocol boundaries, route lifecycle,
@@ -141,6 +144,30 @@ link to it. Do not accept a release by pointing directly at existing examples,
 tests, or closed issues without first checking that those evidence sources cover
 the target contract.
 
+## Public Typing And IDE Support
+
+Public typing completeness is a release gate. A framework release must keep
+Pylance/pyright-compatible IDE hints useful for both the source checkout and the
+installed package.
+
+Before release:
+
+- run `pyright` over `agently/`, `tests/`, and `examples/` with the release
+  candidate interpreter before running `pytest`
+- audit changed public surfaces for missing annotations and unjustified broad
+  `Any`
+- confirm `agently/py.typed` exists in the source tree and is included in the
+  built or installed package
+- run a Pylance-equivalent `pyright` smoke from outside the repository source
+  path against an installed candidate package, importing representative public
+  root APIs and changed public surfaces
+- record commands, interpreter, package source, and result in the release PR
+  body or review notes
+
+If the release also publishes or recommends a companion Python package such as
+`agently-devtools`, run the same source and installed-package typing/IDE smoke
+for that companion before declaring the release line aligned.
+
 ## Foundation Example Effect Gate
 
 Foundation-layer capabilities are release-critical framework substrate, not
@@ -152,7 +179,7 @@ enough by themselves: the release reviewer must also run the corresponding core
 example under `examples/` and confirm the real effect still works through the
 recommended public API.
 
-AgentExecution, AgentTaskLoop, Skills workflows, and business examples can be
+AgentExecution, AgentTask, Skills workflows, and business examples can be
 release use-case checks, but they are not Foundation checks by themselves. Map
 them to this gate only when the release also touches a Foundation substrate they
 depend on, such as ModelRequest result materialization, TriggerFlow lifecycle,
@@ -187,6 +214,8 @@ At minimum, include:
 - change summary grouped by user-visible capability
 - coverage-first acceptance argument or matrix
 - validation commands and results, including any skipped or failed checks
+- public typing and Pylance/pyright IDE metadata checks for source and installed
+  package candidates
 - Foundation example effect checks for touched Foundation-layer capabilities
 - clean install smoke environment and result
 - compatibility manifest updates and companion repository status
