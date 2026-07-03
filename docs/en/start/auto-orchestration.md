@@ -273,7 +273,14 @@ stream. In task-strategy executions it includes model-generated text increments
 and also projects selected process events into paragraph text: template progress,
 snapshots, heartbeat status, phase status, retry markers, and the terminal task result.
 Use `type="instant"` when the UI needs the original structured event payloads
-with `path`, `value`, `delta`, `is_complete`, and `meta`.
+with `path`, `value`, `delta`, `is_complete`, and `meta`. When a structured
+execution item can also be represented as natural-language stream text,
+`instant` yields the original item first and then an additional synthetic
+`AgentExecutionStreamData` item at `path="$delta"`. The synthetic item has
+`event_type="delta"`, `source="agent_execution"`, and
+`meta["stream_kind"] == "text_projection"` with source-path metadata. It is a
+consumer projection only: `type="all"` stays the raw audit stream and does not
+include synthetic `$delta` items.
 
 During long quiet waits, AgentTask may emit an `agent_task.heartbeat` stream item
 after `agent_task.heartbeat_interval_seconds` seconds without any other stream
@@ -578,7 +585,10 @@ artifact writers and structured UIs should prefer structured status events when
 available, and only handle the marker at a plain-text consumption boundary. Use
 `type="instant"` for structured execution events:
 `AgentExecutionStreamData` keeps the familiar `path`, `value`, `delta`, and
-`is_complete` fields and adds route metadata for process-level events.
+`is_complete` fields and adds route metadata for process-level events. For UI
+consumers that want one text slot plus structured state updates, `instant` also
+appends synthetic `path="$delta"` text-projection items after source events that
+can be projected to text; `all` does not include those derived items.
 
 `create_execution()` creates an AgentExecution draft. Ordinary prompt-only
 drafts run as direct model requests. DynamicTask/TaskDAG workflows run through

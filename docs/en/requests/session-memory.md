@@ -26,6 +26,77 @@ agent.deactivate_session()
 
 `activate_session(session_id=...)` creates or reuses the `Session` for that id and writes `runtime.session_id` into the agent settings. Use `deactivate_session()` to stop injecting session chat history into future requests.
 
+## Workspace-backed long-term memory
+
+For durable memory, attach a `SessionMemory` plugin. The built-in sample plugin
+is `AgentlyMemory`; it stores records in Workspace and injects retrieved memory
+into the next request.
+
+```python
+from agently.core import Session
+
+workspace = Agently.create_workspace("./.agently/support-memory")
+
+session = Session()
+session.use_memory(mode="AgentlyMemory", workspace=workspace)
+```
+
+Agent-created sessions can bind the agent Workspace automatically:
+
+```python
+agent = Agently.create_agent()
+agent.use_workspace("./.agently/support-memory")
+agent.activate_session(session_id="support-demo")
+
+agent.activated_session.use_memory(mode="AgentlyMemory")
+```
+
+`AgentlyMemory` writes memory records with:
+
+- `collection="memory"`
+- `kind="global_memory"` for `GLOBAL_MEMORY`
+- `kind="session_memory"` for `SESSION_MEMORY`
+- fixed `provenance`, `tags`, `memory_scope`, and optional `vector_index`
+  metadata
+
+`GLOBAL_MEMORY` is shared inside one Workspace. `SESSION_MEMORY` is also scoped
+by `runtime.session_id`. A standalone `Session` must pass `workspace=...`; if a
+Workspace-backed memory plugin needs storage and no Workspace is available,
+Agently raises a clear error.
+
+The memory body shape and model prompts are configurable under
+`session.memory.AgentlyMemory.*`. Prompt overrides use Configure-Prompt-shaped
+`.execution` blocks:
+
+```python
+agent.set_settings(
+    "session.memory.AgentlyMemory.body_schema",
+    {
+        "preference": "string",
+        "project": "string",
+        "evidence": "short string",
+    },
+)
+
+agent.set_settings(
+    "session.memory.AgentlyMemory.extract.execution.instruct",
+    "Extract durable user preferences and project facts only.",
+)
+```
+
+The model owns extraction, compression, retrieval-query planning, and rerank
+judgment. Deterministic code only validates shape, applies Workspace filters,
+stores records, and enforces budgets. For small memory scopes,
+`AgentlyMemory` skips rerank when candidate count is below
+`session.memory.AgentlyMemory.retrieve.rerank_min_candidates` (default `2`) and
+records `memory_rerank_skipped` diagnostics. If rerank fails after retry,
+retrieval falls back to deterministic candidates and records diagnostics.
+`AgentlyMemory` also keeps memory usable when rerank drops every candidate in a
+memory scope: it reruns that scope without rerank, injects the deterministic
+memory package, and records `memory_rerank_empty_fallback` diagnostics. Set
+`session.memory.AgentlyMemory.retrieve.keep_candidates_on_empty_rerank=False` to
+disable that safeguard.
+
 ## Chat history methods
 
 With a session active, these agent methods proxy to the current session:
@@ -88,7 +159,8 @@ agent.register_session_analysis_handler(analysis_handler)
 agent.register_session_resize_handler("keep_last_four", keep_last_four)
 ```
 
-If you want model-generated memory, call the model in your own resize handler. Session stores the returned `memo` and injects it into later requests.
+Use resize handlers for chat-window policy and the `memo` field. Use
+`session.use_memory(...)` when the memory should be durable Workspace records.
 
 ## Import / export
 
@@ -110,7 +182,7 @@ Aliases also exist: `session.to_json()` / `session.to_yaml()`, and `session.load
 
 ## Boundaries
 
-Session owns multi-turn chat history, the current context window, an optional memo field, and import / export. It does not own durable storage backends, vector databases, cross-device user profiles, or exact token budgeting. Put those in your application layer or knowledge-base layer.
+Session owns multi-turn chat history, the current context window, an optional memo field, memory-plugin attachment, and import / export. Workspace owns durable storage and retrieval. `SessionMemory` plugins own memory strategy. Agently does not add a cross-Workspace user profile in V1.
 
 ## See also
 

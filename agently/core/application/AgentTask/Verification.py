@@ -486,7 +486,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "current_evidence_ledger": current_evidence_ledger,
                 "evidence_ledger": evidence_ledger,
                 "acceptance_locator_view": acceptance_locator_view_from_ledger(evidence_ledger),
-                "grounding_guard": grounding_guard,
+                "grounding_guard": self._compact_grounding_guard_for_verifier(grounding_guard),
                 "trusted_workspace_artifacts": trusted_workspace_artifacts,
                 "capability_evidence_requirements": capability_evidence_requirements,
                 "context_pack": self._compact_context_pack_for_verifier(context_pack),
@@ -2933,6 +2933,76 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 max_chars=600,
             )
         return compact
+
+    @classmethod
+    def _compact_grounding_guard_for_verifier(cls, grounding_guard: Mapping[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {
+            "schema_version": grounding_guard.get("schema_version"),
+            "valid": grounding_guard.get("valid"),
+            "blocking_count": grounding_guard.get("blocking_count"),
+            "checked_claims": grounding_guard.get("checked_claims"),
+        }
+        diagnostics = grounding_guard.get("diagnostics")
+        if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
+            compact["diagnostics"] = [
+                cls._compact_verifier_prompt_value(item, max_chars=800)
+                for item in list(diagnostics)[:12]
+                if isinstance(item, Mapping)
+            ]
+            if len(diagnostics) > 12:
+                compact["diagnostics"].append({"omitted": len(diagnostics) - 12, "reason": "prompt_budget"})
+        available_ids = grounding_guard.get("available_evidence_ids")
+        if isinstance(available_ids, Sequence) and not isinstance(available_ids, str | bytes | bytearray):
+            compact["available_evidence_count"] = len(available_ids)
+            compact["available_evidence_id_sample"] = [str(item) for item in list(available_ids)[:16]]
+        normalized = grounding_guard.get("normalized_evidence_use")
+        if isinstance(normalized, Sequence) and not isinstance(normalized, str | bytes | bytearray):
+            compact["normalized_evidence_use"] = [
+                cls._compact_verifier_prompt_value(item, max_chars=900)
+                for item in list(normalized)[:16]
+                if isinstance(item, Mapping)
+            ]
+            if len(normalized) > 16:
+                compact["normalized_evidence_use"].append({"omitted": len(normalized) - 16, "reason": "prompt_budget"})
+        refs = grounding_guard.get("available_evidence_refs")
+        if (
+            isinstance(refs, Sequence)
+            and not isinstance(refs, str | bytes | bytearray)
+            and (grounding_guard.get("valid") is False or int(grounding_guard.get("blocking_count") or 0) > 0)
+        ):
+            compact["available_evidence_refs"] = [
+                cls._compact_grounding_guard_ref_for_verifier(ref)
+                for ref in list(refs)[:24]
+                if isinstance(ref, Mapping)
+            ]
+            if len(refs) > 24:
+                compact["available_evidence_refs"].append({"omitted": len(refs) - 24, "reason": "prompt_budget"})
+        return DataFormatter.sanitize(compact)
+
+    @classmethod
+    def _compact_grounding_guard_ref_for_verifier(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
+        keep_keys = (
+            "id",
+            "cite_as",
+            "kind",
+            "status",
+            "body_state",
+            "path",
+            "url",
+            "criterion_id",
+            "claim",
+            "heading",
+            "anchor_text",
+            "line_start",
+            "line_end",
+        )
+        compact: dict[str, Any] = {key: ref.get(key) for key in keep_keys if key in ref}
+        aliases = ref.get("aliases")
+        if isinstance(aliases, Sequence) and not isinstance(aliases, str | bytes | bytearray):
+            compact["aliases"] = [str(item) for item in list(aliases)[:6]]
+            if len(aliases) > 6:
+                compact["aliases"].append(f"... omitted {len(aliases) - 6} aliases")
+        return DataFormatter.sanitize(compact)
 
     @classmethod
     def _compact_action_record_for_verifier(cls, record: Any) -> Any:

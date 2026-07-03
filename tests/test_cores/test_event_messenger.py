@@ -474,6 +474,7 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
     settings = _build_runtime_log_settings("simple")
 
     assert should_render_console_event(RuntimeEvent(event_type="model.requesting", message="requesting"), settings)
+    assert should_render_console_event(RuntimeEvent(event_type="model.completed", payload={"raw_text": "done"}), settings)
     assert not should_render_console_event(RuntimeEvent(event_type="model.streaming", message="delta"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="model.request_failed", level="ERROR"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="model.validation_failed", level="WARNING"), settings)
@@ -504,6 +505,28 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
     assert should_render_console_event(RuntimeEvent(event_type="triggerflow.execution_failed", level="ERROR"), settings)
     assert not should_render_console_event(RuntimeEvent(event_type="triggerflow.signal", message="signal"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings)
+    assert should_render_console_event(RuntimeEvent(event_type="agent_execution.started", message="started"), settings)
+    assert should_render_console_event(
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            payload={"stream_kind": "phase", "path": "agent_task.phase.planned", "value": {"phase": "planned"}},
+        ),
+        settings,
+    )
+    assert not should_render_console_event(
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            payload={"stream_kind": "model_delta", "path": "agent_task.model.delta", "value": "A"},
+        ),
+        settings,
+    )
+    assert not should_render_console_event(
+        RuntimeEvent(
+            event_type="agent_execution.stream.delta",
+            payload={"stream_kind": "progress_delta", "path": "agent_task.progress", "delta": "A"},
+        ),
+        settings,
+    )
     assert not should_render_console_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="request.failed", level="ERROR"), settings)
 
@@ -648,6 +671,110 @@ def test_action_console_rendering_shows_loop_without_unknown_action(monkeypatch)
     assert "ActionLoop" in rendered
     assert "Started" in rendered
     assert "Action-unknown" not in rendered
+
+
+def test_model_console_simple_renders_request_and_result(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        _ = kwargs
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.requesting",
+            source="probe",
+            payload={
+                "agent_name": "debug-agent",
+                "response_id": "resp-1",
+                "request_text": "USER: summarize revenue risk",
+            },
+        ),
+        "simple",
+    )
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.completed",
+            source="probe",
+            payload={
+                "agent_name": "debug-agent",
+                "response_id": "resp-1",
+                "raw_text": "Revenue risk is moderate.",
+                "result": {"summary": "fallback should not win when raw_text exists"},
+            },
+        ),
+        "simple",
+    )
+
+    rendered = "\n".join(printed)
+    assert "Requesting" in rendered
+    assert "USER: summarize revenue risk" in rendered
+    assert "Done" in rendered
+    assert "Revenue risk is moderate." in rendered
+    assert "fallback should not win" not in rendered
+
+
+def test_model_console_detail_keeps_structured_result_priority(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        _ = kwargs
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.completed",
+            source="probe",
+            payload={
+                "agent_name": "debug-agent",
+                "response_id": "resp-1",
+                "raw_text": "raw final text",
+                "result": {"summary": "structured final result"},
+            },
+        ),
+        "detail",
+    )
+
+    rendered = "\n".join(printed)
+    assert "structured final result" in rendered
+    assert "raw final text" not in rendered
+
+
+def test_agent_execution_console_simple_renders_process_summary(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        _ = kwargs
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+
+    RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="agent_execution.stream",
+            source="BaseAgent",
+            payload={
+                "execution_id": "exec-1",
+                "stream_kind": "phase",
+                "path": "agent_task.phase.planned",
+                "value": {"phase": "planned", "detail": "Plan accepted."},
+            },
+            meta={"execution_id": "exec-1"},
+        ),
+        "simple",
+    )
+
+    rendered = "\n".join(printed)
+    assert "AgentExecution" in rendered
+    assert "Execution-exec-1" in rendered
+    assert "Process" in rendered
+    assert "kind=phase" in rendered
+    assert "agent_task.phase.planned" in rendered
+    assert "Plan accepted." in rendered
 
 
 @pytest.mark.asyncio

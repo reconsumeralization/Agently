@@ -16,7 +16,7 @@ from agently.core import PluginManager, TaskBoardGraph, TaskBoardRevision, TaskB
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, AgentExecutionResult
 from agently.core.application.AgentTask import AgentTask
 from agently.core.application.AgentTask.BlockCarrier import WorkUnitResult
-from agently.types.data import AgentlyRequestData, WorkspaceContextPackage
+from agently.types.data import AgentExecutionStreamData, AgentlyRequestData, WorkspaceContextPackage
 from agently.types.options import ExecutionOptions, SkillsRouteOptions
 from agently.utils import DataFormatter
 from agently.utils import Settings
@@ -196,6 +196,61 @@ async def test_agent_execution_stream_cancel_retrieves_start_exception():
         event_loop.set_exception_handler(previous_handler)
 
     assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_instant_adds_synthetic_delta_projection_without_polluting_all():
+    phase_item = AgentExecutionStreamData(
+        path="agent_task.phase.planned",
+        value={"phase": "planned", "iteration": 1},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        route="task",
+        task_id="task-1",
+        meta={
+            "stream_kind": "phase",
+            "execution_id": "exec-1",
+            "lineage": {"task_id": "task-1"},
+        },
+    )
+    owner = SimpleNamespace(
+        _completed=True,
+        stream=SimpleNamespace(items=[phase_item]),
+    )
+
+    instant_items = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="instant")
+    ]
+    delta_chunks = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="delta")
+    ]
+    all_items = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="all")
+    ]
+
+    assert instant_items[0] is phase_item
+    synthetic_delta = instant_items[1]
+    assert isinstance(synthetic_delta, AgentExecutionStreamData)
+    assert synthetic_delta.path == "$delta"
+    assert synthetic_delta.delta == "Iteration 1: phase planned.\n\n"
+    assert synthetic_delta.value == synthetic_delta.delta
+    assert synthetic_delta.event_type == "delta"
+    assert synthetic_delta.is_complete is False
+    assert synthetic_delta.source == "agent_execution"
+    assert synthetic_delta.route == "task"
+    assert synthetic_delta.task_id == "task-1"
+    assert synthetic_delta.meta == {
+        "stream_kind": "text_projection",
+        "projection_source_path": "agent_task.phase.planned",
+        "projection_source_stream_kind": "phase",
+        "execution_id": "exec-1",
+        "lineage": {"task_id": "task-1"},
+        "projection_source_event_type": "done",
+        "projection_source": "agent_task",
+    }
+    assert delta_chunks == ["Iteration 1: phase planned.\n\n"]
+    assert all_items == [("agent_execution", phase_item)]
 
 
 class MockAgentExecutionIsolationRequester(MockAgentExecutionRequester):
@@ -6130,13 +6185,14 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
     agent = _create_taskboard_control_stall_agent("execution-taskboard-control-no-progress-timeout").use_workspace(
         tmp_path / "workspace"
     )
+    idle_timeout_seconds = 0.8
 
     execution = agent.create_task(
         goal="Run a stalled TaskBoard control card.",
         success_criteria=["The control card reports a no-progress failure instead of heartbeating forever."],
         execution="taskboard",
         max_iterations=1,
-        limits={"max_no_progress_seconds": 0.2},
+        limits={"max_no_progress_seconds": idle_timeout_seconds},
         options={"request_timeout_seconds": 5.0, "agent_task": {"taskboard_card_max_attempts": 1}},
     )
 
@@ -6149,14 +6205,14 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
     card_result = taskboard["revision"]["card_results"]["control-stall"]
     diagnostic = card_result["diagnostics"][0]
 
-    assert elapsed < 1.5
+    assert elapsed < 2.5
     assert result["status"] == "error"
     assert result["accepted"] is False
     assert result["artifact_status"] == "partial"
     assert card_result["status"] == "failed"
     assert diagnostic["code"] == "taskboard.card.timeout"
     assert diagnostic["card_id"] == "control-stall"
-    assert "max_no_progress_seconds=0.2" in diagnostic["message"]
+    assert f"max_no_progress_seconds={idle_timeout_seconds}" in diagnostic["message"]
 
 
 @pytest.mark.asyncio

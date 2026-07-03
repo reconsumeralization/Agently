@@ -72,7 +72,7 @@ class LocalWorkspaceBackend:
         self.retention_policy = self
         self.evidence_linker = self
         self.text_index = self
-        self.vector_index = NoopVectorIndex()
+        self.vector_index = self._default_vector_index()
         if create:
             self._initialize()
         elif not self.root.exists():
@@ -143,6 +143,9 @@ class LocalWorkspaceBackend:
     def _default_workspace_id(self):
         digest = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()[:24]
         return f"ws_{ digest }"
+
+    def _default_vector_index(self):
+        return NoopVectorIndex()
 
     def _load_workspace_meta(self):
         meta_path = self.root / "workspace.meta.json"

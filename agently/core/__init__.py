@@ -88,6 +88,7 @@ from .session import Session
 from .workspace import (
     DefaultContextBuilder,
     LazyWorkspace,
+    LocalVectorIndex,
     LocalWorkspaceBackend,
     ContextProfile,
     RuleContextPlanner,
@@ -124,6 +125,7 @@ __all__ = [
     "ExecutionResourceManager",
     "ExtensionHandlers",
     "LazyWorkspace",
+    "LocalVectorIndex",
     "LocalWorkspaceBackend",
     "ModelRequest",
     "ModelRequestResult",

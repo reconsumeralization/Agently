@@ -10,7 +10,7 @@ Agently.set_settings(
             "temperature": 0.7,
         },
     },
-).set_settings("debug", True)
+).set_settings("debug", "detail")
 
 agent = Agently.create_agent()
 
@@ -31,4 +31,4 @@ print(result)
 # Use file="..." for a local image or files=[...] / urls=[...] for multi-image input.
 # Any OpenAI-compatible VLM can be used here; swap base_url, model, and auth
 # to use a different provider (Ollama, OpenAI, DeepSeek-VL, etc.).
-# debug=True prints the raw request/response stream to console.
+# debug="detail" prints the raw request/response stream to console.

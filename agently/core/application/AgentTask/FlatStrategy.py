@@ -852,10 +852,24 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 surface = str(item.get("search_surface") or item.get("surface") or "").strip()
                 if surface in {"workspace_index", "workspace_files", "workspace_index_and_files", "files"}:
                     candidate["search_surface"] = "workspace_files" if surface == "files" else surface
-                for key in ("max_results", "snippet_limit", "snippet_offset", "max_file_bytes", "context_lines"):
+                for key in (
+                    "max_results",
+                    "snippet_limit",
+                    "snippet_offset",
+                    "max_file_bytes",
+                    "context_lines",
+                    "top_n",
+                    "max_candidates",
+                ):
                     value = item.get(key)
                     if value is not None:
                         candidate[key] = DataFormatter.sanitize(value)
+                for key in ("tags", "method", "selection"):
+                    value = item.get(key)
+                    if value is not None:
+                        candidate[key] = DataFormatter.sanitize(value)
+                if item.get("rerank") is not None:
+                    candidate["rerank"] = bool(item.get("rerank"))
                 if item.get("include_hidden") is not None:
                     candidate["include_hidden"] = bool(item.get("include_hidden"))
                 filters = item.get("filters")
@@ -1447,10 +1461,15 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
             " For Workspace, repository, or file-backed evidence, prefer scoped retrieval before bulk reads when it can "
             "reduce prompt input. If useful, return scoped_retrieval.query_groups with prioritized exact phrases or "
-            "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. Search/read executors only "
+            "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. Workspace.retrieve/read executors only "
             "record bounded facts; the planner/verifier must judge semantic usefulness after seeing snippets or readbacks. "
             "Set query_group.search_surface to 'workspace_index' for SQLite/FTS records, 'workspace_files' for bounded "
             "file grep-style search, or 'workspace_index_and_files' when both surfaces are worth the bounded cost. For "
+            "explicit retrieval tuning, query groups may include tags, method='auto'|'keyword'|'vector'|'hybrid', "
+            "rerank, selection='length'|'top_n', top_n, or max_candidates; omit method unless the task gives a concrete "
+            "retrieval requirement, so Workspace can choose keyword or hybrid from its retrieval policy. "
+            "Blocks keep the compatibility operation name workspace_operation.search, but the scoped retrieval executor "
+            "uses Workspace.retrieve as the shared strategy and records retrieval diagnostics in bounded facts. "
             "workspace_files, query is the content text to search, path is the directory or file scope, and pattern is a "
             "file glob such as '*.md' or '*' rather than another content keyword. "
             "When the task context names a concrete Workspace collection, kind, path, or scope for the relevant records, "
@@ -1501,7 +1520,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 ),
                 "scoped_retrieval": (
                     dict,
-                    "Optional retrieval plan: {query_groups: [{query, expected_role, search_surface?, path?, pattern?, filters?, max_results?, snippet_limit?, max_file_bytes?}], fallback_order?: [...]}; executors return facts only",
+                    "Optional retrieval plan: {query_groups: [{query, expected_role, search_surface?, path?, pattern?, filters?, tags?, method?, rerank?, selection?, top_n?, max_results?, max_candidates?, snippet_limit?, max_file_bytes?}], fallback_order?: [...]}; executors return facts only",
                     False,
                 ),
             },
@@ -1658,17 +1677,20 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "source boundary. "
                     "For repository or file-source steps, a clone/list manifest path is ref_only; read the specific "
                     "file or artifact before making claims about its content. "
-                    "When scoped_retrieval.query_groups is present, try the prioritized scoped search before broad "
+                    "When scoped_retrieval.query_groups is present, try the prioritized scoped Workspace.retrieve search before broad "
                     "reads; use evidence_snippet results as bounded source text and locator_ref results only as targets "
                     "for later bounded readback. If scoped_retrieval_results is present, those are already executed "
-                    "Blocks/Workspace search facts for the current step; inspect them before choosing broader reads. "
-                    "Treat evidence_ledger as the authoritative grounding ledger. Use its item ids in evidence_use "
-                    "for factual claims. status=failed or status=empty is evidence of unavailability only, not support "
-                    "for positive business facts. body_state=ref_only supports only discovery/ref-pointer claims; "
-                    "read the referenced source before asserting its content. body_state=truncated supports only the "
-                    "visible excerpt, not whole-source or exhaustive claims. scoped_retrieval_results is a compatibility "
-                    "view derived from the same ledger and is not a separate grounding authority. "
-                    "Do not treat a local search hit as semantic acceptance by itself. "
+                    "Blocks/Workspace retrieval facts for the current step; inspect them before choosing broader reads. "
+                    "Treat evidence_ledger as the authoritative grounding ledger for item ids, cite handles, status, "
+                    "body_state, and grounding rules. Use its item ids in evidence_use for factual claims. Current-step "
+                    "retrieval excerpt text is carried by scoped_retrieval_results.evidence_snippets, while cold "
+                    "provenance and larger bodies stay outside the synthesis prompt. status=failed or status=empty is "
+                    "evidence of unavailability only, not support for positive business facts. body_state=ref_only "
+                    "supports only discovery/ref-pointer claims; read the referenced source before asserting its "
+                    "content. body_state=truncated supports only the visible excerpt, not whole-source or exhaustive "
+                    "claims. scoped_retrieval_results is a compatibility view derived from the same ledger and is not a "
+                    "separate grounding authority. "
+                    "Do not treat a retrieval hit as semantic acceptance by itself. "
                     "When repair_context contains fields, it is the active verification feedback for this work unit. "
                     "Use its acceptance_delta, advisory_repair_constraints, advisory_next_step_requirements, and "
                     "available_evidence_anchors as the correction contract; do not rely on the planner restating every "

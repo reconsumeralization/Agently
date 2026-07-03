@@ -19,13 +19,14 @@ from .LocalBackend import LocalWorkspaceBackend
 from .Manager import WorkspaceManager
 from .Profiles import CheckpointIngestionProfile, FastIngestionProfile
 from .ContextBuilder import DefaultContextBuilder, ContextProfile, RuleContextPlanner, WorkspaceRetriever
-from .Stores import LocalContentStore, LocalWorkspacePolicyEngine, NoopVectorIndex
+from .Stores import LocalContentStore, LocalVectorIndex, LocalWorkspacePolicyEngine, NoopVectorIndex
 
 __all__ = [
     "CheckpointIngestionProfile",
     "DefaultContextBuilder",
     "FastIngestionProfile",
     "LocalContentStore",
+    "LocalVectorIndex",
     "LocalWorkspaceBackend",
     "LazyWorkspace",
     "LocalWorkspacePolicyEngine",

@@ -243,9 +243,10 @@ AgentExecution records progress in `async_get_meta()["diagnostics"]`:
 - `diagnostics["stalls"]` records idle no-progress failures.
 
 When debugging a live app, attach a temporary Event Center hook or enable
-console detail logs with `.set_settings("debug", True)` /
-`.set_settings("debug", "detail")`. Remove temporary debug hooks and debug
-settings after the issue is understood.
+console logs with `.set_settings("debug", True)` for request/result and process
+summaries, or `.set_settings("debug", "detail")` for full observation and model
+delta output. Remove temporary debug hooks and debug settings after the issue is
+understood.
 
 ## Compatibility rules
 

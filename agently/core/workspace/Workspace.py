@@ -43,10 +43,14 @@ from agently.types.data.workspace import (
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
     WorkspaceRetentionAnchor,
+    WorkspaceRetrievalMethod,
+    WorkspaceRetrievalPackage,
+    WorkspaceRetrievalSelection,
     WorkspaceRuntimeEventRecord,
     WorkspaceScratchLease,
 )
 from agently.types.plugins import WorkspaceBackend
+from .Retrieval import RerankHandler, retrieve_workspace
 from ._defaults import (
     ScopeNode,
     WORKSPACE_FILE_AREAS,
@@ -298,6 +302,19 @@ class Workspace:
             scoped.setdefault(filter_key, value)
         return scoped
 
+    def _matches_default_search_scope(self, ref: WorkspaceRecordRef) -> bool:
+        if not self.default_search_scope:
+            return True
+        scope = ref.get("scope")
+        if not isinstance(scope, dict):
+            return False
+        for key, value in self.default_search_scope.items():
+            if value is None:
+                continue
+            if scope.get(key) != value:
+                return False
+        return True
+
     async def _scope_record_ref(self, ref: WorkspaceRecordRef) -> WorkspaceRecordRef:
         if not self.default_scope:
             return ref
@@ -356,8 +373,76 @@ class Workspace:
             chunk_size=chunk_size,
         )
 
-    async def search(self, query: str | None = None, filters: dict[str, Any] | None = None):
+    async def grep(self, query: str | None = None, filters: dict[str, Any] | None = None):
         return await self.backend.search(query, self._scoped_filters(filters))
+
+    async def search(self, query: str | None = None, filters: dict[str, Any] | None = None):
+        scoped_filters = self._scoped_filters(filters)
+        deterministic = await self.backend.search(query, scoped_filters)
+        if not self._search_should_use_retrieve(
+            query=query,
+            filters=scoped_filters,
+            candidate_count=len(deterministic),
+        ):
+            return deterministic
+        package = await self.retrieve(
+            query,
+            filters=scoped_filters,
+            sources=["records"],
+            budget={
+                "chars": 6000,
+                "item_chars": 1200,
+                "max_candidates": max(50, len(deterministic)),
+            },
+            selection="length",
+            rerank=False,
+            max_candidates=max(50, len(deterministic)),
+            profile="search_auto",
+        )
+        refs = self._record_refs_from_retrieval_package(package)
+        return refs or deterministic
+
+    async def retrieve(
+        self,
+        query: str | None = None,
+        *,
+        tags: "Sequence[str] | None" = None,
+        filters: dict[str, Any] | None = None,
+        scope: dict[str, Any] | None = None,
+        sources: "Sequence[str] | None" = None,
+        budget: dict[str, Any] | None = None,
+        selection: WorkspaceRetrievalSelection = "length",
+        top_n: int | None = None,
+        method: WorkspaceRetrievalMethod = "auto",
+        rerank: bool | None = None,
+        rerank_handler: RerankHandler | None = None,
+        max_rerank_retries: int = 1,
+        file_options: dict[str, Any] | None = None,
+        max_candidates: int | None = None,
+        profile: str = "auto",
+        plugin_manager: Any = None,
+        settings: Any = None,
+    ) -> WorkspaceRetrievalPackage:
+        return await retrieve_workspace(
+            self,
+            query,
+            tags=tags,
+            filters=filters,
+            scope=scope,
+            sources=sources,
+            budget=budget,
+            selection=selection,
+            top_n=top_n,
+            method=method,
+            rerank=rerank,
+            rerank_handler=rerank_handler,
+            max_rerank_retries=max_rerank_retries,
+            file_options=file_options,
+            max_candidates=max_candidates,
+            profile=profile,
+            plugin_manager=plugin_manager,
+            settings=settings,
+        )
 
     async def link(
         self,
@@ -426,7 +511,7 @@ class Workspace:
         return await self._scope_record_ref(ref)
 
     async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
-        return await self.backend.get_checkpoint(run_id)
+        return await self.latest_checkpoint(run_id)
 
     async def put_snapshot(
         self,
@@ -445,13 +530,20 @@ class Workspace:
         return await self._scope_record_ref(ref)
 
     async def get_snapshot(self, run_id: str) -> dict[str, Any] | None:
-        return await self.backend.get_snapshot(run_id)
+        ref = await self.latest_snapshot(run_id)
+        if ref is None:
+            return None
+        state = await self.get_data(ref)
+        return state if isinstance(state, dict) else None
 
     async def latest_snapshot(self, run_id: str) -> WorkspaceRecordRef | None:
-        return await self.backend.latest_snapshot(run_id)
+        return await self.latest_checkpoint(run_id)
 
     async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
-        return await self.backend.latest_checkpoint(run_id)
+        if not self.default_search_scope:
+            return await self.backend.latest_checkpoint(run_id)
+        history = await self.checkpoint_history(run_id)
+        return history[0] if history else None
 
     async def checkpoint_history(
         self,
@@ -460,7 +552,15 @@ class Workspace:
         step_id: str | None = None,
         limit: int | None = None,
     ) -> list[WorkspaceRecordRef]:
-        return await self.backend.checkpoint_history(run_id, step_id=step_id, limit=limit)
+        backend_limit = None if self.default_search_scope else limit
+        history = await self.backend.checkpoint_history(run_id, step_id=step_id, limit=backend_limit)
+        if self.default_search_scope:
+            history = [ref for ref in history if self._matches_default_search_scope(ref)]
+            if limit is not None:
+                if limit < 0:
+                    raise ValueError("limit must be greater than or equal to 0.")
+                history = history[:limit]
+        return history
 
     async def claim_lease(
         self,
@@ -500,7 +600,12 @@ class Workspace:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> WorkspaceRecordRef:
-        return await self.backend.put_artifact_ref(run_id, artifact, metadata=metadata)
+        scoped_metadata = dict(metadata or {})
+        if self.default_scope:
+            raw_scope = scoped_metadata.get("scope")
+            scoped_metadata["scope"] = self._scoped_record_scope(raw_scope if isinstance(raw_scope, dict) else {})
+        ref = await self.backend.put_artifact_ref(run_id, artifact, metadata=scoped_metadata)
+        return await self._scope_record_ref(ref)
 
     async def append_runtime_event(
         self,
@@ -679,6 +784,43 @@ class Workspace:
 
     async def grep_files(
         self,
+        query: str,
+        *,
+        path: str | Path = ".",
+        pattern: str = "*",
+        max_results: int = 50,
+        include_hidden: bool = False,
+        max_file_bytes: int = 200000,
+        context_lines: int = 0,
+        max_snippet_bytes: int = 1200,
+        regex: bool | None = None,
+        glob: str | None = None,
+    ) -> Any:
+        if regex is not None or glob is not None:
+            return await self._grep_file_lines(
+                query,
+                path=path,
+                regex=True if regex is None else regex,
+                glob=glob,
+                context_lines=context_lines,
+                max_results=max_results,
+                include_hidden=include_hidden,
+                max_file_bytes=max_file_bytes,
+                max_snippet_bytes=max_snippet_bytes,
+            )
+        return await self._search_file_refs(
+            query,
+            path=path,
+            pattern=pattern,
+            max_results=max_results,
+            include_hidden=include_hidden,
+            max_file_bytes=max_file_bytes,
+            context_lines=context_lines,
+            max_snippet_bytes=max_snippet_bytes,
+        )
+
+    async def _grep_file_lines(
+        self,
         pattern: str,
         *,
         path: str | Path = ".",
@@ -756,6 +898,136 @@ class Workspace:
         }
 
     async def search_files(
+        self,
+        query: str,
+        *,
+        path: str | Path = ".",
+        pattern: str = "*",
+        max_results: int = 50,
+        include_hidden: bool = False,
+        max_file_bytes: int = 200000,
+        context_lines: int = 0,
+        max_snippet_bytes: int = 1200,
+    ) -> list[WorkspaceFileSearchResult]:
+        deterministic = await self.grep_files(
+            query,
+            path=path,
+            pattern=pattern,
+            max_results=max_results,
+            include_hidden=include_hidden,
+            max_file_bytes=max_file_bytes,
+            context_lines=context_lines,
+            max_snippet_bytes=max_snippet_bytes,
+        )
+        if not self._search_files_should_use_retrieve(
+            query=query,
+            path=path,
+            pattern=pattern,
+            candidate_count=len(deterministic),
+            max_results=max_results,
+        ):
+            return deterministic
+        package = await self.retrieve(
+            query,
+            sources=["files"],
+            budget={
+                "chars": 6000,
+                "item_chars": max(400, min(int(max_snippet_bytes), 1200)),
+                "max_candidates": max(50, len(deterministic)),
+            },
+            selection="length",
+            rerank=False,
+            file_options={
+                "path": path,
+                "pattern": pattern,
+                "max_results": max_results,
+                "include_hidden": include_hidden,
+                "max_file_bytes": max_file_bytes,
+                "context_lines": context_lines,
+                "max_snippet_bytes": max_snippet_bytes,
+            },
+            max_candidates=max(50, len(deterministic)),
+            profile="search_files_auto",
+        )
+        results = self._file_results_from_retrieval_package(package)
+        return results or deterministic
+
+    @staticmethod
+    def _search_should_use_retrieve(
+        *,
+        query: str | None,
+        filters: dict[str, Any],
+        candidate_count: int,
+    ) -> bool:
+        if not query or not str(query).strip():
+            return False
+        if candidate_count <= 8:
+            return False
+        if filters.get("id") is not None or filters.get("path") is not None:
+            return False
+        return True
+
+    @staticmethod
+    def _search_files_should_use_retrieve(
+        *,
+        query: str,
+        path: str | Path,
+        pattern: str,
+        candidate_count: int,
+        max_results: int,
+    ) -> bool:
+        _ = path, pattern, max_results
+        if not str(query or "").strip():
+            return False
+        if candidate_count <= 8:
+            return False
+        return True
+
+    @staticmethod
+    def _record_refs_from_retrieval_package(package: Any) -> list[WorkspaceRecordRef]:
+        if not isinstance(package, dict):
+            return []
+        items = package.get("items")
+        if not isinstance(items, list):
+            return []
+        refs: list[WorkspaceRecordRef] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ref = item.get("ref")
+            if not isinstance(ref, dict):
+                continue
+            record_id = str(ref.get("id") or "")
+            if not record_id or record_id in seen:
+                continue
+            seen.add(record_id)
+            refs.append(cast(WorkspaceRecordRef, ref))
+        return refs
+
+    @staticmethod
+    def _file_results_from_retrieval_package(package: Any) -> list[WorkspaceFileSearchResult]:
+        if not isinstance(package, dict):
+            return []
+        items = package.get("items")
+        if not isinstance(items, list):
+            return []
+        results: list[WorkspaceFileSearchResult] = []
+        seen: set[tuple[str, int]] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            result = item.get("file")
+            if not isinstance(result, dict):
+                continue
+            key = (str(result.get("path") or ""), int(result.get("line") or 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(cast(WorkspaceFileSearchResult, result))
+        return results
+
+    async def _search_file_refs(
         self,
         query: str,
         *,

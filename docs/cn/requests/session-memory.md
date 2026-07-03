@@ -26,6 +26,70 @@ agent.deactivate_session()
 
 `activate_session(session_id=...)` 会创建或复用这个 id 对应的 `Session`，并把 `runtime.session_id` 写进 agent settings。关闭时用 `deactivate_session()`；关闭后 agent 不再把 session chat history 注入请求。
 
+## Workspace 持久长期记忆
+
+需要持久记忆时，为 Session 挂载 `SessionMemory` 插件。内置样板插件是
+`AgentlyMemory`；它把记忆写入 Workspace record，并在下一次请求前检索并注入相关记忆。
+
+```python
+from agently.core import Session
+
+workspace = Agently.create_workspace("./.agently/support-memory")
+
+session = Session()
+session.use_memory(mode="AgentlyMemory", workspace=workspace)
+```
+
+由 Agent 创建的 Session 可以自动绑定当前 Agent Workspace：
+
+```python
+agent = Agently.create_agent()
+agent.use_workspace("./.agently/support-memory")
+agent.activate_session(session_id="support-demo")
+
+agent.activated_session.use_memory(mode="AgentlyMemory")
+```
+
+`AgentlyMemory` 写入的记忆 record 使用：
+
+- `collection="memory"`
+- `kind="global_memory"` 表示 `GLOBAL_MEMORY`
+- `kind="session_memory"` 表示 `SESSION_MEMORY`
+- 固定的 `provenance`、`tags`、`memory_scope` 和可选 `vector_index` 元数据
+
+`GLOBAL_MEMORY` 在同一个 Workspace 内共享。`SESSION_MEMORY` 还会按
+`runtime.session_id` 继续隔离。独立 `Session` 必须显式传入 `workspace=...`；当
+Workspace-backed 记忆插件需要存储但没有可用 Workspace 时，Agently 会抛出清晰错误。
+
+记忆 body 结构和模型 prompt 可通过 `session.memory.AgentlyMemory.*` 配置。
+prompt 覆盖使用 Configure-Prompt 风格的 `.execution` block：
+
+```python
+agent.set_settings(
+    "session.memory.AgentlyMemory.body_schema",
+    {
+        "preference": "string",
+        "project": "string",
+        "evidence": "short string",
+    },
+)
+
+agent.set_settings(
+    "session.memory.AgentlyMemory.extract.execution.instruct",
+    "只抽取可长期复用的用户偏好和项目事实。",
+)
+```
+
+模型负责抽取、压缩、检索 query 规划和 rerank 判断。确定性代码只负责结构校验、
+Workspace 过滤、写入和预算控制。对于很小的记忆候选集，`AgentlyMemory`
+会在候选数量低于 `session.memory.AgentlyMemory.retrieve.rerank_min_candidates`
+时跳过 rerank（默认阈值为 `2`），并记录 `memory_rerank_skipped` 诊断。
+rerank 重试后仍失败时，会降级到确定性候选并记录诊断。当某个记忆 scope 的候选
+被 rerank 全部丢弃时，`AgentlyMemory` 也会保守降级：对该 scope 关闭 rerank
+重新取回确定性候选、注入记忆包，并记录 `memory_rerank_empty_fallback` 诊断。可通过
+`session.memory.AgentlyMemory.retrieve.keep_candidates_on_empty_rerank=False`
+关闭这个保护。
+
 ## Chat history 入口
 
 启用 session 后，agent 上这几个方法会代理到当前 session：
@@ -88,7 +152,8 @@ agent.register_session_analysis_handler(analysis_handler)
 agent.register_session_resize_handler("keep_last_four", keep_last_four)
 ```
 
-如果你要做“模型摘要记忆”，把模型调用放进自己的 resize handler；Session 只负责保存 handler 返回的 `memo` 并在后续请求里注入它。
+resize handler 适合管理 chat window 和 `memo` 字段。如果记忆需要持久化为
+Workspace record，使用 `session.use_memory(...)`。
 
 ## 导入 / 导出
 
@@ -110,7 +175,7 @@ agent.activate_session(session_id=restored.id)
 
 ## 边界
 
-Session 负责多轮 chat history、当前上下文窗口、可选 memo 字段和导入导出。它不负责持久化后端、向量库、跨设备用户画像或精确 token 预算。那些应该在应用层或知识库层实现。
+Session 负责多轮 chat history、当前上下文窗口、可选 memo 字段、memory 插件挂载和导入导出。Workspace 负责持久化和检索。`SessionMemory` 插件负责记忆策略。V1 不提供跨 Workspace 的用户画像或自动同步。
 
 ## 另见
 

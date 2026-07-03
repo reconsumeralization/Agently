@@ -134,6 +134,58 @@ def test_task_board_schedule_waits_for_completed_dependencies():
     assert next_revision.card_results["collect"].file_refs[0]["path"] == "facts.md"
 
 
+def test_task_board_revision_next_revision_accepts_dict_payloads():
+    revision = TaskBoardRevision.create(
+        board_id="dict-payloads",
+        graph={
+            "graph_id": "dict-payloads-graph",
+            "cards": [{"id": "collect", "objective": "Collect facts."}],
+        },
+    )
+
+    next_revision = revision.next_revision(
+        {
+            "graph_id": "dict-payloads-graph",
+            "cards": [
+                {"id": "collect", "objective": "Collect facts."},
+                {"id": "final", "objective": "Write final answer.", "depends_on": ["collect"]},
+            ],
+        },
+        card_results={
+            "collect": {
+                "card_id": "collect",
+                "status": "completed",
+                "preview": {"facts": ["alpha"]},
+            }
+        },
+    )
+
+    assert isinstance(next_revision.graph, TaskBoardGraph)
+    assert isinstance(next_revision.card_results["collect"], TaskBoardCardResult)
+    assert next_revision.graph.card_by_id()["final"].depends_on == ("collect",)
+    assert next_revision.card_results["collect"].preview == {"facts": ["alpha"]}
+    TaskBoardValidator().validate(next_revision)
+
+
+def test_task_board_graph_with_cards_accepts_dict_payloads():
+    graph = TaskBoardGraph.from_value(
+        {
+            "graph_id": "with-cards",
+            "cards": [{"id": "collect", "objective": "Collect facts."}],
+        }
+    )
+
+    next_graph = graph.with_cards(
+        [
+            {"id": "collect", "objective": "Collect facts."},
+            {"id": "final", "objective": "Write final answer.", "depends_on": ["collect"]},
+        ]
+    )
+
+    assert isinstance(next_graph.cards[0], type(graph.cards[0]))
+    assert next_graph.card_by_id()["final"].depends_on == ("collect",)
+
+
 def test_task_board_record_card_results_derives_terminal_board_status():
     revision = _revision()
     completed_revision = TaskBoardValidator().apply_patch(

@@ -64,13 +64,13 @@ class WorkspaceRetriever:
         records: list[WorkspaceRecordRef] = []
         queries = plan.get("queries") or [None]
         for query in queries:
-            for record in await workspace.search(query, filters=plan.get("filters") or {}):
+            for record in await workspace.grep(query, filters=plan.get("filters") or {}):
                 record_id = record["id"]
                 if record_id not in seen:
                     seen.add(record_id)
                     records.append(record)
         if not records:
-            for record in await workspace.search(None, filters=plan.get("filters") or {}):
+            for record in await workspace.grep(None, filters=plan.get("filters") or {}):
                 record_id = record["id"]
                 if record_id not in seen:
                     seen.add(record_id)

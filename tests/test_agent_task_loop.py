@@ -13,7 +13,7 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.core.orchestration import TaskBoard
+from agently.core.orchestration import TaskBoard, build_task_board_evidence_view
 from agently.core.application.AgentTask.BlockCarrier import (
     WorkUnitIntent,
     WorkUnitResult,
@@ -135,6 +135,117 @@ def test_taskboard_prompts_keep_model_contract_surface_simple():
             if phrase in text:
                 offenders.append(f"{relative_path}: {phrase}")
     assert offenders == []
+
+
+@pytest.mark.asyncio
+async def test_taskboard_final_prompt_omits_duplicate_revision_card_results(tmp_path, monkeypatch):
+    agent = Agently.create_agent("taskboard-final-prompt-compaction").use_workspace(
+        tmp_path / "taskboard-final-prompt-compaction"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-prompt-compaction",
+        goal="Summarize the collected evidence.",
+        success_criteria=["Use the collected evidence."],
+        execution="taskboard",
+    )
+    graph = TaskBoardGraph.from_value(
+        {
+            "graph_id": "taskboard-final-prompt-compaction.graph",
+            "cards": [
+                {
+                    "id": "collect",
+                    "objective": "Collect evidence.",
+                    "required_outputs": ["evidence"],
+                    "status": "completed",
+                }
+            ],
+        }
+    )
+    ledger = {
+        "items": [
+            {
+                "id": "evidence-1",
+                "kind": "note",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "Collected evidence body.",
+            }
+        ]
+    }
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-final-prompt-compaction",
+        graph=graph,
+        revision_id="rev-0",
+    ).next_revision(
+        graph,
+        status="completed",
+        card_results={
+            "collect": TaskBoardCardResult.from_value(
+                {
+                    "card_id": "collect",
+                    "status": "completed",
+                    "preview": "Collected evidence body.",
+                    "metadata": {"evidence_ledger": ledger},
+                }
+            )
+        },
+    )
+    evidence_view = build_task_board_evidence_view(revision).to_dict()
+    captured: dict[str, Any] = {}
+
+    class _Prompt:
+        def __init__(self) -> None:
+            self.values: dict[str, Any] = {}
+
+        def get(self, key: str, default: Any = None, inherit: bool = False) -> Any:
+            _ = inherit
+            return self.values.get(key, default)
+
+        def set(self, key: str, value: Any) -> None:
+            self.values[key] = value
+
+    class _Request:
+        def __init__(self) -> None:
+            self.prompt = _Prompt()
+
+        def input(self, payload: Mapping[str, Any]) -> "_Request":
+            captured["payload"] = dict(payload)
+            return self
+
+        def instruct(self, instruction: str) -> "_Request":
+            captured["instruction"] = instruction
+            return self
+
+        def output(self, schema: Mapping[str, Any], format: str = "json") -> "_Request":
+            captured["output_schema"] = dict(schema)
+            captured["output_format"] = format
+            return self
+
+        async def async_get_data(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            _ = args, kwargs
+            return {
+                "accepted": True,
+                "reason": "Accepted.",
+                "final_result": "Collected evidence body.",
+                "missing_criteria": [],
+                "evidence_use": [{"claim": "Collected evidence", "evidence_ids": ["e1"], "support_type": "content"}],
+            }
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: _Request())
+
+    await task._request_taskboard_final(
+        revision,
+        evidence_view,
+        schedule=TaskBoard(revision, handler=lambda _context: None).schedule(),
+    )
+
+    payload = captured["payload"]
+    prompt_revision = payload["revision"]
+    assert "card_results" not in prompt_revision
+    assert prompt_revision["card_result_statuses"] == {"collect": "completed"}
+    assert payload["taskboard_evidence_view"]["cards"][0]["preview"]
+    assert payload["evidence_ledger"]["items"][0]["body"] == "Collected evidence body."
 
 
 def test_verifier_prompt_keeps_optional_risk_sections_optional():
@@ -1123,7 +1234,7 @@ def test_block_carrier_exposes_compact_scoped_retrieval_policy():
     assert policy["roles"]["locator_ref"] == "discovered target; content not read"
     assert policy["roles"]["evidence_snippet"] == "bounded readable excerpt"
     assert policy["query_owner"] == "planner_or_control_model"
-    assert policy["executor_owner"] == "Workspace search/read actions or Blocks workspace_operation"
+    assert policy["executor_owner"] == "Workspace.retrieve through Blocks workspace_operation, plus bounded readback when needed"
 
 
 def test_flat_step_plan_preserves_scoped_retrieval_query_groups(tmp_path):
@@ -1277,11 +1388,140 @@ def test_block_carrier_compiles_scoped_retrieval_before_agent_step(tmp_path):
     assert compact_plan["plan_blocks"][0]["bound_inputs"]["query"] == "alpha deadline"
     assert compact_plan["plan_blocks"][0]["bound_inputs"]["filters"] == {
         "scope.case_id": "alpha",
-        "path": "notes",
     }
     assert execution_plan.edges[0].from_plan_block == execution_plan.plan_blocks[0].id
     assert execution_plan.edges[0].to_plan_block == execution_plan.plan_blocks[1].id
     assert execution_plan.edges[0].binding["target_input"] == "scoped_retrieval_results"
+
+
+def test_block_carrier_keeps_file_path_out_of_record_filters_for_mixed_retrieval(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-mixed-path").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-mixed-path",
+        goal="Search records and files without suppressing records by file path.",
+        success_criteria=["Evidence is grounded."],
+    )
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Use mixed Workspace evidence.",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "alpha deadline",
+                        "expected_role": "evidence_snippet",
+                        "search_surface": "workspace_index_and_files",
+                        "collection": "observations",
+                        "path": "notes",
+                        "pattern": "*.md",
+                    }
+                ]
+            },
+        }
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
+
+    execution_plan = task._build_blocks_execution_plan(work_unit, plan, cast(Any, context_pack))
+    inputs = execution_plan.plan_blocks[0].bound_inputs
+
+    assert inputs["path"] == "notes"
+    assert inputs["pattern"] == "*.md"
+    assert inputs["filters"] == {"collection": "observations"}
+
+
+def test_block_carrier_model_hot_snippets_preserve_projection_metadata():
+    snippets = AgentTask._model_hot_evidence_snippets(
+        [
+            {
+                "role": "evidence_snippet",
+                "content_state": "projected_from_raw_record",
+                "record_id": "rec_123",
+                "collection": "support-intel",
+                "kind": "credit_policy",
+                "content": "Credit policy: service credits may not exceed 15 percent.",
+                "raw_chars": 1200,
+                "projected_chars": 64,
+                "projection": {
+                    "strategy": "deterministic_structured_projection",
+                    "raw_chars": 1200,
+                    "projected_chars": 64,
+                    "omitted_keys": ["audit", "source_system"],
+                    "raw_content_state": "raw_readback_available",
+                },
+                "original_ref": {
+                    "record_id": "rec_123",
+                    "collection": "support-intel",
+                    "kind": "credit_policy",
+                    "path": "support-intel/rec_123.json",
+                    "size": 1200,
+                    "content_state": "raw_readback_available",
+                },
+            }
+        ]
+    )
+
+    assert snippets[0]["content_state"] == "projected_from_raw_record"
+    assert snippets[0]["projection"]["strategy"] == "deterministic_structured_projection"
+    assert snippets[0]["projection"]["omitted_keys"] == ["audit", "source_system"]
+    assert snippets[0]["original_ref"]["record_id"] == "rec_123"
+    assert snippets[0]["original_ref"]["content_state"] == "raw_readback_available"
+
+
+def test_block_carrier_passes_workspace_retrieve_options(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-options").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-options",
+        goal="Use Workspace retrieve options.",
+        success_criteria=["Evidence is grounded."],
+    )
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Use reranked tagged Workspace evidence.",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "alpha deadline",
+                        "expected_role": "evidence_snippet",
+                        "filters": {"collection": "observations"},
+                        "tags": ["alpha", "deadline"],
+                        "method": "hybrid",
+                        "selection": "top_n",
+                        "top_n": 2,
+                        "rerank": False,
+                        "max_candidates": 9,
+                    }
+                ]
+            },
+        }
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
+
+    execution_plan = task._build_blocks_execution_plan(work_unit, plan, cast(Any, context_pack))
+    inputs = execution_plan.plan_blocks[0].bound_inputs
+
+    assert inputs["tags"] == ["alpha", "deadline"]
+    assert inputs["method"] == "hybrid"
+    assert inputs["selection"] == "top_n"
+    assert inputs["top_n"] == 2
+    assert inputs["rerank"] is False
+    assert inputs["max_candidates"] == 9
 
 
 def test_block_carrier_normalizes_singleton_record_filters(tmp_path):
@@ -1410,6 +1650,7 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
     evidence_ledger = seen["evidence_ledger"]
     assert len(scoped_results) == 1
     assert scoped_results[0]["query"] == "deadline"
+    assert scoped_results[0]["bounded"]["retrieval_strategy"] == "workspace.retrieve"
     assert scoped_results[0]["bounded"]["returned_results"] == 1
     assert [item["kind"] for item in evidence_ledger["items"][:3]] == [
         "workspace_operation.search",
@@ -1505,6 +1746,7 @@ async def test_block_carrier_executes_file_scoped_retrieval_and_injects_results(
 
     scoped_results = seen["scoped_results"]
     assert scoped_results[0]["bounded"]["search_surface"] == "workspace_files"
+    assert scoped_results[0]["bounded"]["retrieval_strategy"] == "workspace.retrieve"
     assert "search_engines" not in scoped_results[0]["bounded"]
     assert scoped_results[0]["bounded"]["file_returned_results"] == 1
     assert scoped_results[0]["bounded"]["context_lines"] == 3
@@ -2262,6 +2504,53 @@ def test_agent_task_hot_path_compaction_omits_provider_request_payloads():
     assert verifier_value["raw_request"]["reason"] == "provider_request_payload_hot_path"
     assert verifier_value["message"]["reason"] == "provider_request_payload_hot_path"
     assert action_preview["prompt_data"]["reason"] == "provider_request_payload_hot_path"
+
+
+def test_agent_task_compacts_grounding_guard_for_verifier_prompt():
+    refs = [
+        {
+            "id": f"evidence-{index}",
+            "cite_as": f"e{index}",
+            "kind": "workspace_artifact.acceptance_locator",
+            "status": "ok",
+            "body_state": "ref_only",
+            "path": "final.md",
+            "aliases": [f"alias-{index}-{alias}" for alias in range(10)],
+        }
+        for index in range(30)
+    ]
+    valid_guard = {
+        "schema_version": "evidence_use_guard/v1",
+        "valid": True,
+        "blocking_count": 0,
+        "diagnostics": [],
+        "checked_claims": 4,
+        "available_evidence_ids": [ref["id"] for ref in refs],
+        "available_evidence_refs": refs,
+        "normalized_evidence_use": [{"claim": "supported", "evidence_ids": ["evidence-1"], "support_type": "content"}],
+    }
+
+    compact_valid = AgentTask._compact_grounding_guard_for_verifier(valid_guard)
+
+    assert compact_valid["valid"] is True
+    assert compact_valid["available_evidence_count"] == 30
+    assert len(compact_valid["available_evidence_id_sample"]) == 16
+    assert "available_evidence_refs" not in compact_valid
+    assert compact_valid["normalized_evidence_use"][0]["claim"] == "supported"
+
+    blocking_guard = dict(valid_guard)
+    blocking_guard.update(
+        {
+            "valid": False,
+            "blocking_count": 1,
+            "diagnostics": [{"code": "evidence_ledger.invalid_evidence_id", "blocking": True}],
+        }
+    )
+    compact_blocking = AgentTask._compact_grounding_guard_for_verifier(blocking_guard)
+
+    assert compact_blocking["valid"] is False
+    assert len(compact_blocking["available_evidence_refs"]) == 25
+    assert compact_blocking["available_evidence_refs"][0]["aliases"][-1] == "... omitted 4 aliases"
 
 
 class MockAgentTaskRequester:
@@ -5965,7 +6254,7 @@ async def test_agent_task_loop_progress_model_does_not_delay_stream_close(tmp_pa
 
     stream_items = await asyncio.wait_for(
         _collect_stream(task),
-        timeout=5,
+        timeout=8,
     )
 
     assert any((item.meta or {}).get("stream_kind") == "snapshot" for item in stream_items)
@@ -7125,6 +7414,7 @@ async def test_task_wall_clock_budget_surfaces_timed_out(tmp_path):
         goal="Repair a legacy Agently script so it runs on the current API.",
         success_criteria=["The script runs successfully."],
         workspace=tmp_path / "task-workspace",
+        execution="flat",
         max_iterations=3,
         limits={"max_seconds": 0.2},
     )

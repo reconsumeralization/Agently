@@ -116,12 +116,19 @@ attempt 的事实作为结构化 stream item 保留下来：`$status` 表达 ret
 完成状态，`meta` 带有 `response_id`、`request_run_id`、`model_run_id` 与
 `attempt_index`。`type="delta"` 是纯文本投影，产出字符串，并用
 `"<$retry>{reason}</$retry>"` 标记重放边界。
+`type="instant"` 会保留每条原始结构化 item；当该 item 还能投影成自然语言文本时，
+会紧跟着追加一个 synthetic `AgentExecutionStreamData`，其 `path="$delta"`、
+`event_type="delta"`、`source="agent_execution"`，并带有
+`meta["stream_kind"] == "text_projection"`。`type="all"` 仍是 raw audit stream，
+不包含这些 synthetic projection item。
 
 ```python
 execution = agent.input("总结这份事故更新。")
 async for item in execution.get_async_generator(type="instant"):
     if item.path == "$status":
         print(item.value["status"], item.meta["response_id"])
+    elif item.path == "$delta" and item.delta:
+        print(item.delta, end="", flush=True)
     elif item.path == "model.delta" and item.delta:
         print(item.delta, end="", flush=True)
 ```
@@ -129,7 +136,9 @@ async for item in execution.get_async_generator(type="instant"):
 无参 execution generator 默认也是同一个 `delta` 投影，所以
 `execution.get_generator()` 和 `execution.get_async_generator()` 都产出字符串。
 consumer 需要结构化 `$status` 而不是文本标记时，使用 `type="instant"` 或
-`type="all"`。
+`type="all"`。UI 同时需要结构化状态更新和派生 `$delta` 文本槽时用
+`type="instant"`；records、DevTools-style replay 或审计场景需要避免派生 item 混入
+source fact 时用 `type="all"`。
 
 如果多个字段共用一个 CLI 输出区域，不要把 `.is_complete` 当成全局展示顺序屏障。
 结构化 parser 往往是因为已经看到下一个 path 开始，才确认上一个 path 已关闭，

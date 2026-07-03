@@ -121,6 +121,10 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
 
     plugin_manager.register("ResponseParser", AgentlyResponseParser)
 
+    from agently.builtins.plugins.SessionMemory import AgentlyMemory
+
+    plugin_manager.register("SessionMemory", AgentlyMemory)
+
 
 def _load_default_settings(settings: "Settings"):
     settings.load("yaml_file", f"{str(Path(__file__).resolve().parent)}/_default_settings.yaml")

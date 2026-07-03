@@ -818,7 +818,17 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         for task in tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        _done, pending = await asyncio.wait(tasks, timeout=0.1)
+        if pending:
+            for task in pending:
+                self._background_stream_tasks.discard(task)
+            self.diagnostics.setdefault("stream_warnings", []).append(
+                {
+                    "type": "BackgroundStreamTaskCancelTimeout",
+                    "message": "Background stream task cancellation did not finish before AgentTask stream close.",
+                    "pending_count": len(pending),
+                }
+            )
 
     @classmethod
     def _operator_safe_progress_snapshot(cls, stage: str, snapshot: dict[str, Any]) -> dict[str, Any]:
