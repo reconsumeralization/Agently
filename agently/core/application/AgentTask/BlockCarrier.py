@@ -29,23 +29,24 @@ def scoped_retrieval_policy() -> dict[str, Any]:
     return {
         "schema_version": "agent_task_scoped_retrieval/v1",
         "query_owner": "planner_or_control_model",
-        "executor_owner": "Workspace search/read actions or Blocks workspace_operation",
-        "optimization_goal": "reduce hot prompt input by searching scoped refs before bulk reads",
+        "executor_owner": "Workspace.retrieve through Blocks workspace_operation, plus bounded readback when needed",
+        "optimization_goal": "reduce hot prompt input by retrieving scoped refs before bulk reads",
         "roles": {
             "locator_ref": "discovered target; content not read",
             "evidence_snippet": "bounded readable excerpt",
         },
         "search_surfaces": {
-            "workspace_index": "Workspace SQLite/FTS records",
-            "workspace_files": "Workspace files under an explicit path plus file-glob pattern; query searches file content",
+            "workspace_index": "Workspace record retrieval through keyword/tag candidates and optional rerank",
+            "workspace_files": "Workspace file retrieval under an explicit path plus file-glob pattern; query searches file content",
             "workspace_index_and_files": "Use both bounded surfaces and record the facts separately",
         },
         "rules": [
-            "Use scoped search before full file/resource reads when it can reduce input volume.",
+            "Use scoped retrieval before full file/resource reads when it can reduce input volume.",
             "Treat locator_ref as discovery only until a bounded readback/snippet is available.",
             "Treat truncated evidence snippets as factual partial context; downstream consumers decide whether to request wider scoped retrieval or readback.",
-            "Do not let local search hits decide semantic usefulness or task acceptance.",
+            "Do not let retrieval hits decide semantic usefulness or task acceptance.",
             "For workspace_index records, put record collection in filters.collection; path is only for file search or exact record paths; use filters.kind only when the exact record kind is provided, never infer a generic kind such as note.",
+            "Use tags, method, rerank, selection, top_n, and max_candidates only when they are explicit retrieval requirements; otherwise keep the query group small.",
         ],
         "bounded_defaults": {
             "max_results": 8,

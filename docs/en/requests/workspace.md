@@ -66,7 +66,7 @@ ref = await agent.workspace.ingest(
     source={"type": "command", "name": "pytest"},
 )
 
-records = await agent.workspace.search(
+records = await agent.workspace.grep(
     "route fallback",
     filters={"collection": "observations", "kind": "test_output"},
 )
@@ -79,11 +79,68 @@ context_pack = await agent.workspace.build_context(
 )
 ```
 
-`workspace.search(...)` supports structural filters such as `collection`,
-`kind`, record `id`, record `path`, `scope.<key>`, and `meta.<key>`. Use these
-filters when the planner or application already knows the relevant collection,
-record, path, or task scope; they narrow retrieval without turning a search hit
-into semantic acceptance.
+`workspace.grep(...)` is deterministic record search. It supports structural
+filters such as `collection`, `kind`, record `id`, record `path`,
+`scope.<key>`, and `meta.<key>`. Use these filters when the planner or
+application already knows the relevant collection, record, path, or task scope;
+they narrow retrieval without turning a search hit into semantic acceptance.
+`workspace.search(...)` remains a compatibility alias to `workspace.grep(...)`.
+
+For deterministic file search, use `workspace.grep_files(...)`. The
+compatibility method `workspace.search_files(...)` calls the same structured
+file-search path:
+
+```python
+hits = await agent.workspace.grep_files(
+    "deadline",
+    path="notes",
+    pattern="*.md",
+    max_results=10,
+)
+```
+
+## Retrieval
+
+Use `workspace.retrieve(...)` when the caller wants the shared intelligent
+retrieval strategy: keyword/tag candidates, optional vector candidates,
+structure-gated model rerank, dropped-candidate refill, and budget packaging.
+
+```python
+results = await agent.workspace.retrieve(
+    query="What should this session remember?",
+    tags=["preference", "project"],
+    scope={"memory_scope": "SESSION_MEMORY"},
+    sources=["records", "files"],
+    budget={"chars": 12000},
+    selection="length",
+)
+```
+
+Defaults are conservative:
+
+- candidate source is record keyword/FTS search plus tag retrieval;
+- selection uses a character budget (`selection="length"`);
+- `selection="top_n"` is available when callers need a fixed number of items;
+- vector mode is opt-in with `method="vector"` or `method="hybrid"`;
+- if the backend only has `NoopVectorIndex`, vector mode degrades to
+  deterministic candidates and records diagnostics;
+- `rerank=None` uses a structural cost gate: rerank is skipped for focused
+  candidate pools and used for oversized, weakly filtered, mixed-source, or
+  highly dispersed pools;
+- broad-pool rerank sees a bounded candidate-summary window before final
+  packaging, so dropped candidates do not starve later relevant records or file
+  snippets;
+- selected structured record payloads are rendered as deterministic model-hot
+  projections with `original_ref` and `projection` metadata; the raw Workspace
+  record remains the source of truth and can be read back when verification
+  needs it;
+- callers can still force rerank with `rerank=True` or disable it with
+  `rerank=False`;
+- if model rerank fails after retry, retrieval keeps deterministic candidates
+  and records diagnostics.
+
+`retrieve(...)` is a Workspace strategy, not a Session-memory-only feature.
+Session memory, text fragments, and file retrieval can all use it.
 
 Use `agent.use_workspace(...)` when the application needs a stable explicit
 root, read-only mode, or a registered backend provider:
@@ -361,17 +418,21 @@ Use the visible snippet as evidence only within that excerpt; use the locator
 as a target for a later bounded `read_file(...)` or Blocks
 `workspace_operation` readback.
 
-Blocks `workspace_operation` can also run scoped Workspace searches through the
-Workspace SQLite/FTS index, bounded Workspace file search, and bounded ref/path
-reads through `search` and `read_bounded` operations. These operations return
-typed `locator_ref` and `evidence_snippet` facts; they do not decide whether a
-hit is semantically useful or whether a task is complete. In Flat AgentTask
-steps, planner-provided `scoped_retrieval.query_groups` are lowered to these
-Blocks search facts before the bounded `agent_step` consumes them. Query groups
-may set `search_surface` to `workspace_index`, `workspace_files`, or
-`workspace_index_and_files`, and may carry structural filters (`collection`,
-`kind`, `id`, `path`, `scope`, or `meta`) so large retained records and files
-can stay out of the hot context until a bounded search or readback needs them.
+Blocks `workspace_operation` can also run scoped Workspace retrieval through
+the compatibility `search` operation name plus bounded ref/path reads through
+`read_bounded`. The `search` operation uses `workspace.retrieve(...)` as the
+shared retrieval strategy for Workspace records and files, then returns typed
+`locator_ref` and `evidence_snippet` facts; it does not decide whether a hit is
+semantically useful or whether a task is complete. In Flat AgentTask steps,
+planner-provided `scoped_retrieval.query_groups` are lowered to these Blocks
+retrieval facts before the bounded `agent_step` consumes them. Query groups may
+set `search_surface` to `workspace_index`, `workspace_files`, or
+`workspace_index_and_files`, may carry structural filters (`collection`,
+`kind`, `id`, `path`, `scope`, or `meta`), and may pass explicit retrieval
+options such as `tags`, `method`, `rerank`, `selection`, `top_n`, or
+`max_candidates` when the task requires them. This keeps large retained records
+and files out of the hot context until a bounded retrieval or readback needs
+them.
 For `workspace_index`, put record collections in `filters.collection`; use
 `filters.kind` only when the exact record kind is known, and do not use `path`
 for collection names. Singleton filter lists are normalized to scalar values

@@ -18,7 +18,7 @@ from uuid import uuid4
 from warnings import warn
 
 from json import JSONDecodeError
-from typing import Sequence, Any, TYPE_CHECKING
+from typing import Callable, Sequence, Any, TYPE_CHECKING, cast
 
 import json
 import json5
@@ -49,9 +49,15 @@ class Session:
         *,
         auto_resize: bool = True,
         settings: dict[str, Any] | Settings = {},
+        plugin_manager: Any = None,
+        workspace: Any = None,
+        workspace_provider: Callable[[], Any] | None = None,
     ):
         self.id = id if id is not None else uuid4().hex
         self._auto_resize = auto_resize
+        self.plugin_manager = plugin_manager
+        self._memory_workspace = workspace
+        self._workspace_provider = workspace_provider
         if isinstance(settings, dict):
             from agently.base import settings as global_settings
 
@@ -68,6 +74,8 @@ class Session:
         self._full_context: list[ChatMessage] = []
         self._context_window: list[ChatMessage] = []
         self._memo = None
+        self._memory_plugin: Any = None
+        self._memory_mode: str | None = None
 
         self.reset_chat_history = FunctionShifter.syncify(self.async_reset_chat_history)
         self.set_chat_history = FunctionShifter.syncify(self.async_set_chat_history)
@@ -82,6 +90,88 @@ class Session:
         self.to_yaml = self.get_yaml_session
         self.load_json = self.load_json_session
         self.load_yaml = self.load_yaml_session
+
+    @property
+    def memory(self):
+        return self._memory_plugin
+
+    @property
+    def memory_mode(self) -> str | None:
+        return self._memory_mode
+
+    def _resolve_memory_workspace(self):
+        if self._memory_workspace is not None:
+            return self._memory_workspace
+        if callable(self._workspace_provider):
+            workspace = self._workspace_provider()
+            if workspace is not None:
+                self._memory_workspace = workspace
+        return self._memory_workspace
+
+    def bind_memory_workspace(self, workspace: Any):
+        self._memory_workspace = workspace
+        if self._memory_plugin is not None and hasattr(self._memory_plugin, "bind_workspace"):
+            self._memory_plugin.bind_workspace(workspace)
+        return self
+
+    def use_memory(self, *, mode: str = "AgentlyMemory", workspace: Any = None):
+        plugin_manager = self.plugin_manager
+        if plugin_manager is None:
+            from agently.base import plugin_manager as global_plugin_manager
+
+            plugin_manager = global_plugin_manager
+            self.plugin_manager = plugin_manager
+        if workspace is not None:
+            self._memory_workspace = workspace
+        else:
+            workspace = self._resolve_memory_workspace()
+        try:
+            session_memory_class = plugin_manager.get_plugin("SessionMemory", mode)
+        except Exception as exc:
+            raise ValueError(f"SessionMemory mode '{ mode }' is not registered.") from exc
+        self._memory_plugin = cast(Any, session_memory_class)(
+            session=self,
+            workspace=workspace,
+            plugin_manager=plugin_manager,
+            settings=self.settings,
+        )
+        self._memory_mode = mode
+        return self
+
+    async def async_prepare_memory(self, prompt: "Prompt", settings: "Settings"):
+        if self._memory_plugin is None:
+            return {}
+        if getattr(self._memory_plugin, "workspace", None) is None:
+            workspace = self._resolve_memory_workspace()
+            if workspace is not None:
+                self._memory_plugin.bind_workspace(workspace)
+        return await self._memory_plugin.prepare_request(
+            prompt=prompt,
+            session=self,
+            settings=settings,
+        )
+
+    async def async_after_memory_turn(
+        self,
+        *,
+        user_content: str | None,
+        assistant_content: str | None,
+        result: "ModelRequestResult",
+        settings: "Settings",
+    ):
+        if self._memory_plugin is None:
+            return {}
+        if getattr(self._memory_plugin, "workspace", None) is None:
+            workspace = self._resolve_memory_workspace()
+            if workspace is not None:
+                self._memory_plugin.bind_workspace(workspace)
+        return await self._memory_plugin.after_turn(
+            session=self,
+            user_content=user_content,
+            assistant_content=assistant_content,
+            result=result,
+            settings=settings,
+        )
 
     async def _default_analysis_handler(
         self,

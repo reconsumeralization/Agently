@@ -28,6 +28,7 @@ from .ExecutionExchange import ExecutionExchangeProvider
 from .PromptGenerator import PromptGenerator
 from .ModelRequester import HandlerDrivenModelRequester, ModelProviderResponseGenerator, ModelRequestHandlers, ModelRequester
 from .TaskDAGPlanner import TaskDAGPlanner
+from .SessionMemory import SessionMemory
 from .Blocks import Blocks
 from .SkillsExecutor import (
     SkillsEffortStrategyHandler,

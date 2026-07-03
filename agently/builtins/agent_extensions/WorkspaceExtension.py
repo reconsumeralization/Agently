@@ -139,4 +139,7 @@ class WorkspaceExtension(BaseAgent):
             provider=provider,
             lazy=False,
         )
+        bind_session_memory = getattr(self, "_bind_activated_session_memory_workspace", None)
+        if callable(bind_session_memory):
+            bind_session_memory()
         return self

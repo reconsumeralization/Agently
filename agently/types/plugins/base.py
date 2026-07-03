@@ -20,6 +20,7 @@ AgentlyPluginType = Literal[
     "ResponseParser",
     "ToolManager",
     "Session",
+    "SessionMemory",
     "ActionRuntime",
     "ActionFlow",
     "ActionExecutor",

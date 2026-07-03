@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from agently import Agently
@@ -518,6 +520,8 @@ async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(
     assert output["query"] == "deadline"
     assert output["filters"] == {"scope.task_id": "alpha"}
     assert output["bounded"]["max_results"] == 4
+    assert output["bounded"]["retrieval_strategy"] == "workspace.retrieve"
+    assert output["bounded"]["retrieval_selection"] == "top_n"
     assert output["bounded"]["snippet_limit"] == 24
     assert [item["ref"]["id"] for item in output["locator_refs"]] == [expected_ref["id"]]
     assert output["locator_refs"][0]["role"] == "locator_ref"
@@ -535,6 +539,125 @@ async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(
     assert ledger_items["evidence_snippet"]["status"] == "ok"
     assert ledger_items["evidence_snippet"]["id"]
     assert not {"useful", "accepted", "semantically_relevant"}.intersection(output)
+
+
+@pytest.mark.asyncio
+async def test_blocks_workspace_operation_search_preserves_record_projection_metadata(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-projected-search")
+    expected_ref = await workspace.put(
+        {
+            "source_system": "crm_activity_export",
+            "subject": "CivicPay credit guidance",
+            "attributes": {
+                "raw_lines": [
+                    "Merchant: CivicPay",
+                    "Credit policy: service credits may not exceed 15 percent.",
+                ]
+            },
+            "audit": {"schema": "crm.varying.v3"},
+        },
+        collection="support-intel",
+        kind="credit_policy",
+        scope={"task_id": "projection"},
+    )
+    graph = Agently.blocks.compile(
+        {
+            "plan_id": "plan-workspace-projected-search",
+            "plan_blocks": [
+                {
+                    "id": "search",
+                    "plan_block_id": "workspace_operation",
+                    "kind": "workspace_operation",
+                    "bound_inputs": {
+                        "operation": "search",
+                        "query": "CivicPay credit",
+                        "filters": {"scope.task_id": "projection", "collection": "support-intel"},
+                        "max_results": 2,
+                        "include_snippets": True,
+                        "snippet_limit": 800,
+                    },
+                }
+            ],
+        }
+    )
+
+    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
+    await execution.async_start({"ignored": True})
+    snapshot = await execution.async_close(timeout=5)
+
+    evidence = Agently.blocks.map_evidence(graph, snapshot)
+    output = evidence.execution_block_results[0]["output"]
+    snippet = output["evidence_snippets"][0]
+    assert output["locator_refs"][0]["record_id"] == expected_ref["id"]
+    assert snippet["content_state"] == "projected_from_raw_record"
+    assert snippet["original_ref"]["record_id"] == expected_ref["id"]
+    assert snippet["projection"]["strategy"] == "deterministic_structured_projection"
+    assert "Credit policy: service credits may not exceed 15 percent." in snippet["content"]
+    assert "source_system" not in snippet["content"]
+    ledger_items = {item["kind"]: item for item in evidence.evidence_items}
+    assert ledger_items["evidence_snippet"]["body_state"] == "bounded"
+
+
+@pytest.mark.asyncio
+async def test_blocks_workspace_operation_search_calls_workspace_retrieve(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-retrieve-options")
+    expected_ref = await workspace.ingest(
+        content="Alpha deadline is 2026-07-01.",
+        collection="observations",
+        kind="note",
+        summary="alpha deadline note",
+        meta={"tags": ["alpha", "deadline"]},
+    )
+    captured: dict[str, Any] = {}
+    original_retrieve = workspace.retrieve
+
+    async def capture_retrieve(query, **kwargs):
+        captured["query"] = query
+        captured["kwargs"] = dict(kwargs)
+        return await original_retrieve(query, **kwargs)
+
+    workspace.retrieve = capture_retrieve  # type: ignore[method-assign]
+    graph = Agently.blocks.compile(
+        {
+            "plan_id": "plan-workspace-retrieve-options",
+            "plan_blocks": [
+                {
+                    "id": "search",
+                    "plan_block_id": "workspace_operation",
+                    "kind": "workspace_operation",
+                    "bound_inputs": {
+                        "operation": "search",
+                        "query": "deadline",
+                        "tags": ["alpha"],
+                        "method": "hybrid",
+                        "selection": "top_n",
+                        "top_n": 1,
+                        "rerank": False,
+                        "max_candidates": 5,
+                        "max_results": 1,
+                        "include_snippets": True,
+                    },
+                }
+            ],
+        }
+    )
+
+    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
+    await execution.async_start({"ignored": True})
+    snapshot = await execution.async_close(timeout=5)
+
+    evidence = Agently.blocks.map_evidence(graph, snapshot)
+    output = evidence.execution_block_results[0]["output"]
+    assert captured["query"] == "deadline"
+    assert captured["kwargs"]["tags"] == ["alpha"]
+    assert captured["kwargs"]["method"] == "hybrid"
+    assert captured["kwargs"]["selection"] == "top_n"
+    assert captured["kwargs"]["top_n"] == 1
+    assert captured["kwargs"]["rerank"] is False
+    assert captured["kwargs"]["max_candidates"] == 5
+    assert output["bounded"]["retrieval_strategy"] == "workspace.retrieve"
+    assert output["bounded"]["retrieval_method"] == "hybrid"
+    assert [item["ref"]["id"] for item in output["locator_refs"]] == [expected_ref["id"]]
 
 
 @pytest.mark.asyncio
@@ -609,6 +732,7 @@ async def test_blocks_workspace_operation_search_can_use_workspace_files_surface
     output = evidence.execution_block_results[0]["output"]
     assert output["operation"] == "search"
     assert output["bounded"]["search_surface"] == "workspace_files"
+    assert output["bounded"]["retrieval_strategy"] == "workspace.retrieve"
     assert output["bounded"]["search_engines"] in (["workspace_file_grep"], ["workspace_file_scan"])
     assert output["bounded"]["index_total_matches"] == 0
     assert output["bounded"]["file_returned_results"] == 1

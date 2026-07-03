@@ -462,7 +462,18 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 value = raw_group.get(key)
                 if value is not None:
                     bound_inputs[key] = value
-            for key in ("search_surface", "include_hidden", "max_file_bytes", "context_lines"):
+            for key in (
+                "search_surface",
+                "include_hidden",
+                "max_file_bytes",
+                "context_lines",
+                "tags",
+                "method",
+                "selection",
+                "top_n",
+                "rerank",
+                "max_candidates",
+            ):
                 value = raw_group.get(key)
                 if value is not None:
                     bound_inputs[key] = value
@@ -514,9 +525,6 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                     f"meta.{key}",
                     AgentTaskCarrierMixin._normalize_scoped_retrieval_filter_value(f"meta.{key}", value),
                 )
-        path = group.get("path")
-        if path is not None:
-            filters.setdefault("path", AgentTaskCarrierMixin._normalize_scoped_retrieval_filter_value("path", path))
         return filters
 
     @staticmethod
@@ -562,14 +570,65 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
     def _evidence_ledger_from_block_context(cls, block_context: Mapping[str, Any]) -> dict[str, Any]:
         state = block_context.get("state")
         if not isinstance(state, Mapping):
-            return evidence_ledger_view({"evidence_items": ()}, max_items=64, body_chars=1800)
+            return cls._model_hot_evidence_ledger(evidence_ledger_view({"evidence_items": ()}, max_items=64, include_body=False))
         evidence_items = state.get("evidence_items")
         if isinstance(evidence_items, Sequence) and not isinstance(evidence_items, (str, bytes, bytearray)):
-            return evidence_ledger_view({"evidence_items": evidence_items}, max_items=64, body_chars=1800)
+            return cls._model_hot_evidence_ledger(
+                evidence_ledger_view({"evidence_items": evidence_items}, max_items=64, include_body=False)
+            )
         results = state.get("execution_block_results")
         if isinstance(results, Sequence) and not isinstance(results, (str, bytes, bytearray)):
-            return evidence_ledger_view({"execution_block_results": results}, max_items=64, body_chars=1800)
-        return evidence_ledger_view({"evidence_items": ()}, max_items=64, body_chars=1800)
+            return cls._model_hot_evidence_ledger(
+                evidence_ledger_view({"execution_block_results": results}, max_items=64, include_body=False)
+            )
+        return cls._model_hot_evidence_ledger(evidence_ledger_view({"evidence_items": ()}, max_items=64, include_body=False))
+
+    @classmethod
+    def _model_hot_evidence_ledger(cls, ledger: Mapping[str, Any]) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        raw_items = ledger.get("items")
+        if isinstance(raw_items, Sequence) and not isinstance(raw_items, (str, bytes, bytearray)):
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    continue
+                compact: dict[str, Any] = {}
+                for key in (
+                    "id",
+                    "cite_as",
+                    "kind",
+                    "status",
+                    "body_state",
+                    "source",
+                    "role",
+                    "path",
+                    "record_id",
+                    "collection",
+                    "source_url",
+                    "selected_url",
+                    "requested_url",
+                    "canonical_url",
+                    "url",
+                    "href",
+                ):
+                    cls._copy_model_hot_field(compact, item, key)
+                if compact:
+                    items.append(compact)
+        return DataFormatter.sanitize(
+            {
+                "schema_version": ledger.get("schema_version"),
+                "item_count": ledger.get("item_count", len(items)),
+                "items_omitted": ledger.get("items_omitted", 0),
+                "status_counts": ledger.get("status_counts", {}),
+                "body_state_counts": ledger.get("body_state_counts", {}),
+                "items": items,
+                "grounding_rules": {
+                    "ok_content": "Use scoped_retrieval_results/readback excerpts for visible content; bind claims to ok ledger ids.",
+                    "ref_only": "ref_only ids support discovery only until readback exists.",
+                    "failed_empty": "failed or empty ids support only missing/unavailable claims.",
+                    "truncated": "truncated ids support only the visible excerpt.",
+                },
+            }
+        )
 
     @staticmethod
     def _model_hot_scoped_retrieval_bounded(value: Any) -> dict[str, Any]:
@@ -577,6 +636,13 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             return {}
         allowed_keys = (
             "search_surface",
+            "retrieval_strategy",
+            "retrieval_method",
+            "retrieval_selection",
+            "retrieval_rerank",
+            "retrieval_candidate_count",
+            "retrieval_selected_count",
+            "retrieval_omitted",
             "max_results",
             "total_matches",
             "returned_results",
@@ -623,6 +689,9 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "line_end",
                 "offset",
                 "truncated",
+                "body_state",
+                "raw_chars",
+                "projected_chars",
             ):
                 cls._copy_model_hot_field(snippet, item, key)
             content = item.get("content")
@@ -633,8 +702,37 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             locator_ref = item.get("locator_ref")
             if isinstance(locator_ref, Mapping):
                 snippet["locator_ref"] = cls._model_hot_locator_ref(locator_ref)
+            projection = item.get("projection")
+            if isinstance(projection, Mapping):
+                snippet["projection"] = cls._model_hot_projection(projection)
+            original_ref = item.get("original_ref")
+            if isinstance(original_ref, Mapping):
+                snippet["original_ref"] = cls._model_hot_original_ref(original_ref)
             snippets.append(DataFormatter.sanitize(snippet))
         return snippets
+
+    @classmethod
+    def _model_hot_projection(cls, value: Mapping[str, Any]) -> dict[str, Any]:
+        projection: dict[str, Any] = {}
+        for key in (
+            "strategy",
+            "raw_chars",
+            "projected_chars",
+            "truncated",
+            "raw_content_state",
+        ):
+            cls._copy_model_hot_field(projection, value, key)
+        omitted_keys = value.get("omitted_keys")
+        if isinstance(omitted_keys, Sequence) and not isinstance(omitted_keys, (str, bytes, bytearray)):
+            projection["omitted_keys"] = [str(item) for item in omitted_keys[:24] if str(item).strip()]
+        return DataFormatter.sanitize(projection)
+
+    @classmethod
+    def _model_hot_original_ref(cls, value: Mapping[str, Any]) -> dict[str, Any]:
+        ref: dict[str, Any] = {}
+        for key in ("record_id", "collection", "kind", "path", "size", "content_state"):
+            cls._copy_model_hot_field(ref, value, key)
+        return DataFormatter.sanitize(ref)
 
     @classmethod
     def _model_hot_locator_ref(cls, value: Mapping[str, Any]) -> dict[str, Any]:

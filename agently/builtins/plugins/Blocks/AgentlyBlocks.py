@@ -1688,132 +1688,122 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
             minimum=0,
             maximum=20,
         )
-        refs = (
-            list(await workspace.search(str(query) if query is not None else None, filters=dict(filters)))
-            if search_index
-            else []
-        )
-        selected_refs = refs[:max_results]
-        locator_refs = [
-            _workspace_locator_ref(
-                ref,
-                query=query,
-                filters=filters,
-                index=index,
-                source="blocks.workspace_operation.search",
-            )
-            for index, ref in enumerate(selected_refs)
-            if isinstance(ref, Mapping)
-        ]
         evidence_snippets: list[dict[str, Any]] = []
         diagnostics: list[dict[str, Any]] = []
-        if include_snippets:
-            for index, ref in enumerate(selected_refs):
-                if not isinstance(ref, Mapping):
-                    continue
-                locator_ref = locator_refs[index] if index < len(locator_refs) else _workspace_locator_ref(
+        retrieve_func = getattr(workspace, "retrieve", None)
+        if not callable(retrieve_func):
+            raise RuntimeError("Workspace does not expose retrieve(...), which is required for workspace_operation.search.")
+        sources: list[str] = []
+        if search_index:
+            sources.append("records")
+        if search_files:
+            sources.append("files")
+        retrieval_selection = str(bound_inputs.get("selection") or "top_n").strip().lower()
+        if retrieval_selection not in {"length", "top_n"}:
+            retrieval_selection = "top_n"
+        top_n_value = bound_inputs.get("top_n", max_results)
+        top_n = _bounded_int(top_n_value, default=max_results, minimum=1, maximum=50)
+        max_candidates = _bounded_int(
+            bound_inputs.get("max_candidates"),
+            default=max(max_results * 3, max_results),
+            minimum=1,
+            maximum=500,
+        )
+        retrieval_snippets = include_snippets or search_files
+        retrieval_budget = {
+            "chars": max(1, max_results * max(1, snippet_limit if retrieval_snippets else 200)),
+            "item_chars": max(1, snippet_limit if retrieval_snippets else 1),
+            "max_candidates": max_candidates,
+            "top_n": top_n,
+        }
+        method = str(bound_inputs.get("method") or "keyword").strip().lower()
+        if method not in {"keyword", "vector", "hybrid"}:
+            method = "keyword"
+        rerank = _optional_bool(bound_inputs.get("rerank"))
+        package = retrieve_func(
+            str(query) if query is not None else None,
+            tags=_string_list(bound_inputs.get("tags", filters.get("tags"))),
+            filters=dict(filters),
+            sources=sources,
+            budget=retrieval_budget,
+            selection=cast(Any, retrieval_selection),
+            top_n=top_n,
+            method=cast(Any, method),
+            rerank=rerank,
+            file_options={
+                "path": path_scope,
+                "pattern": pattern,
+                "max_results": max_candidates,
+                "include_hidden": include_hidden,
+                "max_file_bytes": max_file_bytes,
+                "context_lines": context_lines,
+                "max_snippet_bytes": snippet_limit,
+            },
+            max_candidates=max_candidates,
+        )
+        if inspect.isawaitable(package):
+            package = await package
+        if not isinstance(package, Mapping):
+            package = {}
+        retrieval_items = [
+            dict(item)
+            for item in package.get("items", [])
+            if isinstance(item, Mapping)
+        ][:max_results]
+        retrieval_diagnostics = dict(package.get("diagnostics") or {}) if isinstance(package.get("diagnostics"), Mapping) else {}
+        retrieval_omitted = [
+            dict(item)
+            for item in package.get("omitted", [])
+            if isinstance(item, Mapping)
+        ]
+        selected_refs: list[dict[str, Any]] = []
+        file_results: list[dict[str, Any]] = []
+        locator_refs: list[dict[str, Any]] = []
+        for index, item in enumerate(retrieval_items):
+            if item.get("source") == "record" and isinstance(item.get("ref"), Mapping):
+                ref = dict(cast(Mapping[str, Any], item["ref"]))
+                selected_refs.append(ref)
+                locator_ref = _workspace_locator_ref(
                     ref,
                     query=query,
                     filters=filters,
                     index=index,
                     source="blocks.workspace_operation.search",
                 )
-                try:
-                    segment = await workspace.read_bounded(ref, offset=snippet_offset, limit=snippet_limit)
-                except Exception as error:
-                    diagnostics.append(
-                        {
-                            "code": "blocks.workspace_operation.search_snippet_failed",
-                            "record_id": str(ref.get("id") or ""),
-                            "type": error.__class__.__name__,
-                            "message": str(error),
-                        }
+                locator_ref["workspace_source"] = "workspace.retrieve"
+                _copy_optional_retrieval_rank(locator_ref, item)
+                locator_refs.append(locator_ref)
+                if include_snippets:
+                    evidence_snippets.append(
+                        _workspace_evidence_snippet_from_retrieval_item(
+                            item,
+                            locator_ref=locator_ref,
+                            query=query,
+                            filters=filters,
+                            snippet_offset=snippet_offset,
+                            source="blocks.workspace_operation.search",
+                        )
                     )
-                    continue
-                evidence_snippets.append(
-                    _workspace_evidence_snippet(
-                        segment,
-                        locator_ref=locator_ref,
-                        query=query,
-                        filters=filters,
-                        source="blocks.workspace_operation.search",
-                    )
+                continue
+            if item.get("source") == "file" and isinstance(item.get("file"), Mapping):
+                file_result = dict(cast(Mapping[str, Any], item["file"]))
+                file_results.append(file_result)
+                locator_ref = _workspace_file_locator_ref_from_search_result(
+                    file_result,
+                    query=query,
+                    index=index,
+                    workspace_source="workspace.retrieve",
                 )
-        file_results: list[dict[str, Any]] = []
-        remaining_file_results = max_results if not search_index else max_results - len(selected_refs)
-        if search_files and remaining_file_results > 0:
-            search_files_func = getattr(workspace, "search_files", None)
-            if callable(search_files_func):
-                try:
-                    raw_file_results = search_files_func(
-                        str(query or ""),
-                        path=path_scope,
-                        pattern=pattern,
-                        max_results=remaining_file_results,
-                        include_hidden=include_hidden,
-                        max_file_bytes=max_file_bytes,
-                        context_lines=context_lines,
-                        max_snippet_bytes=snippet_limit,
+                _copy_optional_retrieval_rank(locator_ref, item)
+                locator_refs.append(locator_ref)
+                if include_snippets or search_files:
+                    evidence_snippets.append(
+                        _workspace_file_evidence_snippet_from_retrieval_item(
+                            item,
+                            file_result=file_result,
+                            locator_ref=locator_ref,
+                        )
                     )
-                    if inspect.isawaitable(raw_file_results):
-                        raw_file_results = await raw_file_results
-                    iterable_file_results = (
-                        raw_file_results if isinstance(raw_file_results, (list, tuple)) else ()
-                    )
-                    file_results = [
-                        dict(item)
-                        for item in iterable_file_results
-                        if isinstance(item, Mapping)
-                    ]
-                except Exception as error:
-                    diagnostics.append(
-                        {
-                            "code": "blocks.workspace_operation.file_search_failed",
-                            "type": error.__class__.__name__,
-                            "message": str(error),
-                            "path": str(path_scope),
-                            "pattern": pattern,
-                        }
-                    )
-            else:
-                diagnostics.append(
-                    {
-                        "code": "blocks.workspace_operation.file_search_unavailable",
-                        "message": "Workspace does not expose search_files(...).",
-                        "path": str(path_scope),
-                        "pattern": pattern,
-                    }
-                )
-        file_locator_refs: list[dict[str, Any]] = []
-        file_evidence_snippets: list[dict[str, Any]] = []
-        for index, item in enumerate(file_results, start=len(locator_refs)):
-            raw_locator = item.get("locator_ref")
-            locator_ref = dict(raw_locator) if isinstance(raw_locator, Mapping) else {}
-            locator_ref.update(
-                {
-                    "role": "locator_ref",
-                    "content_state": "ref_only",
-                    "source": "blocks.workspace_operation.search_files",
-                    "workspace_source": item.get("source") or "workspace.search_files",
-                    "query": query,
-                    "index": index,
-                }
-            )
-            file_locator_refs.append(locator_ref)
-            snippet = dict(item)
-            snippet.update(
-                {
-                    "role": "evidence_snippet",
-                    "content_state": "bounded_readback_available",
-                    "source": "blocks.workspace_operation.search_files",
-                    "workspace_source": item.get("source") or "workspace.search_files",
-                    "content": item.get("snippet") or item.get("text") or "",
-                    "locator_ref": locator_ref,
-                }
-            )
-            file_evidence_snippets.append(snippet)
-        locator_refs.extend(file_locator_refs)
-        evidence_snippets.extend(file_evidence_snippets)
         results = [
             {
                 **locator_ref,
@@ -1831,7 +1821,7 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
         ) + sum(int(item.get("bytes") or 0) for item in file_results if isinstance(item, Mapping))
         search_engines = []
         if search_index:
-            search_engines.append("workspace_sqlite_fts")
+            search_engines.append("workspace_retrieve_records")
         file_search_engines = sorted(
             {
                 str(item.get("search_engine") or "workspace_file_search")
@@ -1846,13 +1836,23 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
             "query": query,
             "filters": dict(filters),
             "bounded": {
+                "retrieval_strategy": "workspace.retrieve",
+                "retrieval_method": method,
+                "retrieval_selection": retrieval_selection,
+                "retrieval_rerank": retrieval_diagnostics.get("rerank"),
+                "retrieval_candidate_count": retrieval_diagnostics.get("candidate_count"),
+                "retrieval_selected_count": retrieval_diagnostics.get("selected_count"),
+                "retrieval_omitted": retrieval_omitted,
                 "search_surface": search_surface,
                 "search_engines": search_engines,
                 "max_results": max_results,
-                "total_matches": len(refs) + len(file_results),
-                "index_total_matches": len(refs),
+                "total_matches": int(retrieval_diagnostics.get("candidate_count") or len(retrieval_items)),
+                "index_total_matches": int(
+                    retrieval_diagnostics.get("deterministic_record_candidates") or len(selected_refs)
+                ),
+                "index_returned_results": len(selected_refs),
                 "file_returned_results": len(file_results),
-                "returned_results": len(selected_refs) + len(file_results),
+                "returned_results": len(locator_refs),
                 "include_snippets": include_snippets,
                 "snippet_offset": snippet_offset,
                 "snippet_limit": snippet_limit,
@@ -2013,6 +2013,128 @@ def _workspace_evidence_snippet(
         "digest": segment.get("digest"),
         "content_type": segment.get("content_type"),
     }
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _string_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        item = value.strip()
+        return [item] if item else None
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return items or None
+    return None
+
+
+def _copy_optional_retrieval_rank(target: dict[str, Any], item: Mapping[str, Any]) -> None:
+    if item.get("score") is not None:
+        target["score"] = item.get("score")
+    if item.get("reason") not in (None, "", [], {}):
+        target["reason"] = item.get("reason")
+
+
+def _workspace_evidence_snippet_from_retrieval_item(
+    item: Mapping[str, Any],
+    *,
+    locator_ref: Mapping[str, Any],
+    query: Any = None,
+    filters: Mapping[str, Any] | None = None,
+    snippet_offset: int = 0,
+    source: str,
+) -> dict[str, Any]:
+    content = str(item.get("content") or "")
+    truncated = bool(item.get("truncated")) or content.endswith("\n[truncated]")
+    snippet = {
+        "role": "evidence_snippet",
+        "content_state": item.get("content_state") or "bounded_readback_available",
+        "source": source,
+        "workspace_source": "workspace.retrieve",
+        "query": query,
+        "filters": dict(filters or {}),
+        "locator_ref": dict(locator_ref),
+        "record_id": locator_ref.get("record_id"),
+        "path": locator_ref.get("path"),
+        "collection": locator_ref.get("collection"),
+        "kind": locator_ref.get("kind"),
+        "content": content,
+        "snippet": content,
+        "snippet_chars": len(content),
+        "snippet_bytes": len(content.encode("utf-8")),
+        "truncated": truncated,
+        "offset": snippet_offset,
+        "size": len(content.encode("utf-8")),
+        "total_size": item.get("raw_chars", item.get("chars")),
+        "eof": not truncated,
+        "digest": locator_ref.get("sha256"),
+    }
+    for key in ("body_state", "raw_chars", "projected_chars"):
+        if item.get(key) not in (None, "", [], {}):
+            snippet[key] = item.get(key)
+    for key in ("projection", "original_ref"):
+        value = item.get(key)
+        if isinstance(value, Mapping):
+            snippet[key] = dict(value)
+    return snippet
+
+
+def _workspace_file_locator_ref_from_search_result(
+    item: Mapping[str, Any],
+    *,
+    query: Any,
+    index: int,
+    workspace_source: str,
+) -> dict[str, Any]:
+    raw_locator = item.get("locator_ref")
+    locator_ref = dict(raw_locator) if isinstance(raw_locator, Mapping) else {}
+    locator_ref.update(
+        {
+            "role": "locator_ref",
+            "content_state": "ref_only",
+            "source": "blocks.workspace_operation.search_files",
+            "workspace_source": workspace_source,
+            "query": query,
+            "index": index,
+        }
+    )
+    return locator_ref
+
+
+def _workspace_file_evidence_snippet_from_retrieval_item(
+    item: Mapping[str, Any],
+    *,
+    file_result: Mapping[str, Any],
+    locator_ref: Mapping[str, Any],
+) -> dict[str, Any]:
+    content = str(item.get("content") or file_result.get("snippet") or file_result.get("text") or "")
+    snippet = dict(file_result)
+    snippet.update(
+        {
+            "role": "evidence_snippet",
+            "content_state": "bounded_readback_available",
+            "source": "blocks.workspace_operation.search_files",
+            "workspace_source": "workspace.retrieve",
+            "content": content,
+            "snippet": content,
+            "snippet_chars": len(content),
+            "snippet_bytes": len(content.encode("utf-8")),
+            "locator_ref": locator_ref,
+        }
+    )
+    return snippet
 
 
 async def _execute_approval_wait_block(block: ExecutionBlock, data: TriggerFlowRuntimeData) -> Any:

@@ -303,3 +303,44 @@ class WorkspaceContextPackage(TypedDict):
     items: list[WorkspaceContextItem]
     omitted: list[WorkspaceContextOmission]
     diagnostics: dict[str, Any]
+
+
+WorkspaceRetrievalSource = Literal["record", "file"]
+WorkspaceRetrievalSelection = Literal["length", "top_n"]
+WorkspaceRetrievalMethod = Literal["keyword", "vector", "hybrid"]
+
+
+class WorkspaceRetrievalItem(TypedDict, total=False):
+    source: WorkspaceRetrievalSource
+    candidate_id: str
+    ref: WorkspaceRecordRef
+    file: WorkspaceFileSearchResult
+    kind: str | None
+    summary: str
+    content: str | None
+    tags: list[str]
+    score: float | None
+    reason: str | None
+    use: str
+    chars: int
+    body_state: str
+    content_state: str
+    original_ref: dict[str, Any]
+    projection: dict[str, Any]
+    raw_chars: int
+    projected_chars: int
+    truncated: bool
+
+
+class WorkspaceRetrievalOmission(TypedDict):
+    reason: str
+    count: int
+
+
+class WorkspaceRetrievalPackage(TypedDict):
+    query: str | None
+    profile: str
+    selection: WorkspaceRetrievalSelection
+    items: list[WorkspaceRetrievalItem]
+    omitted: list[WorkspaceRetrievalOmission]
+    diagnostics: dict[str, Any]

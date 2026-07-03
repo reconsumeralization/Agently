@@ -16,6 +16,14 @@ from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_record
 from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPackage, WorkspaceContextPlan, WorkspaceRecordRef
 
 
+def _retrieval_ref_id(item: Any) -> str:
+    return cast(WorkspaceRecordRef, item.get("ref"))["id"]
+
+
+def _retrieval_tags(item: Any) -> list[str]:
+    return cast(list[str], item.get("tags"))
+
+
 @pytest.mark.asyncio
 async def test_agent_has_lazy_workspace_by_default(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -325,6 +333,85 @@ async def test_workspace_checkpoint_cas_lease_and_artifact_refs(tmp_path):
     assert stolen.get("owner_id") == "worker-2"
     with pytest.raises(RuntimeError, match="lease conflict|expired"):
         await workspace.heartbeat_lease("run-cas", "worker-1", expired_token)
+
+
+@pytest.mark.asyncio
+async def test_workspace_scoped_checkpoint_reads_do_not_cross_scope(tmp_path):
+    workspace = Agently.create_workspace(
+        tmp_path / "shared-checkpoint-scope",
+        default_scope={"project_id": "shared-project"},
+        default_search_scope={"project_id": "shared-project"},
+    )
+    first = workspace.with_scope_node(
+        "sessions",
+        "first-session",
+        scope={"session_id": "first-session"},
+        search_scope={"session_id": "first-session"},
+    )
+    second = workspace.with_scope_node(
+        "sessions",
+        "second-session",
+        scope={"session_id": "second-session"},
+        search_scope={"session_id": "second-session"},
+    )
+
+    first_checkpoint = await first.put_checkpoint(
+        "shared-run",
+        {"owner": "first", "state_version": 1},
+        step_id="phase",
+    )
+    second_checkpoint = await second.put_checkpoint(
+        "shared-run",
+        {"owner": "second", "state_version": 1},
+        step_id="phase",
+    )
+
+    first_latest = await first.latest_checkpoint("shared-run")
+    first_get = await first.get_checkpoint("shared-run")
+    second_latest = await second.latest_checkpoint("shared-run")
+    assert first_latest is not None
+    assert first_get is not None
+    assert second_latest is not None
+    assert first_latest["id"] == first_checkpoint["id"]
+    assert first_get["id"] == first_checkpoint["id"]
+    assert second_latest["id"] == second_checkpoint["id"]
+    assert [item["id"] for item in await first.checkpoint_history("shared-run")] == [first_checkpoint["id"]]
+    assert [item["id"] for item in await second.checkpoint_history("shared-run")] == [second_checkpoint["id"]]
+    assert await first.get_snapshot("shared-run") == {"owner": "first", "state_version": 1}
+    assert await second.get_snapshot("shared-run") == {"owner": "second", "state_version": 1}
+
+
+@pytest.mark.asyncio
+async def test_workspace_scoped_artifact_ref_inherits_workspace_scope(tmp_path):
+    workspace = Agently.create_workspace(
+        tmp_path / "shared-artifact-scope",
+        default_scope={"project_id": "shared-project"},
+        default_search_scope={"project_id": "shared-project"},
+    )
+    execution = workspace.with_scope_node(
+        "executions",
+        "exec-1",
+        scope={"session_id": "scope-a"},
+        search_scope={"session_id": "scope-a"},
+    )
+
+    artifact_ref = await execution.put_artifact_ref(
+        "artifact-run",
+        {"large": "payload"},
+        metadata={
+            "kind": "checkpoint_payload",
+            "summary": "scoped artifact payload",
+            "scope": {"custom": "kept"},
+        },
+    )
+
+    assert artifact_ref["scope"]["project_id"] == "shared-project"
+    assert artifact_ref["scope"]["session_id"] == "scope-a"
+    assert artifact_ref["scope"]["execution_id"] == "exec-1"
+    assert artifact_ref["scope"]["run_id"] == "artifact-run"
+    assert artifact_ref["scope"]["custom"] == "kept"
+    hits = await execution.search("payload", filters={"collection": "artifacts"})
+    assert [item["id"] for item in hits] == [artifact_ref["id"]]
 
 
 @pytest.mark.asyncio
@@ -776,6 +863,421 @@ async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_
     assert question_ref["id"] in [item["id"] for item in question_results]
     assert context_pack["items"]
     assert "fallback_reason" not in context_pack["diagnostics"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_grep_aliases_preserve_search_behavior(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-grep-aliases")
+    await workspace.ingest(
+        content="release deadline is Monday",
+        collection="observations",
+        kind="note",
+        summary="deadline note",
+        scope={"case_id": "grep-alias"},
+    )
+    await workspace.write_file("notes/todo.txt", "release deadline is 2026-07-01\n")
+
+    search_refs = await workspace.search("deadline", filters={"scope.case_id": "grep-alias"})
+    grep_refs = await workspace.grep("deadline", filters={"scope.case_id": "grep-alias"})
+    assert [ref["id"] for ref in grep_refs] == [ref["id"] for ref in search_refs]
+
+    search_hits = await workspace.search_files("deadline", path="notes", pattern="*.txt")
+    grep_hits = await workspace.grep_files("deadline", path="notes", pattern="*.txt")
+    assert [item["path"] for item in grep_hits] == [item["path"] for item in search_hits]
+    assert grep_hits[0]["role"] == "evidence_snippet"
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_keyword_tag_candidates(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-tags")
+    expected = await workspace.put(
+        {"memory": "User prefers concise project updates."},
+        collection="memory",
+        kind="session_memory",
+        summary="concise project update preference",
+        scope={"memory_scope": "SESSION_MEMORY"},
+        meta={"tags": ["preference", "project"]},
+    )
+    await workspace.put(
+        {"memory": "Unrelated billing note."},
+        collection="memory",
+        kind="session_memory",
+        summary="billing note",
+        scope={"memory_scope": "SESSION_MEMORY"},
+        meta={"tags": ["billing"]},
+    )
+
+    package = await workspace.retrieve(
+        "project updates",
+        tags=["preference"],
+        filters={"collection": "memory", "kind": "session_memory"},
+        scope={"memory_scope": "SESSION_MEMORY"},
+        budget={"chars": 2000},
+        rerank=False,
+    )
+
+    assert [_retrieval_ref_id(item) for item in package["items"]] == [expected["id"]]
+    assert _retrieval_tags(package["items"][0]) == ["preference", "project"]
+    assert package["diagnostics"]["deterministic_record_candidates"] == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_projects_structured_records_for_model_hot_view(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-projected-record")
+    ref = await workspace.put(
+        {
+            "source_system": "crm_activity_export",
+            "subject": "CivicPay credit guidance",
+            "attributes": {
+                "labels": ["civicpay", "credit"],
+                "raw_lines": [
+                    "Merchant: CivicPay",
+                    "Credit policy: service credits may not exceed 15 percent.",
+                    "Approval rule: Risk lead approval is required above USD 2,500.",
+                ],
+            },
+            "audit": {"schema": "crm.varying.v3", "export_batch": "nightly-private"},
+        },
+        collection="support-intel",
+        kind="credit_policy",
+        scope={"case_id": "projection"},
+        meta={"tags": ["civicpay", "credit"]},
+    )
+
+    package = await workspace.retrieve(
+        "CivicPay credit",
+        filters={"collection": "support-intel"},
+        scope={"case_id": "projection"},
+        budget={"chars": 2000},
+        rerank=False,
+    )
+
+    item = cast(Any, package["items"][0])
+    content = str(item["content"])
+    assert _retrieval_ref_id(item) == ref["id"]
+    assert item["content_state"] == "projected_from_raw_record"
+    assert item["body_state"] == "bounded"
+    assert item["original_ref"]["record_id"] == ref["id"]
+    assert item["original_ref"]["content_state"] == "raw_readback_available"
+    assert item["projection"]["strategy"] == "deterministic_structured_projection"
+    assert item["projection"]["raw_chars"] > item["projection"]["projected_chars"]
+    assert "Credit policy: service credits may not exceed 15 percent." in content
+    assert "Risk lead approval is required above USD 2,500." in content
+    assert "source_system" not in content
+    assert "nightly-private" not in content
+    assert "audit" in item["projection"]["omitted_keys"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_can_disable_record_projection(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-raw-record")
+    ref = await workspace.put(
+        {
+            "source_system": "crm_activity_export",
+            "subject": "CivicPay credit guidance",
+            "attributes": {"raw_lines": ["Merchant: CivicPay"]},
+        },
+        collection="support-intel",
+        kind="credit_policy",
+        scope={"case_id": "raw-projection"},
+    )
+
+    package = await workspace.retrieve(
+        "CivicPay",
+        filters={"collection": "support-intel"},
+        scope={"case_id": "raw-projection"},
+        budget={"chars": 2000, "record_projection": False},
+        rerank=False,
+    )
+
+    item = cast(Any, package["items"][0])
+    assert _retrieval_ref_id(item) == ref["id"]
+    assert item["content_state"] == "bounded_readback_available"
+    assert item["projection"]["strategy"] == "raw_excerpt"
+    assert "source_system" in str(item["content"])
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_default_rerank_gate_skips_focused_pool(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-rerank-gate-skip")
+    for index in range(2):
+        await workspace.put(
+            {"memory": f"focused candidate {index}"},
+            collection="memory",
+            kind="session_memory",
+            summary=f"focused candidate {index}",
+            scope={"memory_scope": "SESSION_MEMORY"},
+            meta={"tags": ["focused"]},
+        )
+    calls = 0
+
+    async def rerank_handler(*, query, candidates):
+        nonlocal calls
+        _ = (query, candidates)
+        calls += 1
+        return {"decisions": []}
+
+    package = await workspace.retrieve(
+        "focused candidate",
+        tags=["focused"],
+        filters={"collection": "memory", "kind": "session_memory"},
+        scope={"memory_scope": "SESSION_MEMORY"},
+        selection="top_n",
+        top_n=5,
+        rerank_handler=rerank_handler,
+    )
+
+    assert calls == 0
+    assert len(package["items"]) == 2
+    assert package["diagnostics"]["rerank"]["enabled"] is False
+    assert package["diagnostics"]["rerank"]["reason"] == "candidate_count_within_selection"
+    assert package["diagnostics"]["rerank_gate"]["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_default_rerank_gate_uses_structure_signals(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-rerank-gate-use")
+    refs = []
+    for index in range(6):
+        refs.append(
+            await workspace.put(
+                {"memory": f"candidate {index}"},
+                collection="memory",
+                kind=f"kind_{index}",
+                summary=f"candidate {index}",
+            )
+        )
+    calls = 0
+
+    async def rerank_handler(*, query, candidates):
+        nonlocal calls
+        _ = query
+        calls += 1
+        return {
+            "decisions": [
+                {"id": candidates[0]["id"], "useful": False, "score": 0.0, "reason": "first distractor"},
+                {"id": candidates[1]["id"], "useful": True, "score": 0.9, "reason": "best"},
+            ]
+        }
+
+    package = await workspace.retrieve(
+        "candidate",
+        selection="top_n",
+        top_n=2,
+        rerank_handler=rerank_handler,
+    )
+
+    assert calls == 1
+    assert _retrieval_ref_id(package["items"][0]) == refs[1]["id"]
+    assert package["diagnostics"]["rerank_gate"]["enabled"] is True
+    assert "many_record_kinds" in package["diagnostics"]["rerank_gate"]["reasons"]
+    assert package["omitted"][0] == {"reason": "rerank_drop", "count": 1}
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_model_rerank_drops_and_refills(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-rerank")
+    refs = []
+    for index in range(3):
+        refs.append(
+            await workspace.put(
+                {"memory": f"candidate {index}"},
+                collection="memory",
+                kind="global_memory",
+                summary=f"candidate {index}",
+                scope={"memory_scope": "GLOBAL_MEMORY"},
+                meta={"tags": ["topic"]},
+            )
+        )
+
+    async def rerank_handler(*, query, candidates):
+        _ = query
+        return {
+            "decisions": [
+                {"id": candidates[0]["id"], "useful": False, "score": 0.0, "reason": "irrelevant"},
+                {"id": candidates[1]["id"], "useful": True, "score": 0.9, "reason": "best"},
+            ]
+        }
+
+    package = await workspace.retrieve(
+        None,
+        tags=["topic"],
+        filters={"collection": "memory", "kind": "global_memory"},
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+        budget={"chars": 2000, "rerank_candidates": 2},
+        selection="top_n",
+        top_n=2,
+        rerank=True,
+        rerank_handler=rerank_handler,
+    )
+
+    selected_ids = [_retrieval_ref_id(item) for item in package["items"]]
+    assert selected_ids == [refs[1]["id"], refs[2]["id"]]
+    assert package["omitted"][0] == {"reason": "rerank_drop", "count": 1}
+    assert package["diagnostics"]["rerank"]["degraded"] is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_applies_unprefixed_rerank_record_ids(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-rerank-unprefixed-id")
+    refs = []
+    for index in range(3):
+        refs.append(
+            await workspace.put(
+                {"memory": f"candidate {index}"},
+                collection="memory",
+                kind="global_memory",
+                summary=f"candidate {index}",
+                scope={"memory_scope": "GLOBAL_MEMORY"},
+                meta={"tags": ["topic"]},
+            )
+        )
+
+    async def rerank_handler(*, query, candidates):
+        _ = (query, candidates)
+        return {
+            "decisions": [
+                {"id": refs[0]["id"], "useful": False, "score": 0.0, "reason": "irrelevant"},
+                {"id": refs[1]["id"], "useful": True, "score": 0.9, "reason": "best"},
+            ]
+        }
+
+    package = await workspace.retrieve(
+        None,
+        tags=["topic"],
+        filters={"collection": "memory", "kind": "global_memory"},
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+        budget={"chars": 2000, "rerank_candidates": 2},
+        selection="top_n",
+        top_n=2,
+        rerank=True,
+        rerank_handler=rerank_handler,
+    )
+
+    selected_ids = [_retrieval_ref_id(item) for item in package["items"]]
+    assert selected_ids == [refs[1]["id"], refs[2]["id"]]
+    assert package["omitted"][0] == {"reason": "rerank_drop", "count": 1}
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_default_rerank_window_covers_broad_pool(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-rerank-window")
+    for index in range(18):
+        await workspace.put(
+            {"memory": f"candidate {index}"},
+            collection="memory",
+            kind=f"kind_{index}",
+            summary=f"candidate {index}",
+            scope={"memory_scope": "GLOBAL_MEMORY"},
+            meta={"tags": ["topic"]},
+        )
+    seen_count = 0
+
+    async def rerank_handler(*, query, candidates):
+        nonlocal seen_count
+        _ = query
+        seen_count = len(candidates)
+        return {
+            "decisions": [
+                {"id": candidate["id"], "useful": True, "score": 1.0, "reason": "candidate"}
+                for candidate in candidates
+            ]
+        }
+
+    await workspace.retrieve(
+        "candidate",
+        filters={"collection": "memory"},
+        selection="top_n",
+        top_n=6,
+        rerank_handler=rerank_handler,
+    )
+
+    assert seen_count == 18
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_rerank_retry_failure_degrades(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-rerank-degrade")
+    ref = await workspace.put(
+        {"memory": "deterministic fallback"},
+        collection="memory",
+        kind="global_memory",
+        summary="deterministic fallback",
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+    )
+    calls = 0
+
+    async def failing_rerank(*, query, candidates):
+        nonlocal calls
+        _ = (query, candidates)
+        calls += 1
+        raise RuntimeError("model unavailable")
+
+    package = await workspace.retrieve(
+        None,
+        filters={"collection": "memory", "kind": "global_memory"},
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+        rerank=True,
+        rerank_handler=failing_rerank,
+        max_rerank_retries=1,
+    )
+
+    assert calls == 2
+    assert [_retrieval_ref_id(item) for item in package["items"]] == [ref["id"]]
+    assert package["diagnostics"]["rerank"]["degraded"] is True
+    assert package["diagnostics"]["rerank"]["reason"] == "rerank_failed"
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_vector_mode_uses_index_or_degrades(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-vector")
+    first = await workspace.put(
+        {"memory": "keyword candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="keyword candidate",
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+    )
+    vector_only = await workspace.put(
+        {"memory": "vector candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="vector candidate",
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+    )
+
+    degraded = await workspace.retrieve(
+        "candidate",
+        filters={"collection": "memory", "kind": "global_memory"},
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+        method="vector",
+        rerank=False,
+    )
+    assert degraded["diagnostics"]["vector"]["used"] is False
+    assert degraded["diagnostics"]["vector"]["reason"] == "vector_index_unavailable"
+    assert first["id"] in [_retrieval_ref_id(item) for item in degraded["items"]]
+
+    class FakeVectorIndex:
+        name = "fake"
+
+        async def index_record(self, ref, content):
+            _ = (ref, content)
+
+        async def search(self, query, *, filters=None, limit=None):
+            _ = (query, filters, limit)
+            return [vector_only]
+
+    cast(Any, workspace.backend).vector_index = FakeVectorIndex()
+    used = await workspace.retrieve(
+        "semantic query",
+        filters={"collection": "memory", "kind": "global_memory"},
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+        method="vector",
+        rerank=False,
+    )
+
+    assert used["diagnostics"]["vector"]["used"] is True
+    assert _retrieval_ref_id(used["items"][0]) == vector_only["id"]
 
 
 @pytest.mark.asyncio

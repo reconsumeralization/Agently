@@ -1123,7 +1123,7 @@ def test_block_carrier_exposes_compact_scoped_retrieval_policy():
     assert policy["roles"]["locator_ref"] == "discovered target; content not read"
     assert policy["roles"]["evidence_snippet"] == "bounded readable excerpt"
     assert policy["query_owner"] == "planner_or_control_model"
-    assert policy["executor_owner"] == "Workspace search/read actions or Blocks workspace_operation"
+    assert policy["executor_owner"] == "Workspace.retrieve through Blocks workspace_operation, plus bounded readback when needed"
 
 
 def test_flat_step_plan_preserves_scoped_retrieval_query_groups(tmp_path):
@@ -1277,11 +1277,140 @@ def test_block_carrier_compiles_scoped_retrieval_before_agent_step(tmp_path):
     assert compact_plan["plan_blocks"][0]["bound_inputs"]["query"] == "alpha deadline"
     assert compact_plan["plan_blocks"][0]["bound_inputs"]["filters"] == {
         "scope.case_id": "alpha",
-        "path": "notes",
     }
     assert execution_plan.edges[0].from_plan_block == execution_plan.plan_blocks[0].id
     assert execution_plan.edges[0].to_plan_block == execution_plan.plan_blocks[1].id
     assert execution_plan.edges[0].binding["target_input"] == "scoped_retrieval_results"
+
+
+def test_block_carrier_keeps_file_path_out_of_record_filters_for_mixed_retrieval(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-mixed-path").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-mixed-path",
+        goal="Search records and files without suppressing records by file path.",
+        success_criteria=["Evidence is grounded."],
+    )
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Use mixed Workspace evidence.",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "alpha deadline",
+                        "expected_role": "evidence_snippet",
+                        "search_surface": "workspace_index_and_files",
+                        "collection": "observations",
+                        "path": "notes",
+                        "pattern": "*.md",
+                    }
+                ]
+            },
+        }
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
+
+    execution_plan = task._build_blocks_execution_plan(work_unit, plan, cast(Any, context_pack))
+    inputs = execution_plan.plan_blocks[0].bound_inputs
+
+    assert inputs["path"] == "notes"
+    assert inputs["pattern"] == "*.md"
+    assert inputs["filters"] == {"collection": "observations"}
+
+
+def test_block_carrier_model_hot_snippets_preserve_projection_metadata():
+    snippets = AgentTask._model_hot_evidence_snippets(
+        [
+            {
+                "role": "evidence_snippet",
+                "content_state": "projected_from_raw_record",
+                "record_id": "rec_123",
+                "collection": "support-intel",
+                "kind": "credit_policy",
+                "content": "Credit policy: service credits may not exceed 15 percent.",
+                "raw_chars": 1200,
+                "projected_chars": 64,
+                "projection": {
+                    "strategy": "deterministic_structured_projection",
+                    "raw_chars": 1200,
+                    "projected_chars": 64,
+                    "omitted_keys": ["audit", "source_system"],
+                    "raw_content_state": "raw_readback_available",
+                },
+                "original_ref": {
+                    "record_id": "rec_123",
+                    "collection": "support-intel",
+                    "kind": "credit_policy",
+                    "path": "support-intel/rec_123.json",
+                    "size": 1200,
+                    "content_state": "raw_readback_available",
+                },
+            }
+        ]
+    )
+
+    assert snippets[0]["content_state"] == "projected_from_raw_record"
+    assert snippets[0]["projection"]["strategy"] == "deterministic_structured_projection"
+    assert snippets[0]["projection"]["omitted_keys"] == ["audit", "source_system"]
+    assert snippets[0]["original_ref"]["record_id"] == "rec_123"
+    assert snippets[0]["original_ref"]["content_state"] == "raw_readback_available"
+
+
+def test_block_carrier_passes_workspace_retrieve_options(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-options").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-options",
+        goal="Use Workspace retrieve options.",
+        success_criteria=["Evidence is grounded."],
+    )
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Use reranked tagged Workspace evidence.",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": "alpha deadline",
+                        "expected_role": "evidence_snippet",
+                        "filters": {"collection": "observations"},
+                        "tags": ["alpha", "deadline"],
+                        "method": "hybrid",
+                        "selection": "top_n",
+                        "top_n": 2,
+                        "rerank": False,
+                        "max_candidates": 9,
+                    }
+                ]
+            },
+        }
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
+
+    execution_plan = task._build_blocks_execution_plan(work_unit, plan, cast(Any, context_pack))
+    inputs = execution_plan.plan_blocks[0].bound_inputs
+
+    assert inputs["tags"] == ["alpha", "deadline"]
+    assert inputs["method"] == "hybrid"
+    assert inputs["selection"] == "top_n"
+    assert inputs["top_n"] == 2
+    assert inputs["rerank"] is False
+    assert inputs["max_candidates"] == 9
 
 
 def test_block_carrier_normalizes_singleton_record_filters(tmp_path):
@@ -1410,6 +1539,7 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
     evidence_ledger = seen["evidence_ledger"]
     assert len(scoped_results) == 1
     assert scoped_results[0]["query"] == "deadline"
+    assert scoped_results[0]["bounded"]["retrieval_strategy"] == "workspace.retrieve"
     assert scoped_results[0]["bounded"]["returned_results"] == 1
     assert [item["kind"] for item in evidence_ledger["items"][:3]] == [
         "workspace_operation.search",
@@ -1505,6 +1635,7 @@ async def test_block_carrier_executes_file_scoped_retrieval_and_injects_results(
 
     scoped_results = seen["scoped_results"]
     assert scoped_results[0]["bounded"]["search_surface"] == "workspace_files"
+    assert scoped_results[0]["bounded"]["retrieval_strategy"] == "workspace.retrieve"
     assert "search_engines" not in scoped_results[0]["bounded"]
     assert scoped_results[0]["bounded"]["file_returned_results"] == 1
     assert scoped_results[0]["bounded"]["context_lines"] == 3
