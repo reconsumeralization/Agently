@@ -193,8 +193,8 @@ class TaskBoardGraph:
     def card_by_id(self) -> dict[str, TaskBoardCard]:
         return {card.id: card for card in self.cards}
 
-    def with_cards(self, cards: Sequence[TaskBoardCard]) -> "TaskBoardGraph":
-        return replace(self, cards=tuple(cards))
+    def with_cards(self, cards: Sequence[TaskBoardCard | Mapping[str, Any]]) -> "TaskBoardGraph":
+        return replace(self, cards=tuple(TaskBoardCard.from_value(card) for card in cards))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -368,21 +368,29 @@ class TaskBoardRevision:
 
     def next_revision(
         self,
-        graph: TaskBoardGraph,
+        graph: TaskBoardGraph | Mapping[str, Any],
         *,
         status: TaskBoardStatus | str | None = None,
-        card_results: Mapping[str, TaskBoardCardResult] | None = None,
+        card_results: Mapping[str, TaskBoardCardResult | Mapping[str, Any]] | None = None,
         evidence_refs: Sequence[Mapping[str, Any]] | None = None,
         diagnostics: Sequence[Mapping[str, Any]] | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> "TaskBoardRevision":
         next_id = _next_revision_id(self.revision_id)
+        effective_card_results = (
+            {
+                str(card_id): TaskBoardCardResult.from_value(result)
+                for card_id, result in card_results.items()
+            }
+            if card_results is not None
+            else dict(self.card_results)
+        )
         return TaskBoardRevision(
             board_id=self.board_id,
             revision_id=next_id,
-            graph=graph,
+            graph=TaskBoardGraph.from_value(graph),
             status=status or self.status,
-            card_results=card_results if card_results is not None else dict(self.card_results),
+            card_results=effective_card_results,
             evidence_refs=tuple(evidence_refs) if evidence_refs is not None else tuple(self.evidence_refs),
             diagnostics=tuple(diagnostics) if diagnostics is not None else tuple(self.diagnostics),
             metadata=dict(metadata) if metadata is not None else dict(self.metadata),

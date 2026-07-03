@@ -1716,9 +1716,9 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
             "max_candidates": max_candidates,
             "top_n": top_n,
         }
-        method = str(bound_inputs.get("method") or "keyword").strip().lower()
-        if method not in {"keyword", "vector", "hybrid"}:
-            method = "keyword"
+        method = str(bound_inputs.get("method") or "auto").strip().lower()
+        if method not in {"auto", "keyword", "vector", "hybrid"}:
+            method = "auto"
         rerank = _optional_bool(bound_inputs.get("rerank"))
         package = retrieve_func(
             str(query) if query is not None else None,
@@ -1837,7 +1837,10 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
             "filters": dict(filters),
             "bounded": {
                 "retrieval_strategy": "workspace.retrieve",
-                "retrieval_method": method,
+                "retrieval_method": retrieval_diagnostics.get("effective_method", method),
+                "retrieval_requested_method": retrieval_diagnostics.get("method", method),
+                "retrieval_effective_method": retrieval_diagnostics.get("effective_method", method),
+                "retrieval_method_resolution": retrieval_diagnostics.get("method_resolution"),
                 "retrieval_selection": retrieval_selection,
                 "retrieval_rerank": retrieval_diagnostics.get("rerank"),
                 "retrieval_candidate_count": retrieval_diagnostics.get("candidate_count"),

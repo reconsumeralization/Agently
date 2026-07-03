@@ -899,7 +899,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "source_ref_policy": self._taskboard_source_ref_policy(),
                 "source_refs": source_refs_from_ledger(evidence_view, max_refs=32)
                 or self._taskboard_final_source_refs_from_evidence_view(evidence_view),
-                "revision": self._compact_taskboard_revision_for_prompt(revision),
+                "revision": self._compact_taskboard_revision_for_prompt(
+                    revision,
+                    include_card_results=False,
+                ),
                 "candidate_final_result": self._compact_verifier_prompt_value(candidate_final_result),
                 "execution_prompt": self._execution_prompt_context(),
                 "language_policy": language_policy,

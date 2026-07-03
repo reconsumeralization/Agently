@@ -542,7 +542,7 @@ async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(
 
 
 @pytest.mark.asyncio
-async def test_blocks_workspace_operation_search_preserves_record_projection_metadata(tmp_path):
+async def test_blocks_workspace_operation_search_preserves_record_representation_metadata(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace-projected-search")
     expected_ref = await workspace.put(
         {
@@ -589,9 +589,10 @@ async def test_blocks_workspace_operation_search_preserves_record_projection_met
     output = evidence.execution_block_results[0]["output"]
     snippet = output["evidence_snippets"][0]
     assert output["locator_refs"][0]["record_id"] == expected_ref["id"]
-    assert snippet["content_state"] == "projected_from_raw_record"
+    assert snippet["content_state"] == "compact_structured_record"
     assert snippet["original_ref"]["record_id"] == expected_ref["id"]
-    assert snippet["projection"]["strategy"] == "deterministic_structured_projection"
+    assert snippet["projection"]["strategy"] == "compact_structured_record"
+    assert snippet["projection"]["chosen_representation"] == "compact_structured"
     assert "Credit policy: service credits may not exceed 15 percent." in snippet["content"]
     assert "source_system" not in snippet["content"]
     ledger_items = {item["kind"]: item for item in evidence.evidence_items}

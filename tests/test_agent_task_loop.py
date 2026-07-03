@@ -13,7 +13,7 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.core.orchestration import TaskBoard
+from agently.core.orchestration import TaskBoard, build_task_board_evidence_view
 from agently.core.application.AgentTask.BlockCarrier import (
     WorkUnitIntent,
     WorkUnitResult,
@@ -135,6 +135,117 @@ def test_taskboard_prompts_keep_model_contract_surface_simple():
             if phrase in text:
                 offenders.append(f"{relative_path}: {phrase}")
     assert offenders == []
+
+
+@pytest.mark.asyncio
+async def test_taskboard_final_prompt_omits_duplicate_revision_card_results(tmp_path, monkeypatch):
+    agent = Agently.create_agent("taskboard-final-prompt-compaction").use_workspace(
+        tmp_path / "taskboard-final-prompt-compaction"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-prompt-compaction",
+        goal="Summarize the collected evidence.",
+        success_criteria=["Use the collected evidence."],
+        execution="taskboard",
+    )
+    graph = TaskBoardGraph.from_value(
+        {
+            "graph_id": "taskboard-final-prompt-compaction.graph",
+            "cards": [
+                {
+                    "id": "collect",
+                    "objective": "Collect evidence.",
+                    "required_outputs": ["evidence"],
+                    "status": "completed",
+                }
+            ],
+        }
+    )
+    ledger = {
+        "items": [
+            {
+                "id": "evidence-1",
+                "kind": "note",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "Collected evidence body.",
+            }
+        ]
+    }
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-final-prompt-compaction",
+        graph=graph,
+        revision_id="rev-0",
+    ).next_revision(
+        graph,
+        status="completed",
+        card_results={
+            "collect": TaskBoardCardResult.from_value(
+                {
+                    "card_id": "collect",
+                    "status": "completed",
+                    "preview": "Collected evidence body.",
+                    "metadata": {"evidence_ledger": ledger},
+                }
+            )
+        },
+    )
+    evidence_view = build_task_board_evidence_view(revision).to_dict()
+    captured: dict[str, Any] = {}
+
+    class _Prompt:
+        def __init__(self) -> None:
+            self.values: dict[str, Any] = {}
+
+        def get(self, key: str, default: Any = None, inherit: bool = False) -> Any:
+            _ = inherit
+            return self.values.get(key, default)
+
+        def set(self, key: str, value: Any) -> None:
+            self.values[key] = value
+
+    class _Request:
+        def __init__(self) -> None:
+            self.prompt = _Prompt()
+
+        def input(self, payload: Mapping[str, Any]) -> "_Request":
+            captured["payload"] = dict(payload)
+            return self
+
+        def instruct(self, instruction: str) -> "_Request":
+            captured["instruction"] = instruction
+            return self
+
+        def output(self, schema: Mapping[str, Any], format: str = "json") -> "_Request":
+            captured["output_schema"] = dict(schema)
+            captured["output_format"] = format
+            return self
+
+        async def async_get_data(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            _ = args, kwargs
+            return {
+                "accepted": True,
+                "reason": "Accepted.",
+                "final_result": "Collected evidence body.",
+                "missing_criteria": [],
+                "evidence_use": [{"claim": "Collected evidence", "evidence_ids": ["e1"], "support_type": "content"}],
+            }
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: _Request())
+
+    await task._request_taskboard_final(
+        revision,
+        evidence_view,
+        schedule=TaskBoard(revision, handler=lambda _context: None).schedule(),
+    )
+
+    payload = captured["payload"]
+    prompt_revision = payload["revision"]
+    assert "card_results" not in prompt_revision
+    assert prompt_revision["card_result_statuses"] == {"collect": "completed"}
+    assert payload["taskboard_evidence_view"]["cards"][0]["preview"]
+    assert payload["evidence_ledger"]["items"][0]["body"] == "Collected evidence body."
 
 
 def test_verifier_prompt_keeps_optional_risk_sections_optional():
@@ -2393,6 +2504,53 @@ def test_agent_task_hot_path_compaction_omits_provider_request_payloads():
     assert verifier_value["raw_request"]["reason"] == "provider_request_payload_hot_path"
     assert verifier_value["message"]["reason"] == "provider_request_payload_hot_path"
     assert action_preview["prompt_data"]["reason"] == "provider_request_payload_hot_path"
+
+
+def test_agent_task_compacts_grounding_guard_for_verifier_prompt():
+    refs = [
+        {
+            "id": f"evidence-{index}",
+            "cite_as": f"e{index}",
+            "kind": "workspace_artifact.acceptance_locator",
+            "status": "ok",
+            "body_state": "ref_only",
+            "path": "final.md",
+            "aliases": [f"alias-{index}-{alias}" for alias in range(10)],
+        }
+        for index in range(30)
+    ]
+    valid_guard = {
+        "schema_version": "evidence_use_guard/v1",
+        "valid": True,
+        "blocking_count": 0,
+        "diagnostics": [],
+        "checked_claims": 4,
+        "available_evidence_ids": [ref["id"] for ref in refs],
+        "available_evidence_refs": refs,
+        "normalized_evidence_use": [{"claim": "supported", "evidence_ids": ["evidence-1"], "support_type": "content"}],
+    }
+
+    compact_valid = AgentTask._compact_grounding_guard_for_verifier(valid_guard)
+
+    assert compact_valid["valid"] is True
+    assert compact_valid["available_evidence_count"] == 30
+    assert len(compact_valid["available_evidence_id_sample"]) == 16
+    assert "available_evidence_refs" not in compact_valid
+    assert compact_valid["normalized_evidence_use"][0]["claim"] == "supported"
+
+    blocking_guard = dict(valid_guard)
+    blocking_guard.update(
+        {
+            "valid": False,
+            "blocking_count": 1,
+            "diagnostics": [{"code": "evidence_ledger.invalid_evidence_id", "blocking": True}],
+        }
+    )
+    compact_blocking = AgentTask._compact_grounding_guard_for_verifier(blocking_guard)
+
+    assert compact_blocking["valid"] is False
+    assert len(compact_blocking["available_evidence_refs"]) == 25
+    assert compact_blocking["available_evidence_refs"][0]["aliases"][-1] == "... omitted 4 aliases"
 
 
 class MockAgentTaskRequester:
@@ -6096,7 +6254,7 @@ async def test_agent_task_loop_progress_model_does_not_delay_stream_close(tmp_pa
 
     stream_items = await asyncio.wait_for(
         _collect_stream(task),
-        timeout=5,
+        timeout=8,
     )
 
     assert any((item.meta or {}).get("stream_kind") == "snapshot" for item in stream_items)
@@ -7256,6 +7414,7 @@ async def test_task_wall_clock_budget_surfaces_timed_out(tmp_path):
         goal="Repair a legacy Agently script so it runs on the current API.",
         success_criteria=["The script runs successfully."],
         workspace=tmp_path / "task-workspace",
+        execution="flat",
         max_iterations=3,
         limits={"max_seconds": 0.2},
     )

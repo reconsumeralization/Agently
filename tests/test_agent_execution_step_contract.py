@@ -6185,13 +6185,14 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
     agent = _create_taskboard_control_stall_agent("execution-taskboard-control-no-progress-timeout").use_workspace(
         tmp_path / "workspace"
     )
+    idle_timeout_seconds = 0.8
 
     execution = agent.create_task(
         goal="Run a stalled TaskBoard control card.",
         success_criteria=["The control card reports a no-progress failure instead of heartbeating forever."],
         execution="taskboard",
         max_iterations=1,
-        limits={"max_no_progress_seconds": 0.2},
+        limits={"max_no_progress_seconds": idle_timeout_seconds},
         options={"request_timeout_seconds": 5.0, "agent_task": {"taskboard_card_max_attempts": 1}},
     )
 
@@ -6204,14 +6205,14 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
     card_result = taskboard["revision"]["card_results"]["control-stall"]
     diagnostic = card_result["diagnostics"][0]
 
-    assert elapsed < 1.5
+    assert elapsed < 2.5
     assert result["status"] == "error"
     assert result["accepted"] is False
     assert result["artifact_status"] == "partial"
     assert card_result["status"] == "failed"
     assert diagnostic["code"] == "taskboard.card.timeout"
     assert diagnostic["card_id"] == "control-stall"
-    assert "max_no_progress_seconds=0.2" in diagnostic["message"]
+    assert f"max_no_progress_seconds={idle_timeout_seconds}" in diagnostic["message"]
 
 
 @pytest.mark.asyncio

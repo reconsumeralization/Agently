@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 
 RetrievalSourceName = Literal["records", "record", "files", "file"]
+RecordRepresentationMode = Literal["auto", "raw", "projected"]
 RerankHandler = Callable[..., Any]
 
 
@@ -47,7 +48,7 @@ async def retrieve_workspace(
     budget: Mapping[str, Any] | None = None,
     selection: WorkspaceRetrievalSelection = "length",
     top_n: int | None = None,
-    method: WorkspaceRetrievalMethod = "keyword",
+    method: WorkspaceRetrievalMethod = "auto",
     rerank: bool | None = None,
     rerank_handler: RerankHandler | None = None,
     max_rerank_retries: int = 1,
@@ -62,9 +63,16 @@ async def retrieve_workspace(
     safe_max_candidates = _max_candidates(max_candidates, normalized_budget)
     scoped_filters = _scoped_retrieval_filters(filters, scope)
     normalized_tags = _normalize_tags(tags)
+    requested_method, effective_method, method_resolution = _resolve_retrieval_method(
+        workspace,
+        method=method,
+        settings=settings,
+    )
     diagnostics: dict[str, Any] = {
         "profile": profile,
-        "method": method,
+        "method": requested_method,
+        "effective_method": effective_method,
+        "method_resolution": method_resolution,
         "selection": selection,
         "sources": sorted(selected_sources),
         "filters": scoped_filters,
@@ -79,7 +87,7 @@ async def retrieve_workspace(
             query=query,
             tags=normalized_tags,
             filters=scoped_filters,
-            method=method,
+            method=effective_method,
             max_candidates=safe_max_candidates,
             diagnostics=diagnostics,
         )
@@ -196,6 +204,116 @@ def _normalize_tags(tags: Sequence[str] | None) -> list[str]:
     return result
 
 
+def _resolve_retrieval_method(
+    workspace: "Workspace",
+    *,
+    method: WorkspaceRetrievalMethod | str | None,
+    settings: Any,
+) -> tuple[WorkspaceRetrievalMethod, Literal["keyword", "vector", "hybrid"], dict[str, Any]]:
+    requested = str(method or "auto").strip().lower()
+    if requested not in {"auto", "keyword", "vector", "hybrid"}:
+        requested = "auto"
+    requested_method = cast(WorkspaceRetrievalMethod, requested)
+    if requested in {"keyword", "vector", "hybrid"}:
+        return requested_method, cast(Literal["keyword", "vector", "hybrid"], requested), {
+            "mode": "explicit",
+            "reason": "caller_requested",
+        }
+
+    vector_available = _workspace_vector_available(workspace)
+    embedding_policy_configured, embedding_policy_reason = _embedding_policy_configured(settings)
+    if vector_available and embedding_policy_configured:
+        return requested_method, "hybrid", {
+            "mode": "auto",
+            "reason": embedding_policy_reason,
+            "vector_index_available": True,
+        }
+    return requested_method, "keyword", {
+        "mode": "auto",
+        "reason": "vector_index_unavailable" if not vector_available else "embedding_policy_not_configured",
+        "vector_index_available": vector_available,
+    }
+
+
+def _workspace_vector_available(workspace: "Workspace") -> bool:
+    vector_index = getattr(getattr(workspace, "backend", None), "vector_index", None)
+    return vector_index is not None and getattr(vector_index, "name", None) != "noop"
+
+
+def _embedding_policy_configured(settings: Any) -> tuple[bool, str]:
+    candidate_strategy = _settings_get_first(
+        settings,
+        "workspace.retrieval.candidate_strategy",
+        "workspace.retrieve.candidate_strategy",
+    )
+    if str(candidate_strategy or "").strip().lower() in {"hybrid", "vector"}:
+        return True, "candidate_strategy"
+    default_method = _settings_get_first(
+        settings,
+        "workspace.retrieval.default_method",
+        "workspace.retrieve.default_method",
+    )
+    if str(default_method or "").strip().lower() in {"hybrid", "vector"}:
+        return True, "default_method"
+    if _settings_bool(
+        settings,
+        "workspace.retrieval.vector_preferred",
+        "workspace.retrieval.embeddings.enabled",
+        "workspace.embeddings.enabled",
+    ):
+        return True, "vector_preferred"
+    embedding_model = _settings_get_first(
+        settings,
+        "workspace.retrieval.embedding_model",
+        "workspace.retrieval.embeddings.model",
+        "workspace.embeddings.model",
+        "embeddings.model",
+    )
+    if isinstance(embedding_model, str) and embedding_model.strip():
+        return True, "embedding_model"
+    return False, "embedding_policy_not_configured"
+
+
+def _settings_bool(settings: Any, *keys: str) -> bool:
+    value = _settings_get_first(settings, *keys)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
+
+
+def _settings_get_first(settings: Any, *keys: str) -> Any:
+    sources: list[Any] = [settings] if settings is not None else []
+    if settings is None:
+        try:
+            from agently.base import settings as global_settings
+
+            sources.append(global_settings)
+        except Exception:
+            pass
+    for source in sources:
+        for key in keys:
+            try:
+                value = source.get(key, None)
+            except Exception:
+                value = None
+            if value is None and isinstance(source, Mapping):
+                value = _mapping_get_dot_path(source, key)
+            if value is not None:
+                return value
+    return None
+
+
+def _mapping_get_dot_path(mapping: Mapping[str, Any], key: str) -> Any:
+    current: Any = mapping
+    for part in key.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
 async def _record_candidates(
     workspace: "Workspace",
     *,
@@ -279,6 +397,9 @@ async def _vector_record_candidates(
     if vector_index is None or getattr(vector_index, "name", None) == "noop":
         vector_diagnostics["reason"] = "vector_index_unavailable"
         return []
+    similarity = getattr(vector_index, "similarity", None)
+    if similarity is not None:
+        vector_diagnostics["similarity"] = similarity
     try:
         records = await vector_index.search(str(query), filters=filters, limit=limit)
     except Exception as exc:
@@ -383,6 +504,7 @@ _PROJECTION_OMIT_KEYS = {
     "export_batch",
     "format",
     "labels",
+    "noise",
     "object_type",
     "priority_hint",
     "queue",
@@ -814,10 +936,11 @@ async def _package_candidates(
 ) -> tuple[WorkspaceRetrievalPackage, int]:
     char_budget = _char_budget(budget)
     item_char_budget = _item_char_budget(budget, char_budget)
-    record_projection = _record_projection_enabled(budget)
+    record_representation = _record_representation_mode(budget)
     selected: list[WorkspaceRetrievalItem] = []
     omitted_budget = 0
     used_chars = 0
+    representation_counts: dict[str, int] = {}
     top_n_limit = top_n if top_n is not None else budget.get("top_n")
     if isinstance(top_n_limit, int):
         top_n_limit = max(1, top_n_limit)
@@ -828,7 +951,12 @@ async def _package_candidates(
         if selection == "top_n" and top_n_limit is not None and len(selected) >= top_n_limit:
             omitted_budget += 1
             continue
-        item = await _candidate_item(workspace, candidate, item_char_budget, record_projection=record_projection)
+        item = await _candidate_item(
+            workspace,
+            candidate,
+            item_char_budget,
+            record_representation=record_representation,
+        )
         item_chars = int(item.get("chars") or 0)
         if selection == "length" and selected and used_chars + item_chars > char_budget:
             omitted_budget += 1
@@ -846,10 +974,22 @@ async def _package_candidates(
             item = mutable_item
         selected.append(item)
         used_chars += item_chars
+        if item.get("source") == "record":
+            projection = item.get("projection")
+            representation = (
+                str(projection.get("chosen_representation") or projection.get("strategy") or "unknown")
+                if isinstance(projection, Mapping)
+                else "unknown"
+            )
+            representation_counts[representation] = representation_counts.get(representation, 0) + 1
 
     diagnostics["used_chars"] = used_chars
     diagnostics["char_budget"] = char_budget
     diagnostics["selected_count"] = len(selected)
+    diagnostics["representation"] = {
+        "record_mode": record_representation,
+        "record_counts": representation_counts,
+    }
     return (
         {
             "query": query,
@@ -868,14 +1008,14 @@ async def _candidate_item(
     candidate: dict[str, Any],
     item_char_budget: int,
     *,
-    record_projection: bool,
+    record_representation: RecordRepresentationMode,
 ) -> WorkspaceRetrievalItem:
     if candidate.get("source") == "record":
         return await _record_item(
             workspace,
             candidate,
             item_char_budget,
-            record_projection=record_projection,
+            record_representation=record_representation,
         )
     return _file_item(candidate, item_char_budget)
 
@@ -885,11 +1025,11 @@ async def _record_item(
     candidate: dict[str, Any],
     item_char_budget: int,
     *,
-    record_projection: bool,
+    record_representation: RecordRepresentationMode,
 ) -> WorkspaceRetrievalItem:
     ref = cast(WorkspaceRecordRef, candidate["ref"])
     value = await _safe_record_value(workspace, ref)
-    projection = _project_record_value(value, item_char_budget, enabled=record_projection)
+    projection = _project_record_value(value, item_char_budget, representation=record_representation)
     summary = ref.get("summary") or ""
     content = projection["content"]
     content_text = content or ""
@@ -945,57 +1085,105 @@ async def _safe_record_value(workspace: "Workspace", record: WorkspaceRecordRef)
         return None
 
 
-def _record_projection_enabled(budget: Mapping[str, Any]) -> bool:
-    raw = budget.get("record_projection", budget.get("projection", True))
+def _record_representation_mode(budget: Mapping[str, Any]) -> RecordRepresentationMode:
+    raw = budget.get("record_representation", budget.get("representation", None))
+    if raw is not None:
+        normalized = str(raw).strip().lower()
+        if normalized in {"raw", "raw_excerpt", "off", "disabled", "false", "no", "0"}:
+            return "raw"
+        if normalized in {"projected", "projection", "project", "force_projected"}:
+            return "projected"
+        return "auto"
+    raw = budget.get("record_projection", budget.get("projection", None))
     if isinstance(raw, bool):
-        return raw
+        return "auto" if raw else "raw"
     if raw is None:
-        return True
-    return str(raw).strip().lower() not in {"0", "false", "no", "off", "raw", "disabled"}
+        return "auto"
+    normalized = str(raw).strip().lower()
+    if normalized in {"0", "false", "no", "off", "raw", "disabled"}:
+        return "raw"
+    if normalized in {"projected", "projection", "project", "force_projected"}:
+        return "projected"
+    return "auto"
 
 
-def _project_record_value(value: Any, max_chars: int, *, enabled: bool) -> dict[str, Any]:
-    raw_text = _record_raw_text(value)
-    if not enabled or not isinstance(value, (Mapping, Sequence)) or isinstance(value, (str, bytes, bytearray)):
+def _project_record_value(
+    value: Any,
+    max_chars: int,
+    *,
+    representation: RecordRepresentationMode,
+) -> dict[str, Any]:
+    raw_text = _record_raw_text(value) or ""
+    if representation == "raw" or not isinstance(value, (Mapping, Sequence)) or isinstance(value, (str, bytes, bytearray)):
         excerpt = _excerpt(raw_text, max_chars)
         return _projection_result(
             content=excerpt,
-            raw_chars=len(raw_text or ""),
+            raw_chars=len(raw_text),
             strategy="raw_excerpt",
+            chosen_representation="raw",
             content_state="bounded_readback_available",
             truncated=bool(excerpt and excerpt.endswith("\n[truncated]")),
             omitted_keys=[],
+            reason="forced_raw" if representation == "raw" else "non_structured_value",
         )
     projected_lines, omitted_keys = _record_projection_lines(value)
     projected_text = "\n".join(line for line in projected_lines if line.strip()).strip()
+    compact_structured_text, compact_omitted_keys = _compact_structured_record_text(value, max_chars=max_chars)
+    omitted_keys = [*omitted_keys, *compact_omitted_keys]
+    if representation == "auto" and compact_structured_text:
+        compact_limit = _auto_compact_structured_limit(max_chars)
+        if len(compact_structured_text) <= compact_limit:
+            excerpt = _excerpt(compact_structured_text, max_chars)
+            return _projection_result(
+                content=excerpt,
+                raw_chars=len(raw_text),
+                strategy="compact_structured_record",
+                chosen_representation="compact_structured",
+                content_state="compact_structured_record",
+                truncated=bool(excerpt and excerpt.endswith("\n[truncated]")),
+                omitted_keys=omitted_keys,
+                reason="short_structured_record_preserved",
+                projected_candidate_chars=len(projected_text),
+                compact_structured_chars=len(compact_structured_text),
+            )
     if not projected_text:
         excerpt = _excerpt(raw_text, max_chars)
         return _projection_result(
             content=excerpt,
-            raw_chars=len(raw_text or ""),
+            raw_chars=len(raw_text),
             strategy="raw_excerpt_empty_projection",
+            chosen_representation="raw",
             content_state="bounded_readback_available",
             truncated=bool(excerpt and excerpt.endswith("\n[truncated]")),
             omitted_keys=omitted_keys,
+            reason="empty_projection",
+            compact_structured_chars=len(compact_structured_text),
         )
-    if raw_text is not None and len(projected_text) >= len(raw_text):
+    if representation == "auto" and len(projected_text) >= len(raw_text):
         excerpt = _excerpt(raw_text, max_chars)
         return _projection_result(
             content=excerpt,
             raw_chars=len(raw_text),
             strategy="raw_excerpt_not_shorter",
+            chosen_representation="raw",
             content_state="bounded_readback_available",
             truncated=bool(excerpt and excerpt.endswith("\n[truncated]")),
             omitted_keys=omitted_keys,
+            reason="projection_not_shorter",
+            projected_candidate_chars=len(projected_text),
+            compact_structured_chars=len(compact_structured_text),
         )
     excerpt = _excerpt(projected_text, max_chars)
     return _projection_result(
         content=excerpt,
-        raw_chars=len(raw_text or ""),
+        raw_chars=len(raw_text),
         strategy="deterministic_structured_projection",
+        chosen_representation="projected",
         content_state="projected_from_raw_record",
         truncated=bool(excerpt and excerpt.endswith("\n[truncated]")),
         omitted_keys=omitted_keys,
+        reason="forced_projected" if representation == "projected" else "projected_shorter_than_raw",
+        compact_structured_chars=len(compact_structured_text),
     )
 
 
@@ -1004,23 +1192,34 @@ def _projection_result(
     content: str | None,
     raw_chars: int,
     strategy: str,
+    chosen_representation: str,
     content_state: str,
     truncated: bool,
     omitted_keys: list[str],
+    reason: str,
+    projected_candidate_chars: int | None = None,
+    compact_structured_chars: int | None = None,
 ) -> dict[str, Any]:
     content_text = content or ""
+    metadata: dict[str, Any] = {
+        "strategy": strategy,
+        "chosen_representation": chosen_representation,
+        "reason": reason,
+        "raw_chars": raw_chars,
+        "projected_chars": len(content_text),
+        "truncated": truncated,
+        "omitted_keys": sorted(set(omitted_keys))[:24],
+        "raw_content_state": "raw_readback_available",
+    }
+    if projected_candidate_chars is not None:
+        metadata["projected_candidate_chars"] = projected_candidate_chars
+    if compact_structured_chars is not None:
+        metadata["compact_structured_chars"] = compact_structured_chars
     return {
         "content": content,
         "content_state": content_state,
         "truncated": truncated,
-        "metadata": {
-            "strategy": strategy,
-            "raw_chars": raw_chars,
-            "projected_chars": len(content_text),
-            "truncated": truncated,
-            "omitted_keys": sorted(set(omitted_keys))[:24],
-            "raw_content_state": "raw_readback_available",
-        },
+        "metadata": metadata,
     }
 
 
@@ -1030,6 +1229,80 @@ def _record_raw_text(value: Any) -> str | None:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, default=str)
     return str(value)
+
+
+def _auto_compact_structured_limit(max_chars: int) -> int:
+    return max(400, min(max_chars, 1400))
+
+
+def _compact_structured_record_text(value: Any, *, max_chars: int) -> tuple[str, list[str]]:
+    omitted: list[str] = []
+    compact_value = _compact_structured_record_value(value, omitted=omitted, path=(), depth=0, max_chars=max_chars)
+    if compact_value in ({}, [], None):
+        return "", omitted
+    try:
+        text = json.dumps(compact_value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(compact_value)
+    return text, omitted
+
+
+def _compact_structured_record_value(
+    value: Any,
+    *,
+    omitted: list[str],
+    path: tuple[str, ...],
+    depth: int,
+    max_chars: int,
+) -> Any:
+    if depth > 5:
+        omitted.append(".".join(path) or "depth")
+        return None
+    if isinstance(value, Mapping):
+        compact: dict[str, Any] = {}
+        for index, (raw_key, child) in enumerate(value.items()):
+            if index >= 48:
+                omitted.append(".".join((*path, "field_limit")))
+                break
+            key = str(raw_key)
+            normalized_key = key.strip().lower()
+            child_path = (*path, key)
+            if normalized_key in _PROJECTION_OMIT_KEYS:
+                omitted.append(".".join(child_path))
+                continue
+            child_value = _compact_structured_record_value(
+                child,
+                omitted=omitted,
+                path=child_path,
+                depth=depth + 1,
+                max_chars=max_chars,
+            )
+            if child_value not in ({}, [], None):
+                compact[key] = child_value
+        return compact
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        compact_items: list[Any] = []
+        for index, child in enumerate(value):
+            if index >= 24:
+                omitted.append(".".join((*path, "item_limit")))
+                compact_items.append({"omitted_items": len(value) - 24})
+                break
+            child_value = _compact_structured_record_value(
+                child,
+                omitted=omitted,
+                path=(*path, str(index)),
+                depth=depth + 1,
+                max_chars=max_chars,
+            )
+            if child_value not in ({}, [], None):
+                compact_items.append(child_value)
+        return compact_items
+    if isinstance(value, bytes):
+        return f"<{len(value)} bytes>"
+    if isinstance(value, str):
+        text_limit = max(240, min(1200, max_chars // 2))
+        return _excerpt(value, text_limit)
+    return value
 
 
 def _original_record_ref(ref: WorkspaceRecordRef) -> dict[str, Any]:

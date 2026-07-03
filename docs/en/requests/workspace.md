@@ -84,11 +84,16 @@ filters such as `collection`, `kind`, record `id`, record `path`,
 `scope.<key>`, and `meta.<key>`. Use these filters when the planner or
 application already knows the relevant collection, record, path, or task scope;
 they narrow retrieval without turning a search hit into semantic acceptance.
-`workspace.search(...)` remains a compatibility alias to `workspace.grep(...)`.
+`workspace.search(...)` keeps the compatibility return shape of record refs, but
+its implementation may automatically use the shared retrieval packaging path
+when a broad query produces many candidates. Use `workspace.grep(...)` when the
+caller requires the old deterministic candidate list.
 
 For deterministic file search, use `workspace.grep_files(...)`. The
-compatibility method `workspace.search_files(...)` calls the same structured
-file-search path:
+compatibility method `workspace.search_files(...)` keeps returning file-search
+hits, but may automatically use retrieval packaging for large candidate pools.
+Use `workspace.grep_files(...)` when the caller requires the old deterministic
+line/file search result set:
 
 ```python
 hits = await agent.workspace.grep_files(
@@ -121,7 +126,24 @@ Defaults are conservative:
 - candidate source is record keyword/FTS search plus tag retrieval;
 - selection uses a character budget (`selection="length"`);
 - `selection="top_n"` is available when callers need a fixed number of items;
-- vector mode is opt-in with `method="vector"` or `method="hybrid"`;
+- retrieval candidate strategy and rerank are separate decisions:
+  `method="auto"` chooses the candidate source, while `rerank=None` decides
+  whether model rerank is worth the extra request;
+- `method="auto"` is the default. It resolves to keyword/tag retrieval unless a
+  non-noop backend `vector_index` is present and Workspace retrieval settings
+  express vector preference, for example
+  `workspace.retrieval.candidate_strategy="hybrid"`,
+  `workspace.retrieval.vector_preferred=True`, or
+  `workspace.retrieval.embedding_model="<model-name>"`;
+- `method="keyword"`, `method="vector"`, and `method="hybrid"` remain explicit
+  caller overrides;
+- the default local backend keeps `NoopVectorIndex`; provider-specific
+  embedding clients are application or plugin logic and should be installed by
+  supplying a backend `vector_index`. If callers install the built-in
+  `LocalVectorIndex(embedder)`, Workspace uses cosine similarity by default and
+  also supports `similarity="dot"` or `similarity="l2"`. Custom vector indexes
+  own their own distance formula. The Chroma integration defaults its collection
+  space to cosine as its adapter-level default;
 - if the backend only has `NoopVectorIndex`, vector mode degrades to
   deterministic candidates and records diagnostics;
 - `rerank=None` uses a structural cost gate: rerank is skipped for focused
@@ -130,10 +152,17 @@ Defaults are conservative:
 - broad-pool rerank sees a bounded candidate-summary window before final
   packaging, so dropped candidates do not starve later relevant records or file
   snippets;
-- selected structured record payloads are rendered as deterministic model-hot
-  projections with `original_ref` and `projection` metadata; the raw Workspace
-  record remains the source of truth and can be read back when verification
-  needs it;
+- selected record payloads use `record_representation="auto"` by default:
+  short structured records keep a compact structure with cold fields omitted,
+  while long or noisy records use deterministic model-hot projections; every
+  item carries `original_ref` and `projection` metadata, and the raw Workspace
+  record remains the source of truth for readback;
+- cold fields are non-hot record mechanics such as `audit`, `source_system`,
+  `tags`, and `noise`; they are omitted from the model-hot package, not from
+  the stored Workspace record;
+- callers can set `budget={"record_representation": "raw"}` or
+  `budget={"record_representation": "projected"}` when they need a fixed
+  representation policy;
 - callers can still force rerank with `rerank=True` or disable it with
   `rerank=False`;
 - if model rerank fails after retry, retrieval keeps deterministic candidates
@@ -527,7 +556,12 @@ retriever, and packager profiles.
 Workspace exposes low-level backend seams for content, metadata, checkpoints,
 RuntimeEvent storage, ref resolution, retention, evidence links, text index,
 policy, and vector index. The default local backend is filesystem content plus
-SQLite metadata/FTS and `NoopVectorIndex`. ContextBuilder exposes
+SQLite metadata/FTS and `NoopVectorIndex`; provider-specific embedding clients
+belong in application code, a custom backend, or a plugin-provided
+`vector_index`. The built-in `LocalVectorIndex(embedder)` is available when an
+application wants a provider-neutral local vector scorer; its default similarity
+is cosine, with dot product and L2 as explicit options.
+ContextBuilder exposes
 `ContextPlanner`, `WorkspaceContextRetriever`, and `ContextPackager`; advanced
 model-assisted planning, vector retrieval, reranking, compression, and remote
 backends are expected to arrive as plugins over this foundation.

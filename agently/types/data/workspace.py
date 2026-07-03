@@ -307,7 +307,7 @@ class WorkspaceContextPackage(TypedDict):
 
 WorkspaceRetrievalSource = Literal["record", "file"]
 WorkspaceRetrievalSelection = Literal["length", "top_n"]
-WorkspaceRetrievalMethod = Literal["keyword", "vector", "hybrid"]
+WorkspaceRetrievalMethod = Literal["auto", "keyword", "vector", "hybrid"]
 
 
 class WorkspaceRetrievalItem(TypedDict, total=False):

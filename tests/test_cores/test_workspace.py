@@ -9,7 +9,13 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently
-from agently.core import LazyWorkspace, WorkspaceConfigurationError, WorkspaceManager, WorkspacePolicyError
+from agently.core import (
+    LazyWorkspace,
+    LocalVectorIndex,
+    WorkspaceConfigurationError,
+    WorkspaceManager,
+    WorkspacePolicyError,
+)
 from agently.core.application import AgentTask
 from agently.core.workspace._defaults import WORKSPACE_GUIDE_FILENAME, script_scope
 from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_records, project_runtime_event_record
@@ -866,7 +872,7 @@ async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_
 
 
 @pytest.mark.asyncio
-async def test_workspace_grep_aliases_preserve_search_behavior(tmp_path):
+async def test_workspace_search_preserves_deterministic_shape_for_small_candidate_pool(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-grep-aliases")
     await workspace.ingest(
         content="release deadline is Monday",
@@ -885,6 +891,51 @@ async def test_workspace_grep_aliases_preserve_search_behavior(tmp_path):
     grep_hits = await workspace.grep_files("deadline", path="notes", pattern="*.txt")
     assert [item["path"] for item in grep_hits] == [item["path"] for item in search_hits]
     assert grep_hits[0]["role"] == "evidence_snippet"
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_auto_uses_retrieve_for_large_record_candidate_pool(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-search-auto-records")
+    refs = []
+    for index in range(12):
+        refs.append(
+            await workspace.put(
+                {
+                    "body": f"needle candidate {index}",
+                    "padding": "x" * 1800,
+                },
+                collection="observations",
+                kind="auto_search_probe",
+                summary=f"needle candidate {index}",
+                scope={"case_id": "search-auto"},
+            )
+        )
+
+    grep_refs = await workspace.grep("needle", filters={"scope.case_id": "search-auto"})
+    search_refs = await workspace.search("needle", filters={"scope.case_id": "search-auto"})
+
+    assert len(grep_refs) == len(refs)
+    assert 0 < len(search_refs) < len(grep_refs)
+    assert {ref["id"] for ref in search_refs}.issubset({ref["id"] for ref in grep_refs})
+    assert all("id" in ref and "collection" in ref and "path" in ref for ref in search_refs)
+
+
+@pytest.mark.asyncio
+async def test_workspace_search_files_auto_uses_retrieve_for_large_file_candidate_pool(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-search-auto-files")
+    for index in range(12):
+        await workspace.write_file(
+            f"auto-files/file-{index}.txt",
+            f"needle candidate {index}\n" + ("x" * 1800),
+        )
+
+    grep_hits = await workspace.grep_files("needle", path=".", pattern="**/*.txt", max_results=20, context_lines=1)
+    search_hits = await workspace.search_files("needle", path=".", pattern="**/*.txt", max_results=20, context_lines=1)
+
+    assert len(grep_hits) == 12
+    assert 0 < len(search_hits) < len(grep_hits)
+    assert {item["path"] for item in search_hits}.issubset({item["path"] for item in grep_hits})
+    assert all(item["role"] == "evidence_snippet" for item in search_hits)
 
 
 @pytest.mark.asyncio
@@ -948,7 +999,7 @@ async def test_workspace_retrieve_projects_structured_records_for_model_hot_view
         "CivicPay credit",
         filters={"collection": "support-intel"},
         scope={"case_id": "projection"},
-        budget={"chars": 2000},
+        budget={"chars": 2000, "record_representation": "projected"},
         rerank=False,
     )
 
@@ -960,12 +1011,64 @@ async def test_workspace_retrieve_projects_structured_records_for_model_hot_view
     assert item["original_ref"]["record_id"] == ref["id"]
     assert item["original_ref"]["content_state"] == "raw_readback_available"
     assert item["projection"]["strategy"] == "deterministic_structured_projection"
+    assert item["projection"]["chosen_representation"] == "projected"
     assert item["projection"]["raw_chars"] > item["projection"]["projected_chars"]
     assert "Credit policy: service credits may not exceed 15 percent." in content
     assert "Risk lead approval is required above USD 2,500." in content
     assert "source_system" not in content
     assert "nightly-private" not in content
     assert "audit" in item["projection"]["omitted_keys"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_auto_preserves_short_structured_records(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-auto-short-record")
+    ref = await workspace.put(
+        {
+            "account": "Vega Clinical",
+            "region": "EU",
+            "launch_gate": {
+                "blocked_item": "VP-17",
+                "deadline": "2026-08-05",
+                "required_signoffs": [
+                    {"role": "QA lead", "owner": "Noam Fischer"},
+                    {"role": "Regulatory owner", "owner": "Lena Ortiz"},
+                ],
+            },
+            "source_system": "clinical_ops_export",
+            "audit": {"export_batch": "nightly-private"},
+            "noise": {"superseded_gate": "APAC trial shipment is not current launch evidence"},
+        },
+        collection="launch-intel",
+        kind="gate_review",
+        summary="Vega Clinical EU launch gate",
+        scope={"case_id": "auto-short-structure"},
+    )
+
+    package = await workspace.retrieve(
+        "Vega VP-17 signoffs",
+        filters={"collection": "launch-intel"},
+        scope={"case_id": "auto-short-structure"},
+        budget={"chars": 2000},
+        rerank=False,
+    )
+
+    item = cast(Any, package["items"][0])
+    content = str(item["content"])
+    assert _retrieval_ref_id(item) == ref["id"]
+    assert item["content_state"] == "compact_structured_record"
+    assert item["projection"]["strategy"] == "compact_structured_record"
+    assert item["projection"]["chosen_representation"] == "compact_structured"
+    assert item["projection"]["reason"] == "short_structured_record_preserved"
+    assert package["diagnostics"]["representation"]["record_counts"] == {"compact_structured": 1}
+    assert "blocked_item" in content
+    assert "required_signoffs" in content
+    assert "Noam Fischer" in content
+    assert "Lena Ortiz" in content
+    assert "nightly-private" not in content
+    assert "APAC trial shipment" not in content
+    assert "audit" in item["projection"]["omitted_keys"]
+    assert "noise" in item["projection"]["omitted_keys"]
 
 
 @pytest.mark.asyncio
@@ -1092,6 +1195,7 @@ async def test_workspace_retrieve_model_rerank_drops_and_refills(tmp_path):
 
     async def rerank_handler(*, query, candidates):
         _ = query
+        seen_candidates[:] = list(candidates)
         return {
             "decisions": [
                 {"id": candidates[0]["id"], "useful": False, "score": 0.0, "reason": "irrelevant"},
@@ -1099,6 +1203,7 @@ async def test_workspace_retrieve_model_rerank_drops_and_refills(tmp_path):
             ]
         }
 
+    seen_candidates: list[dict[str, Any]] = []
     package = await workspace.retrieve(
         None,
         tags=["topic"],
@@ -1112,7 +1217,13 @@ async def test_workspace_retrieve_model_rerank_drops_and_refills(tmp_path):
     )
 
     selected_ids = [_retrieval_ref_id(item) for item in package["items"]]
-    assert selected_ids == [refs[1]["id"], refs[2]["id"]]
+    reranked_ids = [str(candidate["id"]).split("record:", 1)[-1] for candidate in seen_candidates]
+    dropped_id, kept_id = reranked_ids[:2]
+    refill_ids = {ref["id"] for ref in refs} - set(reranked_ids)
+    assert len(selected_ids) == 2
+    assert dropped_id not in selected_ids
+    assert kept_id in selected_ids
+    assert any(refill_id in selected_ids for refill_id in refill_ids)
     assert package["omitted"][0] == {"reason": "rerank_drop", "count": 1}
     assert package["diagnostics"]["rerank"]["degraded"] is False
 
@@ -1278,6 +1389,215 @@ async def test_workspace_retrieve_vector_mode_uses_index_or_degrades(tmp_path):
 
     assert used["diagnostics"]["vector"]["used"] is True
     assert _retrieval_ref_id(used["items"][0]) == vector_only["id"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_local_vector_index_defaults_to_cosine_similarity(tmp_path):
+    def embed_texts(texts: str | list[str]) -> list[list[float]]:
+        values = [texts] if isinstance(texts, str) else texts
+        vectors: list[list[float]] = []
+        for text in values:
+            normalized = text.lower()
+            if "alpha" in normalized:
+                vectors.append([1.0, 0.0])
+            elif "beta" in normalized:
+                vectors.append([0.0, 1.0])
+            else:
+                vectors.append([0.7, 0.3])
+        return vectors
+
+    workspace = Agently.create_workspace(tmp_path / "workspace-local-vector-index")
+    cast(Any, workspace.backend).vector_index = LocalVectorIndex(embed_texts)
+    alpha = await workspace.put(
+        {"memory": "alpha vector candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="alpha vector candidate",
+    )
+    await workspace.put(
+        {"memory": "beta vector candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="beta vector candidate",
+    )
+
+    package = await workspace.retrieve(
+        "alpha query",
+        filters={"collection": "memory", "kind": "global_memory"},
+        method="vector",
+        rerank=False,
+    )
+
+    assert cast(Any, workspace.backend).vector_index.similarity == "cosine"
+    assert package["diagnostics"]["vector"]["similarity"] == "cosine"
+    assert _retrieval_ref_id(package["items"][0]) == alpha["id"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_local_vector_index_similarity_modes_change_ranking(tmp_path):
+    def embed_texts(texts: str | list[str]) -> list[list[float]]:
+        values = [texts] if isinstance(texts, str) else texts
+        vectors: list[list[float]] = []
+        for text in values:
+            normalized = text.lower()
+            if "exact-direction" in normalized:
+                vectors.append([1.0, 0.0])
+            elif "large-magnitude" in normalized:
+                vectors.append([10.0, 1.0])
+            elif "nearby-offset" in normalized:
+                vectors.append([0.9, 0.1])
+            else:
+                vectors.append([1.0, 0.0])
+        return vectors
+
+    async def run_similarity(similarity: str) -> tuple[list[str], str]:
+        workspace = Agently.create_workspace(tmp_path / f"workspace-vector-{similarity}")
+        cast(Any, workspace.backend).vector_index = LocalVectorIndex(
+            embed_texts,
+            similarity=cast(Any, similarity),
+        )
+        exact = await workspace.put(
+            {"memory": "exact-direction candidate"},
+            collection="memory",
+            kind="global_memory",
+            summary="exact-direction candidate",
+        )
+        large = await workspace.put(
+            {"memory": "large-magnitude candidate"},
+            collection="memory",
+            kind="global_memory",
+            summary="large-magnitude candidate",
+        )
+        nearby = await workspace.put(
+            {"memory": "nearby-offset candidate"},
+            collection="memory",
+            kind="global_memory",
+            summary="nearby-offset candidate",
+        )
+        package = await workspace.retrieve(
+            "query vector",
+            filters={"collection": "memory", "kind": "global_memory"},
+            method="vector",
+            rerank=False,
+            selection="top_n",
+            top_n=3,
+        )
+        names_by_id = {
+            exact["id"]: "exact",
+            large["id"]: "large",
+            nearby["id"]: "nearby",
+        }
+        return [names_by_id[_retrieval_ref_id(item)] for item in package["items"]], cast(
+            str,
+            package["diagnostics"]["vector"]["similarity"],
+        )
+
+    cosine_order, cosine_similarity = await run_similarity("cosine")
+    dot_order, dot_similarity = await run_similarity("dot")
+    l2_order, l2_similarity = await run_similarity("l2")
+
+    assert cosine_similarity == "cosine"
+    assert dot_similarity == "dot"
+    assert l2_similarity == "l2"
+    assert cosine_order == ["exact", "large", "nearby"]
+    assert dot_order == ["large", "exact", "nearby"]
+    assert l2_order == ["exact", "nearby", "large"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_auto_method_keeps_keyword_without_embedding_policy(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-auto-keyword")
+    keyword_ref = await workspace.put(
+        {"memory": "alpha keyword candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="alpha keyword candidate",
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+    )
+    vector_only = await workspace.put(
+        {"memory": "semantic vector-only candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="semantic vector-only candidate",
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+    )
+
+    class FakeVectorIndex:
+        name = "fake"
+        used = False
+
+        async def index_record(self, ref, content):
+            _ = (ref, content)
+
+        async def search(self, query, *, filters=None, limit=None):
+            self.used = True
+            _ = (query, filters, limit)
+            return [vector_only]
+
+    fake_index = FakeVectorIndex()
+    cast(Any, workspace.backend).vector_index = fake_index
+
+    package = await workspace.retrieve(
+        "alpha",
+        filters={"collection": "memory", "kind": "global_memory"},
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+        method="auto",
+        rerank=False,
+        settings={},
+    )
+
+    assert package["diagnostics"]["method"] == "auto"
+    assert package["diagnostics"]["effective_method"] == "keyword"
+    assert package["diagnostics"]["method_resolution"]["reason"] == "embedding_policy_not_configured"
+    assert "vector" not in package["diagnostics"]
+    assert fake_index.used is False
+    assert _retrieval_ref_id(package["items"][0]) == keyword_ref["id"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_retrieve_auto_method_uses_hybrid_when_embedding_policy_configured(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-retrieve-auto-hybrid")
+    await workspace.put(
+        {"memory": "keyword fallback candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="keyword fallback candidate",
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+    )
+    vector_only = await workspace.put(
+        {"memory": "semantic vector-only candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="semantic vector-only candidate",
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+    )
+
+    class FakeVectorIndex:
+        name = "fake"
+
+        async def index_record(self, ref, content):
+            _ = (ref, content)
+
+        async def search(self, query, *, filters=None, limit=None):
+            _ = (query, filters, limit)
+            return [vector_only]
+
+    cast(Any, workspace.backend).vector_index = FakeVectorIndex()
+
+    package = await workspace.retrieve(
+        "semantic query",
+        filters={"collection": "memory", "kind": "global_memory"},
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+        method="auto",
+        rerank=False,
+        settings={"workspace": {"retrieval": {"embedding_model": "test-embedding"}}},
+    )
+
+    assert package["diagnostics"]["method"] == "auto"
+    assert package["diagnostics"]["effective_method"] == "hybrid"
+    assert package["diagnostics"]["method_resolution"]["reason"] == "embedding_model"
+    assert package["diagnostics"]["vector"]["used"] is True
+    assert _retrieval_ref_id(package["items"][0]) == vector_only["id"]
 
 
 @pytest.mark.asyncio

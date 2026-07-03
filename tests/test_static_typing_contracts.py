@@ -40,6 +40,8 @@ from agently.types.data import (
     ResultContentType,
     SkillRuntimeStreamHandler,
     StreamingData,
+    TaskBoardGraph,
+    TaskBoardRevision,
 )
 from agently.types.plugins import AgentExecution, SkillsPlanningContext
 
@@ -145,3 +147,42 @@ def test_response_named_aliases_stay_in_typed_data_namespace_only():
         assert_type(cast(AgentlyOriginalResponsePayload, object()), AgentlyOriginalResultPayload)
         assert_type(cast(AgentlyResponseGenerator, object()), AgentlyResultGenerator)
         assert_type(cast(ResponseContentType, "all"), ResultContentType)
+
+
+def test_task_board_public_update_methods_accept_dict_payloads():
+    if TYPE_CHECKING:
+        revision = TaskBoardRevision.create(
+            board_id="typing-task-board",
+            graph={
+                "graph_id": "typing-task-board-graph",
+                "cards": [{"id": "collect", "objective": "Collect facts."}],
+            },
+        )
+
+        next_revision = revision.next_revision(
+            {
+                "graph_id": "typing-task-board-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect facts."},
+                    {"id": "final", "objective": "Write final answer.", "depends_on": ["collect"]},
+                ],
+            },
+            card_results={"collect": {"card_id": "collect", "status": "completed"}},
+        )
+        assert_type(next_revision, TaskBoardRevision)
+
+        graph = TaskBoardGraph.from_value(
+            {
+                "graph_id": "typing-task-board-graph",
+                "cards": [{"id": "collect", "objective": "Collect facts."}],
+            }
+        )
+        assert_type(
+            graph.with_cards(
+                [
+                    {"id": "collect", "objective": "Collect facts."},
+                    {"id": "final", "objective": "Write final answer.", "depends_on": ["collect"]},
+                ]
+            ),
+            TaskBoardGraph,
+        )
