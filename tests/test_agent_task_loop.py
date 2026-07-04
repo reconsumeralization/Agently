@@ -8685,6 +8685,181 @@ def test_cumulative_evidence_ledger_keeps_current_action_result_when_old_items_o
     assert guard["valid"] is True
 
 
+def test_verifier_ledger_preserves_pinned_finalizer_action_result_after_block_compaction():
+    target_id = "agent_task_action_result:write_xlsx_file:act_call_target"
+    evidence_items: list[dict[str, Any]] = []
+    for index in range(109):
+        evidence_items.append(
+            {
+                "id": f"workspace_artifact_readback:noise:{index}",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": f"noise-{index}.md",
+                "body": f"Noise evidence {index}",
+            }
+        )
+    evidence_items.append(
+        {
+            "id": target_id,
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "write_xlsx_file",
+            "action_call_id": "act_call_target",
+            "path": "/tmp/run/artifacts/report.xlsx",
+            "body": '{"filename":"report.xlsx","path":"/tmp/run/artifacts/report.xlsx","size":5990}',
+        }
+    )
+
+    ledger = AgentTask._evidence_ledger_from_execution_meta(
+        {
+            "status": "completed",
+            "logs": {},
+            "blocks": {
+                "evidence": {
+                    "evidence_items": evidence_items,
+                    "pinned_evidence_ids": [target_id],
+                }
+            },
+        }
+    )
+
+    ids = [item.get("id") for item in ledger.get("items", [])]
+    assert target_id in ids
+
+
+def test_path_only_host_file_action_result_remains_evidence_ref():
+    host_path = "/tmp/agently-host-artifacts/report.xlsx"
+    ledger = AgentTask._evidence_ledger_from_execution_meta(
+        {
+            "status": "completed",
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "write_xlsx_file",
+                        "status": "success",
+                        "action_call_id": "act_call_xlsx",
+                        "data": {
+                            "filename": "report.xlsx",
+                            "path": host_path,
+                            "size": 5990,
+                        },
+                    }
+                ],
+                "route_logs": {},
+            },
+        }
+    )
+
+    action_item = next(
+        item
+        for item in ledger["items"]
+        if item.get("kind") == "agent_task.action.result"
+        and item.get("action_id") == "write_xlsx_file"
+    )
+    assert action_item["id"] == "agent_task_action_result:write_xlsx_file:act_call_xlsx"
+    assert action_item["path"] == host_path
+    assert "report.xlsx" in str(action_item.get("body"))
+    assert "5990" in str(action_item.get("body"))
+    assert any(ref.get("value") == host_path for ref in ledger.get("source_refs", []))
+
+
+@pytest.mark.asyncio
+async def test_path_only_host_file_action_upgrades_only_after_workspace_readback(tmp_path):
+    agent = _create_agent("agent-task-host-file-workspace-readback").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Return a generated file.",
+        success_criteria=["The generated file is available as a trusted Workspace ref."],
+        execution="taskboard",
+    )
+    await task.workspace.write_file("reports/final.txt", "generated file body")
+    absolute_path = str(task.workspace.resolve_file_path("reports/final.txt"))
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_xlsx_file",
+                    "status": "success",
+                    "action_call_id": "act_call_workspace",
+                    "data": {
+                        "filename": "final.txt",
+                        "path": absolute_path,
+                        "size": 19,
+                    },
+                }
+            ],
+            "route_logs": {},
+        },
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "status": "completed",
+            "artifact_manifest": {"path": "reports/final.txt"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.host_file.workspace_readback",
+    )
+
+    assert delivered["file_refs"][0]["path"] == "reports/final.txt"
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+
+
+@pytest.mark.asyncio
+async def test_path_only_host_file_action_outside_workspace_stays_external_diagnostic(tmp_path):
+    agent = _create_agent("agent-task-host-file-outside-workspace").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Return a generated file.",
+        success_criteria=["The generated file boundary is preserved."],
+        execution="taskboard",
+    )
+    external_path = tmp_path / "host-artifacts" / "report.xlsx"
+    external_path.parent.mkdir()
+    external_path.write_bytes(b"external artifact")
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_xlsx_file",
+                    "status": "success",
+                    "action_call_id": "act_call_external",
+                    "data": {
+                        "filename": "report.xlsx",
+                        "path": str(external_path),
+                        "size": external_path.stat().st_size,
+                    },
+                }
+            ],
+            "route_logs": {},
+        },
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "status": "completed",
+            "artifact_manifest": {"path": "report.xlsx"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.host_file.external_pointer",
+    )
+
+    diagnostic_codes = {
+        item.get("code")
+        for item in delivered.get("diagnostics", [])
+        if isinstance(item, Mapping)
+    }
+    assert delivered.get("file_refs") == []
+    assert "agent_task.workspace_artifact.action_file_outside_workspace" in diagnostic_codes
+    assert delivered["status"] == "blocked"
+
+
 def test_cumulative_verifier_evidence_uses_raw_action_data_when_digest_missing(tmp_path):
     from agently.core.application import AgentTask
 

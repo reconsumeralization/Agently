@@ -315,6 +315,24 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             materialized_refs.append(materialized_ref)
         return self._dedupe_ref_records(materialized_refs)
 
+    @staticmethod
+    def _taskboard_final_pinned_evidence_ids(final_evidence_guard: Mapping[str, Any]) -> list[str]:
+        pinned: list[str] = []
+        normalized = final_evidence_guard.get("normalized_evidence_use")
+        if not isinstance(normalized, Sequence) or isinstance(normalized, str | bytes | bytearray):
+            return pinned
+        for entry in normalized:
+            if not isinstance(entry, Mapping):
+                continue
+            evidence_ids = entry.get("evidence_ids")
+            if not isinstance(evidence_ids, Sequence) or isinstance(evidence_ids, str | bytes | bytearray):
+                continue
+            for evidence_id in evidence_ids:
+                text = str(evidence_id or "").strip()
+                if text and text not in pinned:
+                    pinned.append(text)
+        return pinned
+
     async def _finalize_taskboard(self, revision: Any, *, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
         result_status = self._taskboard_terminal_status(revision, schedule)
@@ -417,6 +435,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400)
         final_evidence_guard = validate_evidence_use(collect_evidence_use(final), evidence_ledger)
         final = value_with_normalized_evidence_use(final, final_evidence_guard.get("normalized_evidence_use"))
+        pinned_evidence_ids = self._taskboard_final_pinned_evidence_ids(final_evidence_guard)
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         final_verification: dict[str, Any] | None = None
         should_verify_final = (
@@ -456,6 +475,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "blocks": {
                     "evidence": {
                         "evidence_items": evidence_ledger.get("items", []),
+                        "pinned_evidence_ids": pinned_evidence_ids,
                         "diagnostics": [],
                     }
                 },
