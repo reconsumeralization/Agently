@@ -1919,7 +1919,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
     async def _bridge_step_execution_stream(self, iteration_index: int, execution: Any) -> None:
         try:
-            async for item in execution.get_async_generator(type="instant"):
+            async for stream_record in execution.get_async_generator(type="all"):
+                if isinstance(stream_record, tuple) and len(stream_record) == 2:
+                    _, item = stream_record
+                else:
+                    item = stream_record
                 await self._emit_step_execution_stream_item(iteration_index, execution, item)
         except asyncio.CancelledError:
             raise

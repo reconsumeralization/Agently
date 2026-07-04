@@ -1090,14 +1090,15 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         item: Any,
     ) -> AgentExecutionStreamData:
         raw_path = str(getattr(item, "path", "") or "stream")
+        event_type: Literal["delta", "done"] = "delta" if getattr(item, "event_type", None) == "delta" else "done"
         delta = None if self._is_process_summary_stream_path(raw_path) else getattr(item, "delta", None)
         display_meta = self._taskboard_control_stream_display_meta(raw_path)
         return await self._emit(
             f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.control.{raw_path}",
             getattr(item, "value", None),
-            event_type="delta",
+            event_type=event_type,
             delta=delta,
-            is_complete=bool(getattr(item, "is_complete", False)),
+            is_complete=bool(getattr(item, "is_complete", event_type == "done")),
             meta={
                 "task_id": self.id,
                 "status": self.status,
@@ -1166,7 +1167,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
 
     async def _bridge_taskboard_card_execution_stream(self, card_id: str, execution: Any) -> None:
         try:
-            async for item in execution.get_async_generator(type="instant"):
+            async for stream_record in execution.get_async_generator(type="all"):
+                if isinstance(stream_record, tuple) and len(stream_record) == 2:
+                    _, item = stream_record
+                else:
+                    item = stream_record
                 await self._emit_taskboard_card_execution_stream_item(card_id, execution, item)
         except asyncio.CancelledError:
             raise
