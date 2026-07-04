@@ -14,7 +14,7 @@
 
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, cast
 import asyncio
 import hashlib
 import json
@@ -380,7 +380,7 @@ class Browse:
 
     @classmethod
     def _pick_main_root(cls, soup):
-        from bs4 import Tag
+        Tag = LazyImport.from_import("bs4", "Tag", install_name="beautifulsoup4", auto_install=False)
 
         best_node = None
         best_length = 0
@@ -400,7 +400,7 @@ class Browse:
 
     @classmethod
     def _pick_body_root(cls, soup):
-        from bs4 import Tag
+        Tag = LazyImport.from_import("bs4", "Tag", install_name="beautifulsoup4", auto_install=False)
 
         if isinstance(soup.body, Tag):
             return soup.body
@@ -1072,7 +1072,7 @@ class Browse:
                     "url": url,
                 }
 
-            import pyautogui
+            pyautogui = cast(Any, LazyImport.import_package("pyautogui", auto_install=False))
 
             modifier = "command" if os_name == "Darwin" else "ctrl"
             pyautogui.PAUSE = self.pyautogui_pause
@@ -1188,8 +1188,12 @@ class Browse:
         return read_result
 
     async def _playwright_open(self, url: str) -> dict[str, Any]:
-        LazyImport.import_package("playwright", auto_install=False)
-        from playwright.async_api import async_playwright
+        playwright_async = LazyImport.import_package(
+            "playwright.async_api",
+            install_name="playwright",
+            auto_install=False,
+        )
+        async_playwright = getattr(playwright_async, "async_playwright")
 
         requested_url = str(url or "")
         url = self._normalize_url(requested_url)
@@ -1299,11 +1303,10 @@ class Browse:
             }
 
     async def _bs4_browse(self, url: str) -> str | dict[str, Any]:
-        LazyImport.import_package("httpx")
-        LazyImport.import_package("bs4", install_name="beautifulsoup4")
-
-        from bs4 import BeautifulSoup
-        from httpx import AsyncClient
+        httpx = LazyImport.import_package("httpx", auto_install=False)
+        bs4 = LazyImport.import_package("bs4", install_name="beautifulsoup4", auto_install=False)
+        AsyncClient = getattr(httpx, "AsyncClient")
+        BeautifulSoup = getattr(bs4, "BeautifulSoup")
 
         target_url = self._normalize_url(url)
         try:
@@ -1444,8 +1447,8 @@ class Browse:
         if result.get("content_kind") == "remote_file":
             return result
 
-        LazyImport.import_package("bs4", install_name="beautifulsoup4")
-        from bs4 import BeautifulSoup
+        bs4 = LazyImport.import_package("bs4", install_name="beautifulsoup4", auto_install=False)
+        BeautifulSoup = getattr(bs4, "BeautifulSoup")
 
         content_bytes = result.pop("content_bytes", b"")
         soup = BeautifulSoup(content_bytes, "html.parser")

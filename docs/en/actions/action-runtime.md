@@ -234,6 +234,10 @@ media type, and SHA-256 when available. A path-only payload such as
 Action result evidence and a ref pointer, but it is not treated as a trusted
 Workspace file unless the path is inside the Workspace files root and Workspace
 readback succeeds.
+Built-in web actions such as Search and Browse do not prompt for package
+installation while running. Missing optional dependencies surface as structured
+Action failures so service hosts can decide whether to install, retry, or fall
+back.
 When the digest is still too large for later planning or reply hot paths,
 Agently compacts the model-visible digest again: `result` keeps the bounded
 digest, duplicate `data` / `model_digest` fields may become `same_as="result"`

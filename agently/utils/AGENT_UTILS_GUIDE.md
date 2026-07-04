@@ -93,14 +93,20 @@ When to use:
 - Do not use this as a generic warning helper.
 
 ### LazyImport
-Purpose: import optional deps and optionally auto-install via pip with version constraints.
+Purpose: import optional deps, report structured missing-dependency facts, and
+optionally auto-install via pip only when explicitly enabled.
 
 Key methods:
-- `from_import(from_package, target_modules, auto_install=True, version_constraint=None, install_name=None)`
-- `import_package(package_name, auto_install=True, version_constraint=None, install_name=None)`
+- `from_import(from_package, target_modules, auto_install=False, version_constraint=None, install_name=None)`
+- `import_package(package_name, auto_install=False, version_constraint=None, install_name=None)`
 
 Notes:
-- This prompts for installation in interactive use; plan for non-interactive runtime accordingly.
+- By default this does not prompt or mutate the environment. Missing packages
+  and version mismatches raise `LazyImportDependencyError`, an `ImportError`
+  subclass with `payload`, `install_command`, and `install_command_text`.
+- `auto_install=True` is reserved for explicit interactive CLI/dev paths. It
+  must be declared at the `LazyImport` call site, prompts on the command line,
+  and runs the suggested pip install command only after the user confirms.
 
 ### Logger
 Purpose: create a consistent logger with optional uvicorn integration.

@@ -165,7 +165,7 @@ class Search:
 
     def _get_ddgs(self):
         if self.ddgs is None:
-            ddgs_module = LazyImport.import_package("ddgs", version_constraint=">=9.10.0")
+            ddgs_module = LazyImport.import_package("ddgs", version_constraint=">=9.10.0", auto_install=False)
             self.ddgs = ddgs_module.DDGS(proxy=self.proxy, timeout=self.timeout)
         return self.ddgs
 
@@ -604,10 +604,9 @@ class Search:
         query: str,
         max_results: int | None = 10,
     ):
-        LazyImport.import_package("httpx")
-        LazyImport.import_package("feedparser")
-        from httpx import AsyncClient
-        import feedparser
+        httpx = LazyImport.import_package("httpx", auto_install=False)
+        feedparser = LazyImport.import_package("feedparser", auto_install=False)
+        AsyncClient = getattr(httpx, "AsyncClient")
 
         url = f"https://export.arxiv.org/api/query?search_query=all:{ query }&max_results={ max_results }"
 

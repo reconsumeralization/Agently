@@ -258,7 +258,10 @@ The smoke script must verify two things:
 - A basic installed-package startup path works without optional dependencies
   that are explicitly protected by `agently.utils.LazyImport`.
 - At least one LazyImport-protected missing dependency path is triggered on
-  purpose, and the user-facing install prompt/error is emitted correctly.
+  purpose, and the structured `LazyImportDependencyError` explains the missing
+  dependency and install command correctly. An install prompt should appear only
+  when the caller declares `auto_install=True` at the `LazyImport` call site in
+  an interactive smoke.
 
 Optional integrations such as DevTools, ChromaDB, FastMCP, SQLModel, Playwright,
 or other provider-specific packages should not be installed unless the smoke is
