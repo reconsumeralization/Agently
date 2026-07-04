@@ -2440,6 +2440,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     @classmethod
     def _evidence_ledger_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
         evidence_items: list[dict[str, Any]] = []
+        pinned_evidence_ids = cls._pinned_evidence_ids_from_execution_meta(execution_meta)
         blocks = execution_meta.get("blocks")
         if isinstance(blocks, Mapping):
             evidence = blocks.get("evidence")
@@ -2449,7 +2450,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 if isinstance(raw_block_items, Sequence) and not isinstance(
                     raw_block_items, str | bytes | bytearray
                 ):
-                    block_evidence["evidence_items"] = cls._prioritized_verifier_evidence_items(raw_block_items)
+                    block_evidence["evidence_items"] = cls._prioritized_verifier_evidence_items(
+                        raw_block_items,
+                        pinned_evidence_ids=pinned_evidence_ids,
+                    )
                 block_ledger = evidence_ledger_view(block_evidence, max_items=80, body_chars=2400)
                 evidence_items.extend(
                     dict(item)
@@ -2458,21 +2462,62 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 )
         evidence_items.extend(cls._action_result_evidence_items_from_execution_meta(execution_meta))
         return evidence_ledger_view(
-            {"evidence_items": cls._prioritized_verifier_evidence_items(evidence_items)},
+            {
+                "evidence_items": cls._prioritized_verifier_evidence_items(
+                    evidence_items,
+                    pinned_evidence_ids=pinned_evidence_ids,
+                )
+            },
             max_items=120,
             body_chars=2400,
         )
 
     @classmethod
-    def _prioritized_verifier_evidence_items(cls, items: Sequence[Any]) -> list[dict[str, Any]]:
-        ordered: list[tuple[int, int, dict[str, Any]]] = []
+    def _pinned_evidence_ids_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> set[str]:
+        pinned: set[str] = set()
+
+        def collect(value: Any) -> None:
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    pinned.add(text)
+                return
+            if isinstance(value, Mapping):
+                for key in ("id", "evidence_id"):
+                    text = str(value.get(key) or "").strip()
+                    if text:
+                        pinned.add(text)
+                return
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+                for item in value:
+                    collect(item)
+
+        collect(execution_meta.get("pinned_evidence_ids"))
+        blocks = execution_meta.get("blocks")
+        if isinstance(blocks, Mapping):
+            evidence = blocks.get("evidence")
+            if isinstance(evidence, Mapping):
+                collect(evidence.get("pinned_evidence_ids"))
+        return pinned
+
+    @classmethod
+    def _prioritized_verifier_evidence_items(
+        cls,
+        items: Sequence[Any],
+        *,
+        pinned_evidence_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        pinned = pinned_evidence_ids or set()
+        ordered: list[tuple[int, int, int, dict[str, Any]]] = []
         for index, item in enumerate(items):
             if not isinstance(item, Mapping):
                 continue
             sanitized = dict(DataFormatter.sanitize(item))
-            ordered.append((cls._verifier_evidence_item_priority(sanitized), index, sanitized))
-        ordered.sort(key=lambda entry: (entry[0], entry[1]))
-        return [item for _, _, item in ordered]
+            evidence_id = str(sanitized.get("id") or "").strip()
+            pin_priority = -1 if evidence_id and evidence_id in pinned else 0
+            ordered.append((pin_priority, cls._verifier_evidence_item_priority(sanitized), index, sanitized))
+        ordered.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+        return [item for _, _, _, item in ordered]
 
     @staticmethod
     def _verifier_evidence_item_priority(item: Mapping[str, Any]) -> int:

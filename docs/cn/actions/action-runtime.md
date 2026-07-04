@@ -206,6 +206,12 @@ SHA-256 和截断标记，消费方可以明确知道 preview 不是完整证据
 显式返回 `artifacts` 或 `artifact_refs` 的 action 即使输出很小也使用同一合同。
 这包括 `MCPActionExecutor` 暴露的 MCP resource/content block；Agently 记录
 声明过的 artifact metadata，但不会通过扫描目录推断未声明的文件写入。
+如果宿主 action 会生成供 AgentTask 或 TaskBoard 后续消费的文件，建议返回带
+path、size/bytes、media type，以及可用时 SHA-256 的 typed `file_refs` 或
+`artifact_refs`。只有 `{filename, path, size}` 这类 path-only payload 时，Agently
+会把它保留为有界 Action result evidence 和 ref pointer；只有当 path 位于
+Workspace files root 内且 Workspace readback 成功时，才会升级为可信 Workspace
+file ref。
 如果 digest 对后续规划或回复 hot path 仍然过大，Agently 会再次压缩模型可见 digest：
 `result` 保留有界 digest，重复的 `data` / `model_digest` 字段可能变成
 `same_as="result"` 指针，artifact refs 会省略 preview 正文但保留 readback id。

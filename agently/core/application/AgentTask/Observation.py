@@ -1476,14 +1476,21 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     result_preview = fallback_preview
                     break
         if result_preview is not None:
-            compact["result_preview"] = cls._compact_action_preview_value(result_preview, max_chars=5200)
+            compact_result_preview = cls._compact_action_preview_value(result_preview, max_chars=5200)
+            if isinstance(result_preview, Mapping) and isinstance(compact_result_preview, dict):
+                result_path = result_preview.get("path") or result_preview.get("output_path") or result_preview.get("file_path")
+                if result_path:
+                    for key in ("filename", "file_name", "size"):
+                        if key in result_preview and result_preview.get(key) not in (None, "", [], {}):
+                            compact_result_preview[key] = DataFormatter.sanitize(result_preview.get(key))
+            compact["result_preview"] = compact_result_preview
         result_preview_meta = digest.get("result_preview_meta") if isinstance(digest, Mapping) else None
         if result_preview_meta is None:
             result_preview_meta = record.get("result_preview_meta")
         if result_preview_meta is None and isinstance(result_preview, Mapping):
             result_preview_meta = {
                 key: result_preview.get(key)
-                for key in ("chars", "bytes", "sha256", "truncated", "read_bytes")
+                for key in ("chars", "bytes", "sha256", "truncated", "read_bytes", "size")
                 if key in result_preview
             }
         if result_preview_meta is not None:

@@ -1061,9 +1061,9 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
 
         def collect_result_path(record: Mapping[str, Any], value: Any) -> None:
-            if not isinstance(value, Mapping) or not mapping_reports_success(value):
+            if not isinstance(value, Mapping):
                 return
-            action_id = str(record.get("id") or record.get("name") or "").strip().lower()
+            action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "").strip().lower()
             mode = str(value.get("mode") or value.get("operation") or "").strip().lower()
             is_file_materializer = action_id in {"write_file", "edit_file", "apply_patch"} or mode in {
                 "write",
@@ -1073,9 +1073,23 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 "append",
                 "create",
             }
-            if not is_file_materializer:
+            candidate_path = value.get("path") or value.get("output_path") or value.get("file_path")
+            has_file_metadata = any(
+                value.get(key) not in (None, "", [], {})
+                for key in (
+                    "filename",
+                    "file_name",
+                    "size",
+                    "bytes",
+                    "sha256",
+                    "media_type",
+                    "mime_type",
+                    "content_type",
+                )
+            )
+            if not (is_file_materializer or (candidate_path and has_file_metadata)):
                 return
-            add_path(value.get("path") or value.get("output_path") or value.get("file_path"))
+            add_path(candidate_path)
 
         success_statuses = {"success", "succeeded", "ok", "completed", "partial_success"}
         for record in cls._collect_execution_action_records(execution_meta):
@@ -1183,13 +1197,26 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES,
                 )
             except Exception as error:
+                outside_workspace = isinstance(error, ValueError)
+                code = (
+                    "agent_task.workspace_artifact.action_file_outside_workspace"
+                    if outside_workspace
+                    else "agent_task.workspace_artifact.action_file_readback_failed"
+                )
+                message = (
+                    "A successful file-producing Action returned a candidate artifact path outside the "
+                    "Workspace files root; the path is preserved as Action result evidence but was not "
+                    "promoted to trusted Workspace file_refs."
+                    if outside_workspace
+                    else (
+                        "A successful file-producing Action returned a candidate artifact path, but "
+                        "Workspace readback failed; trusted file_refs were not produced for this path."
+                    )
+                )
                 diagnostics.append(
                     self._workspace_artifact_readback_missing_diagnostic(
-                        code="agent_task.workspace_artifact.action_file_readback_failed",
-                        message=(
-                            "A successful Workspace file action produced a candidate artifact path, "
-                            "but readback failed; trusted file_refs were not produced for this path."
-                        ),
+                        code=code,
+                        message=message,
                         path=candidate_path,
                         source=source,
                         error=error,

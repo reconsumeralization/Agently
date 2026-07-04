@@ -227,6 +227,13 @@ Actions that explicitly return `artifacts` or `artifact_refs` use the same
 contract even when the output is small. This includes MCP resource/content
 blocks surfaced by `MCPActionExecutor`; Agently records the declared artifact
 metadata, but it does not infer undeclared file writes by scanning directories.
+Host actions that create files for later AgentTask or TaskBoard consumption
+should return typed `file_refs` or `artifact_refs` with the path, size or bytes,
+media type, and SHA-256 when available. A path-only payload such as
+`{"filename": "...", "path": "...", "size": ...}` stays visible as bounded
+Action result evidence and a ref pointer, but it is not treated as a trusted
+Workspace file unless the path is inside the Workspace files root and Workspace
+readback succeeds.
 When the digest is still too large for later planning or reply hot paths,
 Agently compacts the model-visible digest again: `result` keeps the bounded
 digest, duplicate `data` / `model_digest` fields may become `same_as="result"`
