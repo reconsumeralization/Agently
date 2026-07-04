@@ -289,6 +289,115 @@ def test_agent_task_process_progress_delta_uses_only_explicit_progress_event():
     assert project_agent_execution_text_delta(progress_item) == "Reading the bounded source evidence.\n\n"
 
 
+class _FakeChildExecutionStream:
+    id = "child-execution-1"
+
+    def __init__(self, source_item: AgentExecutionStreamData):
+        self._source_item = source_item
+        self.requested_types: list[str] = []
+
+    async def get_async_generator(self, type: str = "instant"):
+        self.requested_types.append(type)
+        if type == "instant":
+            yield self._source_item
+            yield AgentExecutionStreamData(
+                path="$delta",
+                value=self._source_item.delta,
+                delta=self._source_item.delta,
+                event_type="delta",
+                is_complete=False,
+                source="agent_execution",
+                route=self._source_item.route,
+                meta={
+                    "stream_kind": "text_projection",
+                    "projection_source_path": self._source_item.path,
+                    "projection_source_event_type": self._source_item.event_type,
+                },
+            )
+            return
+        assert type == "all"
+        yield ("agent_execution", self._source_item)
+
+
+def _minimal_agent_task_stream_owner() -> Any:
+    task = object.__new__(AgentTask)
+    task.id = "agent-task-stream-test"
+    task.status = "running"
+    task._stream_items = []
+    task._stream_queues = []
+    task._last_stream_emit_monotonic = 0.0
+    return task
+
+
+def _child_delta_item() -> AgentExecutionStreamData:
+    return AgentExecutionStreamData(
+        path="answer",
+        value="A",
+        delta="A",
+        event_type="delta",
+        is_complete=False,
+        source="model_request",
+        route="model_request",
+        meta={"field_path": "answer", "response_id": "response-1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_task_flat_child_stream_uses_raw_events_without_synthetic_delta_projection():
+    task = _minimal_agent_task_stream_owner()
+    child_execution = _FakeChildExecutionStream(_child_delta_item())
+
+    await task._bridge_step_execution_stream(1, child_execution)
+
+    delta_chunks = [
+        chunk
+        for chunk in (AgentTask._project_stream_item(item, "delta") for item in task._stream_items)
+        if chunk is not None
+    ]
+    child_paths = [(item.meta or {}).get("child_path") for item in task._stream_items]
+
+    assert delta_chunks == ["A"]
+    assert child_paths == ["answer"]
+    assert child_execution.requested_types == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_agent_task_taskboard_child_stream_uses_raw_events_without_synthetic_delta_projection():
+    task = _minimal_agent_task_stream_owner()
+    child_execution = _FakeChildExecutionStream(_child_delta_item())
+
+    await task._bridge_taskboard_card_execution_stream("collect", child_execution)
+
+    delta_chunks = [
+        chunk
+        for chunk in (AgentTask._project_stream_item(item, "delta") for item in task._stream_items)
+        if chunk is not None
+    ]
+    child_paths = [(item.meta or {}).get("child_path") for item in task._stream_items]
+
+    assert delta_chunks == ["A"]
+    assert child_paths == ["answer"]
+    assert child_execution.requested_types == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_agent_task_taskboard_control_stream_preserves_done_event_type():
+    task = _minimal_agent_task_stream_owner()
+    done_item = AgentExecutionStreamData(
+        path="final_result",
+        value="complete",
+        event_type="done",
+        is_complete=True,
+        source="model_request",
+    )
+
+    emitted = await task._emit_taskboard_control_stream_item("collect", done_item)
+
+    assert emitted.event_type == "done"
+    assert emitted.is_complete is True
+    assert emitted.delta is None
+
+
 def test_agent_task_action_observation_delta_projects_safe_progress_text():
     started = AgentExecutionStreamData(
         path="agent_task.action.started",
