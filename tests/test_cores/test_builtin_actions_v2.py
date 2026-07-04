@@ -1266,3 +1266,41 @@ def test_search_action_executor_awaits_async_fallback_methods():
 
     assert result.get("status") == "success"
     assert result.get("data") == {"query": "agents", "max_results": 3}
+
+
+def test_search_package_disables_lazy_import_install_prompt(monkeypatch):
+    calls: list[tuple[str, dict[str, Any]]] = []
+    search_module = importlib.import_module("agently.builtins.actions.Search")
+
+    def missing_package(package_name: str, **kwargs):
+        calls.append((package_name, kwargs))
+        raise ImportError("missing dependency")
+
+    monkeypatch.setattr(search_module.LazyImport, "import_package", missing_package)
+
+    with pytest.raises(ImportError):
+        Search(timeout=1)._get_ddgs()
+
+    assert calls == [("ddgs", {"version_constraint": ">=9.10.0", "auto_install": False})]
+
+
+@pytest.mark.asyncio
+async def test_browse_bs4_disables_lazy_import_install_prompt(monkeypatch):
+    calls: list[tuple[str, dict[str, Any]]] = []
+    browse_module = importlib.import_module("agently.builtins.actions.Browse")
+
+    def missing_bs4(package_name: str, **kwargs):
+        calls.append((package_name, kwargs))
+        if package_name == "httpx":
+            return object()
+        raise ImportError("missing dependency")
+
+    monkeypatch.setattr(browse_module.LazyImport, "import_package", missing_bs4)
+
+    with pytest.raises(ImportError):
+        await Browse(fallback_order=("bs4",), enable_playwright=False, enable_curl=False)._bs4_browse("https://example.com")
+
+    assert calls == [
+        ("httpx", {"auto_install": False}),
+        ("bs4", {"install_name": "beautifulsoup4", "auto_install": False}),
+    ]
