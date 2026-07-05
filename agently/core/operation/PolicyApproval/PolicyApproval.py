@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import uuid
 from typing import TYPE_CHECKING, Any, cast
@@ -186,25 +187,167 @@ class PolicyApprovalManager:
         handler: str | None = None,
         resume_to: Any = "self",
         interrupt_id: str | None = None,
+        channel_id: str | None = None,
+        provider_id: str | None = None,
+        wait_mode: str | None = None,
+        hot_wait_timeout: float | None = None,
+        cold_persistence_policy: str | None = None,
+        request_payload_schema: dict[str, Any] | None = None,
+        response_payload_schema: dict[str, Any] | None = None,
+        audit_metadata: dict[str, Any] | None = None,
+        settings: Any = None,
     ):
         normalized_request = self.normalize_request(request)
         if getattr(runtime_data, "is_resume", False):
-            resume = getattr(runtime_data, "resume", None)
-            resume_value = getattr(resume, "value", None)
-            decision = self.normalize_decision(resume_value, handler="triggerflow_resume")
-            await self._emit("policy.approval.resumed", normalized_request, decision)
-            return decision
+            decision = self._claim_resumed_gate_decision(runtime_data, normalized_request, interrupt_id)
+            if decision is not None:
+                await self._emit("policy.approval.resumed", normalized_request, decision)
+                return decision
 
         decision = await self.async_resolve(normalized_request, handler=handler)
         if decision.get("status") != "pending":
             return decision
+        if channel_id is None and provider_id is None and wait_mode is None:
+            from agently.base import execution_exchange
+
+            routing = await execution_exchange.async_route(
+                {
+                    "exchange_kind": "approval",
+                    "channel_id": channel_id,
+                    "provider_id": provider_id,
+                    "audit_metadata": {
+                        "source": str(normalized_request.get("source") or ""),
+                        "subject": str(normalized_request.get("subject") or ""),
+                    },
+                },
+                settings=settings if settings is not None else getattr(runtime_data, "settings", None),
+            )
+            if routing:
+                channel_id = routing.get("channel_id")
+                provider_id = routing.get("provider_id")
+                wait_mode = routing.get("wait_mode")
+                if hot_wait_timeout is None:
+                    hot_wait_timeout = routing.get("hot_wait_timeout")
+                if cold_persistence_policy is None:
+                    cold_persistence_policy = routing.get("cold_persistence_policy")
+        resolved_audit_metadata = {
+            "source": str(normalized_request.get("source") or ""),
+            "subject": str(normalized_request.get("subject") or ""),
+            "risk": str(normalized_request.get("risk") or ""),
+        }
+        if audit_metadata:
+            resolved_audit_metadata.update(dict(audit_metadata))
         return await runtime_data.async_pause_for(
             type="policy_approval",
             exchange_kind="approval",
             payload={"request": _copy_public(normalized_request), "decision": _copy_public(decision)},
             interrupt_id=interrupt_id or f"policy:{ normalized_request.get('request_id', '') }",
             resume_to=resume_to,
+            channel_id=channel_id,
+            provider_id=provider_id,
+            wait_mode=wait_mode or "disconnected",
+            hot_wait_timeout=hot_wait_timeout,
+            cold_persistence_policy=cold_persistence_policy or "persist",
+            request_payload_schema=request_payload_schema,
+            response_payload_schema=response_payload_schema,
+            audit_metadata=resolved_audit_metadata,
         )
+
+    @staticmethod
+    def _request_identity(request: Any) -> str | None:
+        """Stable identity of a gate request across resume replays.
+
+        ``request_id`` is regenerated on every replay, so identity is the
+        remaining public request content.
+        """
+        if not isinstance(request, dict):
+            return None
+        try:
+            return json.dumps(
+                {
+                    key: request.get(key)
+                    for key in ("source", "capability", "subject", "risk", "payload", "policy", "lineage")
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+                default=str,
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _claim_resumed_gate_decision(
+        self,
+        runtime_data: Any,
+        normalized_request: PolicyApprovalRequest,
+        interrupt_id: str | None,
+    ) -> PolicyApprovalDecision | None:
+        """Claim the resumed interrupt that belongs to THIS gate, if any.
+
+        A resumed chunk replays every gate it contains, and the resume context
+        on the signal only describes the interrupt that triggered the replay.
+        Consuming it blindly lets a later, different gate (for example a
+        permission gate following a plan-approval gate) treat someone else's
+        approval as its own. Instead each gate claims its own resumed interrupt
+        from the execution's interrupt ledger — matched by explicit
+        ``interrupt_id`` when the caller pinned one, otherwise by stable
+        request identity — in creation order, at most once per chunk
+        invocation. ``None`` means "no resume belongs to this gate": the gate
+        falls through to its normal resolve/pause path.
+        """
+        execution = getattr(runtime_data, "execution", None)
+        interrupts: dict[str, Any] = {}
+        if execution is not None:
+            get_interrupts = getattr(execution, "_get_interrupts", None)
+            if callable(get_interrupts):
+                try:
+                    found = get_interrupts()
+                    interrupts = dict(found) if isinstance(found, dict) else {}
+                except Exception:
+                    interrupts = {}
+        if not interrupts:
+            # No interrupt ledger is reachable (legacy snapshot or bare runtime
+            # data): keep the historical behavior of consuming the triggering
+            # resume payload.
+            resume = getattr(runtime_data, "resume", None)
+            if resume is None:
+                return None
+            return self.normalize_decision(getattr(resume, "value", None), handler="triggerflow_resume")
+        claimed_ids = getattr(runtime_data, "_policy_gate_claimed_interrupt_ids", None)
+        if not isinstance(claimed_ids, set):
+            claimed_ids = set()
+            try:
+                setattr(runtime_data, "_policy_gate_claimed_interrupt_ids", claimed_ids)
+            except Exception:
+                pass
+        identity = self._request_identity(normalized_request)
+        candidates: list[tuple[float, str, dict[str, Any]]] = []
+        for candidate_id, candidate in interrupts.items():
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("type") != "policy_approval":
+                continue
+            if candidate.get("status") != "resumed":
+                continue
+            if str(candidate_id) in claimed_ids:
+                continue
+            if interrupt_id is not None:
+                if str(candidate_id) != str(interrupt_id):
+                    continue
+            else:
+                payload = candidate.get("payload")
+                payload = payload if isinstance(payload, dict) else {}
+                candidate_identity = self._request_identity(payload.get("request"))
+                if candidate_identity is None or candidate_identity != identity:
+                    continue
+            created_at = candidate.get("created_at")
+            created_at = float(created_at) if isinstance(created_at, (int, float)) else 0.0
+            candidates.append((created_at, str(candidate_id), candidate))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        _, claimed_id, claimed = candidates[0]
+        claimed_ids.add(claimed_id)
+        return self.normalize_decision(claimed.get("resume_value"), handler="triggerflow_resume")
 
     def _fail_closed(self, request: PolicyApprovalRequest) -> PolicyApprovalDecision:
         return {

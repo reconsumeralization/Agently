@@ -492,6 +492,7 @@ class ActionDispatcher:
         settings: Settings | None = None,
         purpose: str | None = None,
         policy_override: ActionPolicy | None = None,
+        trusted_policy_override: ActionPolicy | None = None,
         source_protocol: str = "direct",
         todo_suggestion: str = "",
         next_value: str = "",
@@ -585,6 +586,12 @@ class ActionDispatcher:
             "diagnostics": call_diagnostics,
         }
         policy = self._merge_policy(execution_settings, spec, sanitized_override)
+        if isinstance(trusted_policy_override, dict) and trusted_policy_override:
+            # Host-trusted grants (e.g. a policy approval resolved through the
+            # ExecutionExchange gate) intentionally bypass the model-sourced
+            # sanitization: they are passed by host/framework code and never
+            # travel inside the planned action command.
+            cast(dict[str, Any], policy).update(trusted_policy_override)
         policy_approval_handler = execution_settings.get("policy_approval.handler", None)
         if policy_approval_handler is not None and not policy.get("policy_approval_handler"):
             policy["policy_approval_handler"] = str(policy_approval_handler)

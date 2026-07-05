@@ -12,10 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Literal, TypeAlias
+from typing import Any, Awaitable, Callable, Literal, TypeAlias
 
 from typing_extensions import TypedDict
 
+ExecutionExchangeKind: TypeAlias = Literal[
+    "approval",
+    "decision",
+    "control",
+    "clarification",
+    "supplement",
+    "ack",
+]
+ExecutionExchangeStatus: TypeAlias = Literal[
+    "pending",
+    "responded",
+    "cancelled",
+    "expired",
+]
 ExecutionExchangeWaitMode: TypeAlias = Literal[
     "connected",
     "disconnected",
@@ -37,7 +51,7 @@ ExecutionExchangeDispatchState: TypeAlias = Literal[
 class ExecutionExchangeRequest(TypedDict, total=False):
     request_id: str
     interrupt_id: str
-    exchange_kind: str | None
+    exchange_kind: ExecutionExchangeKind | str | None
     exchange_id: str | None
     callback_idempotency_key: str | None
     actor_id: str | None
@@ -58,3 +72,45 @@ class ExecutionExchangeProviderResult(TypedDict, total=False):
     request_ref: Any
     audit_metadata: dict[str, Any]
     provider_metadata: dict[str, Any]
+
+
+class ExecutionExchangeRouting(TypedDict, total=False):
+    provider_id: str | None
+    channel_id: str | None
+    wait_mode: ExecutionExchangeWaitMode
+    hot_wait_timeout: float | None
+    cold_persistence_policy: Literal["persist", "cancel", "fail_closed"] | str
+    handler: str
+    meta: dict[str, Any]
+
+
+class ExecutionExchangeResponse(TypedDict, total=False):
+    exchange_id: str | None
+    interrupt_id: str
+    payload: Any
+    actor_id: str | None
+    resume_request_id: str | None
+    responded_at: float
+    meta: dict[str, Any]
+
+
+class ExecutionExchangeView(TypedDict, total=False):
+    exchange_id: str | None
+    interrupt_id: str
+    execution_id: str
+    kind: ExecutionExchangeKind | str | None
+    status: ExecutionExchangeStatus
+    subject: str
+    source: str
+    payload: Any
+    request: ExecutionExchangeRequest
+    response: Any
+    actor_id: str | None
+    created_at: float | None
+    resolved_at: float | None
+
+
+ExchangeRoutingHandler = Callable[
+    [ExecutionExchangeRequest],
+    "ExecutionExchangeRouting | None | Awaitable[ExecutionExchangeRouting | None]",
+]
