@@ -122,6 +122,18 @@ class ActionDispatcher:
         return {str(key) for key in kwargs.keys()}
 
     @classmethod
+    def _host_only_action_input_keys(cls, spec: ActionSpec) -> set[str]:
+        meta = spec.get("meta", {})
+        if not isinstance(meta, dict):
+            return set()
+        raw_keys = meta.get("host_only_input_keys", [])
+        if isinstance(raw_keys, str):
+            return {raw_keys}
+        if isinstance(raw_keys, (list, tuple, set)):
+            return {str(key) for key in raw_keys if str(key)}
+        return set()
+
+    @classmethod
     def _sanitize_action_input(
         cls,
         spec: ActionSpec,
@@ -132,13 +144,14 @@ class ActionDispatcher:
         if source_protocol not in cls.MODEL_PLANNING_PROTOCOLS:
             return dict(action_input), []
         declared_keys = cls._declared_action_input_keys(spec)
-        if declared_keys is None:
-            return dict(action_input), []
+        host_only_keys = cls._host_only_action_input_keys(spec)
         sanitized: dict[str, Any] = {}
         stripped: list[str] = []
         for key, value in action_input.items():
             key_text = str(key)
-            if key_text in declared_keys:
+            if key_text in host_only_keys:
+                stripped.append(key_text)
+            elif declared_keys is None or key_text in declared_keys:
                 sanitized[key_text] = value
             else:
                 stripped.append(key_text)
@@ -158,7 +171,7 @@ class ActionDispatcher:
             "severity": "warning",
             "code": "action.input.unexpected_keys_stripped",
             "message": (
-                "Ignored undeclared action input keys from a model-planned action command: "
+                "Ignored undeclared or host-only action input keys from a model-planned action command: "
                 f"{ ', '.join(stripped_keys) }."
             ),
             "meta": {

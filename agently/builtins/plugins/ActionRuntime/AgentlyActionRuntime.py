@@ -437,7 +437,7 @@ class AgentlyActionRuntime:
         from agently.core.orchestration.TriggerFlow import TriggerFlow
 
         settings = context["settings"]
-        action_calls = request.get("action_calls", [])
+        action_calls = cast(list["ActionCall"], request.get("action_calls", []))
         concurrency = request.get("concurrency", None)
         timeout = request.get("timeout", None)
         trusted_policy_overrides = request.get("trusted_policy_overrides", {})
@@ -466,7 +466,7 @@ class AgentlyActionRuntime:
                 # for_each fan-out items carry no index attribute; locate the
                 # command position in the original call list instead.
                 try:
-                    command_key = action_calls.index(action_call)
+                    command_key = action_calls.index(cast("ActionCall", action_call))
                 except ValueError:
                     command_key = None
             trusted_policy_override = trusted_policy_overrides.get(command_key)

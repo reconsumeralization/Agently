@@ -8243,6 +8243,91 @@ def test_step_scope_restricts_step_actions_from_structured_field(tmp_path):
     assert step_execution["step_scope"]["allowed_capability_ids"] == ["fetch_sources"]
 
 
+def test_step_scope_uses_agent_execution_use_actions_when_available(tmp_path):
+    from agently.core.application import AgentTask
+
+    agent = _capability_gate_agent("agent-task-step-scope-use-actions")
+    task = AgentTask(
+        agent,
+        goal="Gather evidence in a scoped step.",
+        success_criteria=["Evidence gathered."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    class _FakeExecution:
+        def __init__(self):
+            self.used_actions: list[list[str]] = []
+            self.applied_route_policy: dict[str, Any] | None = None
+
+        def use_actions(self, action_ids):
+            self.used_actions.append(list(action_ids))
+
+        def route_policy(self, value):
+            self.applied_route_policy = value
+
+        def record_consumed_option(self, *args, **kwargs):
+            pass
+
+    execution = _FakeExecution()
+    plan = cast(Any, task)._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "gather only",
+            "expected_evidence": "x",
+            "rationale": "y",
+            "step_scope": {"allowed_capability_ids": ["fetch_sources"]},
+        }
+    )
+    step_execution = cast(Any, task)._configure_step_execution(execution, plan)
+
+    assert execution.used_actions == [["fetch_sources"]]
+    assert step_execution["action_scope_source"] == "step_scope"
+
+
+def test_step_required_action_ids_use_agent_execution_require_actions(tmp_path):
+    from agently.core.application import AgentTask
+
+    agent = _capability_gate_agent("agent-task-step-required-actions")
+    task = AgentTask(
+        agent,
+        goal="Run a required action.",
+        success_criteria=["Required action evidence exists."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    class _FakeExecution:
+        def __init__(self):
+            self.required_actions: list[list[str]] = []
+            self.applied_route_policy: dict[str, Any] | None = None
+
+        def require_actions(self, action_ids):
+            self.required_actions.append(list(action_ids))
+
+        def route_policy(self, value):
+            self.applied_route_policy = value
+
+        def record_consumed_option(self, *args, **kwargs):
+            pass
+
+    execution = _FakeExecution()
+    plan = cast(Any, task)._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "run required probe",
+            "expected_evidence": "action record",
+            "rationale": "user required the action",
+            "required_action_ids": ["probe_action"],
+        }
+    )
+    step_execution = cast(Any, task)._configure_step_execution(execution, plan)
+
+    assert execution.required_actions == [["probe_action"]]
+    assert step_execution["required_action_ids"] == ["probe_action"]
+    assert step_execution["action_scope_source"] == "required_action_ids"
+
+
 def test_auto_step_plan_suppresses_dag_after_prior_dag_failure(tmp_path):
     from agently.core.application import AgentTask
 

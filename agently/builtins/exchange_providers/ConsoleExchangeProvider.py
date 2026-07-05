@@ -18,7 +18,9 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, cast
+
+from agently.types.data import ExecutionExchangeProviderResult, ExecutionExchangeRequest
 
 
 class ConsoleExchangeProvider:
@@ -40,7 +42,13 @@ class ConsoleExchangeProvider:
         self._print_func = print_func
         self._pending: dict[str, dict[str, Any]] = {}
 
-    def publish_request(self, execution_id: str, request: dict[str, Any], *, interrupt: dict[str, Any]):
+    def publish_request(
+        self,
+        execution_id: str,
+        request: ExecutionExchangeRequest,
+        *,
+        interrupt: dict[str, Any],
+    ) -> ExecutionExchangeProviderResult:
         exchange_id = str(request.get("exchange_id") or f"console:{ uuid.uuid4().hex }")
         entry = {
             "execution_id": execution_id,
@@ -57,7 +65,7 @@ class ConsoleExchangeProvider:
         }
 
     @staticmethod
-    def _render_card(exchange_id: str, request: dict[str, Any], interrupt: dict[str, Any]) -> str:
+    def _render_card(exchange_id: str, request: ExecutionExchangeRequest, interrupt: dict[str, Any]) -> str:
         kind = str(request.get("exchange_kind") or "exchange")
         audit_metadata = request.get("audit_metadata")
         audit_metadata = audit_metadata if isinstance(audit_metadata, dict) else {}
@@ -75,7 +83,7 @@ class ConsoleExchangeProvider:
         ]
         return "\n".join(lines)
 
-    async def await_response(self, request: dict[str, Any]):
+    async def await_response(self, request: ExecutionExchangeRequest):
         kind = str(request.get("exchange_kind") or "exchange")
         if kind == "approval":
             prompt = "Approve? [y/N] "
@@ -97,10 +105,10 @@ class ConsoleExchangeProvider:
             }
         return {"text": text}
 
-    async def cancel_request(self, request: dict[str, Any], *, reason: str = ""):
+    async def cancel_request(self, request: ExecutionExchangeRequest, *, reason: str = ""):
         exchange_id = str(request.get("exchange_id") or "")
         if self._pending.pop(exchange_id, None) is not None:
             self._print_func(f"[Agently Exchange] { exchange_id } cancelled: { reason }")
 
-    async def list_pending(self, scope: Any = None):
-        return [dict(entry["request"]) for entry in self._pending.values()]
+    async def list_pending(self, scope: Any = None) -> list[ExecutionExchangeRequest]:
+        return [cast(ExecutionExchangeRequest, dict(entry["request"])) for entry in self._pending.values()]

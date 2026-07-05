@@ -330,10 +330,12 @@ class ExecutionExchangeManager:
         execution: Any,
         interrupt: dict[str, Any],
     ) -> "ExecutionExchangeProvider | None":
-        provider = None
+        provider: ExecutionExchangeProvider | None = None
         get_resource = getattr(execution, "_get_runtime_resource", None)
         if callable(get_resource):
-            provider = get_resource("execution_exchange_provider", None)
+            candidate = get_resource("execution_exchange_provider", None)
+            if callable(getattr(candidate, "publish_request", None)):
+                provider = cast("ExecutionExchangeProvider", candidate)
         if provider is not None:
             return provider
         request = interrupt.get("external_wait_request")
@@ -488,7 +490,8 @@ class ExecutionExchangeManager:
     def project_execution_exchanges(cls, execution: Any) -> list[ExecutionExchangeView]:
         execution_id = str(getattr(execution, "id", ""))
         get_interrupts = getattr(execution, "_get_interrupts", None)
-        interrupts = get_interrupts() if callable(get_interrupts) else {}
+        raw_interrupts = get_interrupts() if callable(get_interrupts) else {}
+        interrupts: dict[Any, Any] = raw_interrupts if isinstance(raw_interrupts, dict) else {}
         views: list[ExecutionExchangeView] = []
         for interrupt in interrupts.values():
             if isinstance(interrupt, dict) and interrupt.get("exchange_kind"):

@@ -485,7 +485,10 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                      'safe command profile when commands is omitted, '
                                                                      'and oversized stdout/stderr streams are '
                                                                      'persisted under artifacts/shell/ when a '
-                                                                     'Workspace root is available.',
+                                                                     'Workspace root is available. allow_unsafe is a '
+                                                                     'host-only direct execution grant, is not exposed '
+                                                                     'in model-visible shell action schemas, and is '
+                                                                     'stripped from model-planned action inputs.',
                                    'coding_workspace_actions_contract': 'agent.enable_coding_agent_actions(...) '
                                                                         'exposes Workspace-owned read_file, '
                                                                         'glob_files, grep_files, edit_file, '

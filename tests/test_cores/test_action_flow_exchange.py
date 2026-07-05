@@ -102,8 +102,10 @@ async def test_action_loop_hot_wait_approval_executes_action_in_place():
         assert len(provider.published) == 1
         assert calls == [{"path": "./tmp/report.md"}]
         executed = [record for record in records if record.get("action_id") == "delete_report"]
-        assert executed and executed[0]["status"] == "success"
-        assert executed[0]["data"]["deleted"] is True
+        assert executed and executed[0].get("status") == "success"
+        executed_data = executed[0].get("data")
+        assert isinstance(executed_data, dict)
+        assert executed_data.get("deleted") is True
     finally:
         global_settings.set("policy_approval.handler", old_handler)
         _restore_interaction_settings(old)
@@ -134,7 +136,9 @@ async def test_action_loop_durable_mode_returns_paused_records_instead_of_raisin
         assert len(provider.published) == 1
         paused = [record for record in records if record.get("status") == "approval_required"]
         assert len(paused) == 1
-        exchange_meta = paused[0]["meta"]["exchange"]
+        paused_meta = paused[0].get("meta")
+        assert isinstance(paused_meta, dict)
+        exchange_meta = paused_meta["exchange"]
         assert exchange_meta["pending"][0]["kind"] == "approval"
         assert exchange_meta["pending"][0]["status"] == "pending"
         assert exchange_meta["respond_keys"]
@@ -148,7 +152,7 @@ async def test_action_loop_durable_mode_returns_paused_records_instead_of_raisin
             {"status": "approved", "approved": True, "reason": "late approval"},
             actor="unit-test",
         )
-        assert view["status"] == "responded"
+        assert view.get("status") == "responded"
         await asyncio.sleep(0.1)
         assert calls == [{"path": "./tmp/report.md"}]
     finally:
@@ -224,16 +228,16 @@ async def test_action_loop_projects_exchange_items_onto_owning_agent_execution()
                 max_rounds=3,
             )
         executed = [record for record in records if record.get("action_id") == "delete_report"]
-        assert executed and executed[0]["status"] == "success"
+        assert executed and executed[0].get("status") == "success"
 
         actions = [item["action"] for item in notifications]
         assert actions == ["pending", "resolved"]
         pending_views = notifications[0]["exchanges"]
-        assert pending_views and pending_views[0]["kind"] == "approval"
-        assert pending_views[0]["status"] == "pending"
+        assert pending_views and pending_views[0].get("kind") == "approval"
+        assert pending_views[0].get("status") == "pending"
         resolved_views = notifications[1]["exchanges"]
-        assert resolved_views and resolved_views[0]["status"] == "responded"
-        assert notifications[1]["meta"].get("interrupt_id") == resolved_views[0]["interrupt_id"]
+        assert resolved_views and resolved_views[0].get("status") == "responded"
+        assert notifications[1]["meta"].get("interrupt_id") == resolved_views[0].get("interrupt_id")
     finally:
         global_settings.set("policy_approval.handler", old_handler)
         _restore_interaction_settings(old)

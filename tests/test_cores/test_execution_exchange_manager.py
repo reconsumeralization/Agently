@@ -1,19 +1,27 @@
 import asyncio
 import threading
+from typing import Any
 
 import pytest
 
 from agently import TriggerFlow, TriggerFlowRuntimeData
 from agently.base import execution_exchange, policy_approval, settings
+from agently.types.data import ExecutionExchangeProviderResult, ExecutionExchangeRequest
 
 
 class RecordingProvider:
     def __init__(self, response=None):
-        self.published = []
+        self.published: list[dict[str, Any]] = []
         self.response = response
         self.await_calls = 0
 
-    def publish_request(self, execution_id, request, *, interrupt):
+    def publish_request(
+        self,
+        execution_id: str,
+        request: ExecutionExchangeRequest,
+        *,
+        interrupt: dict[str, Any],
+    ) -> ExecutionExchangeProviderResult:
         self.published.append({"execution_id": execution_id, "request": dict(request)})
         return {
             "exchange_id": f"ex-{ len(self.published) }",
@@ -23,7 +31,7 @@ class RecordingProvider:
 
 
 class HotProvider(RecordingProvider):
-    async def await_response(self, request):
+    async def await_response(self, request: ExecutionExchangeRequest) -> Any:
         self.await_calls += 1
         await asyncio.sleep(0.01)
         return self.response
@@ -31,7 +39,7 @@ class HotProvider(RecordingProvider):
 
 def _approval_flow(**gate_kwargs):
     flow = TriggerFlow()
-    outcome: dict[str, object] = {}
+    outcome: dict[str, Any] = {}
 
     async def guarded(data: TriggerFlowRuntimeData):
         decision = await policy_approval.async_gate(
@@ -76,8 +84,9 @@ async def test_policy_gate_passes_exchange_metadata_into_interrupt_envelope():
         await execution.async_start("go")
 
         interrupt = execution.get_interrupt("approval-gate")
-        assert interrupt is not None and interrupt["status"] == "waiting"
-        envelope = interrupt["external_wait_request"]
+        assert isinstance(interrupt, dict) and interrupt.get("status") == "waiting"
+        envelope = interrupt.get("external_wait_request")
+        assert isinstance(envelope, dict)
         assert envelope["channel_id"] == "test-channel"
         assert envelope["provider_id"] == "unit-provider"
         assert envelope["wait_mode"] == "connected_then_disconnected"
@@ -110,7 +119,9 @@ async def test_policy_gate_routes_metadata_from_interaction_posture():
         await execution.async_start("go")
 
         interrupt = execution.get_interrupt("approval-gate")
-        envelope = interrupt["external_wait_request"]
+        assert isinstance(interrupt, dict)
+        envelope = interrupt.get("external_wait_request")
+        assert isinstance(envelope, dict)
         assert envelope["wait_mode"] == "connected_then_disconnected"
         assert envelope["provider_id"] == "posture-provider"
         assert len(provider.published) == 1
@@ -137,7 +148,7 @@ async def test_hot_wait_resolves_through_provider_await_response():
         assert resolved is True
         assert provider.await_calls == 1
         assert not execution.get_pending_interrupts()
-        result = await execution.async_close()
+        await execution.async_close()
         assert outcome["decision"]["approved"] is True
     finally:
         execution_exchange.unregister_provider("hot-provider")
@@ -152,6 +163,7 @@ async def test_respond_from_another_thread_resumes_live_wait():
         execution = flow.create_execution(auto_close=False)
         await execution.async_start("go")
         interrupt = execution.get_interrupt("approval-gate")
+        assert isinstance(interrupt, dict)
         wait_key = f"{ execution.id }:approval-gate"
 
         def respond_from_thread():
@@ -174,8 +186,9 @@ async def test_respond_from_another_thread_resumes_live_wait():
 
         assert resolved is True
         resumed = execution.get_interrupt("approval-gate")
-        assert resumed["status"] == "resumed"
-        assert resumed["resumed_by"] == "thread-tester"
+        assert isinstance(resumed, dict)
+        assert resumed.get("status") == "resumed"
+        assert resumed.get("resumed_by") == "thread-tester"
         await execution.async_close()
         assert outcome["decision"]["approved"] is True
     finally:
@@ -194,17 +207,17 @@ async def test_project_pending_exchanges_view_shape():
         views = execution_exchange.project_pending_exchanges(execution)
         assert len(views) == 1
         view = views[0]
-        assert view["status"] == "pending"
-        assert view["kind"] == "approval"
-        assert view["interrupt_id"] == "approval-gate"
-        assert view["execution_id"] == execution.id
-        assert view["exchange_id"] == "ex-1"
-        assert view["subject"] == "delete ./report.md"
+        assert view.get("status") == "pending"
+        assert view.get("kind") == "approval"
+        assert view.get("interrupt_id") == "approval-gate"
+        assert view.get("execution_id") == execution.id
+        assert view.get("exchange_id") == "ex-1"
+        assert view.get("subject") == "delete ./report.md"
 
         await execution.async_continue_with("approval-gate", {"approved": True})
         views = execution_exchange.project_execution_exchanges(execution)
-        assert views[0]["status"] == "responded"
-        assert views[0]["response"] == {"approved": True}
+        assert views[0].get("status") == "responded"
+        assert views[0].get("response") == {"approved": True}
         await execution.async_close()
     finally:
         execution_exchange.unregister_provider("view-provider")
@@ -222,8 +235,8 @@ async def test_routing_reads_agent_scoped_settings_not_only_global():
         {"exchange_kind": "approval"}, settings=agent.settings
     )
     assert routing is not None
-    assert routing["provider_id"] == "scoped-prov"
-    assert routing["wait_mode"] == "connected"
+    assert routing.get("provider_id") == "scoped-prov"
+    assert routing.get("wait_mode") == "connected"
 
     # Unset agent-local mode falls back to global/default without leaking the
     # provider from another scope.
@@ -232,7 +245,7 @@ async def test_routing_reads_agent_scoped_settings_not_only_global():
         {"exchange_kind": "approval"}, settings=fresh.settings
     )
     assert routing_default is not None
-    assert routing_default["provider_id"] is None
+    assert routing_default.get("provider_id") is None
 
 
 def _two_gate_chunk_flow():
@@ -244,7 +257,7 @@ def _two_gate_chunk_flow():
     self-resume budget instead of inheriting the first gate's count.
     """
     flow = TriggerFlow()
-    outcome: dict[str, object] = {}
+    outcome: dict[str, Any] = {}
 
     async def double_gated(data: TriggerFlowRuntimeData):
         plan_decision = await policy_approval.async_gate(
@@ -290,7 +303,9 @@ async def test_second_gate_does_not_consume_first_gate_resume_and_gets_fresh_bud
     pending = execution.get_pending_interrupts()
     assert len(pending) == 1
     plan_interrupt_id = next(iter(pending))
-    plan_payload = pending[plan_interrupt_id]["payload"]["request"]
+    plan_interrupt = pending[plan_interrupt_id]
+    assert isinstance(plan_interrupt, dict)
+    plan_payload = plan_interrupt["payload"]["request"]
     assert plan_payload["source"] == "action_plan"
 
     # Approving the plan gate must NOT auto-approve the permission gate: the
@@ -302,7 +317,9 @@ async def test_second_gate_does_not_consume_first_gate_resume_and_gets_fresh_bud
     assert len(pending) == 1
     permission_interrupt_id = next(iter(pending))
     assert permission_interrupt_id != plan_interrupt_id
-    permission_payload = pending[permission_interrupt_id]["payload"]["request"]
+    permission_interrupt = pending[permission_interrupt_id]
+    assert isinstance(permission_interrupt, dict)
+    permission_payload = permission_interrupt["payload"]["request"]
     assert permission_payload["source"] == "action"
     assert outcome["plan_decision"]["approved"] is True
 

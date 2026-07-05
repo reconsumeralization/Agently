@@ -96,6 +96,7 @@ async def test_concurrent_continue_with_on_same_interrupt_dispatches_once():
     assert len(successes) == 1
 
     interrupt = execution.get_interrupt("exchange-a")
+    assert isinstance(interrupt, dict)
     assert interrupt["status"] == "resumed"
     assert resumed["a"] in ({"winner": 1}, {"winner": 2})
 
@@ -121,6 +122,7 @@ async def test_duplicate_resume_request_id_on_same_interrupt_is_idempotent_under
 
     assert not any(isinstance(outcome, BaseException) for outcome in outcomes), outcomes
     interrupt = execution.get_interrupt("exchange-a")
+    assert isinstance(interrupt, dict)
     assert interrupt["status"] == "resumed"
     assert interrupt["resume_requests"]["same-req"]["status"] == "completed"
     assert resumed["a"] == {"approved": True}

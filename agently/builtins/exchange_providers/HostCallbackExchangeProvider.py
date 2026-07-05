@@ -18,7 +18,9 @@ import asyncio
 import inspect
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, cast
+
+from agently.types.data import ExecutionExchangeProviderResult, ExecutionExchangeRequest
 
 
 class HostCallbackExchangeProvider:
@@ -41,7 +43,13 @@ class HostCallbackExchangeProvider:
         self._provider_name = provider_name
         self._entries: dict[str, dict[str, Any]] = {}
 
-    def publish_request(self, execution_id: str, request: dict[str, Any], *, interrupt: dict[str, Any]):
+    def publish_request(
+        self,
+        execution_id: str,
+        request: ExecutionExchangeRequest,
+        *,
+        interrupt: dict[str, Any],
+    ) -> ExecutionExchangeProviderResult:
         exchange_id = str(request.get("exchange_id") or f"{ self._provider_name }:{ uuid.uuid4().hex }")
         stored_request = dict(request)
         stored_request["exchange_id"] = exchange_id
@@ -74,7 +82,7 @@ class HostCallbackExchangeProvider:
             "provider_metadata": {"provider": self._provider_name},
         }
 
-    async def await_response(self, request: dict[str, Any]):
+    async def await_response(self, request: ExecutionExchangeRequest):
         exchange_id = str(request.get("exchange_id") or "")
         entry = self._entries.get(exchange_id)
         if entry is None:
@@ -107,15 +115,19 @@ class HostCallbackExchangeProvider:
             {"status": "approved", "approved": True, "reason": reason, **extra},
         )
 
-    async def cancel_request(self, request: dict[str, Any], *, reason: str = ""):
+    async def cancel_request(self, request: ExecutionExchangeRequest, *, reason: str = ""):
         exchange_id = str(request.get("exchange_id") or "")
         entry = self._entries.pop(exchange_id, None)
         if entry is not None:
             entry["response"] = None
             entry["event"].set()
 
-    async def list_pending(self, scope: Any = None):
-        return [dict(entry["request"]) for entry in self._entries.values() if not entry["event"].is_set()]
+    async def list_pending(self, scope: Any = None) -> list[ExecutionExchangeRequest]:
+        return [
+            cast(ExecutionExchangeRequest, dict(entry["request"]))
+            for entry in self._entries.values()
+            if not entry["event"].is_set()
+        ]
 
     def pending_views(self) -> list[dict[str, Any]]:
         return [

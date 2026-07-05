@@ -112,6 +112,12 @@ workflow, see `examples/step_by_step/11-triggerflow-19_document_review_pause_res
 It uses `pause_for(..., resume_to="self")` inside the model-owned gate, so the
 same gate re-enters with `data.is_resume` and `data.resume` after human review.
 
+For a host-owned approval transport, use the ExecutionExchange provider seam
+instead of inventing a second pause/resume channel. A provider publishes the
+typed request, while TriggerFlow still owns the interrupt ledger and
+`continue_with(...)` resume. See
+`examples/step_by_step/11-triggerflow-23_execution_exchange_provider.py`.
+
 ## Pause across process restarts
 
 `pause_for(...)` integrates cleanly with execution snapshot load:

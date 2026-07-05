@@ -815,6 +815,13 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
         normalized["step_scope"] = {"allowed_capability_ids": allowed_capability_ids}
         normalized["allowed_action_ids"] = allowed_capability_ids
+        required_action_ids = self._normalize_string_list(
+            normalized.get("required_action_ids")
+            or normalized.get("required_actions")
+            or raw_scope.get("required_action_ids")
+            or raw_scope.get("required_actions")
+        )
+        normalized["required_action_ids"] = required_action_ids
         scoped_retrieval = self._normalize_scoped_retrieval_plan(normalized.get("scoped_retrieval"))
         if scoped_retrieval:
             normalized["scoped_retrieval"] = scoped_retrieval
@@ -1067,15 +1074,39 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             step_scope = {}
         allowed_capability_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
         if allowed_capability_ids and effective_shape in {"direct", "actions"}:
-            local_action_ids = getattr(execution, "local_action_ids", None)
-            if isinstance(local_action_ids, list):
-                for capability_id in allowed_capability_ids:
-                    if capability_id not in local_action_ids:
-                        local_action_ids.append(capability_id)
-            sync_action_scope = getattr(execution, "_sync_action_scope", None)
-            if callable(sync_action_scope):
-                sync_action_scope(source="AgentTask.step_scope")
+            use_actions = getattr(execution, "use_actions", None)
+            if callable(use_actions):
+                use_actions(allowed_capability_ids)
+            else:
+                local_action_ids = getattr(execution, "local_action_ids", None)
+                if isinstance(local_action_ids, list):
+                    for capability_id in allowed_capability_ids:
+                        if capability_id not in local_action_ids:
+                            local_action_ids.append(capability_id)
+                sync_action_scope = getattr(execution, "_sync_action_scope", None)
+                if callable(sync_action_scope):
+                    sync_action_scope(source="AgentTask.step_scope")
         action_scope_source = "step_scope" if allowed_capability_ids else ""
+        required_action_ids = self._normalize_string_list(plan.get("required_action_ids"))
+        if required_action_ids and effective_shape in {"direct", "actions"}:
+            require_actions = getattr(execution, "require_actions", None)
+            if callable(require_actions):
+                require_actions(required_action_ids)
+            else:
+                local_action_ids = getattr(execution, "local_action_ids", None)
+                if isinstance(local_action_ids, list):
+                    for action_id in required_action_ids:
+                        if action_id not in local_action_ids:
+                            local_action_ids.append(action_id)
+                local_required_action_ids = getattr(execution, "local_required_action_ids", None)
+                if isinstance(local_required_action_ids, list):
+                    for action_id in required_action_ids:
+                        if action_id not in local_required_action_ids:
+                            local_required_action_ids.append(action_id)
+                sync_action_scope = getattr(execution, "_sync_action_scope", None)
+                if callable(sync_action_scope):
+                    sync_action_scope(source="AgentTask.required_action_ids")
+            action_scope_source = "required_action_ids"
         if effective_shape == "actions" and not allowed_capability_ids:
             action_capability_ids = [
                 str(item.get("id") or "").strip()
@@ -1095,6 +1126,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "dag_allowed": dag_allowed,
             "dag_shape_degraded": dag_shape_degraded,
             "step_scope": DataFormatter.sanitize(step_scope),
+            "required_action_ids": DataFormatter.sanitize(required_action_ids),
             "action_scope_source": action_scope_source,
             "policy": DataFormatter.sanitize(policy),
         }
@@ -1458,7 +1490,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             + strategy_note
             + capability_note
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
-            "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
+            "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability. "
+            "When the user explicitly requires a named action/tool to be called, or the next step cannot be accepted "
+            "without that exact action's execution record, set required_action_ids to those action ids instead of "
+            "claiming the action was requested in prose."
             " For Workspace, repository, or file-backed evidence, prefer scoped retrieval before bulk reads when it can "
             "reduce prompt input. If useful, return scoped_retrieval.query_groups with prioritized exact phrases or "
             "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. Workspace.retrieve/read executors only "
@@ -1516,6 +1551,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "step_scope": (
                     dict,
                     "Optional structured scope: {allowed_capability_ids: [...]}; empty means no restriction",
+                    False,
+                ),
+                "required_action_ids": (
+                    [str],
+                    "Action ids that must produce real ActionRuntime evidence in this bounded step; use for explicit user-required tools/actions",
                     False,
                 ),
                 "scoped_retrieval": (
