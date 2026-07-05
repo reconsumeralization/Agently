@@ -9,7 +9,7 @@ Suggested reading order:
 5. [Patterns](patterns.md): branching, match, batch, for_each, event-driven loops.
 6. [Sub-Flow](sub-flow.md): parent-child flow composition.
 7. [Persistence and Blueprint](persistence-and-blueprint.md): save/load and definition export.
-8. [Pause and Resume](pause-and-resume.md): human intervention and external resume.
+8. [Pause and Resume](pause-and-resume.md): human intervention, ExecutionExchange providers, and external resume.
 9. [Distributed Pause and Resume Boundaries](distributed-pause-resume.md): host-managed recovery, resource ownership, and production boundaries.
 10. [Runtime Intervention](runtime-intervention.md): adding supplemental context without pausing or mutating the graph.
 11. [Model Integration](model-integration.md): calling agents / requests inside chunks.

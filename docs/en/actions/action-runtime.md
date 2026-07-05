@@ -144,6 +144,15 @@ allowlist, Agently uses a small safe shell profile for commands such as `pwd`,
 `python -m pyright`. Stdout and stderr are returned as bounded previews; if a
 stream exceeds `max_output_chars`, the full stream is written under the
 Workspace root at `artifacts/shell/` and referenced from the action result.
+`allow_unsafe` is a host-only direct execution grant; it is not exposed in
+model-visible shell action schemas and is stripped from model-planned action
+inputs. If a model-selected command is outside the safe profile, route it
+through an approval-required action or an ExecutionExchange provider instead of
+letting model output grant its own bypass.
+Custom actions that need direct-call-only parameters can mark them with
+`meta={"host_only_input_keys": [...]}`; Action Runtime strips those keys from
+model-planned `structured_plan` and native tool-call inputs while preserving
+host/direct calls.
 
 Built-in capability packages live under `agently.builtins.actions`. For example:
 

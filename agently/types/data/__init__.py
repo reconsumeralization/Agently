@@ -203,9 +203,15 @@ from .blocks import (
 )
 
 from .execution_exchange import (
+    ExchangeRoutingHandler,
     ExecutionExchangeDispatchState,
+    ExecutionExchangeKind,
     ExecutionExchangeProviderResult,
     ExecutionExchangeRequest,
+    ExecutionExchangeResponse,
+    ExecutionExchangeRouting,
+    ExecutionExchangeStatus,
+    ExecutionExchangeView,
     ExecutionExchangeWaitMode,
 )
 

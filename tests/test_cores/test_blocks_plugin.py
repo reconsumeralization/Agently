@@ -1041,3 +1041,49 @@ def test_task_dag_executor_blocks_path_still_rejects_invalid_dag():
             },
             blocks=Agently.blocks,
         )
+
+
+@pytest.mark.asyncio
+async def test_blocks_external_wait_forwards_exchange_metadata_to_envelope():
+    graph = Agently.blocks.compile(
+        {
+            "plan_id": "plan-external-wait-metadata",
+            "plan_blocks": [
+                {
+                    "id": "callback",
+                    "plan_block_id": "external_wait",
+                    "kind": "external_wait",
+                    "bound_inputs": {
+                        "type": "webhook",
+                        "exchange_kind": "clarification",
+                        "interrupt_id": "external-callback",
+                        "payload": {"ticket_id": "INC-42"},
+                        "channel_id": "blocks-channel",
+                        "provider_id": "blocks-provider",
+                        "wait_mode": "connected_then_disconnected",
+                        "hot_wait_timeout": 7.5,
+                        "response_payload_schema": {"type": "object", "required": ["status"]},
+                        "audit_metadata": {"case": "blocks-passthrough"},
+                    },
+                }
+            ],
+        }
+    )
+    execution = await Agently.blocks.bind_runtime(graph).async_start_execution(
+        None,
+        wait_for_result=False,
+        workspace=False,
+    )
+    pending = execution.get_pending_interrupts()
+    envelope = pending["external-callback"]["external_wait_request"]
+
+    assert envelope["channel_id"] == "blocks-channel"
+    assert envelope["provider_id"] == "blocks-provider"
+    assert envelope["wait_mode"] == "connected_then_disconnected"
+    assert envelope["hot_wait_timeout"] == 7.5
+    assert envelope["response_payload_schema"] == {"type": "object", "required": ["status"]}
+    assert envelope["audit_metadata"]["case"] == "blocks-passthrough"
+    assert envelope["exchange_kind"] == "clarification"
+
+    await execution.async_continue_with("external-callback", {"status": "ready"})
+    await execution.async_close(timeout=5)

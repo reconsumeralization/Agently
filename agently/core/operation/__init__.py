@@ -36,6 +36,7 @@ from .ExecutionResource import (
     ExecutionResourceError,
     ExecutionResourceManager,
 )
+from .ExecutionExchange import ExecutionExchangeManager
 from .PolicyApproval import PolicyApprovalManager
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "ExecutionResourceApprovalDenied",
     "ExecutionResourceApprovalRequired",
     "ExecutionResourceError",
+    "ExecutionExchangeManager",
     "ExecutionResourceManager",
     "PolicyApprovalManager",
     "StandardActionExecutionHandler",

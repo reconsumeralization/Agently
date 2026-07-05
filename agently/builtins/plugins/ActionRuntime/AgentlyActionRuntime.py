@@ -437,9 +437,12 @@ class AgentlyActionRuntime:
         from agently.core.orchestration.TriggerFlow import TriggerFlow
 
         settings = context["settings"]
-        action_calls = request.get("action_calls", [])
+        action_calls = cast(list["ActionCall"], request.get("action_calls", []))
         concurrency = request.get("concurrency", None)
         timeout = request.get("timeout", None)
+        trusted_policy_overrides = request.get("trusted_policy_overrides", {})
+        if not isinstance(trusted_policy_overrides, dict):
+            trusted_policy_overrides = {}
         if len(action_calls) == 0:
             return []
         if self.action.async_execute_action is None:
@@ -458,6 +461,19 @@ class AgentlyActionRuntime:
             policy_override = action_call.get("policy_override", {})
             if not isinstance(policy_override, dict):
                 policy_override = {}
+            command_key = getattr(data, "index", None)
+            if command_key is None:
+                # for_each fan-out items carry no index attribute; locate the
+                # command position in the original call list instead.
+                try:
+                    command_key = action_calls.index(cast("ActionCall", action_call))
+                except ValueError:
+                    command_key = None
+            trusted_policy_override = trusted_policy_overrides.get(command_key)
+            if trusted_policy_override is None and command_key is not None:
+                trusted_policy_override = trusted_policy_overrides.get(str(command_key))
+            if not isinstance(trusted_policy_override, dict):
+                trusted_policy_override = None
 
             async def execute_once():
                 command_index = getattr(data, "index", None)
@@ -474,6 +490,7 @@ class AgentlyActionRuntime:
                     settings=settings,
                     purpose=purpose,
                     policy_override=policy_override,
+                    trusted_policy_override=trusted_policy_override,
                     source_protocol=str(action_call.get("source_protocol", "structured_plan")),
                     todo_suggestion=next_step,
                     next_value=next_step,

@@ -415,6 +415,10 @@ async def async_emit_action_flow_observation(observation: dict[str, Any]) -> Non
         "action_approval_required": "action.approval_required",
         "action_blocked": "action.blocked",
         "action_failed": "action.failed",
+        "exchange_pending": "action.exchange_pending",
+        "exchange_resolved": "action.exchange_resolved",
+        "exchange_paused": "action.exchange_paused",
+        "loop_paused": "action.loop_paused",
     }
     event_type = event_types.get(kind)
     if event_type is None:

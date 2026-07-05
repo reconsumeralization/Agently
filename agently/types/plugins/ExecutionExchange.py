@@ -21,6 +21,26 @@ from agently.types.data import ExecutionExchangeProviderResult, ExecutionExchang
 
 @runtime_checkable
 class ExecutionExchangeProvider(Protocol):
+    """Transport/execution seam for execution exchanges.
+
+    ``publish_request`` is the only required member and keeps the round-001
+    contract: it is called after the interrupt is persisted and before it is
+    exposed, and may merge ``exchange_id``/``request_ref``/metadata back into
+    the ExternalWait envelope.
+
+    Providers may additionally implement optional capability methods that the
+    ExecutionExchangeManager feature-detects with ``getattr``:
+
+    - ``await_response(request) -> Any | None``: connected-mode hot wait; block
+      until a response payload is available or return ``None`` on timeout /
+      abandon. Never called by TriggerFlow core — only by execution-handle
+      owners through the manager.
+    - ``cancel_request(request, *, reason) -> None``: notified when a pending
+      exchange is cancelled or expired so the channel can clean up.
+    - ``list_pending(scope) -> list[ExecutionExchangeRequest]``: enumerate
+      durable pending requests for host recovery after restart.
+    """
+
     def publish_request(
         self,
         execution_id: str,

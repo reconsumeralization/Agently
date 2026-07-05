@@ -203,6 +203,7 @@ class AgentExecution:
             lineage=self.lineage,
         ).bind_execution(self)
         self.execution_context.set_progress_callback(self._publish_runtime_progress)
+        self.execution_context.set_exchange_callback(self._publish_exchange_stream_item)
         self._error: BaseException | None = None
         self._selected_route: tuple[str, dict[str, Any]] | None = None
         self._seen_action_log_keys: set[str] = set()
@@ -302,6 +303,7 @@ class AgentExecution:
             lineage=self.lineage,
         ).bind_execution(self)
         self.execution_context.set_progress_callback(self._publish_runtime_progress)
+        self.execution_context.set_exchange_callback(self._publish_exchange_stream_item)
         self._selected_route = None
         self.route_info = {}
         self.route_plan = {}
@@ -309,6 +311,30 @@ class AgentExecution:
 
     def _build_effective_options(self) -> dict[str, Any]:
         return build_effective_options(self)
+
+    async def _publish_exchange_stream_item(
+        self,
+        action: str,
+        exchanges: list[dict[str, Any]],
+        meta: dict[str, Any],
+    ):
+        """Project pending/resolved human exchanges as typed stream items.
+
+        Hosts consume these as instant items with meta.stream_kind="exchange"
+        carrying normalized ExecutionExchangeView payloads, instead of reading
+        raw TriggerFlow interrupt fields.
+        """
+        await self.stream.emit(
+            f"exchange.{ action }",
+            {"action": action, "exchanges": exchanges},
+            route=str(self.route_info.get("selected_route") or ""),
+            source="execution_exchange",
+            meta={
+                **meta,
+                "stream_kind": "exchange",
+                "exchange_action": action,
+            },
+        )
 
     async def _publish_runtime_progress(self, event: dict[str, Any]):
         stage = str(event.get("stage") or "runtime").strip() or "runtime"

@@ -138,6 +138,13 @@ safe shell profile，例如 `pwd`、`ls`、`rg`、`cat`、`git status`、`git di
 `git log`、`python -m pytest` 和 `python -m pyright`。stdout/stderr 以有界 preview
 返回；某个 stream 超过 `max_output_chars` 时，完整 stream 会写入 Workspace root 下的
 `artifacts/shell/`，并在 action result 中返回引用。
+`allow_unsafe` 是 host-only 的直接执行授权，不会出现在模型可见的 shell action schema
+中；模型计划出的 action input 里即使包含该字段也会被清洗。模型选择的命令超出 safe
+profile 时，应通过需要审批的 action 或 ExecutionExchange provider 路由，而不是允许
+模型输出自行授予 bypass。
+自定义 action 如果需要仅 host/direct call 可用的参数，可以用
+`meta={"host_only_input_keys": [...]}` 声明；Action Runtime 会从模型计划出的
+`structured_plan` 和 native tool-call 输入里清洗这些 key，同时保留 host/direct call。
 
 内置能力 package 位于 `agently.builtins.actions`。例如：
 

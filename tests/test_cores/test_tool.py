@@ -192,6 +192,85 @@ def test_model_sourced_action_input_strips_undeclared_kwargs():
     )
 
 
+def test_model_sourced_action_input_strips_spec_host_only_kwargs():
+    action = Agently.create_agent().action
+    action_id = f"input_host_only_{ uuid.uuid4().hex[:8] }"
+    received: list[dict[str, Any]] = []
+
+    def capture(**kwargs):
+        received.append(dict(kwargs))
+        return dict(kwargs)
+
+    action.register_action(
+        action_id=action_id,
+        desc="Capture received kwargs.",
+        kwargs={"value": (int, ""), "privileged": (bool, "")},
+        func=capture,
+        expose_to_model=False,
+        meta={"host_only_input_keys": ["privileged"]},
+    )
+
+    model_result = action.execute_action(
+        action_id,
+        {"value": 3, "privileged": True},
+        source_protocol="structured_plan",
+    )
+
+    assert model_result.get("status") == "success"
+    assert model_result.get("data") == {"value": 3}
+    assert received[-1] == {"value": 3}
+    diagnostics = model_result.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    strip_diagnostic = next(item for item in diagnostics if item.get("code") == "action.input.unexpected_keys_stripped")
+    assert strip_diagnostic.get("meta", {}).get("stripped_keys") == ["privileged"]
+
+    direct_result = action.execute_action(
+        action_id,
+        {"value": 4, "privileged": True},
+        source_protocol="direct",
+    )
+    assert direct_result.get("status") == "success"
+    assert received[-1] == {"value": 4, "privileged": True}
+
+
+def test_model_sourced_bash_action_input_strips_allow_unsafe(tmp_path):
+    agent = Agently.create_agent()
+    action_id = f"bash_input_safety_{ uuid.uuid4().hex[:8] }"
+    target = tmp_path / "unsafe_probe.txt"
+    command = "python -c \"open('unsafe_probe.txt','w').write('bypassed')\""
+
+    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id=action_id)
+    spec = agent.action.action_registry.get_spec(action_id)
+    assert spec is not None
+    kwargs = spec.get("kwargs")
+    assert isinstance(kwargs, dict)
+    assert "allow_unsafe" not in kwargs
+
+    model_result = agent.action.execute_action(
+        action_id,
+        {"cmd": command, "workdir": str(tmp_path), "allow_unsafe": True},
+        source_protocol="structured_plan",
+    )
+
+    assert model_result.get("status") == "blocked"
+    assert not target.exists()
+    assert model_result.get("kwargs") == {"cmd": command, "workdir": str(tmp_path)}
+    diagnostics = model_result.get("diagnostics")
+    assert isinstance(diagnostics, list)
+    strip_diagnostic = next(item for item in diagnostics if item.get("code") == "action.input.unexpected_keys_stripped")
+    strip_meta = strip_diagnostic.get("meta", {})
+    assert strip_meta["source_protocol"] == "structured_plan"
+    assert strip_meta["stripped_keys"] == ["allow_unsafe"]
+
+    direct_result = agent.action.execute_action(
+        action_id,
+        {"cmd": command, "workdir": str(tmp_path), "allow_unsafe": True},
+        source_protocol="direct",
+    )
+    assert direct_result.get("status") == "success"
+    assert target.read_text(encoding="utf-8") == "bypassed"
+
+
 def test_action_dispatcher_parameter_error_has_structured_diagnostic():
     action = Agently.create_agent().action
     action_id = f"input_type_error_{ uuid.uuid4().hex[:8] }"

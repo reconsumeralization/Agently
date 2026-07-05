@@ -431,6 +431,27 @@ The provider may return `exchange_id`, `provider_metadata`, and
 If provider publishing fails, TriggerFlow records `dispatch_state` as
 `exposure_failed` and emits `triggerflow.interrupt_exposure_failed`.
 
+The public `execution_exchange` facade is the host-side companion for these
+requests:
+
+- register reusable transports with
+  `execution_exchange.register_provider("approval-router", provider)`;
+- inspect host-renderable cards with
+  `execution_exchange.project_pending_exchanges(execution)` or
+  `project_execution_exchanges(execution)`;
+- for connected ActionFlow / PolicyApproval waits, let the host endpoint resolve
+  the live exchange with
+  `await execution_exchange.async_respond(exchange_id, {"approved": True})`.
+
+AgentExecution hosts do not need to read raw TriggerFlow interrupts for the UI.
+When an ActionFlow run is owned by an AgentExecution, pending and resolved
+exchanges are emitted as stream items with path `exchange.pending` or
+`exchange.resolved`, `meta.stream_kind == "exchange"`, and a value shaped as
+`{"action": "...", "exchanges": [ExecutionExchangeView, ...]}`.
+
+For a minimal provider smoke that does not call a model or external service, see
+`examples/step_by_step/11-triggerflow-23_execution_exchange_provider.py`.
+
 For long-running executions, keep large payloads behind provider refs and store
 only compaction facts in the execution snapshot by configuring a host-owned
 reducer policy. The reducer receives the bounded RuntimeEvent

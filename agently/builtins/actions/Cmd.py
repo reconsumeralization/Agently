@@ -96,7 +96,6 @@ class Cmd:
             kwargs={
                 "cmd": ("str | list[str]", "Command to run."),
                 "workdir": ("str | None", "Working directory."),
-                "allow_unsafe": (bool, "Allow command outside allowlist. Default: False."),
             },
             func=self.run,
             tags=tags,
@@ -109,6 +108,7 @@ class Cmd:
                 "component": "builtins.actions.Cmd",
                 "legacy_tool_facade": "agently.builtins.tools.Cmd",
                 "recommended_public_helper": "agent.enable_shell",
+                "host_only_input_keys": ["allow_unsafe"],
             },
         )
         return [action_id]
