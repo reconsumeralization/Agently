@@ -182,3 +182,85 @@ async def test_action_loop_without_provider_denies_instead_of_hanging_or_raising
     finally:
         global_settings.set("policy_approval.handler", old_handler)
         _restore_interaction_settings(old)
+
+
+@pytest.mark.asyncio
+async def test_action_loop_projects_exchange_items_onto_owning_agent_execution():
+    """Slice F: pending/resolved exchanges reach the AgentExecution stream.
+
+    The action loop notifies the bound AgentExecutionContext at each exchange
+    moment; the orchestrator republishes them as instant stream items with
+    meta.stream_kind="exchange" carrying normalized ExecutionExchangeView
+    payloads.
+    """
+    from agently.core.application.AgentExecution import AgentExecutionContext
+    from agently.core.runtime.RuntimeContext import bind_runtime_context
+
+    calls: list[dict[str, Any]] = []
+    agent = _build_agent_with_guarded_action(calls)
+    provider = ApprovingProvider({"status": "approved", "approved": True, "reason": "operator approved"})
+    execution_exchange.register_provider("loop-projection", provider, replace=True)
+    old = _interaction_settings(mode="hot", exchange_provider="loop-projection", hot_wait_timeout=5)
+    old_handler = global_settings.get("policy_approval.handler", None)
+    global_settings.set("policy_approval.handler", "fail_closed")
+
+    notifications: list[dict[str, Any]] = []
+    context = AgentExecutionContext(execution_id="exchange-projection", lineage={}, limits={})
+
+    async def record_exchange(action: str, exchanges: list[dict[str, Any]], meta: dict[str, Any]):
+        notifications.append({"action": action, "exchanges": exchanges, "meta": meta})
+
+    context.set_exchange_callback(record_exchange)
+    try:
+        prompt = Agently.create_prompt()
+        prompt.set("input", "clean up the stale report")
+        with bind_runtime_context(agent_execution_context=context):
+            records = await agent.action.async_plan_and_execute(
+                prompt=prompt,
+                settings=agent.settings,
+                action_list=agent.action.get_action_list(tags=["exchange-test"]),
+                agent_name=agent.name,
+                planning_handler=_planning_handler,
+                max_rounds=3,
+            )
+        executed = [record for record in records if record.get("action_id") == "delete_report"]
+        assert executed and executed[0]["status"] == "success"
+
+        actions = [item["action"] for item in notifications]
+        assert actions == ["pending", "resolved"]
+        pending_views = notifications[0]["exchanges"]
+        assert pending_views and pending_views[0]["kind"] == "approval"
+        assert pending_views[0]["status"] == "pending"
+        resolved_views = notifications[1]["exchanges"]
+        assert resolved_views and resolved_views[0]["status"] == "responded"
+        assert notifications[1]["meta"].get("interrupt_id") == resolved_views[0]["interrupt_id"]
+    finally:
+        global_settings.set("policy_approval.handler", old_handler)
+        _restore_interaction_settings(old)
+        execution_exchange.unregister_provider("loop-projection")
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_publishes_exchange_stream_items():
+    """Orchestrator wiring: the exchange callback lands typed stream items."""
+    agent = Agently.create_agent()
+    execution = agent.create_execution().input("noop")
+    view = {
+        "exchange_id": "ex-1",
+        "interrupt_id": "policy:demo",
+        "execution_id": "flow-1",
+        "kind": "approval",
+        "status": "pending",
+    }
+    await execution.execution_context.async_notify_exchange("pending", [view])
+    exchange_items = [
+        item
+        for item in execution.stream.items
+        if (item.meta or {}).get("stream_kind") == "exchange"
+    ]
+    assert len(exchange_items) == 1
+    item = exchange_items[0]
+    assert item.path == "exchange.pending"
+    assert item.value["action"] == "pending"
+    assert item.value["exchanges"] == [view]
+    assert (item.meta or {}).get("exchange_action") == "pending"

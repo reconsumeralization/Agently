@@ -777,6 +777,9 @@ class TriggerFlowActionFlow:
                         envelope = envelope if isinstance(envelope, dict) else {}
                         wait_mode = str(envelope.get("wait_mode") or "disconnected")
                         cold_policy = str(envelope.get("cold_persistence_policy") or "persist")
+                        pending_exchange_views = execution._to_serializable_value(
+                            execution_exchange.project_pending_exchanges(execution)
+                        )
                         await publish_runtime_observation(
                             "exchange_pending",
                             level="WARNING",
@@ -785,10 +788,13 @@ class TriggerFlowActionFlow:
                                 "agent_name": agent_name,
                                 "interrupt_id": interrupt_id,
                                 "wait_mode": wait_mode,
-                                "pending_exchanges": execution._to_serializable_value(
-                                    execution_exchange.project_pending_exchanges(execution)
-                                ),
+                                "pending_exchanges": pending_exchange_views,
                             },
+                        )
+                        await self._notify_agent_execution_exchange(
+                            "pending",
+                            pending_exchange_views if isinstance(pending_exchange_views, list) else [],
+                            interrupt_id=interrupt_id,
                         )
                         provider = execution_exchange._resolve_interrupt_provider(execution, interrupt)
                         if provider is None and wait_mode != "disconnected":
@@ -816,6 +822,21 @@ class TriggerFlowActionFlow:
                                         "agent_name": agent_name,
                                         "interrupt_id": interrupt_id,
                                     },
+                                )
+                                resolved_interrupt = execution.get_interrupt(interrupt_id)
+                                resolved_views = (
+                                    [
+                                        execution._to_serializable_value(
+                                            execution_exchange.project_exchange(execution.id, resolved_interrupt)
+                                        )
+                                    ]
+                                    if isinstance(resolved_interrupt, dict)
+                                    else []
+                                )
+                                await self._notify_agent_execution_exchange(
+                                    "resolved",
+                                    resolved_views,
+                                    interrupt_id=interrupt_id,
                                 )
                                 continue
                             if wait_mode == "connected":
@@ -930,6 +951,29 @@ class TriggerFlowActionFlow:
                 },
             )
         return normalized
+
+    @staticmethod
+    async def _notify_agent_execution_exchange(
+        action: str,
+        exchanges: list[Any],
+        *,
+        interrupt_id: str | None = None,
+    ):
+        """Project an exchange lifecycle moment onto the owning AgentExecution.
+
+        No-op for plain agent requests: the contextvar only carries an
+        AgentExecutionContext when an AgentExecution owns this run.
+        """
+        context = get_current_agent_execution_context()
+        notify = getattr(context, "async_notify_exchange", None)
+        if callable(notify):
+            result = notify(
+                action,
+                [item for item in exchanges if isinstance(item, dict)],
+                meta={"interrupt_id": interrupt_id} if interrupt_id else None,
+            )
+            if inspect.isawaitable(result):
+                await result
 
     def _record_agent_execution_progress(
         self,
