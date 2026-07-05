@@ -156,10 +156,17 @@ agent.use_actions(Browse())
 
 Search is an Action-native package and does not use ExecutionResource;
 proxy, timeout, backend, and region are package/executor configuration. Browse
-is also Action-native; its default path is Playwright -> restricted curl -> BS4,
-while pyautogui is kept as legacy/advanced configuration. The curl backend is a
-Browse-internal URL fetch fallback, not model-visible shell access. If a Browse action needs a managed
-browser/page/session, register it with a Browser ExecutionResource provider enabled.
+is also Action-native; its default path is Jina Reader -> Playwright -> BS4 ->
+restricted curl, while pyautogui is kept as legacy/advanced configuration. The
+curl backend is a Browse-internal URL fetch fallback, not model-visible shell
+access. Jina Reader delegates the target public URL to `https://r.jina.ai/` for
+URL-to-Markdown recovery and automatically tries the official alternate endpoint
+`https://r.jinaai.cn/` when the primary Reader endpoint has a transport or
+service failure. Disable it explicitly with
+`Browse(enable_jina_reader=False, fallback_order=("playwright", "bs4", "curl"))`
+when that external service boundary is not acceptable.
+If a Browse action needs a managed browser/page/session, register it with a
+Browser ExecutionResource provider enabled.
 
 Agent Client Protocol (ACP) coding agents are exposed as Action capability, not
 as an AgentExecution route. Use `agent.use_acp(on_missing="skip")` to

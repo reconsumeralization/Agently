@@ -378,12 +378,212 @@ def test_agent_language_policy_updates_builtin_browse_accept_language():
     assert browse.headers["Accept-Language"].startswith("zh-CN")
 
 
-def test_browse_default_fallback_prefers_playwright_curl_then_bs4():
+def test_browse_default_fallback_prefers_reader_then_local_backends():
     browse = Browse()
 
-    assert browse.fallback_order == ("playwright", "curl", "bs4")
+    assert browse.fallback_order == ("jina_reader", "playwright", "bs4", "curl")
     assert browse.enable_curl is True
+    assert browse.enable_jina_reader is True
+    assert browse.jina_reader_fallback_endpoints == ("https://r.jinaai.cn/",)
+    assert browse.jina_reader_timeout == 10
     assert browse.playwright_include_links is True
+
+
+def test_browse_jina_reader_url_uses_raw_prepend_format():
+    browse = Browse()
+
+    reader_url = browse._jina_reader_url("https://example.com/path?q=1#section")
+
+    assert reader_url == "https://r.jina.ai/https://example.com/path?q=1#section"
+
+
+def test_browse_jina_reader_url_encodes_only_unsafe_target_characters():
+    browse = Browse()
+
+    reader_url = browse._jina_reader_url("https://example.com/路径?q=hello world")
+
+    assert reader_url == "https://r.jina.ai/https://example.com/%E8%B7%AF%E5%BE%84?q=hello%20world"
+
+
+def test_browse_jina_reader_url_uses_configured_endpoint():
+    browse = Browse(jina_reader_endpoint="https://r.jinaai.cn/")
+
+    reader_url = browse._jina_reader_url("https://example.com/path?q=1")
+
+    assert reader_url == "https://r.jinaai.cn/https://example.com/path?q=1"
+
+
+@pytest.mark.asyncio
+async def test_browse_jina_reader_uses_post_for_fragment_urls(monkeypatch):
+    browse_module = importlib.import_module("agently.builtins.actions.Browse")
+    calls: list[tuple[str, Any]] = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "text/markdown"}
+        text = (
+            "URL Source: https://example.com/#/route\n\n"
+            "# Fragment route\n\n"
+            "Reader returned a concrete body from a hash-routed page."
+        )
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, **kwargs):
+            calls.append(("post", (url, kwargs)))
+            return FakeResponse()
+
+        async def get(self, url, **kwargs):
+            calls.append(("get", (url, kwargs)))
+            raise AssertionError("fragment URLs should use Jina Reader POST form")
+
+    class FakeHttpx:
+        AsyncClient = FakeAsyncClient
+
+    def fake_import_package(package_name: str, **kwargs):
+        calls.append(("import", (package_name, kwargs)))
+        assert package_name == "httpx"
+        assert kwargs == {"auto_install": False}
+        return FakeHttpx
+
+    monkeypatch.setattr(browse_module.LazyImport, "import_package", fake_import_package)
+
+    browse = Browse(enable_jina_reader=True, proxy="http://127.0.0.1:7890", timeout=30, jina_reader_timeout=9)
+    result = await browse._jina_reader_browse("https://example.com/#/route")
+
+    assert isinstance(result, dict)
+    assert result["content_kind"] == "reader_text"
+    assert result["reader_url"] == "https://r.jina.ai/https://example.com/#/route"
+    assert ("init", {"proxy": "http://127.0.0.1:7890", "timeout": 9}) in calls
+    assert any(
+        kind == "post"
+        and payload[0] == "https://r.jina.ai/"
+        and payload[1]["data"] == {"url": "https://example.com/#/route"}
+        for kind, payload in calls
+    )
+    assert not any(kind == "get" for kind, _ in calls)
+
+
+@pytest.mark.asyncio
+async def test_browse_jina_reader_tries_alternate_endpoint_on_transport_error(monkeypatch):
+    browse_module = importlib.import_module("agently.builtins.actions.Browse")
+    calls: list[tuple[str, Any]] = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "text/markdown"}
+        text = "URL Source: https://example.com/\n\n# Example\n\nReader alternate endpoint recovered content."
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, **kwargs):
+            calls.append(("get", (url, kwargs)))
+            if str(url).startswith("https://r.jina.ai/"):
+                raise RuntimeError("tls eof")
+            return FakeResponse()
+
+    class FakeHttpx:
+        AsyncClient = FakeAsyncClient
+
+    monkeypatch.setattr(
+        browse_module.LazyImport,
+        "import_package",
+        lambda package_name, **kwargs: FakeHttpx if package_name == "httpx" else None,
+    )
+
+    browse = Browse(enable_jina_reader=True, timeout=30, jina_reader_timeout=7)
+    result = await browse._jina_reader_browse("https://example.com/")
+
+    assert isinstance(result, dict)
+    assert result["reader_endpoint"] == "https://r.jinaai.cn/"
+    assert result["reader_url"] == "https://r.jinaai.cn/https://example.com/"
+    assert ("init", {"proxy": None, "timeout": 7}) in calls
+    assert [payload[0] for kind, payload in calls if kind == "get"] == [
+        "https://r.jina.ai/https://example.com/",
+        "https://r.jinaai.cn/https://example.com/",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_browse_falls_back_from_jina_block_page_to_local_backend():
+    browse = Browse(
+        fallback_order=("jina_reader", "bs4"),
+        enable_playwright=False,
+        enable_curl=False,
+        enable_jina_reader=True,
+        enable_bs4=True,
+        min_content_length=20,
+        max_attempts=1,
+    )
+
+    async def fake_jina(url: str):
+        return {
+            "ok": True,
+            "content_kind": "reader_text",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "text/markdown",
+            "content": "You've been blocked by network security. Log in to your Reddit account.",
+            "links": [],
+            "canonical_links": [],
+        }
+
+    async def fake_bs4(url: str):
+        return {
+            "ok": True,
+            "content_kind": "html",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "text/html",
+            "content": "Local backend recovered a readable article body with enough content.",
+            "links": [],
+            "canonical_links": [],
+        }
+
+    browse._jina_reader_browse = fake_jina  # type: ignore[method-assign]
+    browse._bs4_browse = fake_bs4  # type: ignore[method-assign]
+
+    result = await browse._execute_action_method("browse", url="https://example.com")
+
+    assert result["status"] == "partial_success"
+    assert result["meta"]["backend"] == "bs4"
+    assert result["diagnostics"][0]["backend"] == "jina_reader"
+    assert "blocked by network security" in result["diagnostics"][0]["message"]
+
+
+def test_browse_exception_detail_includes_cause():
+    error = RuntimeError("connect failed")
+    error.__cause__ = OSError("tls eof")
+
+    detail = Browse._exception_detail(error)
+
+    assert detail == "RuntimeError: connect failed: caused by OSError: tls eof"
+
+
+def test_browse_blocked_page_reason_detects_weibo_visitor_shell():
+    reason = Browse._blocked_page_reason(
+        '--- title: "Sina Visitor System" url: "https://passport.weibo.com/visitor/visitor?entry=miniblog" ---'
+    )
+
+    assert reason == "blocked_or_error_page: sina visitor system"
 
 
 def test_browse_text_extraction_tolerates_missing_node_attrs():
@@ -429,6 +629,89 @@ async def test_browse_curl_backend_extracts_html_content():
     assert result["meta"]["backend"] == "curl"
     assert result["data"]["content"].startswith("Curl backend official page")
     assert result["data"]["links"][0]["url"] == "https://example.com/next"
+
+
+@pytest.mark.asyncio
+async def test_browse_jina_reader_backend_extracts_markdown_content_and_links():
+    browse = Browse(
+        fallback_order=("jina_reader",),
+        enable_playwright=False,
+        enable_curl=False,
+        enable_jina_reader=True,
+        enable_bs4=False,
+        min_content_length=10,
+        max_attempts=1,
+    )
+
+    async def fake_jina(url: str):
+        return {
+            "ok": True,
+            "content_kind": "reader_text",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "text/markdown",
+            "content": "Reader backend official page with enough readable content.",
+            "links": [{"url": "https://example.com/docs", "text": "Docs"}],
+            "canonical_links": ["https://example.com/"],
+        }
+
+    browse._jina_reader_browse = fake_jina  # type: ignore[method-assign]
+
+    result = await browse._execute_action_method("browse", url="https://example.com")
+
+    assert result["status"] == "success"
+    assert result["meta"]["backend"] == "jina_reader"
+    assert result["data"]["content"].startswith("Reader backend official page")
+    assert result["data"]["links"][0]["url"] == "https://example.com/docs"
+
+
+@pytest.mark.asyncio
+async def test_browse_falls_back_from_curl_to_jina_reader_with_diagnostics():
+    browse = Browse(
+        fallback_order=("curl", "jina_reader"),
+        enable_playwright=False,
+        enable_curl=True,
+        enable_jina_reader=True,
+        enable_bs4=False,
+        min_content_length=20,
+        max_attempts=1,
+    )
+
+    async def fake_curl(url: str):
+        return {
+            "ok": True,
+            "content_kind": "html",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "text/html",
+            "content": "short",
+        }
+
+    async def fake_jina(url: str):
+        return {
+            "ok": True,
+            "content_kind": "reader_text",
+            "requested_url": url,
+            "url": url,
+            "status": 200,
+            "media_type": "text/markdown",
+            "content": "Reader recovered the article body with enough useful content.",
+            "links": [],
+            "canonical_links": [],
+        }
+
+    browse._curl_browse = fake_curl  # type: ignore[method-assign]
+    browse._jina_reader_browse = fake_jina  # type: ignore[method-assign]
+
+    result = await browse._execute_action_method("browse", url="https://example.com")
+
+    assert result["status"] == "partial_success"
+    assert result["success"] is True
+    assert result["meta"]["backend"] == "jina_reader"
+    assert result["diagnostics"][0]["backend"] == "curl"
+    assert result["diagnostics"][0]["message"] == "HTTP status 200 produced no readable content"
 
 
 @pytest.mark.asyncio

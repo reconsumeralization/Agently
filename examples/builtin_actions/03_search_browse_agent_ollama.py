@@ -45,6 +45,11 @@ def build_agent():
         "Quote source URLs in the final answer when action results include them.",
     )
     agent.set_action_loop(max_rounds=4)
+    disable_jina_reader = os.getenv("BROWSE_DISABLE_JINA_READER", "0").lower() in {"1", "true", "yes"}
+    jina_reader_endpoint = os.getenv("BROWSE_JINA_READER_ENDPOINT", "https://r.jina.ai/")
+    browse_fallback_order = (
+        ("playwright", "bs4", "curl") if disable_jina_reader else ("jina_reader", "playwright", "bs4", "curl")
+    )
     agent.use_actions(
         [
             Search(
@@ -57,8 +62,11 @@ def build_agent():
                 proxy=os.getenv("BROWSE_PROXY") or os.getenv("SEARCH_PROXY") or None,
                 enable_pyautogui=False,
                 enable_playwright=True,
+                enable_curl=True,
+                enable_jina_reader=not disable_jina_reader,
                 enable_bs4=True,
-                fallback_order=("playwright", "bs4"),
+                jina_reader_endpoint=jina_reader_endpoint,
+                fallback_order=browse_fallback_order,
             ),
         ]
     )
@@ -90,11 +98,19 @@ if __name__ == "__main__":
 # Expected key output with Ollama and search/browse dependencies configured:
 # [ACTION_RECORDS] includes Search actions and may include Browse if the model needs page content.
 # Search/Browse instruction-heavy records include model_digest and artifact_refs.
+# Browse backend traces show Jina Reader, Playwright, BS4, and restricted curl by default.
+# They omit Jina Reader when BROWSE_DISABLE_JINA_READER=1.
 # [MODEL_REPLY] summarizes the discovered source and quotes source URLs when available.
 
 # How it works:
 # Both SearchPack and BrowsePack are registered and the model decides which to call.
 # Typically the model calls search first to find relevant URLs, then calls browse on
-# the most relevant page to extract deeper content.  get_action_result() drives the
-# full multi-round action loop; get_result() asks the model to summarize with the
-# action results injected.  The model's "extra.action_logs" captures the full trace.
+# the most relevant page to extract deeper content. Browse uses Jina Reader as
+# the default external URL-to-Markdown first pass, then falls back to local
+# backends when Reader transport fails or returns an obvious block/error shell.
+# Set BROWSE_DISABLE_JINA_READER=1 when that service boundary is not acceptable.
+# Set BROWSE_JINA_READER_ENDPOINT to choose the primary Reader endpoint; Browse
+# also knows the official alternate endpoint https://r.jinaai.cn/. get_action_result()
+# drives the full multi-round action loop; get_result() asks the model to summarize
+# with the action results injected. The model's "extra.action_logs" captures the
+# full trace.

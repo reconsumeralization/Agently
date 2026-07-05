@@ -99,6 +99,14 @@ metadata, but it should not own built-in capability implementation. `agent.use_t
 Do not use `tool_info_list` / `BuiltInTool` as the new authoring API for built-in
 capabilities.
 
+By default, `Browse()` tries Jina Reader first, then Playwright, BS4, and
+restricted curl. Jina Reader sends the target public URL to `https://r.jina.ai/`
+and consumes its URL-to-Markdown output; when the primary Reader endpoint has a
+transport or service failure, Browse tries the official alternate endpoint
+`https://r.jinaai.cn/` before falling back to local backends. If the external
+Reader service boundary is not acceptable for an application, disable it with
+`Browse(enable_jina_reader=False, fallback_order=("playwright", "bs4", "curl"))`.
+
 Search is backed by the `ddgs` package. Keep `backend="auto"` for the default
 strategy, or pass a specific ddgs backend such as `yahoo`, `brave`,
 `duckduckgo`, `google`, `startpage`, `mojeek`, `wikipedia`, or `yandex`.
@@ -118,9 +126,14 @@ package object. They also retry transient transport failures once by default
 disconnects such as incomplete chunked reads, timeouts, connection resets, and
 proxy handshakes; it is not a substitute for a long-term unavailable network or
 an unreachable proxy.
-Browse's default backend order is Playwright -> restricted curl -> BS4. The
-curl backend only receives normalized URL candidates from Browse and is not
-exposed as a shell action.
+Browse's default backend order is Jina Reader -> Playwright -> BS4 -> restricted
+curl. The curl backend only receives normalized URL candidates from Browse and
+is not exposed as a shell action. The Jina Reader backend receives only the
+target URL and Reader-specific headers; it is a third-party page-reading
+backend, not a Search replacement. Browse automatically continues past obvious
+Reader failures such as transport errors, HTTP 5xx, empty content, or clear
+block/captcha/error pages, but it does not make semantic judgments about whether
+ambiguous page text is task-sufficient.
 
 When an Agent-level language policy is set with `agent.language("zh-CN")`,
 registered Search/Browse packages receive compatible locale defaults unless the

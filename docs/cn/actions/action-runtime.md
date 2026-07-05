@@ -150,9 +150,13 @@ agent.use_actions(Browse())
 
 Search 是 Action-native package，不进入 ExecutionResource；proxy、timeout、
 backend、region 都属于 package/executor 配置。Browse 也是 Action-native；默认主线是
-Playwright -> restricted curl -> BS4，pyautogui 保留为 legacy/advanced 配置。curl backend
-是 Browse 内部的 URL fetch fallback，不是暴露给模型的 shell access。如果 Browse action
-需要托管 browser/page/session，可以启用 Browser ExecutionResource provider。
+Jina Reader -> Playwright -> BS4 -> restricted curl，pyautogui 保留为
+legacy/advanced 配置。curl backend 是 Browse 内部的 URL fetch fallback，不是暴露给模型的
+shell access。Jina Reader 会把目标 public URL 交给 `https://r.jina.ai/` 做
+URL-to-Markdown 恢复；当默认 Reader endpoint 出现传输或服务错误时，会自动尝试官方替代
+endpoint `https://r.jinaai.cn/`。如果应用不能接受这个外部服务边界，可以显式关闭：
+`Browse(enable_jina_reader=False, fallback_order=("playwright", "bs4", "curl"))`。
+如果 Browse action 需要托管 browser/page/session，可以启用 Browser ExecutionResource provider。
 
 Agent Client Protocol（ACP）coding agent 作为 Action capability 暴露，不是
 AgentExecution route。使用 `agent.use_acp(on_missing="skip")` 可以扫描本地
