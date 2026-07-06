@@ -19,6 +19,9 @@ from pathlib import PurePosixPath
 from .TaskShared import *
 
 
+TASK_BOARD_COMPLETION_NOTES_SCHEMA_VERSION = "task_board_completion_notes/v1"
+
+
 class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
     """TaskBoard final synthesis, terminal verification, and final repair routing."""
 
@@ -333,11 +336,65 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     pinned.append(text)
         return pinned
 
-    async def _finalize_taskboard(self, revision: Any, *, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
+    @staticmethod
+    def _taskboard_final_verification_evidence_items(
+        scoped_evidence_view: Mapping[str, Any],
+        *,
+        pinned_evidence_ids: Sequence[str],
+        evidence_view: Mapping[str, Any],
+        max_pinned_items: int = 48,
+    ) -> list[dict[str, Any]]:
+        """Merge the scoped dirty-acceptance projection with cited evidence.
+
+        The scoped view is a hot projection of dirty acceptance items only; the
+        evidence ids the final candidate actually cites (pinned) may live
+        elsewhere on the board (for example a source-content action readback).
+        Final verification must still see those items or it will judge a
+        once-read source as unread/ref_only and request unfixable repairs.
+        """
+        scoped_items = [
+            dict(item)
+            for item in (scoped_evidence_view.get("evidence_items") or [])
+            if isinstance(item, Mapping)
+        ]
+        seen_ids = {str(item.get("id") or "").strip() for item in scoped_items}
+        seen_ids.discard("")
+        pinned_wanted = [str(evidence_id or "").strip() for evidence_id in pinned_evidence_ids]
+        pinned_wanted = [evidence_id for evidence_id in pinned_wanted if evidence_id and evidence_id not in seen_ids]
+        if not pinned_wanted:
+            return scoped_items
+        raw_items = evidence_view.get("evidence_items") if isinstance(evidence_view, Mapping) else None
+        raw_sequence = raw_items if isinstance(raw_items, Sequence) and not isinstance(raw_items, str | bytes | bytearray) else ()
+        items_by_id: dict[str, Mapping[str, Any]] = {}
+        for raw_item in raw_sequence:
+            if not isinstance(raw_item, Mapping):
+                continue
+            raw_id = str(raw_item.get("id") or "").strip()
+            if raw_id and raw_id not in items_by_id:
+                items_by_id[raw_id] = raw_item
+        appended = 0
+        for evidence_id in pinned_wanted:
+            raw_item = items_by_id.get(evidence_id)
+            if raw_item is None:
+                continue
+            scoped_items.append(dict(DataFormatter.sanitize(raw_item)))
+            seen_ids.add(evidence_id)
+            appended += 1
+            if appended >= max_pinned_items:
+                break
+        return scoped_items
+
+    async def _finalize_taskboard(
+        self,
+        revision: Any,
+        *,
+        context_pack: "WorkspaceContextPackage",
+        previous_acceptance_index: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
         result_status = self._taskboard_terminal_status(revision, schedule)
         evidence_view = build_task_board_evidence_view(revision).to_dict()
-        evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400)
+        evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400, budget_selection="content_first")
         explicit_state_facts = task_board_explicit_state_facts(revision, evidence_view=evidence_view)
         blocking_state_facts = task_board_blocking_state_facts(explicit_state_facts)
         candidate_final_result = self._taskboard_candidate_final_result(revision)
@@ -351,14 +408,27 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         can_attempt_degraded_final = self._taskboard_can_attempt_degraded_final(revision, schedule)
         if result_status != "completed" and not can_attempt_degraded_final:
             self.status = "blocked" if result_status == "blocked" else "error"
+            reason = "TaskBoard did not reach a completed board state."
+            final_response = self._taskboard_user_final_response(
+                final={},
+                accepted=False,
+                artifact_status="partial",
+                reason=reason,
+                missing_criteria=["TaskBoard did not reach a completed board state."],
+                final_refs=[],
+                board_status=result_status,
+                degraded_finalization_attempted=False,
+            )
             self.result = {
                 "status": self.status,
                 "accepted": False,
                 "artifact_status": "partial",
+                "degraded": False,
                 "task_id": self.id,
                 "execution_strategy": self.execution_strategy,
                 "effective_execution_strategy": self.effective_execution_strategy,
-                "reason": "TaskBoard did not reach a completed board state.",
+                "reason": reason,
+                "final_response": final_response,
                 "taskboard": {
                     "revision": revision.to_dict(),
                     "schedule": schedule.to_dict(),
@@ -377,7 +447,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 evidence_view,
                 final_artifact_evidence_items,
             )
-            evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400)
+            evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400, budget_selection="content_first")
 
         finalization_source = "model_finalizer"
         final = self._promote_taskboard_final_candidate(
@@ -432,12 +502,34 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 evidence_view,
                 final_artifact_evidence_items,
             )
-            evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400)
+            evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400, budget_selection="content_first")
+        revision_metadata = getattr(revision, "metadata", {})
+        previous_acceptance_index = previous_acceptance_index or (
+            revision_metadata.get("taskboard_acceptance_index")
+            if isinstance(revision_metadata, Mapping)
+            and isinstance(revision_metadata.get("taskboard_acceptance_index"), Mapping)
+            else None
+        )
+        acceptance_index = build_task_board_acceptance_index(
+            revision,
+            success_criteria=self.success_criteria,
+            evidence_view=evidence_view,
+            evidence_ledger=evidence_ledger,
+            explicit_state_facts=explicit_state_facts,
+            previous_acceptance_index=previous_acceptance_index,
+        )
+        acceptance_verification_plan = build_task_board_incremental_verification_plan(acceptance_index)
+        scoped_evidence_view = build_task_board_scoped_evidence_view(
+            acceptance_index,
+            evidence_view=evidence_view,
+            evidence_ledger=evidence_ledger,
+        )
         final_evidence_guard = validate_evidence_use(collect_evidence_use(final), evidence_ledger)
         final = value_with_normalized_evidence_use(final, final_evidence_guard.get("normalized_evidence_use"))
         pinned_evidence_ids = self._taskboard_final_pinned_evidence_ids(final_evidence_guard)
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         final_verification: dict[str, Any] | None = None
+        missing_deliverables = await self._missing_required_workspace_deliverables()
         should_verify_final = (
             accepted
             or bool(str(final.get("final_result") or "").strip())
@@ -445,77 +537,119 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             or bool(final_refs)
         )
         if should_verify_final:
-            final_source_refs = self._taskboard_final_source_refs_from_evidence_view(evidence_view)
             verifier_final_result = str(final.get("final_result") or "").strip()
             if not verifier_final_result and trusted_final_refs:
                 verifier_final_result = self._workspace_artifact_final_result_from_refs(trusted_final_refs)
             if not verifier_final_result:
                 verifier_final_result = str(candidate_final_result or "").strip()
-            final_execution_result = {
-                "status": "completed",
-                "accepted": accepted,
-                "final_result": verifier_final_result,
-                "reason": final.get("reason", ""),
-                "missing_criteria": final.get("missing_criteria", []),
-                "evidence_use": DataFormatter.sanitize(final.get("evidence_use", [])),
-                "file_refs": final_refs,
-                "artifact_refs": final_refs,
-                "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_stream(evidence_view),
-                "evidence_ledger": evidence_ledger,
-            }
-            final_execution_meta = {
-                "status": "completed",
-                "route": {
-                    "selected_route": "agent_task",
-                    "execution_strategy": self.execution_strategy,
-                    "effective_execution_strategy": self.effective_execution_strategy,
-                },
-                "logs": {"artifact_refs": final_refs, "source_refs": final_source_refs},
-                "workspace_refs": {"agent_task_artifacts": final_refs},
-                "blocks": {
-                    "evidence": {
-                        "evidence_items": evidence_ledger.get("items", []),
-                        "pinned_evidence_ids": pinned_evidence_ids,
-                        "diagnostics": [],
-                    }
-                },
-                "diagnostics": {
-                    "taskboard_terminal_status": result_status,
-                    "taskboard_explicit_state_facts": explicit_state_facts,
-                    "taskboard_blocking_state_facts": blocking_state_facts,
-                },
-            }
-            try:
-                final_verification = await self._request_verification(
-                    max(len(self.iterations) + 1, 1),
-                    plan={
-                        "execution_shape": "taskboard",
-                        "effective_execution_shape": "taskboard",
-                        "deliverable_mode": "workspace_artifact",
-                        "expected_evidence": "TaskBoard final deliverable and trusted Workspace refs",
-                    },
-                    execution_result=final_execution_result,
-                    execution_meta=final_execution_meta,
-                    context_pack=context_pack,
-                )
-            except Exception as error:
-                message = _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
+            cache_can_satisfy_final_gate = (
+                isinstance(previous_acceptance_index, Mapping)
+                and acceptance_verification_plan.get("all_satisfied") is True
+                and not acceptance_verification_plan.get("dirty_item_ids")
+                and final_evidence_guard.get("valid") is True
+                and not missing_deliverables
+                and not blocking_state_facts
+            )
+            if cache_can_satisfy_final_gate:
                 final_verification = {
-                    "is_complete": False,
-                    "requires_block": True,
-                    "reason": "TaskBoard final verification failed structurally.",
-                    "failure_analysis": message,
-                    "acceptance_delta": ["TaskBoard final verification must return structured completion status."],
-                    "missing_criteria": ["TaskBoard final verification did not produce a valid structured result."],
-                    "replan_instruction": "Run a continuation step that produces verifier-readable final evidence.",
-                    "repair_constraints": ["Preserve trusted Workspace refs and final deliverable evidence."],
-                    "next_step_requirements": ["Return structured verification fields."],
-                    "final_result_required": True,
-                    "final_result": "",
-                    "guard_reasons": ["taskboard_final_verification_error"],
-                    "error": {"type": error.__class__.__name__, "message": message},
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "Reused clean TaskBoard acceptance verdict cache; no dirty acceptance items require model verification.",
+                    "acceptance_delta": [],
+                    "missing_criteria": [],
+                    "final_result_required": False,
+                    "final_result": verifier_final_result,
+                    "guard_reasons": [],
+                    "verification_source": "taskboard_acceptance_cache",
+                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
                 }
-            missing_deliverables = await self._missing_required_workspace_deliverables()
+                await self._record_phase(
+                    "taskboard_final_verification_cache_hit",
+                    diagnostics={
+                        "revision_id": revision.revision_id,
+                        "green_count": acceptance_index.get("metadata", {}).get("green_count"),
+                        "dirty_count": acceptance_index.get("metadata", {}).get("dirty_count"),
+                        "acceptance_progress_percent": acceptance_index.get("metadata", {}).get("acceptance_progress_percent"),
+                    },
+                )
+            else:
+                final_source_refs = self._taskboard_final_source_refs_from_evidence_view(evidence_view)
+                final_execution_result = {
+                    "status": "completed",
+                    "accepted": accepted,
+                    "final_result": verifier_final_result,
+                    "reason": final.get("reason", ""),
+                    "missing_criteria": final.get("missing_criteria", []),
+                    "evidence_use": DataFormatter.sanitize(final.get("evidence_use", [])),
+                    "file_refs": final_refs,
+                    "artifact_refs": final_refs,
+                    "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_stream(evidence_view),
+                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
+                    "evidence_ledger": evidence_ledger,
+                }
+                final_execution_meta = {
+                    "status": "completed",
+                    "route": {
+                        "selected_route": "agent_task",
+                        "execution_strategy": self.execution_strategy,
+                        "effective_execution_strategy": self.effective_execution_strategy,
+                    },
+                    "logs": {"artifact_refs": final_refs, "source_refs": final_source_refs},
+                    "workspace_refs": {"agent_task_artifacts": final_refs},
+                    "blocks": {
+                        "evidence": {
+                            # Readback-state reuse: the dirty-acceptance projection
+                            # alone drops the source evidence the final artifact
+                            # cites (an already-read PDF preview then re-judges as
+                            # unread in final verification), so the cited/pinned
+                            # ledger items travel with the final candidate.
+                            "evidence_items": self._taskboard_final_verification_evidence_items(
+                                scoped_evidence_view,
+                                pinned_evidence_ids=pinned_evidence_ids,
+                                evidence_view=evidence_view,
+                            ),
+                            "pinned_evidence_ids": pinned_evidence_ids,
+                            "diagnostics": [],
+                        }
+                    },
+                    "diagnostics": {
+                        "taskboard_terminal_status": result_status,
+                        "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+                        "taskboard_acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+                        "taskboard_explicit_state_facts": explicit_state_facts,
+                        "taskboard_blocking_state_facts": blocking_state_facts,
+                    },
+                }
+                try:
+                    final_verification = await self._request_verification(
+                        max(len(self.iterations) + 1, 1),
+                        plan={
+                            "execution_shape": "taskboard",
+                            "effective_execution_shape": "taskboard",
+                            "deliverable_mode": "workspace_artifact",
+                            "expected_evidence": "Dirty TaskBoard acceptance items, final deliverable, and trusted Workspace refs",
+                        },
+                        execution_result=final_execution_result,
+                        execution_meta=final_execution_meta,
+                        context_pack=context_pack,
+                    )
+                except Exception as error:
+                    message = _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
+                    final_verification = {
+                        "is_complete": False,
+                        "requires_block": True,
+                        "reason": "TaskBoard final verification failed structurally.",
+                        "failure_analysis": message,
+                        "acceptance_delta": ["TaskBoard final verification must return structured completion status."],
+                        "missing_criteria": ["TaskBoard final verification did not produce a valid structured result."],
+                        "replan_instruction": "Run a continuation step that produces verifier-readable final evidence.",
+                        "repair_constraints": ["Preserve trusted Workspace refs and final deliverable evidence."],
+                        "next_step_requirements": ["Return structured verification fields."],
+                        "final_result_required": True,
+                        "final_result": "",
+                        "guard_reasons": ["taskboard_final_verification_error"],
+                        "error": {"type": error.__class__.__name__, "message": message},
+                    }
             if missing_deliverables:
                 self._guard_missing_required_deliverables(final_verification, missing_deliverables)
             if blocking_state_facts and final_verification is not None:
@@ -588,29 +722,89 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 final["reason"] = final_verification.get("reason") or "TaskBoard final verification failed."
                 final["missing_criteria"] = final_verification.get("missing_criteria", [])
                 final["final_result"] = final_verification.get("final_result") or final.get("final_result", "")
+            if final_verification is not None:
+                verification_cost_telemetry = {
+                    "model_requests": (
+                        0
+                        if final_verification.get("verification_source") == "taskboard_acceptance_cache"
+                        else 1
+                    )
+                }
+                acceptance_index = build_task_board_acceptance_index(
+                    revision,
+                    success_criteria=self.success_criteria,
+                    verification=final_verification,
+                    evidence_view=evidence_view,
+                    evidence_ledger=evidence_ledger,
+                    explicit_state_facts=explicit_state_facts,
+                    previous_acceptance_index=previous_acceptance_index,
+                    cost_telemetry=verification_cost_telemetry,
+                )
+                acceptance_verification_plan = build_task_board_incremental_verification_plan(acceptance_index)
+                scoped_evidence_view = build_task_board_scoped_evidence_view(
+                    acceptance_index,
+                    evidence_view=evidence_view,
+                    evidence_ledger=evidence_ledger,
+                )
+                self._latest_taskboard_acceptance_index = DataFormatter.sanitize(acceptance_index)
+        degraded_finalization_attempted = result_status != "completed"
+        completion_notes = self._taskboard_completion_notes(
+            revision,
+            final=final,
+            final_verification=final_verification,
+            acceptance_verification_plan=acceptance_verification_plan,
+        )
+        degraded = self._taskboard_final_is_degraded(
+            final,
+            board_status=result_status,
+            degraded_finalization_attempted=degraded_finalization_attempted,
+            completion_notes=completion_notes,
+        )
+        artifact_status = self._taskboard_final_artifact_status(
+            accepted=accepted,
+            degraded=degraded,
+            final=final,
+        )
+        final_response = self._taskboard_user_final_response(
+            final=final,
+            accepted=accepted,
+            artifact_status=artifact_status,
+            reason=str(final.get("reason") or ""),
+            missing_criteria=final.get("missing_criteria", []),
+            final_refs=trusted_final_refs,
+            board_status=result_status,
+            degraded_finalization_attempted=degraded_finalization_attempted,
+            completion_notes=completion_notes,
+        )
         self.status = "completed" if accepted else "blocked"
         self.result = {
             "status": self.status,
             "accepted": accepted,
-            "artifact_status": "accepted" if accepted else "partial",
+            "artifact_status": artifact_status,
+            "degraded": degraded,
             "task_id": self.id,
             "execution_strategy": self.execution_strategy,
             "effective_execution_strategy": self.effective_execution_strategy,
             "final_result": final.get("final_result", ""),
             "reason": final.get("reason", ""),
+            "final_response": final_response,
             "missing_criteria": final.get("missing_criteria", []),
-                "taskboard": {
-                    "revision": revision.to_dict(),
-                    "schedule": schedule.to_dict(),
-                    "evidence_view": evidence_view,
-                    "explicit_state_facts": explicit_state_facts,
-                    "blocking_state_facts": blocking_state_facts,
-                    "terminal_status": result_status,
-                    "degraded_finalization_attempted": result_status != "completed",
-                    "finalization_source": finalization_source,
-                    "final_verification": final_verification,
-                },
-            }
+            "taskboard": {
+                "revision": revision.to_dict(),
+                "schedule": schedule.to_dict(),
+                "evidence_view": evidence_view,
+                "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+                "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+                "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
+                "completion_notes": completion_notes,
+                "explicit_state_facts": explicit_state_facts,
+                "blocking_state_facts": blocking_state_facts,
+                "terminal_status": result_status,
+                "degraded_finalization_attempted": degraded_finalization_attempted,
+                "finalization_source": finalization_source,
+                "final_verification": final_verification,
+            },
+        }
         await self._record_phase(
             "terminal",
             diagnostics={
@@ -636,60 +830,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             return False
         if not bool(final_verification.get("requires_block")):
             return True
-        if isinstance(final_verification.get("error"), Mapping):
-            return False
-
-        def strings(value: Any) -> list[str]:
-            if isinstance(value, str):
-                return [value]
-            if isinstance(value, Mapping):
-                return [str(item) for item in value.values() if item not in (None, "", [], {})]
-            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-                return [str(item) for item in value if item not in (None, "", [], {})]
-            return []
-
-        text = " ".join(
-            [
-                *strings(final_verification.get("reason")),
-                *strings(final_verification.get("failure_analysis")),
-                *strings(final_verification.get("missing_criteria")),
-                *strings(final_verification.get("acceptance_delta")),
-                *strings(final_verification.get("repair_constraints")),
-                *strings(final_verification.get("next_step_requirements")),
-                *strings(final_verification.get("replan_instruction")),
-            ]
-        ).lower()
-        if not text.strip():
-            return False
-        hard_block_markers = (
-            "approval required",
-            "capability unavailable",
-            "cannot continue without",
-            "denied",
-            "external input",
-            "missing required capability",
-            "permission",
-            "unavailable required capability",
-        )
-        if any(marker in text for marker in hard_block_markers):
-            return False
-        repairable_markers = (
-            "artifact",
-            "citation",
-            "deliverable",
-            "evidence",
-            "final",
-            "insufficient",
-            "missing",
-            "readback",
-            "repair",
-            "rewrite",
-            "section",
-            "source",
-            "unsupported",
-            "weak",
-        )
-        return any(marker in text for marker in repairable_markers)
+        return False
 
     @classmethod
     def _dedupe_taskboard_final_evidence_items(
@@ -912,7 +1053,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "allow_degraded_final": allow_degraded_final,
                 "schedule": DataFormatter.sanitize(schedule.to_dict() if schedule is not None else {}),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
-                "evidence_ledger": evidence_ledger_view(evidence_view, max_items=120, body_chars=2400),
+                "evidence_ledger": evidence_ledger_view(evidence_view, max_items=120, body_chars=2400, budget_selection="content_first"),
                 "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
                 "taskboard_focus_payload": DataFormatter.sanitize(focus_payload),
                 "taskboard_explicit_state_facts": DataFormatter.sanitize(explicit_state_facts),
@@ -949,7 +1090,12 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             "If allow_degraded_final is true, the board has stopped with failed, blocked, skipped, or pending "
             "cards. You may still accept only when the completed/degraded evidence is enough to satisfy the "
             "user goal and success criteria with explicit missing-source or degraded-source boundaries in "
-            "the final_result. If critical evidence is missing, set accepted=false and explain the missing criteria. "
+            "the final_result and final_response. If critical evidence is missing, set accepted=false and explain "
+            "the missing criteria. When the final deliverable is useful but incomplete, keep accepted=false and "
+            "write final_response as a user-facing partial-delivery note that states what was produced, what is "
+            "usable, what degraded or unavailable evidence constrained the work, and which requested requirements "
+            "remain unmet. Set degraded=true only when the response intentionally relies on disclosed partial, "
+            "unavailable, optional, or degraded evidence rather than a full evidence path. "
             "After the final result fields, include short self_check, short_summary, and progress_message for "
             "downstream verification/repair context and human progress. These process fields are not evidence and "
             "must not include raw chain-of-thought or long evidence bodies."
@@ -964,6 +1110,21 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     False,
                 ),
                 "missing_criteria": ([str], "Unmet or weak criteria, empty when accepted", False),
+                "degraded": (
+                    bool,
+                    "True when the final answer intentionally uses disclosed partial/unavailable/degraded evidence.",
+                    False,
+                ),
+                "degradation_reason": (
+                    str,
+                    "Short user-safe explanation of the degraded evidence or execution boundary.",
+                    False,
+                ),
+                "final_response": (
+                    str,
+                    "User-facing final answer/status note addressed to the original request. Include artifact quality, degradation boundaries, and unmet requirements without copying long file bodies.",
+                    False,
+                ),
                 "evidence_use": (
                     [dict],
                     "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
@@ -1170,6 +1331,532 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             normalized["final_result"] = candidate
             return normalized
         return final
+
+    @classmethod
+    def _taskboard_completion_notes(
+        cls,
+        revision: Any,
+        *,
+        final: Mapping[str, Any] | None = None,
+        final_verification: Mapping[str, Any] | None = None,
+        acceptance_verification_plan: Mapping[str, Any] | None = None,
+        max_cards: int = 12,
+        max_notes: int = 12,
+    ) -> dict[str, Any]:
+        """Project bounded card/process notes for human-visible final status.
+
+        Completion notes are deliberately a projection over card outputs,
+        finalizer fields, verifier fields, and acceptance diagnostics. They are
+        not EvidenceEnvelope evidence and do not accept or reject the task.
+        """
+        graph = getattr(revision, "graph", None)
+        graph_cards = list(getattr(graph, "cards", []) or [])
+        card_by_id = {str(getattr(card, "id", "")): card for card in graph_cards if str(getattr(card, "id", ""))}
+        card_results = getattr(revision, "card_results", {}) or {}
+        ordered_card_ids = [str(getattr(card, "id", "")) for card in graph_cards if str(getattr(card, "id", ""))]
+        for card_id in card_results.keys():
+            card_id_text = str(card_id)
+            if card_id_text not in ordered_card_ids:
+                ordered_card_ids.append(card_id_text)
+
+        cards: list[dict[str, Any]] = []
+        known_limits: list[str] = []
+        quality_notes: list[str] = []
+        process_notes: list[str] = []
+
+        for card_id in ordered_card_ids[: max(max_cards, 0)]:
+            result = card_results.get(card_id)
+            card = card_by_id.get(card_id)
+            status = str(getattr(result, "status", getattr(card, "status", "")) or "").strip()
+            preview = getattr(result, "preview", None)
+            metadata = getattr(result, "metadata", {}) if result is not None else {}
+            process_summary = metadata.get("process_summary") if isinstance(metadata, Mapping) else None
+
+            summary = cls._taskboard_first_completion_note(
+                cls._taskboard_completion_field_texts(
+                    preview,
+                    ("short_summary", "summary", "final_result", "candidate_final_result", "answer", "reason"),
+                    max_items=4,
+                ),
+                cls._taskboard_completion_field_texts(
+                    process_summary,
+                    ("short_summary", "summary", "reason"),
+                    max_items=4,
+                ),
+            )
+            progress = cls._taskboard_first_completion_note(
+                cls._taskboard_completion_field_texts(preview, ("progress_message",), max_items=2),
+                cls._taskboard_completion_field_texts(process_summary, ("progress_message",), max_items=2),
+            )
+            card_limits = cls._taskboard_dedupe_notes(
+                [
+                    *cls._taskboard_completion_field_texts(
+                        preview,
+                        ("gaps", "remaining_work", "degradation_reason", "missing_criteria"),
+                        max_items=8,
+                    ),
+                    *cls._taskboard_completion_field_texts(
+                        process_summary,
+                        ("gaps", "remaining_work", "degradation_reason", "missing_criteria"),
+                        max_items=8,
+                    ),
+                ],
+                max_notes=8,
+            )
+            card_quality_notes = cls._taskboard_dedupe_notes(
+                [
+                    *cls._taskboard_completion_field_texts(preview, ("self_check", "verification_summary"), max_items=4),
+                    *cls._taskboard_completion_field_texts(
+                        process_summary,
+                        ("self_check", "verification_summary"),
+                        max_items=4,
+                    ),
+                ],
+                max_notes=6,
+            )
+            diagnostics = getattr(result, "diagnostics", ()) if result is not None else ()
+            diagnostic_notes = cls._taskboard_completion_field_texts(
+                diagnostics,
+                ("reason", "message", "summary"),
+                max_items=4,
+            )
+            status_lower = status.lower()
+            if status_lower in {"setback", "blocked", "failed", "skipped"} and not card_limits:
+                fallback = cls._taskboard_first_completion_note(diagnostic_notes, [summary])
+                if fallback:
+                    card_limits.append(fallback)
+                else:
+                    card_limits.append(f"Card {card_id} ended with status {status}.")
+
+            objective = str(getattr(card, "objective", "") or "").strip() if card is not None else ""
+            card_note: dict[str, Any] = {
+                "card_id": card_id,
+                "status": status or "unknown",
+            }
+            if objective:
+                card_note["objective"] = cls._taskboard_note_text(objective, max_chars=240)
+            if summary:
+                card_note["completion_summary"] = summary
+            if progress:
+                card_note["progress_message"] = progress
+            if card_limits:
+                card_note["known_limits"] = card_limits[:4]
+            if card_quality_notes:
+                card_note["quality_notes"] = card_quality_notes[:4]
+            if diagnostic_notes and status_lower in {"setback", "blocked", "failed", "skipped"}:
+                card_note["diagnostic_notes"] = diagnostic_notes[:3]
+
+            cards.append(card_note)
+            for note in card_limits:
+                known_limits.append(f"{card_id}: {note}")
+            for note in card_quality_notes:
+                quality_notes.append(f"{card_id}: {note}")
+
+        effective_final = final if isinstance(final, Mapping) else {}
+        known_limits.extend(
+            cls._taskboard_completion_field_texts(
+                effective_final,
+                ("degradation_reason", "missing_criteria"),
+                max_items=6,
+            )
+        )
+        quality_notes.extend(
+            cls._taskboard_completion_field_texts(
+                effective_final,
+                ("self_check", "short_summary", "progress_message"),
+                max_items=6,
+            )
+        )
+
+        verification_summary = cls._taskboard_final_verification_notes(
+            final_verification,
+            max_notes=max_notes,
+        )
+        known_limits.extend(verification_summary.get("known_limits", []))
+        quality_notes.extend(verification_summary.get("quality_notes", []))
+
+        acceptance_summary = cls._taskboard_acceptance_summary_notes(
+            acceptance_verification_plan,
+        )
+        process_notes.extend(acceptance_summary.get("process_notes", []))
+
+        return DataFormatter.sanitize(
+            {
+                "schema_version": TASK_BOARD_COMPLETION_NOTES_SCHEMA_VERSION,
+                "authority": "projection_only",
+                "semantic_owner": "taskboard_final_verifier",
+                "cards": cards,
+                "known_limits": cls._taskboard_dedupe_notes(known_limits, max_notes=max_notes),
+                "quality_notes": cls._taskboard_dedupe_notes(quality_notes, max_notes=max_notes),
+                "process_notes": cls._taskboard_dedupe_notes(process_notes, max_notes=max_notes),
+                "acceptance_summary": acceptance_summary.get("summary", {}),
+                "final_verification_summary": verification_summary.get("summary", {}),
+                "metadata": {
+                    "projection_role": "human_progress_and_final_response_context",
+                    "not_evidence": True,
+                    "max_cards": max_cards,
+                    "max_notes": max_notes,
+                },
+            }
+        )
+
+    @classmethod
+    def _taskboard_completion_field_texts(
+        cls,
+        value: Any,
+        field_names: Sequence[str],
+        *,
+        max_items: int = 6,
+        depth: int = 0,
+    ) -> list[str]:
+        if max_items <= 0:
+            return []
+        if value in (None, "", [], {}):
+            return []
+        wanted = {str(name).lower() for name in field_names}
+        notes: list[str] = []
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                key_text = str(key).lower()
+                if key_text in wanted:
+                    notes.extend(cls._taskboard_completion_texts(item, max_items=max_items - len(notes)))
+                if depth < 3:
+                    notes.extend(
+                        cls._taskboard_completion_field_texts(
+                            item,
+                            field_names,
+                            max_items=max_items - len(notes),
+                            depth=depth + 1,
+                        )
+                    )
+                if len(notes) >= max_items:
+                    break
+        elif isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            for item in value:
+                notes.extend(
+                    cls._taskboard_completion_field_texts(
+                        item,
+                        field_names,
+                        max_items=max_items - len(notes),
+                        depth=depth,
+                    )
+                )
+                if len(notes) >= max_items:
+                    break
+        return cls._taskboard_dedupe_notes(notes, max_notes=max_items)
+
+    @classmethod
+    def _taskboard_completion_texts(cls, value: Any, *, max_items: int = 6) -> list[str]:
+        if max_items <= 0 or value in (None, "", [], {}):
+            return []
+        if isinstance(value, str):
+            text = cls._taskboard_note_text(value)
+            return [text] if text else []
+        if isinstance(value, bool | int | float):
+            return [str(value)]
+        if isinstance(value, Mapping):
+            notes: list[str] = []
+            for key in ("summary", "reason", "message", "criterion", "status", "name"):
+                if key in value:
+                    notes.extend(cls._taskboard_completion_texts(value.get(key), max_items=max_items - len(notes)))
+                if len(notes) >= max_items:
+                    break
+            if notes:
+                return cls._taskboard_dedupe_notes(notes, max_notes=max_items)
+            text = cls._taskboard_note_text(value)
+            return [text] if text else []
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            notes: list[str] = []
+            for item in value:
+                notes.extend(cls._taskboard_completion_texts(item, max_items=max_items - len(notes)))
+                if len(notes) >= max_items:
+                    break
+            return cls._taskboard_dedupe_notes(notes, max_notes=max_items)
+        text = cls._taskboard_note_text(value)
+        return [text] if text else []
+
+    @classmethod
+    def _taskboard_first_completion_note(cls, *note_groups: Sequence[str]) -> str:
+        for group in note_groups:
+            for note in group:
+                text = cls._taskboard_note_text(note)
+                if text:
+                    return text
+        return ""
+
+    @staticmethod
+    def _taskboard_note_text(value: Any, *, max_chars: int = 320) -> str:
+        text = " ".join(str(DataFormatter.sanitize(value) if isinstance(value, Mapping) else value or "").split())
+        if not text:
+            return ""
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 24)].rstrip() + " [truncated]"
+
+    @classmethod
+    def _taskboard_dedupe_notes(cls, notes: Sequence[Any], *, max_notes: int) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for note in notes:
+            text = cls._taskboard_note_text(note)
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(text)
+            if len(deduped) >= max_notes:
+                break
+        return deduped
+
+    @classmethod
+    def _taskboard_final_verification_notes(
+        cls,
+        final_verification: Mapping[str, Any] | None,
+        *,
+        max_notes: int,
+    ) -> dict[str, Any]:
+        if not isinstance(final_verification, Mapping):
+            return {"summary": {}, "known_limits": [], "quality_notes": []}
+        summary: dict[str, Any] = {}
+        reason = cls._taskboard_note_text(final_verification.get("reason"), max_chars=420)
+        if reason:
+            summary["reason"] = reason
+        if final_verification.get("verification_source") not in (None, "", [], {}):
+            summary["verification_source"] = DataFormatter.sanitize(final_verification.get("verification_source"))
+        known_limits = cls._taskboard_completion_field_texts(
+            final_verification,
+            ("missing_criteria", "failure_analysis", "acceptance_delta"),
+            max_items=max_notes,
+        )
+        quality_notes: list[str] = []
+        criterion_notes: list[dict[str, Any]] = []
+        raw_checks = final_verification.get("criterion_checks")
+        checks = raw_checks if isinstance(raw_checks, Sequence) and not isinstance(raw_checks, str | bytes | bytearray) else ()
+        for check in checks:
+            if not isinstance(check, Mapping):
+                continue
+            criterion = cls._taskboard_note_text(check.get("criterion") or check.get("name") or check.get("claim"), max_chars=240)
+            status = cls._taskboard_note_text(check.get("status"), max_chars=80)
+            note = cls._taskboard_note_text(check.get("summary") or check.get("reason") or check.get("evidence"), max_chars=320)
+            compact_check: dict[str, Any] = {}
+            if criterion:
+                compact_check["criterion"] = criterion
+            if status:
+                compact_check["status"] = status
+            if note:
+                compact_check["summary"] = note
+            if compact_check:
+                criterion_notes.append(compact_check)
+            line = ": ".join(part for part in (criterion, status) if part)
+            if note:
+                line = f"{line} - {note}" if line else note
+            if not line:
+                continue
+            if cls._taskboard_criterion_check_is_satisfied(check):
+                quality_notes.append(line)
+            else:
+                known_limits.append(line)
+            if len(criterion_notes) >= max_notes:
+                break
+        if criterion_notes:
+            summary["criterion_checks"] = criterion_notes
+        return {
+            "summary": DataFormatter.sanitize(summary),
+            "known_limits": cls._taskboard_dedupe_notes(known_limits, max_notes=max_notes),
+            "quality_notes": cls._taskboard_dedupe_notes(quality_notes, max_notes=max_notes),
+        }
+
+    @staticmethod
+    def _taskboard_criterion_check_is_satisfied(check: Mapping[str, Any]) -> bool:
+        return check.get("satisfied") is True
+
+    @classmethod
+    def _taskboard_acceptance_summary_notes(
+        cls,
+        acceptance_verification_plan: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(acceptance_verification_plan, Mapping):
+            return {"summary": {}, "process_notes": []}
+        metadata = acceptance_verification_plan.get("metadata")
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        status_counts = acceptance_verification_plan.get("status_counts")
+        status_counts = status_counts if isinstance(status_counts, Mapping) else {}
+        summary = {
+            "all_satisfied": bool(acceptance_verification_plan.get("all_satisfied")),
+            "status_counts": dict(DataFormatter.sanitize(status_counts)),
+            "dirty_count": metadata.get("dirty_count"),
+            "green_count": metadata.get("green_count"),
+            "total_items": metadata.get("total_items"),
+            "acceptance_progress_percent": metadata.get("acceptance_progress_percent"),
+        }
+        process_notes: list[str] = []
+        if acceptance_verification_plan.get("all_satisfied") is not True:
+            unresolved_parts = [
+                f"{status}={count}"
+                for status, count in status_counts.items()
+                if status in {"unknown", "active", "setback", "blocked", "deferred"}
+                and cls._coerce_non_negative_int(count) > 0
+            ]
+            progress = metadata.get("acceptance_progress_percent")
+            dirty = metadata.get("dirty_count")
+            detail = ", ".join(unresolved_parts) if unresolved_parts else "projection not fully green"
+            suffix = []
+            if progress not in (None, "", [], {}):
+                suffix.append(f"progress={progress}%")
+            if dirty not in (None, "", [], {}):
+                suffix.append(f"dirty_count={dirty}")
+            process_notes.append(
+                "Acceptance projection still reports unresolved progress"
+                + f" ({detail}{'; ' + ', '.join(suffix) if suffix else ''})."
+            )
+        return {"summary": DataFormatter.sanitize(summary), "process_notes": process_notes}
+
+    @classmethod
+    def _taskboard_completion_notes_known_limits(cls, completion_notes: Mapping[str, Any] | None) -> list[str]:
+        if not isinstance(completion_notes, Mapping):
+            return []
+        return cls._taskboard_dedupe_notes(
+            cls._normalize_string_list(completion_notes.get("known_limits")),
+            max_notes=12,
+        )
+
+    @classmethod
+    def _taskboard_completion_notes_disclosure(cls, completion_notes: Mapping[str, Any] | None) -> str:
+        if not isinstance(completion_notes, Mapping):
+            return ""
+        known_limits = cls._taskboard_completion_notes_known_limits(completion_notes)
+        quality_notes = cls._taskboard_dedupe_notes(
+            cls._normalize_string_list(completion_notes.get("quality_notes")),
+            max_notes=6,
+        )
+        process_notes = cls._taskboard_dedupe_notes(
+            cls._normalize_string_list(completion_notes.get("process_notes")),
+            max_notes=6,
+        )
+        selected = list(known_limits[:3])
+        for note in quality_notes:
+            if len(selected) >= 4:
+                break
+            if note not in selected:
+                selected.append(note)
+        if not selected:
+            selected = process_notes[:3]
+        if not selected:
+            return ""
+        label = "Known limitations/notes" if known_limits else "Process notes"
+        return f"{label}: " + "; ".join(selected) + "."
+
+    @classmethod
+    def _taskboard_final_is_degraded(
+        cls,
+        final: Mapping[str, Any],
+        *,
+        board_status: str,
+        degraded_finalization_attempted: bool,
+        completion_notes: Mapping[str, Any] | None = None,
+    ) -> bool:
+        if degraded_finalization_attempted or str(board_status or "").strip().lower() != "completed":
+            return True
+        if cls._normalize_bool(final.get("degraded"), default=False):
+            return True
+        artifact_status = str(final.get("artifact_status") or "").strip().lower()
+        if artifact_status in {"degraded", "partial_success"}:
+            return True
+        return bool(cls._taskboard_completion_notes_known_limits(completion_notes))
+
+    @classmethod
+    def _taskboard_final_artifact_status(
+        cls,
+        *,
+        accepted: bool,
+        degraded: bool,
+        final: Mapping[str, Any],
+    ) -> str:
+        raw_status = str(final.get("artifact_status") or "").strip().lower()
+        if accepted:
+            if degraded or raw_status in {"degraded", "partial_success"}:
+                return "degraded"
+            return "accepted"
+        if raw_status == "blocked":
+            return "blocked"
+        return "partial"
+
+    @classmethod
+    def _taskboard_user_final_response(
+        cls,
+        *,
+        final: Mapping[str, Any],
+        accepted: bool,
+        artifact_status: str,
+        reason: str,
+        missing_criteria: Any,
+        final_refs: Sequence[Mapping[str, Any]],
+        board_status: str,
+        degraded_finalization_attempted: bool,
+        completion_notes: Mapping[str, Any] | None = None,
+    ) -> str:
+        provided = str(final.get("final_response") or "").strip()
+        disclosure = cls._taskboard_completion_notes_disclosure(completion_notes)
+        if provided:
+            if not disclosure:
+                return provided
+            provided_lower = provided.casefold()
+            disclosure_notes = disclosure.split(":", 1)[-1].strip(" .")
+            disclosure_seen = any(
+                note and note.casefold() in provided_lower
+                for note in [part.strip() for part in disclosure_notes.split(";")]
+            )
+            if disclosure_seen:
+                return provided
+            return f"{provided.rstrip()} {disclosure}".strip()
+
+        final_result = str(final.get("final_result") or "").strip()
+        ref_paths = [
+            str(ref.get("path") or "").strip()
+            for ref in final_refs
+            if isinstance(ref, Mapping) and str(ref.get("path") or "").strip()
+        ]
+        ref_paths = list(dict.fromkeys(ref_paths))
+        if ref_paths:
+            deliverable = "Deliverable artifact: " + ", ".join(ref_paths[:4]) + "."
+        elif final_result:
+            if len(final_result) <= 700:
+                deliverable = f"Deliverable result: {final_result}"
+            else:
+                deliverable = "Deliverable result is available in final_result; it is not duplicated in this status note."
+        else:
+            deliverable = "No complete final deliverable was accepted."
+
+        normalized_missing = cls._normalize_string_list(missing_criteria)
+        reason_text = str(reason or final.get("degradation_reason") or "").strip()
+        degradation_reason = str(final.get("degradation_reason") or "").strip()
+        if not degradation_reason and degraded_finalization_attempted:
+            degradation_reason = f"TaskBoard terminal board status was {str(board_status or 'unknown')}."
+        if not degradation_reason and artifact_status == "degraded":
+            degradation_reason = reason_text
+
+        if accepted:
+            if artifact_status == "degraded":
+                response = "Completed with disclosed degradation. " + deliverable
+                if degradation_reason:
+                    response += f" Degradation: {degradation_reason}"
+            else:
+                response = "Completed. " + deliverable
+                if reason_text:
+                    response += f" Summary: {reason_text}"
+        else:
+            response = "Partial result available, but the task was not fully accepted. " + deliverable
+            if reason_text:
+                response += f" Reason: {reason_text}"
+            if degradation_reason:
+                response += f" Degradation: {degradation_reason}"
+            if normalized_missing:
+                response += " Unmet requirements: " + "; ".join(normalized_missing[:5]) + "."
+        if disclosure:
+            response += " " + disclosure
+        return response.strip()
 
     @staticmethod
     def _looks_like_candidate_prefix(value: str, candidate: str) -> bool:

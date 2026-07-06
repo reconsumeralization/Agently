@@ -516,7 +516,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "current_evidence_ledger is the current step view; evidence_ledger includes prior iteration evidence that "
             "is verifier-visible. Do not perform or assume extra readback outside this ledger. failed/empty ledger "
             "items are facts of unavailability only; ref_only items prove only a URL/path/ref was found; bounded or "
-            "truncated content supports only the visible body. grounding_guard contains deterministic id/status/body "
+            "truncated content supports only the visible body. overflow_item_refs are key evidence points whose body "
+            "did not fit the view budget: an overflow item with status=ok and body_state full/bounded/truncated is a "
+            "record that the readback HAPPENED — never conclude a source was unread or unviewed while such an item "
+            "exists for it. grounding_guard contains deterministic id/status/body "
             "state diagnostics that identify evidence-binding gaps. Treat blocking_count as a reason to request "
             "binding repair or additional scoped evidence when a required claim remains unsupported; do not reject a "
             "long artifact solely because an exact locator label missed while equivalent verifier-visible readback "
@@ -609,7 +612,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "final_result": (str, "Final business result when complete"),
                 "criterion_checks": (
                     [dict],
-                    "Compact per-criterion checks: [{criterion, status, summary, evidence_ids?, gaps?}].",
+                    "Compact per-criterion checks: [{criterion, satisfied: bool, status?, summary, evidence_ids?, gaps?}]. The satisfied boolean is required; status text is display-only.",
                     False,
                 ),
                 "verification_summary": (
@@ -2151,13 +2154,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     def _verification_criteria_are_satisfied(cls, criterion_checks: Any) -> bool:
         if not isinstance(criterion_checks, Sequence) or isinstance(criterion_checks, str | bytes | bytearray):
             return False
-        satisfied_statuses = {"satisfied", "passed", "pass", "ok", "complete", "completed", "accepted"}
         checked = False
         for check in criterion_checks:
             if not isinstance(check, Mapping):
                 continue
-            status = str(check.get("status") or "").strip().lower()
-            if status not in satisfied_statuses:
+            if check.get("satisfied") is not True:
                 return False
             checked = True
         return checked
@@ -2176,23 +2177,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         )
 
     @classmethod
-    def _completion_like_guard_text(cls, value: Any) -> bool:
-        text = str(value or "").strip().lower()
-        if not text:
-            return False
-        return any(
-            marker in text
-            for marker in (
-                "task complete",
-                "no replan needed",
-                "verification successful",
-                "deliverable complete",
-                "complete and accepted",
-                "all success criteria are satisfied",
-            )
-        )
-
-    @classmethod
     def _align_guarded_verification_fields(
         cls,
         normalized: dict[str, Any],
@@ -2202,33 +2186,20 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if normalized.get("is_complete") is True or not guard_reasons:
             return
         raw_verification = raw_verification or {}
+        if raw_verification.get("is_complete") is not True:
+            return
         missing = cls._normalize_string_list(normalized.get("missing_criteria"))
         guard_label = ", ".join(str(reason) for reason in guard_reasons if str(reason).strip()) or "verification_guard"
         summary = missing[0] if missing else f"Verification is blocked by {guard_label}."
         guarded_reason = f"Verification is not complete: {summary}"
-        if cls._completion_like_guard_text(normalized.get("reason")):
-            normalized["reason"] = guarded_reason
-        if cls._completion_like_guard_text(normalized.get("failure_analysis")):
-            normalized["failure_analysis"] = guarded_reason
-        progress_message = normalized.get("progress_message", raw_verification.get("progress_message"))
-        if cls._completion_like_guard_text(progress_message):
+        normalized["reason"] = guarded_reason
+        normalized["failure_analysis"] = guarded_reason
+        if normalized.get("progress_message") not in (None, "", [], {}) or raw_verification.get("progress_message") not in (None, "", [], {}):
             normalized["progress_message"] = guarded_reason
-        if (
-            not str(normalized.get("replan_instruction") or "").strip()
-            or cls._completion_like_guard_text(normalized.get("replan_instruction"))
-        ):
-            normalized["replan_instruction"] = (
-                "Run another bounded step and produce explicit evidence for the guarded criteria."
-            )
-        filtered_requirements = [
-            item
-            for item in cls._normalize_string_list(normalized.get("next_step_requirements"))
-            if not cls._completion_like_guard_text(item)
-        ]
-        normalized["next_step_requirements"] = cls._merge_string_lists(
-            filtered_requirements,
-            [normalized.get("replan_instruction")] if normalized.get("replan_instruction") else [],
+        normalized["replan_instruction"] = (
+            "Run another bounded step and produce explicit evidence for the guarded criteria."
         )
+        normalized["next_step_requirements"] = [normalized["replan_instruction"]]
 
     @classmethod
     def _trusted_workspace_artifact_ref_summary(cls, ref: Mapping[str, Any]) -> dict[str, Any]:

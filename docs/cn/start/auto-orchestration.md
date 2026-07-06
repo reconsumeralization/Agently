@@ -212,10 +212,11 @@ checkpoint-store port 写入，task evidence 关系通过 `workspace.link_eviden
 可以把证据带入下一轮，但 Workspace 不会变成自主规划器。
 
 TaskBoard checkpoint 还会包含有界的长任务定向投影：基于声明 criteria/card refs
-生成的 acceptance index，以及包含 active/blocked/deferred card、evidence ref、
-artifact ref 和显式 state fact 的 handoff projection。这些投影用于 resume 或人工
-检查时快速理解 board 状态，不会重放 raw trace。它们不是 `EvidenceEnvelope` 证据，
-也不会验收任务；语义完成仍归 verifier 和 host guard 判断。
+生成的 acceptance index，以及包含 active/setback/blocked/deferred card、evidence
+ref、artifact ref 和显式 state fact 的 handoff projection。`setback` 表示 readback、
+repair、patch 或 continuation 这类可恢复执行挫折，不是硬停止。这些投影用于 resume
+或人工检查时快速理解 board 状态，不会重放 raw trace。它们不是 `EvidenceEnvelope`
+证据，也不会验收任务；语义完成仍归 verifier 和 host guard 判断。
 
 AgentTask 的验证仍由模型判断拥有，但最终验收采用保守 guard。loop 会规范化
 verifier 输出；当仍有 missing criteria、必需 action evidence 失败或被 blocked、
@@ -264,9 +265,20 @@ progress、snapshot、child-execution、delta 或 phase 事件都会重置静默
 因此活跃流不会被 heartbeat 污染。
 
 任务终态和 artifact 验收是两件事。`completed` 表示 verifier 已验收结果
-（`accepted=True`、`artifact_status="accepted"`）。`max_iterations` 仍可能留下
+（`accepted=True`、`artifact_status="accepted"`）。当不可用或部分证据已明确披露、
+并且降级后仍满足用户目标时，TaskBoard 会返回 `accepted=True` 和
+`artifact_status="degraded"`，同时提供面向用户的 `final_response` 说明降级边界。
+这不是质量捷径：语义验收仍由 verifier 和 host guards 决定。`max_iterations` 仍可能留下
 有用的 Workspace 文件或 checkpoint，但它只是 partial artifact
 （`accepted=False`、`artifact_status="partial"`），不是已完成的业务结果。
+partial result 也可以包含 `final_response`，让调用方说明产出了什么、哪些要求仍未满足。
+TaskBoard 终态 payload 还可能包含 `taskboard.completion_notes`：这是对 card
+完成摘要、已知缺口、verifier 备注和 acceptance progress 的有界过程投影。它适合 UI
+进度和最终答复的降级/不足披露，但不是证据，也不能替代 verifier 验收。
+对于模型生产的 verifier/finalizer 字段，`status`、`reason`、`progress_message`
+或 `final_response` 这类自然语言只能作为展示上下文；完成、修复和验收判断必须来自
+`is_complete`、`requires_block`、`criterion_checks[].satisfied` 等结构化布尔字段
+以及 host guards。
 
 当某个 bounded step 或 TaskBoard card 返回短小 `artifact_markdown` 正文或分段
 `artifact_manifest` 时，AgentTask 会通过绑定的 Workspace 写入交付物，并立刻
@@ -329,9 +341,9 @@ Workspace file refs。框架生成的 readback card 会把 evidence scope 扩展
 上游 evidence card，所以 control-card readback 仍能读取更早 evidence-gathering card
 产出的 Action refs。若框架生成的 continuation card 仍报告同一批 readback 不足，框架不会
 继续递归合成新的 readback/continuation 链；该 card 必须提出其他可执行工作，或者带
-diagnostics 保持 blocked。
+diagnostics 保持 setback/blocked。
 对于 scoped Workspace retrieval，`evidence_snippet` 会明确标记有界片段是否
-`truncated`。如果带 scoped retrieval 的 TaskBoard card 返回 blocked/insufficient，
+`truncated`。如果带 scoped retrieval 的 TaskBoard card 返回 setback/blocked/insufficient，
 且没有给出显式 next action，AgentTask 会把这个局部不足转成 action-capable evidence
 card：使用放宽后的有界检索计划补证据，再接一个 continuation card。检索结果仍只是事实
 上下文；是否足够继续由 continuation card 判断。
@@ -343,8 +355,8 @@ card。只写在 `gaps` 自然语言里的 URL 属于 diagnostics，不会被解
 proposal，AgentTask 会把补丁应用到绑定的 Workspace 文件，写回后再读回并返回可信
 `file_refs`。这只负责物化修补事实；最终是否完成仍由终局验收和 host guards 判断。
 对于 `completed` 且 `sufficient=True` 的 control 输出，非致命 `gaps` 不会阻止 Workspace
-artifact 物化；`remaining_work`、blocked 状态、repair 或 readback 仍会阻止写入。写入
-artifact 只是为后续 readback 和 verification 创建证据，不代表最终任务已经被接受。
+artifact 物化；`remaining_work`、setback/blocked 状态、repair 或 readback 仍会阻止写入。
+写入 artifact 只是为后续 readback 和 verification 创建证据，不代表最终任务已经被接受。
 Flat 和 TaskBoard 都不需要在每个中间 work unit 后额外调用独立 verifier。Flat step
 返回非空 `remaining_work` 时，默认表示当前 step 仍是中间工作；下一轮 iteration
 会消费这些新事实并决定下一步行动。step 也可以返回

@@ -17,6 +17,8 @@ from agently.core.orchestration.TaskBoard import (
     build_task_board_acceptance_index,
     build_task_board_focus_payload,
     build_task_board_handoff_projection,
+    build_task_board_incremental_verification_plan,
+    build_task_board_scoped_evidence_view,
     task_board_preflight_diagnostics,
 )
 from agently.core.application.AgentTask.Task import AgentTask
@@ -1671,6 +1673,159 @@ def test_task_board_acceptance_index_derives_from_criteria_cards_verifier_and_lo
     assert index["status_counts"]["satisfied"] == 1
 
 
+def test_task_board_acceptance_index_accepts_structured_satisfied_boolean():
+    revision = TaskBoardRevision.create(
+        board_id="acceptance-index-status-satisfied",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "acceptance-index-status-satisfied-graph",
+                "cards": [{"id": "final", "objective": "Write the final artifact."}],
+            }
+        ),
+    )
+
+    index = build_task_board_acceptance_index(
+        revision,
+        success_criteria=["The final artifact is accepted."],
+        verification={
+            "criterion_checks": [
+                {
+                    "criterion": "The final artifact is accepted.",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "evidence_ids": ["workspace_artifact.readback:final.md"],
+                    "summary": "The verifier accepted the final artifact.",
+                }
+            ]
+        },
+    )
+
+    assert index["items"][0]["status"] == "satisfied"
+    assert index["metadata"]["green_count"] == 1
+    assert index["metadata"]["acceptance_progress_percent"] == 100
+
+
+def test_task_board_acceptance_index_rejects_status_only_verifier_check():
+    revision = TaskBoardRevision.create(
+        board_id="acceptance-index-status-only",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "acceptance-index-status-only-graph",
+                "cards": [{"id": "final", "objective": "Write the final artifact."}],
+            }
+        ),
+    )
+
+    index = build_task_board_acceptance_index(
+        revision,
+        success_criteria=["The final artifact is accepted."],
+        verification={
+            "criterion_checks": [
+                {
+                    "criterion": "The final artifact is accepted.",
+                    "status": "satisfied",
+                    "summary": "Display-only status text is not completion evidence.",
+                }
+            ]
+        },
+    )
+
+    assert index["items"][0]["status"] == "blocked"
+    assert index["metadata"]["green_count"] == 0
+    assert index["metadata"]["dirty_count"] == 1
+
+
+def test_task_board_completion_notes_include_setback_known_limit():
+    revision = TaskBoardRevision.create(
+        board_id="completion-notes-setback",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "completion-notes-setback-graph",
+                "cards": [{"id": "review", "objective": "Review evidence before final synthesis."}],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision=revision.revision_id,
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "review",
+                        "status": "setback",
+                        "preview": {"short_summary": "Review needs bounded readback."},
+                        "diagnostics": [
+                            {
+                                "code": "taskboard.control.auto_readback_patch",
+                                "message": "Need bounded readback before continuing.",
+                            }
+                        ],
+                    },
+                },
+            ),
+        ),
+    )
+
+    notes = AgentTask._taskboard_completion_notes(revision)
+
+    assert notes["cards"][0]["status"] == "setback"
+    assert notes["cards"][0]["known_limits"] == ["Need bounded readback before continuing."]
+    assert notes["known_limits"] == ["review: Need bounded readback before continuing."]
+
+
+def test_task_board_acceptance_index_treats_unmatched_locator_points_as_advisory():
+    revision = TaskBoardRevision.create(
+        board_id="acceptance-index-advisory-locator",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "acceptance-index-advisory-locator-graph",
+                "cards": [
+                    {
+                        "id": "final",
+                        "objective": "Write final.md.",
+                        "metadata": {"acceptance_criteria": ["Model-suggested extra section exists."]},
+                    }
+                ],
+            }
+        ),
+    )
+    evidence_view = {
+        "evidence_items": [
+            {
+                "id": "locator:extra",
+                "kind": "workspace_artifact.acceptance_locator",
+                "criterion": "Model-suggested extra section exists.",
+                "path": "final.md",
+            }
+        ]
+    }
+
+    index = build_task_board_acceptance_index(
+        revision,
+        success_criteria=["The final artifact is accepted."],
+        verification={
+            "criterion_checks": [
+                {
+                    "criterion": "The final artifact is accepted.",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "Verifier accepted the required criterion.",
+                }
+            ]
+        },
+        evidence_view=evidence_view,
+    )
+
+    assert index["metadata"]["dirty_count"] == 0
+    assert index["metadata"]["acceptance_progress_percent"] == 100
+    required = next(item for item in index["items"] if item["requirement_level"] == "required")
+    advisory = next(item for item in index["items"] if item["requirement_level"] == "advisory")
+    assert required["status"] == "satisfied"
+    assert advisory["status"] == "not_applicable"
+
+
 def test_task_board_acceptance_index_does_not_enter_evidence_envelope():
     revision = _revision()
     evidence_view = build_task_board_evidence_view(revision).to_dict()
@@ -1684,6 +1839,156 @@ def test_task_board_acceptance_index_does_not_enter_evidence_envelope():
     assert "acceptance_index" not in evidence_view
     assert all(item.get("kind") != "task_board_acceptance_index" for item in evidence_view["evidence_items"])
     assert all(item.get("schema_version") != "task_board_acceptance_index/v1" for item in evidence_view["evidence_items"])
+
+
+def test_task_board_acceptance_index_tracks_dirty_cache_and_scoped_evidence():
+    revision = TaskBoardRevision.create(
+        board_id="acceptance-incremental",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "acceptance-incremental-graph",
+                "cards": [
+                    {
+                        "id": "draft",
+                        "objective": "Draft final.md.",
+                        "metadata": {"acceptance_criteria": ["final.md includes source citations."]},
+                    }
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision=revision.revision_id,
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": "Draft completed.",
+                        "metadata": {
+                            "evidence_ledger": {
+                                "items": [
+                                    {
+                                        "id": "readback:final.md#citations",
+                                        "kind": "workspace_artifact.targeted_readback",
+                                        "status": "ok",
+                                        "body_state": "bounded",
+                                        "path": "final.md",
+                                        "body": "## Sources\nhttps://example.test/source\n",
+                                        "sha256": "cold-integrity-must-not-enter-scoped-hot-view",
+                                    },
+                                    {
+                                        "id": "readback:unrelated",
+                                        "kind": "workspace_artifact.targeted_readback",
+                                        "status": "ok",
+                                        "body_state": "bounded",
+                                        "path": "notes.md",
+                                        "body": "Unrelated note.",
+                                    },
+                                ]
+                            }
+                        },
+                    },
+                },
+            ),
+        ),
+    )
+    evidence_view = build_task_board_evidence_view(revision).to_dict()
+    first_index = build_task_board_acceptance_index(
+        revision,
+        success_criteria=["final.md includes source citations."],
+        verification={
+            "criterion_checks": [
+                {
+                    "criterion": "final.md includes source citations.",
+                    "satisfied": True,
+                    "evidence_ids": ["readback:final.md#citations"],
+                    "reason": "Verifier accepted the targeted readback.",
+                    "verification_ref": "verification:1",
+                }
+            ],
+            "usage": {"model_requests": 1, "input_chars": 1200, "output_chars": 120},
+        },
+        evidence_view=evidence_view,
+    )
+    cached_index = build_task_board_acceptance_index(
+        revision,
+        success_criteria=["final.md includes source citations."],
+        evidence_view=evidence_view,
+        previous_acceptance_index=first_index,
+    )
+
+    item = cached_index["items"][0]
+    assert item["status"] == "satisfied"
+    assert item["dirty_reason"] == ""
+    assert item["cache_status"] == "hit"
+    assert item["last_verification_ref"] == "verification:1"
+    assert item["verdict_fingerprint"] == first_index["items"][0]["verdict_fingerprint"]
+    assert cached_index["metadata"]["dirty_count"] == 0
+    assert cached_index["metadata"]["green_count"] == 1
+    assert cached_index["metadata"]["verifier_cache_hit_count"] == 1
+    assert cached_index["metadata"]["acceptance_progress_percent"] == 100
+
+    plan = build_task_board_incremental_verification_plan(cached_index)
+    assert plan["all_satisfied"] is True
+    assert plan["dirty_item_ids"] == []
+
+    dirty_revision = TaskBoardValidator().apply_patch(
+        revision,
+        TaskBoardPatch(
+            base_revision=revision.revision_id,
+            operations=(
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": "Draft completed with changed evidence.",
+                        "metadata": {
+                            "evidence_ledger": {
+                                "items": [
+                                    {
+                                        "id": "readback:final.md#citations",
+                                        "kind": "workspace_artifact.targeted_readback",
+                                        "status": "ok",
+                                        "body_state": "bounded",
+                                        "path": "final.md",
+                                        "body": "## Sources\nhttps://example.test/changed\n",
+                                    }
+                                ]
+                            }
+                        },
+                    },
+                },
+            ),
+        ),
+    )
+    dirty_evidence_view = build_task_board_evidence_view(dirty_revision).to_dict()
+    dirty_index = build_task_board_acceptance_index(
+        dirty_revision,
+        success_criteria=["final.md includes source citations."],
+        evidence_view=dirty_evidence_view,
+        previous_acceptance_index=first_index,
+    )
+    dirty_item = dirty_index["items"][0]
+    assert dirty_item["status"] == "active"
+    assert dirty_item["dirty_reason"] == "verdict_fingerprint_changed"
+    assert dirty_index["metadata"]["dirty_count"] == 1
+    assert dirty_index["metadata"]["verifier_cache_miss_count"] == 1
+
+    scoped = build_task_board_scoped_evidence_view(
+        dirty_index,
+        evidence_view=dirty_evidence_view,
+        body_chars=24,
+    )
+    assert scoped["selected_acceptance_item_ids"] == [dirty_item["id"]]
+    assert [item["id"] for item in scoped["evidence_items"]] == ["readback:final.md#citations"]
+    assert scoped["evidence_items"][0]["snippet"].endswith("[truncated]")
+    assert "sha256" not in scoped["evidence_items"][0]
+    assert "readback:unrelated" not in str(scoped)
 
 
 def test_task_board_handoff_projection_is_bounded_and_ref_only():
@@ -2228,6 +2533,64 @@ async def test_task_board_tick_does_not_cancel_independent_card_on_required_fail
     assert tick.card_results["first"].preview == "network timeout"
 
 
+@pytest.mark.asyncio
+async def test_task_board_frontier_dispatches_runnable_recovery_when_board_status_blocked():
+    seen: list[str] = []
+
+    async def handler(context: TaskBoardContext):
+        seen.append(context.card.id)
+        return {"status": "completed", "preview": f"recovered:{ context.card.id }"}
+
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "blocked-recovery",
+            "revision_id": "rev-8",
+            "status": "blocked",
+            "graph": {
+                "graph_id": "blocked-recovery-graph",
+                "cards": [
+                    {"id": "collect", "objective": "Collect source facts.", "status": "completed"},
+                    {
+                        "id": "old.continue",
+                        "objective": "Old continuation that hit a hard stop.",
+                        "status": "blocked",
+                    },
+                    {
+                        "id": "repair",
+                        "objective": "Plan a recovery readback.",
+                        "depends_on": ["collect"],
+                        "status": "completed",
+                    },
+                    {
+                        "id": "repair.readback",
+                        "objective": "Read scoped recovery evidence.",
+                        "depends_on": ["collect", "repair"],
+                        "allowed_execution_shape": "readback",
+                    },
+                    {
+                        "id": "repair.continue",
+                        "objective": "Continue after scoped recovery evidence.",
+                        "depends_on": ["collect", "repair.readback"],
+                    },
+                ],
+            },
+            "card_results": {
+                "collect": {"card_id": "collect", "status": "completed"},
+                "old.continue": {"card_id": "old.continue", "status": "blocked"},
+                "repair": {"card_id": "repair", "status": "completed"},
+            },
+        }
+    )
+    schedule = TaskBoardValidator().schedule(revision)
+    assert "repair.readback" in schedule.runnable_card_ids
+
+    tick = await TaskBoard(revision, handler=handler, scheduler="frontier").async_run_tick(timeout=1, concurrency=1)
+
+    assert seen
+    assert seen[0] == "repair.readback"
+    assert tick.revision.card_results["repair.readback"].status == "completed"
+
+
 def test_task_board_tick_finalize_incomplete_snapshot_preserves_collected_results():
     revision = TaskBoardRevision.create(
         board_id="incomplete-snapshot",
@@ -2432,3 +2795,169 @@ async def test_task_board_handler_cannot_mutate_frozen_revision_directly():
 
     assert tick.previous_revision.revision_id == "rev-0"
     assert tick.revision.revision_id == "rev-1"
+
+
+def test_evidence_ledger_view_budget_keeps_content_items_over_ref_only_flood():
+    """A bounded ledger view must not evict read source content in favor of
+    ref-only locator spam — that is how an already-read PDF preview gets
+    re-judged as unread by a later verifier turn."""
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+
+    locator_flood = [
+        {
+            "id": f"locator-{index}",
+            "kind": "workspace_artifact.acceptance_locator",
+            "status": "ok",
+            "body_state": "ref_only",
+            "path": "final.md",
+        }
+        for index in range(10)
+    ]
+    content_items = [
+        {
+            "id": "pdf-readback",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "truncated",
+            "path": "downloads/official-example.pdf",
+            "body": "LMCC example paper bounded preview text",
+        },
+        {
+            "id": "outline-readback",
+            "kind": "taskboard_action_artifact.readback",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "education outline bounded readback",
+        },
+    ]
+    failure_item = {
+        "id": "blocked-fetch",
+        "kind": "agent_task.action.result",
+        "status": "failed",
+        "body_state": "ref_only",
+    }
+    # Content and failure evidence sit AFTER the locator flood, like a board
+    # evidence view that appends action evidence behind acceptance locators.
+    ledger = evidence_ledger_view(
+        {"evidence_items": [*locator_flood, *content_items, failure_item]},
+        max_items=8,
+        budget_selection="content_first",
+    )
+    kept_ids = [item["id"] for item in ledger["items"]]
+    assert "pdf-readback" in kept_ids
+    assert "outline-readback" in kept_ids
+    assert "blocked-fetch" in kept_ids
+    assert len(ledger["items"]) == 8
+    assert ledger["items_omitted"] == 5
+    # Items past the body budget stay present as citable key evidence points.
+    overflow_ids = [ref["id"] for ref in ledger.get("overflow_item_refs", [])]
+    assert set(overflow_ids) == {f"locator-{index}" for index in range(5, 10)}
+    assert all(ref.get("body_not_rendered") is True for ref in ledger["overflow_item_refs"])
+    # Under budget nothing changes: original order, no eviction, no overflow.
+    unbounded = evidence_ledger_view(
+        {"evidence_items": [*locator_flood, *content_items, failure_item]},
+        max_items=64,
+        budget_selection="content_first",
+    )
+    assert [item["id"] for item in unbounded["items"]][:10] == [f"locator-{index}" for index in range(10)]
+    assert "overflow_item_refs" not in unbounded
+    # Default ordered mode keeps legacy truncate-in-order semantics for callers
+    # that curate their own ordering (verifier pin/kind prioritization) — but
+    # the tail is still represented as key evidence points.
+    ordered = evidence_ledger_view(
+        {"evidence_items": [*locator_flood, *content_items, failure_item]},
+        max_items=8,
+    )
+    assert [item["id"] for item in ordered["items"]] == [f"locator-{index}" for index in range(8)]
+    ordered_overflow_ids = {ref["id"] for ref in ordered.get("overflow_item_refs", [])}
+    assert {"pdf-readback", "outline-readback", "blocked-fetch"} <= ordered_overflow_ids
+
+
+def test_validate_evidence_use_resolves_overflow_key_evidence_points():
+    """A cited id whose body did not fit the view budget is still valid: the
+    key evidence point (id/status/body_state) is the record, not the body."""
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view, validate_evidence_use
+
+    filler = [
+        {
+            "id": f"filler-{index}",
+            "kind": "taskboard_ref",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": f"filler body {index}",
+        }
+        for index in range(9)
+    ]
+    pdf_item = {
+        "id": "pdf-readback",
+        "kind": "agent_task.action.result",
+        "status": "ok",
+        "body_state": "truncated",
+        "path": "downloads/official-example.pdf",
+        "body": "LMCC example paper bounded preview text",
+    }
+    ledger = evidence_ledger_view(
+        {"evidence_items": [*filler, pdf_item]},
+        max_items=4,
+    )
+    assert "pdf-readback" not in [item["id"] for item in ledger["items"]]
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The official example paper was read.",
+                "support_type": "content",
+                "evidence_ids": ["pdf-readback"],
+            }
+        ],
+        ledger,
+    )
+    blocking = [d for d in guard["diagnostics"] if d.get("blocking")]
+    assert blocking == []
+    assert guard["valid"] is True
+
+
+def test_taskboard_final_verification_evidence_includes_pinned_cited_items():
+    """Final verification must see the evidence the final candidate cites even
+    when the dirty-acceptance scoped projection does not link to it."""
+    scoped_view = {
+        "evidence_items": [
+            {
+                "id": "locator-1",
+                "kind": "workspace_artifact.acceptance_locator",
+                "status": "ok",
+                "body_state": "ref_only",
+            }
+        ]
+    }
+    board_view = {
+        "evidence_items": [
+            {
+                "id": "locator-1",
+                "kind": "workspace_artifact.acceptance_locator",
+                "status": "ok",
+                "body_state": "ref_only",
+            },
+            {
+                "id": "pdf-readback",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "truncated",
+                "body": "LMCC example paper bounded preview text",
+            },
+            {
+                "id": "unrelated",
+                "kind": "taskboard_ref",
+                "status": "ok",
+                "body_state": "ref_only",
+            },
+        ]
+    }
+    merged = AgentTask._taskboard_final_verification_evidence_items(
+        scoped_view,
+        pinned_evidence_ids=["pdf-readback", "locator-1", "missing-id"],
+        evidence_view=board_view,
+    )
+    merged_ids = [item["id"] for item in merged]
+    assert merged_ids == ["locator-1", "pdf-readback"]
+    pdf_item = next(item for item in merged if item["id"] == "pdf-readback")
+    assert "bounded preview" in str(pdf_item.get("body"))

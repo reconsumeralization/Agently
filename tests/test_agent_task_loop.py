@@ -13,7 +13,7 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.core.orchestration import TaskBoard, build_task_board_evidence_view
+from agently.core.orchestration import TaskBoard, build_task_board_acceptance_index, build_task_board_evidence_view
 from agently.core.application.AgentTask.BlockCarrier import (
     WorkUnitIntent,
     WorkUnitResult,
@@ -5296,11 +5296,11 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(tmp_path, monkeypatch):
-    agent = _create_agent("agent-taskboard-final-repairable-block").use_workspace(tmp_path / "workspace")
+async def test_taskboard_finalization_repairs_structured_continuation_verdict(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-final-continuation-repair").use_workspace(tmp_path / "workspace")
     task = AgentTask(
         agent,
-        task_id="taskboard-final-repairable-block",
+        task_id="taskboard-final-continuation-repair",
         goal="Return a complete final report.",
         success_criteria=["The final report includes required sections."],
         execution="taskboard",
@@ -5316,9 +5316,9 @@ async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(
     )
     revision = TaskBoardRevision.from_value(
         {
-            "board_id": "taskboard-final-repairable-block",
+            "board_id": "taskboard-final-continuation-repair",
             "revision_id": "rev-1",
-            "graph": {"graph_id": "taskboard-final-repairable-block-graph", "cards": [card.to_dict()]},
+            "graph": {"graph_id": "taskboard-final-continuation-repair-graph", "cards": [card.to_dict()]},
             "card_results": {
                 "draft": TaskBoardCardResult(
                     card_id="draft",
@@ -5333,12 +5333,12 @@ async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(
         }
     )
 
-    async def verifier_requires_block_for_repairable_gap(*_args, **_kwargs):
+    async def verifier_requests_continuation_for_repairable_gap(*_args, **_kwargs):
         return {
             "is_complete": False,
-            "requires_block": True,
+            "requires_block": False,
             "reason": "The final deliverable is missing a required section.",
-            "failure_analysis": "This is a repairable artifact gap.",
+            "failure_analysis": "The artifact can continue with a localized repair.",
             "acceptance_delta": ["Add the missing required section."],
             "missing_criteria": ["Missing required section."],
             "replan_instruction": "Repair final.md by adding the missing section.",
@@ -5355,7 +5355,7 @@ async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(
         return None
 
     monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
-    monkeypatch.setattr(cast(Any, task), "_request_verification", verifier_requires_block_for_repairable_gap)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", verifier_requests_continuation_for_repairable_gap)
     monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
     monkeypatch.setattr(cast(Any, task), "_emit", noop)
 
@@ -5380,6 +5380,21 @@ async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(
     ]
     assert len(repair_cards) == 1
     assert "Missing required section." in repair_cards[0].evidence_contract["missing_criteria"]
+
+
+def test_taskboard_final_verification_does_not_parse_repairable_reason_text():
+    assert (
+        AgentTask._taskboard_final_verification_allows_repair(
+            {
+                "is_complete": False,
+                "requires_block": True,
+                "reason": "This sounds repairable, retryable, and localized.",
+                "failure_analysis": "Please repair final.md.",
+            },
+            blocking_state_facts=[],
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -5562,6 +5577,96 @@ async def test_taskboard_finalization_promotes_single_terminal_candidate_without
     assert result == {"terminal": True, "status": "completed"}
     assert calls == {"finalizer": 0, "verifier": 1}
     assert task.result["taskboard"]["finalization_source"] == "candidate_promotion"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_skips_verifier_when_acceptance_cache_is_clean(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-final-clean-acceptance-cache").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-clean-acceptance-cache",
+        goal="Return the final report.",
+        success_criteria=["The completed card result is returned."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft the final report.",
+            "required_outputs": ["Final report"],
+            "metadata": {"acceptance_criteria": ["The completed card result is returned."]},
+        }
+    )
+    base_revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "taskboard-final-clean-acceptance-cache",
+            "revision_id": "rev-1",
+            "graph": {"graph_id": "taskboard-final-clean-acceptance-cache-graph", "cards": [card.to_dict()]},
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "final_result": "Final report body from the completed terminal card.",
+                        "remaining_work": [],
+                    },
+                ).to_dict()
+            },
+        }
+    )
+    previous_index = build_task_board_acceptance_index(
+        base_revision,
+        success_criteria=task.success_criteria,
+        verification={
+            "criterion_checks": [
+                {
+                    "criterion": "The completed card result is returned.",
+                    "satisfied": True,
+                    "reason": "Prior verifier accepted the terminal card.",
+                    "verification_ref": "verification:clean",
+                }
+            ]
+        },
+        evidence_view=build_task_board_evidence_view(base_revision).to_dict(),
+    )
+    revision = TaskBoardRevision.from_value(
+        {**base_revision.to_dict(), "metadata": {"taskboard_acceptance_index": previous_index}}
+    )
+    calls = {"finalizer": 0, "verifier": 0}
+
+    async def fail_finalizer(*_args, **_kwargs):
+        calls["finalizer"] += 1
+        raise AssertionError("TaskBoard finalizer should be skipped for promotable terminal candidate.")
+
+    async def fail_verifier(*_args, **_kwargs):
+        calls["verifier"] += 1
+        raise AssertionError("Clean acceptance cache should skip terminal model verification.")
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", fail_verifier)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert result == {"terminal": True, "status": "completed"}
+    assert calls == {"finalizer": 0, "verifier": 0}
+    assert task.result["accepted"] is True
+    assert task.result["taskboard"]["acceptance_verification_plan"]["all_satisfied"] is True
+    assert task.result["taskboard"]["final_verification"]["verification_source"] == "taskboard_acceptance_cache"
 
 
 @pytest.mark.asyncio
@@ -5786,8 +5891,18 @@ def test_verification_accepts_file_backed_result_despite_soft_liveness_failure(t
             "final_result_required": True,
             "final_result": "final.md",
             "criterion_checks": [
-                {"criterion": "sections", "status": "satisfied", "summary": "All required sections are present."},
-                {"criterion": "grounding", "status": "satisfied", "summary": "Grounding guard is clear."},
+                {
+                    "criterion": "sections",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "All required sections are present.",
+                },
+                {
+                    "criterion": "grounding",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "Grounding guard is clear.",
+                },
             ],
         },
         execution_evidence_summary={
@@ -5829,6 +5944,28 @@ def test_verification_accepts_file_backed_result_despite_soft_liveness_failure(t
     assert "Execution step status is failed" not in " ".join(verification.get("repair_constraints", []))
     assert verification["final_result_via_workspace_artifact"] is True
     assert verification["non_blocking_execution_status"]["error_type"] == "RuntimeStageStallError"
+
+
+def test_verification_criterion_checks_require_structured_satisfied_boolean():
+    assert AgentTask._verification_criteria_are_satisfied(
+        [
+            {
+                "criterion": "grounding",
+                "status": "satisfied",
+                "summary": "Display-only model status text is not enough.",
+            }
+        ]
+    ) is False
+    assert AgentTask._verification_criteria_are_satisfied(
+        [
+            {
+                "criterion": "grounding",
+                "satisfied": True,
+                "status": "satisfied",
+                "summary": "Structured boolean is the completion signal.",
+            }
+        ]
+    ) is True
 
 
 def test_verification_keeps_liveness_failure_blocking_without_criterion_checks(tmp_path):

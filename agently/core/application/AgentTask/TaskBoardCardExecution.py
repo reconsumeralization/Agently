@@ -647,7 +647,19 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             context.revision,
             success_criteria=self.success_criteria,
             evidence_view=evidence_view,
+            evidence_ledger=evidence_ledger,
             explicit_state_facts=task_board_explicit_state_facts(context.revision, evidence_view=evidence_view),
+            previous_acceptance_index=(
+                getattr(self, "_latest_taskboard_acceptance_index", None)
+                if isinstance(getattr(self, "_latest_taskboard_acceptance_index", None), Mapping)
+                else None
+            ),
+        )
+        acceptance_verification_plan = build_task_board_incremental_verification_plan(acceptance_index)
+        scoped_evidence_view = build_task_board_scoped_evidence_view(
+            acceptance_index,
+            evidence_view=evidence_view,
+            evidence_ledger=evidence_ledger,
         )
         focus_payload = build_task_board_focus_payload(
             context.revision,
@@ -677,6 +689,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
             "evidence_ledger": evidence_ledger,
             "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+            "taskboard_acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+            "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
             "taskboard_focus_payload": DataFormatter.sanitize(focus_payload),
             "dependency_readbacks": dependency_readbacks,
             "available_readback": self._taskboard_available_readback(evidence_view),
@@ -735,7 +749,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "Short control-card decision factors; no raw chain-of-thought.",
                 False,
             ),
-            "status": (str, "completed, blocked, failed, or skipped for this card", False),
+            "status": (str, "completed, setback, blocked, failed, or skipped for this card", False),
             "answer": (str, "Card-local synthesis or decision summary", True),
             "candidate_final_result": (
                 str,
@@ -833,7 +847,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             quality_gates=(
                 {
                     "kind": "taskboard_control_card_status",
-                    "allowed_statuses": ["completed", "blocked", "failed", "skipped"],
+                    "allowed_statuses": ["completed", "setback", "blocked", "failed", "skipped"],
                 },
             ),
             runtime_preferences={
@@ -1433,7 +1447,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 return "blocked"
         if isinstance(card_output, Mapping):
             status = str(card_output.get("status") or "completed").strip().lower()
-            if status in {"completed", "blocked", "failed", "skipped"}:
+            if status in {"completed", "setback", "blocked", "failed", "skipped"}:
                 return status
             remaining = card_output.get("remaining_work")
             if isinstance(remaining, Sequence) and not isinstance(remaining, str | bytes | bytearray) and remaining:
@@ -1444,15 +1458,26 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
     def _taskboard_control_card_status(cls, card_output: Any) -> str:
         if isinstance(card_output, Mapping):
             status = str(card_output.get("status") or "completed").strip().lower()
-            if status in {"completed", "blocked", "failed", "skipped"}:
+            next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
+            workspace_patch_delivery = card_output.get("workspace_patch_delivery")
+            if (
+                next_action == "patch"
+                and status in {"completed", "skipped"}
+                and card_output.get("sufficient") is not False
+                and isinstance(workspace_patch_delivery, Mapping)
+                and str(workspace_patch_delivery.get("status") or "").strip().lower() == "completed"
+            ):
                 return status
-            next_action = str(card_output.get("next_board_action") or "").strip().lower()
-            if next_action in {"readback", "needs_readback", "repair", "patch", "continue", "block"}:
+            if next_action in {"readback", "needs_readback", "repair", "patch", "continue"}:
+                return "setback"
+            if next_action in {"block", "stop"}:
                 return "blocked"
+            if status in {"completed", "setback", "blocked", "failed", "skipped"}:
+                return status
             remaining = card_output.get("remaining_work")
             gaps = card_output.get("gaps")
             if cls._has_remaining_work(remaining) or cls._has_remaining_work(gaps):
-                return "blocked"
+                return "setback"
         return "completed"
 
     @staticmethod

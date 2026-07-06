@@ -201,6 +201,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "task-strategy AgentExecution drafts" in task_loop_contract["contract"]
     assert "not a separate recommended AgentTask execution owner" in task_loop_contract["contract"]
     assert "accepted=true" in task_loop_contract["contract"]
+    assert "final_response" in task_loop_contract["contract"]
+    assert "artifact_status=degraded" in task_loop_contract["contract"]
     assert "artifact_status=partial" in task_loop_contract["contract"]
     assert "agent.resume(task_id)" in task_loop_contract["contract"]
     assert "compatibility aliases only" in task_loop_contract["contract"]

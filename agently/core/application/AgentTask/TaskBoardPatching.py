@@ -26,7 +26,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if not isinstance(card_output, Mapping):
             return True
         status = str(card_output.get("status") or "").strip().lower()
-        if status in {"blocked", "failed", "skipped", "error", "timed_out"}:
+        if status in {"setback", "blocked", "failed", "skipped", "error", "timed_out"}:
             return False
         next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
         if next_action in {"readback", "needs_readback", "repair", "patch", "block", "stop"}:
@@ -676,7 +676,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             return None
         status = str(card_output.get("status") or "").strip().lower()
         structurally_insufficient = (
-            status == "blocked"
+            status in {"blocked", "setback"}
             or card_output.get("sufficient") is False
             or self._has_remaining_work(card_output.get("remaining_work"))
         )
@@ -696,7 +696,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             scoped_retrieval=expanded_scoped_retrieval,
             source="agent_task.taskboard.scoped_retrieval_continuation",
             diagnostic_code="taskboard.scoped_retrieval.auto_continuation_patch",
-            auto_patch_reason="blocked_scoped_retrieval_consumer_continuation",
+            auto_patch_reason="setback_scoped_retrieval_consumer_continuation",
         )
         if patch is None:
             return None
@@ -855,7 +855,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         current_card.update(
             {
                 "failure_policy": "degradable",
-                "status": "blocked",
+                "status": "setback",
                 "metadata": current_metadata,
             }
         )
@@ -864,7 +864,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         gaps = cls._normalize_string_list(card_output.get("gaps"))
         remaining_work = cls._normalize_string_list(card_output.get("remaining_work"))
         if scoped_retrieval_plan:
-            readback_objective = "Run expanded bounded scoped retrieval before continuing the blocked card."
+            readback_objective = "Run expanded bounded scoped retrieval before continuing the setback card."
             if target_ref_list:
                 readback_objective = (
                     f"{readback_objective} Also collect explicit target refs: {'; '.join(target_ref_list)}"
@@ -872,18 +872,18 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         elif action_target_refs:
             readback_objective = (
                 "Collect scoped evidence from the explicit external target refs required before continuing the "
-                f"blocked control card. Target refs: {'; '.join(action_target_refs)}"
+                f"setback control card. Target refs: {'; '.join(action_target_refs)}"
             )
         elif workspace_target_refs:
             readback_objective = (
-                "Read bounded Workspace target refs required before continuing the blocked control card. "
+                "Read bounded Workspace target refs required before continuing the setback control card. "
                 f"Target refs: {'; '.join(workspace_target_refs)}"
             )
         else:
-            readback_objective = "Read scoped cold evidence required before continuing the blocked control card."
+            readback_objective = "Read scoped cold evidence required before continuing the setback control card."
         if gaps:
             readback_objective = f"{readback_objective} Gaps: {'; '.join(gaps[:3])}"
-        continuation_objective = str(getattr(card, "objective", "") or "Continue the blocked TaskBoard card.").strip()
+        continuation_objective = str(getattr(card, "objective", "") or "Continue the setback TaskBoard card.").strip()
         if remaining_work:
             continuation_objective = f"{continuation_objective} Remaining work: {'; '.join(remaining_work[:3])}"
         final_workspace_deliverables = cls._normalize_string_list(
@@ -972,6 +972,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                         "scoped_retrieval": bool(scoped_retrieval_plan),
                     },
                 },
+                {"op": "set_board_status", "status": "running"},
             ],
             "diagnostics": [
                 {
