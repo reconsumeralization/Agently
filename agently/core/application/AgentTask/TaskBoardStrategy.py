@@ -36,6 +36,8 @@ class AgentTaskTaskBoardStrategyMixin(
     AgentTaskTaskBoardPatchingMixin,
     AgentTaskTaskBoardProjectionMixin,
 ):
+    _latest_taskboard_acceptance_index: dict[str, Any] | None
+
     async def _run_taskboard(self) -> dict[str, Any]:
         iteration_index = 1
         try:
@@ -185,6 +187,15 @@ class AgentTaskTaskBoardStrategyMixin(
                 return TaskBoardRevision.from_value(raw_revision)
             return TaskBoardRevision.from_value(board.revision)
 
+        async def _sync_latest_acceptance_index(data: TriggerFlowRuntimeData[Any, Any, Any]) -> None:
+            latest_acceptance_index = getattr(self, "_latest_taskboard_acceptance_index", None)
+            if isinstance(latest_acceptance_index, Mapping):
+                await data.async_set_state(
+                    "taskboard_acceptance_index",
+                    DataFormatter.sanitize(latest_acceptance_index),
+                    emit=False,
+                )
+
         async def start_lifecycle(data: TriggerFlowRuntimeData[Any, Any, Any]):
             max_ticks = self._taskboard_max_ticks()
             max_ticks_source = self._taskboard_max_ticks_source()
@@ -204,6 +215,11 @@ class AgentTaskTaskBoardStrategyMixin(
             await data.async_set_state("tick_index", initial_tick_index, emit=False)
             await data.async_set_state("max_ticks", max_ticks, emit=False)
             await data.async_set_state("runtime_topology", topology, emit=False)
+            if resumed_taskboard_state is not None and isinstance(resumed_taskboard_state.get("acceptance_index"), Mapping):
+                self._latest_taskboard_acceptance_index = DataFormatter.sanitize(
+                    resumed_taskboard_state.get("acceptance_index")
+                )
+                await _sync_latest_acceptance_index(data)
             await self._record_phase(
                 "taskboard_lifecycle_started",
                 iteration=iteration_index,
@@ -270,6 +286,7 @@ class AgentTaskTaskBoardStrategyMixin(
                     runtime_topology=runtime_topology,
                     terminal_reason="no_runnable_cards",
                 )
+                await _sync_latest_acceptance_index(data)
                 await data.async_emit_nowait(finalize_requested_event, {"tick_index": tick_index})
                 return {"terminal": False, "status": "ready_to_finalize"}
 
@@ -326,6 +343,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 revision=tick_result.revision,
                 runtime_topology=tick_runtime_topology,
             )
+            await _sync_latest_acceptance_index(data)
             if self._taskboard_revision_completed(tick_result.revision):
                 await data.async_set_state("terminal_reason", "board_completed", emit=False)
                 await data.async_emit_nowait(finalize_requested_event, {"tick_index": tick_index})
@@ -342,8 +360,15 @@ class AgentTaskTaskBoardStrategyMixin(
             if data.get_state("final_result", None, inherit=False) is not None:
                 return data.get_state("final_result", inherit=False)
             revision = _unpack_revision_state(data)
+            previous_acceptance_index = data.get_state("taskboard_acceptance_index", None, inherit=False)
+            if not isinstance(previous_acceptance_index, Mapping):
+                previous_acceptance_index = getattr(self, "_latest_taskboard_acceptance_index", None)
             try:
-                result = await self._finalize_taskboard(revision, context_pack=context_pack)
+                result = await self._finalize_taskboard(
+                    revision,
+                    context_pack=context_pack,
+                    previous_acceptance_index=previous_acceptance_index if isinstance(previous_acceptance_index, Mapping) else None,
+                )
             except _AgentTaskDeadlineExceeded as error:
                 result = await self._terminate_timed_out(
                     max(len(self.iterations) + 1, 1),
@@ -371,6 +396,7 @@ class AgentTaskTaskBoardStrategyMixin(
                         terminal_reason="final_verification_repair",
                         final_result=result,
                     )
+                    await _sync_latest_acceptance_index(data)
                     await data.async_emit_nowait(tick_requested_event, {"tick_index": next_tick_index})
                 return result
             await data.async_set_state("final_result", result, emit=False)
@@ -383,6 +409,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 terminal_reason=str(data.get_state("terminal_reason", "", inherit=False) or "") or None,
                 final_result=checkpoint_result if isinstance(checkpoint_result, Mapping) else None,
             )
+            await _sync_latest_acceptance_index(data)
             return result
 
         lifecycle_flow.to(start_lifecycle, name="task_board.lifecycle.start")
@@ -400,7 +427,12 @@ class AgentTaskTaskBoardStrategyMixin(
             revision = TaskBoardRevision.from_value(json.loads(raw_revision))
         else:
             revision = TaskBoardRevision.from_value(board.revision)
-        return await self._finalize_taskboard(revision, context_pack=context_pack)
+        latest_acceptance_index = getattr(self, "_latest_taskboard_acceptance_index", None)
+        return await self._finalize_taskboard(
+            revision,
+            context_pack=context_pack,
+            previous_acceptance_index=latest_acceptance_index if isinstance(latest_acceptance_index, Mapping) else None,
+        )
 
     async def _request_taskboard_plan(self, context_pack: "WorkspaceContextPackage"):
         policy = resolve_task_board_planning_policy(
@@ -571,7 +603,7 @@ class AgentTaskTaskBoardStrategyMixin(
             if task_board_card_required(card):
                 if status != "completed":
                     return False
-            elif status not in {"completed", "failed", "blocked", "skipped"}:
+            elif status not in {"completed", "failed", "setback", "blocked", "skipped"}:
                 return False
         return True
 
@@ -591,7 +623,7 @@ class AgentTaskTaskBoardStrategyMixin(
         }
         if "failed" in required_statuses.values():
             return "failed"
-        if "blocked" in required_statuses.values() or schedule.blocked_card_ids:
+        if "blocked" in required_statuses.values() or "setback" in required_statuses.values() or schedule.blocked_card_ids:
             return "blocked"
         if cls._taskboard_revision_completed(revision):
             return "completed"

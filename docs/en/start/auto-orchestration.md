@@ -231,10 +231,12 @@ turning Workspace into an autonomous planner.
 
 TaskBoard checkpoints also include bounded orientation projections for long
 runs: an acceptance index over declared criteria/card refs and a handoff
-projection with active/blocked/deferred cards, evidence refs, artifact refs, and
-explicit state facts. These projections help resume or inspect the board without
-replaying raw traces. They are not `EvidenceEnvelope` evidence and do not accept
-the task; semantic completion still belongs to the verifier plus host guards.
+projection with active/setback/blocked/deferred cards, evidence refs, artifact
+refs, and explicit state facts. `setback` means a recoverable execution setback
+such as readback, repair, patch, or continuation work; it is not a hard stop.
+These projections help resume or inspect the board without replaying raw traces.
+They are not `EvidenceEnvelope` evidence and do not accept the task; semantic
+completion still belongs to the verifier plus host guards.
 
 AgentTask verification remains model-owned, but completion acceptance is
 conservative. The loop normalizes verifier output and will not accept a task as
@@ -293,9 +295,24 @@ spam.
 
 Terminal task status and artifact acceptance are separate. `completed` means
 the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`).
+When a result is accepted only because unavailable or partial evidence was
+explicitly disclosed and still satisfies the user goal, TaskBoard reports
+`accepted=True` with `artifact_status="degraded"` and includes a user-facing
+`final_response` that explains the degradation. This is not a quality shortcut:
+semantic acceptance still comes from the verifier and host guards.
 `max_iterations` can still leave a useful Workspace file or checkpoint, but it
 is a partial artifact (`accepted=False`, `artifact_status="partial"`), not a
-completed business result.
+completed business result. Partial results may still include `final_response`
+so callers can show what was produced and which requirements remain unmet.
+TaskBoard terminal payloads may also include `taskboard.completion_notes`, a
+bounded process projection of card summaries, known gaps, verifier notes, and
+acceptance progress. It is useful for UI progress and final-response disclosure,
+but it is not evidence and does not replace verifier acceptance.
+For model-produced verifier or finalizer fields, prose such as `status`,
+`reason`, `progress_message`, or `final_response` is display context only;
+completion and repair decisions must come from structured booleans such as
+`is_complete`, `requires_block`, and `criterion_checks[].satisfied` plus host
+guards.
 
 When a bounded step or TaskBoard card returns a short `artifact_markdown` body
 or a sectioned `artifact_manifest`, AgentTask writes the deliverable through the
@@ -381,7 +398,7 @@ cards, so a control-card readback can still inspect Action refs produced by
 earlier evidence-gathering cards. If a generated continuation card still
 reports that the same readback is insufficient, the framework does not
 recursively synthesize another readback/continuation chain; the card must
-propose different executable work or remain blocked with diagnostics.
+propose different executable work or remain in setback/blocked diagnostics.
 For scoped Workspace retrieval, `evidence_snippet` records include whether the
 bounded snippet was `truncated`. AgentTask now carries these retrieval facts
 through the canonical `EvidenceEnvelope.evidence_items` ledger and injects a
@@ -391,7 +408,7 @@ compatibility projections, not separate grounding authorities. Failed or empty
 search/readback items support unavailable or missing-data claims only;
 `ref_only` locator items prove only discovery until a bounded readback evidence
 item exists. If a TaskBoard card with scoped retrieval
-returns blocked/insufficient output without an explicit next action, AgentTask
+returns setback/blocked/insufficient output without an explicit next action, AgentTask
 turns that local insufficiency into an action-capable evidence card with an
 expanded bounded retrieval plan plus a continuation card. The search result is
 still only factual context; the continuation card decides whether it is enough.
@@ -408,9 +425,10 @@ writes it back, and returns trusted `file_refs` after readback. This is a
 materialization step only: final completion still belongs to terminal
 acceptance and host guards.
 For completed and sufficient control outputs, non-fatal `gaps` do not prevent
-Workspace artifact materialization; `remaining_work`, blocked status, repair,
-or readback still do. Writing the artifact only creates evidence for later
-readback and verification. It does not mean the final task has been accepted.
+Workspace artifact materialization; `remaining_work`, setback/blocked status,
+repair, or readback still do. Writing the artifact only creates evidence for
+later readback and verification. It does not mean the final task has been
+accepted.
 Flat and TaskBoard do not need an independent verifier after every intermediate
 work unit. In Flat, non-empty `remaining_work` defaults the current step to an
 intermediate result, so the next iteration consumes the new facts and decides

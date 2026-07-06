@@ -428,8 +428,14 @@ class TaskBoard:
         ) -> tuple[list[str], bool]:
             running_card_ids = string_set_from_state(data, "running_card_ids")
             dispatched_card_ids = string_set_from_state(data, "dispatched_card_ids")
-            if str(revision.status).strip().lower() in {"completed", "failed", "blocked"}:
-                schedule = schedule_task_board_revision(revision)
+            schedule = schedule_task_board_revision(revision)
+            runnable = [
+                card_id
+                for card_id in schedule.runnable_card_ids
+                if card_id not in running_card_ids and card_id not in dispatched_card_ids
+            ]
+            revision_status = str(revision.status).strip().lower()
+            if revision_status == "completed" or (revision_status in {"failed", "blocked"} and not runnable):
                 await store_revision_state(
                     data,
                     revision,
@@ -439,12 +445,6 @@ class TaskBoard:
                 )
                 return [], not running_card_ids
 
-            schedule = schedule_task_board_revision(revision)
-            runnable = [
-                card_id
-                for card_id in schedule.runnable_card_ids
-                if card_id not in running_card_ids and card_id not in dispatched_card_ids
-            ]
             running_card_ids.update(runnable)
             dispatched_card_ids.update(runnable)
             await store_revision_state(

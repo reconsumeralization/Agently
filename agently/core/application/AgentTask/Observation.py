@@ -122,13 +122,36 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             evidence_view = build_task_board_evidence_view(effective_revision).to_dict()
             schedule = TaskBoard(effective_revision, handler=lambda _context: None).schedule()
             explicit_state_facts = task_board_explicit_state_facts(effective_revision, evidence_view=evidence_view)
+            previous_acceptance_index = getattr(self, "_latest_taskboard_acceptance_index", None)
+            if not isinstance(previous_acceptance_index, Mapping):
+                revision_metadata = getattr(effective_revision, "metadata", {})
+                previous_acceptance_index = (
+                    revision_metadata.get("taskboard_acceptance_index")
+                    if isinstance(revision_metadata, Mapping)
+                    and isinstance(revision_metadata.get("taskboard_acceptance_index"), Mapping)
+                    else None
+                )
+            verification_payload = {}
+            if isinstance(final_result, Mapping):
+                taskboard_result = final_result.get("taskboard")
+                if isinstance(taskboard_result, Mapping) and isinstance(taskboard_result.get("final_verification"), Mapping):
+                    verification_payload = taskboard_result["final_verification"]
+                else:
+                    verification_payload = final_result
             acceptance_index = build_task_board_acceptance_index(
                 effective_revision,
                 success_criteria=self.success_criteria,
-                verification=final_result or {},
+                verification=verification_payload,
                 evidence_view=evidence_view,
                 explicit_state_facts=explicit_state_facts,
+                previous_acceptance_index=previous_acceptance_index,
             )
+            acceptance_verification_plan = build_task_board_incremental_verification_plan(acceptance_index)
+            scoped_evidence_view = build_task_board_scoped_evidence_view(
+                acceptance_index,
+                evidence_view=evidence_view,
+            )
+            self._latest_taskboard_acceptance_index = DataFormatter.sanitize(acceptance_index)
             revision_id = str(effective_revision.revision_id)
             step_id = f"taskboard-{stage}-{tick_index}-{revision_id}"
             handoff_projection = build_task_board_handoff_projection(
@@ -156,6 +179,8 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     "revision": DataFormatter.sanitize(revision_dict),
                     "evidence_view": DataFormatter.sanitize(evidence_view),
                     "acceptance_index": DataFormatter.sanitize(acceptance_index),
+                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
                     "handoff_projection": DataFormatter.sanitize(handoff_projection),
                     "runtime_topology": DataFormatter.sanitize(runtime_topology or {}),
                     "terminal_reason": terminal_reason,
@@ -193,6 +218,8 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     "revision_id": revision_id,
                     "revision_ref": record_ref.get("id"),
                     "acceptance_index": DataFormatter.sanitize(acceptance_index),
+                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
                     "handoff_projection": DataFormatter.sanitize(handoff_projection),
                     "terminal_reason": terminal_reason,
                     "final_status": (final_result or {}).get("status"),
@@ -235,6 +262,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 tick_index=tick_index,
                 revision=effective_revision,
                 evidence_view=evidence_view,
+                acceptance_index=acceptance_index,
                 handoff_projection=handoff_projection,
                 runtime_topology=runtime_topology or {},
                 terminal_reason=terminal_reason,

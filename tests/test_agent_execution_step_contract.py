@@ -2292,6 +2292,7 @@ def test_taskboard_blocked_scoped_retrieval_card_adds_continuation_patch(tmp_pat
     next_revision = validator.apply_patch(revision, patch)
     cards = next_revision.graph.card_by_id()
     assert cards["review"].failure_policy == "degradable"
+    assert cards["review"].status == "setback"
     assert "review.evidence" in cards
     assert "review.continue" in cards
     assert cards["review.evidence"].allowed_execution_shape == "actions"
@@ -2367,6 +2368,7 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
     next_revision = validator.apply_patch(revision, patch)
     cards = next_revision.graph.card_by_id()
     assert cards["final"].failure_policy == "degradable"
+    assert cards["final"].status == "setback"
     assert "final.readback" in cards
     assert "final.continue" in cards
     assert cards["final.readback"].allowed_execution_shape == "readback"
@@ -4461,6 +4463,48 @@ def test_taskboard_final_normalization_prefers_workspace_ref_fallback_for_file_d
     assert "file body section" not in normalized["final_result"]
 
 
+def test_taskboard_final_response_explains_partial_artifact_without_acceptance():
+    final_response = AgentTask._taskboard_user_final_response(
+        final={
+            "final_result": "Workspace artifact delivered at final.md; full content is available through file_refs/readback.",
+        },
+        accepted=False,
+        artifact_status="partial",
+        reason="Official PDF source was unavailable, so source-grounded claims remain weak.",
+        missing_criteria=["Ground every official-source claim in verifier-visible evidence."],
+        final_refs=[{"path": "final.md", "role": "workspace_artifact"}],
+        board_status="completed",
+        degraded_finalization_attempted=False,
+    )
+
+    assert "Partial result available" in final_response
+    assert "final.md" in final_response
+    assert "Official PDF source was unavailable" in final_response
+    assert "Ground every official-source claim" in final_response
+
+
+def test_taskboard_final_response_augments_overstrong_model_response_with_completion_notes():
+    final_response = AgentTask._taskboard_user_final_response(
+        final={"final_response": "Completed. All success criteria are satisfied."},
+        accepted=True,
+        artifact_status="degraded",
+        reason="Verifier accepted under disclosed source limits.",
+        missing_criteria=[],
+        final_refs=[{"path": "final.md", "role": "workspace_artifact"}],
+        board_status="completed",
+        degraded_finalization_attempted=False,
+        completion_notes={
+            "authority": "projection_only",
+            "known_limits": ["Official PDF content was not read; only the download link was available."],
+            "quality_notes": ["Final artifact disclosed the source limitation."],
+        },
+    )
+
+    assert "All success criteria are satisfied" in final_response
+    assert "Official PDF content was not read" in final_response
+    assert "Known limitations/notes" in final_response
+
+
 @pytest.mark.asyncio
 async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_path, monkeypatch):
     agent = _create_agent("execution-taskboard-finalizer-rejection-verifier").use_workspace(
@@ -4515,6 +4559,14 @@ async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_pa
             "reason": "Terminal verifier accepted the candidate.",
             "final_result": "Verified final answer.",
             "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion": "The final answer is verified.",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "Verifier accepted the terminal candidate.",
+                }
+            ],
         }
 
     async def no_missing_deliverables() -> list[dict[str, Any]]:
@@ -4539,6 +4591,209 @@ async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_pa
     assert task.result["accepted"] is True
     assert task.result["final_result"] == "Verified final answer."
     assert task.result["taskboard"]["final_verification"]["is_complete"] is True
+    assert task.result["taskboard"]["taskboard_acceptance_index"]["metadata"]["green_count"] == 1
+    assert task.result["taskboard"]["acceptance_verification_plan"]["all_satisfied"] is True
+
+
+@pytest.mark.asyncio
+async def test_taskboard_degraded_final_success_is_not_plain_accepted(tmp_path, monkeypatch):
+    agent = _create_agent("execution-taskboard-degraded-final-success").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce the best available source-grounded brief.",
+        success_criteria=["Deliver a usable brief and disclose unavailable optional sources."],
+        execution="taskboard",
+    )
+    revision = TaskBoardRevision.create(
+        board_id="degraded-final-success",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "degraded-final-success-graph",
+                "cards": [
+                    {"id": "draft", "objective": "Write the usable brief."},
+                    {"id": "optional_audit", "objective": "Try optional source audit.", "depends_on": ["draft"]},
+                ],
+            }
+        ),
+    )
+    degraded_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": "rev-0",
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": {"candidate_final_result": "Usable brief with disclosed source limits."},
+                    },
+                },
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "optional_audit",
+                        "status": "blocked",
+                        "preview": {"reason": "Optional source audit was unavailable."},
+                    },
+                },
+            ],
+        },
+    )
+    finalizer_seen: dict[str, Any] = {}
+
+    async def fake_taskboard_final(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        finalizer_seen["allow_degraded_final"] = kwargs.get("allow_degraded_final")
+        return {
+            "accepted": True,
+            "degraded": True,
+            "degradation_reason": "The optional source audit was unavailable and disclosed.",
+            "reason": "The usable brief satisfies the goal under disclosed source limits.",
+            "final_result": "Usable brief with disclosed source limits.",
+            "final_response": "Completed with disclosed degradation: optional source audit unavailable.",
+            "missing_criteria": [],
+        }
+
+    async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Accepted under disclosed degradation.",
+            "final_result": "Usable brief with disclosed source limits.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion": "Deliver a usable brief and disclose unavailable optional sources.",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "The brief discloses the unavailable audit.",
+                }
+            ],
+        }
+
+    async def no_missing_deliverables() -> list[dict[str, Any]]:
+        return []
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
+    monkeypatch.setattr(task, "_request_verification", fake_request_verification)
+    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    terminal = await task._finalize_taskboard(degraded_revision, context_pack=cast(WorkspaceContextPackage, {}))
+
+    assert terminal == {"terminal": True, "status": "completed"}
+    assert finalizer_seen["allow_degraded_final"] is True
+    assert task.result["accepted"] is True
+    assert task.result["artifact_status"] == "degraded"
+    assert task.result["degraded"] is True
+    assert "optional source audit unavailable" in task.result["final_response"]
+    assert task.result["taskboard"]["degraded_finalization_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_taskboard_completion_notes_disclose_card_gaps_in_final_response(tmp_path, monkeypatch):
+    agent = _create_agent("execution-taskboard-completion-notes-final-response").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Produce the best available source-grounded report.",
+        success_criteria=["Deliver a usable report and disclose source limits."],
+        execution="taskboard",
+    )
+    revision = TaskBoardRevision.create(
+        board_id="completion-notes-final-response",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "completion-notes-final-response-graph",
+                "cards": [{"id": "draft", "objective": "Write the usable report."}],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": "rev-0",
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": {
+                            "final_result": "Usable report with source boundary disclosed.",
+                            "short_summary": "A usable report was produced.",
+                            "gaps": [
+                                "Official PDF content was not read; only the download link was available."
+                            ],
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    async def fake_taskboard_final(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "accepted": True,
+            "reason": "All requested content was delivered.",
+            "final_result": "Usable report with source boundary disclosed.",
+            "final_response": "Completed. All success criteria are satisfied.",
+            "missing_criteria": [],
+        }
+
+    async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Verifier accepted the report because the source limitation is disclosed.",
+            "final_result": "Usable report with source boundary disclosed.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion": "Deliver a usable report and disclose source limits.",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "The report discloses that the official PDF content was not read.",
+                }
+            ],
+        }
+
+    async def no_missing_deliverables() -> list[dict[str, Any]]:
+        return []
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
+    monkeypatch.setattr(task, "_request_verification", fake_request_verification)
+    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+
+    assert terminal == {"terminal": True, "status": "completed"}
+    assert task.result["accepted"] is True
+    assert task.result["artifact_status"] == "degraded"
+    assert task.result["degraded"] is True
+    assert "All success criteria are satisfied" in task.result["final_response"]
+    assert "Official PDF content was not read" in task.result["final_response"]
+    notes = task.result["taskboard"]["completion_notes"]
+    assert notes["authority"] == "projection_only"
+    assert notes["metadata"]["not_evidence"] is True
+    assert any("Official PDF content was not read" in note for note in notes["known_limits"])
+    assert not any(
+        item.get("schema_version") == "task_board_completion_notes/v1"
+        for item in task.result["taskboard"]["evidence_view"].get("evidence_items", [])
+        if isinstance(item, dict)
+    )
 
 
 @pytest.mark.asyncio
@@ -5794,7 +6049,7 @@ async def test_taskboard_control_consumer_requests_readback_without_intermediate
     assert MockTaskBoardConsumerDrivenRequester.seen_dependency_evidence is True
     assert "Verify the task against every success criterion" not in request_text
     assert not _is_taskboard_final_request(request_text)
-    assert result.status == "blocked"
+    assert result.status == "setback"
     assert result.patch_proposal is not None
     assert result.metadata["next_board_action"] == "readback"
     assert result.preview["sufficient"] is False
@@ -5806,7 +6061,7 @@ async def test_taskboard_control_consumer_requests_readback_without_intermediate
     assert cards["review.readback"].depends_on == ("collect",)
     assert cards["review.continue"].allowed_execution_shape == "control"
     assert cards["review.continue"].depends_on == ("collect", "review.readback")
-    assert cards["review"].status == "blocked"
+    assert cards["review"].status == "setback"
     assert cards["review"].metadata["superseded_by"] == "review.continue"
 
 

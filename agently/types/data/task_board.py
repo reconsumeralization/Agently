@@ -27,6 +27,7 @@ TaskBoardCardStatus: TypeAlias = Literal[
     "ready",
     "running",
     "completed",
+    "setback",
     "blocked",
     "failed",
     "skipped",

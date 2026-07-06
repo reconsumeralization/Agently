@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -22,6 +24,8 @@ from agently.types.data import TaskBoardRevision
 
 
 TASK_BOARD_ACCEPTANCE_INDEX_SCHEMA_VERSION = "task_board_acceptance_index/v1"
+TASK_BOARD_INCREMENTAL_VERIFICATION_PLAN_SCHEMA_VERSION = "task_board_incremental_verification_plan/v1"
+TASK_BOARD_SCOPED_EVIDENCE_VIEW_SCHEMA_VERSION = "task_board_scoped_evidence_view/v1"
 TASK_BOARD_HANDOFF_PROJECTION_SCHEMA_VERSION = "task_board_handoff_projection/v1"
 TASK_BOARD_FOCUS_PAYLOAD_SCHEMA_VERSION = "task_board_focus_payload/v1"
 
@@ -40,8 +44,17 @@ _HOT_REF_CONTENT_KEYS = {
     "text",
     "transcript",
 }
-_ACCEPTANCE_STATUSES = {"unknown", "active", "satisfied", "blocked", "deferred", "not_applicable"}
-_TRUTHY = {"true", "yes", "pass", "passed", "satisfied", "complete", "completed", "ok", "accepted"}
+_COLD_INTEGRITY_KEYS = {"bytes", "checksum", "digest", "read_bytes", "raw_bytes", "sha256"}
+_ACCEPTANCE_STATUSES = {
+    "unknown",
+    "active",
+    "satisfied",
+    "setback",
+    "blocked",
+    "deferred",
+    "not_applicable",
+}
+_ACCEPTANCE_GREEN_STATUSES = {"satisfied", "not_applicable"}
 
 
 def build_task_board_acceptance_index(
@@ -52,6 +65,8 @@ def build_task_board_acceptance_index(
     evidence_view: Mapping[str, Any] | None = None,
     evidence_ledger: Mapping[str, Any] | None = None,
     explicit_state_facts: Sequence[Mapping[str, Any]] | None = None,
+    previous_acceptance_index: Mapping[str, Any] | None = None,
+    cost_telemetry: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a non-authoritative TaskBoard acceptance projection.
 
@@ -71,6 +86,7 @@ def build_task_board_acceptance_index(
             "status": "unknown",
             "status_reason": "Criterion is declared but not yet verifier-satisfied.",
             "source": "user",
+            "requirement_level": "required",
             "linked_card_ids": [],
             "linked_evidence_ids": [],
             "linked_locator_ids": [],
@@ -88,6 +104,10 @@ def build_task_board_acceptance_index(
             if item["status"] == "unknown" and card_status in {"completed", "running", "ready"}:
                 item["status"] = "active"
                 item["status_reason"] = f"Linked TaskBoard card {card.id!r} is {card_status}."
+                item["source"] = "taskboard_card"
+            if card_status == "setback":
+                item["status"] = "setback"
+                item["status_reason"] = f"Linked TaskBoard card {card.id!r} encountered a recoverable setback."
                 item["source"] = "taskboard_card"
             if card_status in {"blocked", "failed"}:
                 item["status"] = "blocked"
@@ -113,14 +133,29 @@ def build_task_board_acceptance_index(
     _apply_explicit_state_facts_to_acceptance_items(index_items, explicit_state_facts)
 
     items = sorted(index_items.values(), key=lambda item: item["id"])
-    status_counts = {status: 0 for status in sorted(_ACCEPTANCE_STATUSES)}
     for item in items:
         status = _normalize_acceptance_status(item.get("status"))
+        if item.get("requirement_level") == "advisory" and status in {"unknown", "active"}:
+            status = "not_applicable"
+            item["status_reason"] = (
+                "Advisory TaskBoard/card locator point; required progress is driven by declared success criteria."
+            )
         item["status"] = status
-        status_counts[status] = status_counts.get(status, 0) + 1
         item["linked_card_ids"] = _sorted_unique_strings(item.get("linked_card_ids"))
         item["linked_evidence_ids"] = _sorted_unique_strings(item.get("linked_evidence_ids"))
         item["linked_locator_ids"] = _sorted_unique_strings(item.get("linked_locator_ids"))
+
+    _annotate_acceptance_incremental_fields(
+        items,
+        revision=effective_revision,
+        evidence_view=evidence_view,
+        evidence_ledger=evidence_ledger,
+        verification=verification,
+        previous_acceptance_index=previous_acceptance_index,
+        cost_telemetry=cost_telemetry,
+    )
+    status_counts = _acceptance_status_counts(items)
+    metadata = _acceptance_incremental_metadata(items, previous_acceptance_index=previous_acceptance_index)
 
     return {
         "schema_version": TASK_BOARD_ACCEPTANCE_INDEX_SCHEMA_VERSION,
@@ -132,6 +167,97 @@ def build_task_board_acceptance_index(
             "authority": "projection_only",
             "semantic_owner": "taskboard_final_verifier",
             "source": "taskboard_harness_projection",
+            **metadata,
+        },
+    }
+
+
+def build_task_board_incremental_verification_plan(acceptance_index: Mapping[str, Any]) -> dict[str, Any]:
+    """Select only dirty acceptance items for the next verifier pass."""
+
+    items = [dict(item) for item in _sequence_of_mappings(acceptance_index.get("items"))]
+    dirty_items = [item for item in items if _acceptance_item_dirty(item)]
+    satisfied_items = [
+        item for item in items if _normalize_acceptance_status(item.get("status")) in _ACCEPTANCE_GREEN_STATUSES
+    ]
+    total = len(items)
+    green_count = len(satisfied_items)
+    dirty_count = len(dirty_items)
+    return {
+        "schema_version": TASK_BOARD_INCREMENTAL_VERIFICATION_PLAN_SCHEMA_VERSION,
+        "board_id": acceptance_index.get("board_id"),
+        "revision_id": acceptance_index.get("revision_id"),
+        "all_satisfied": total > 0 and dirty_count == 0 and green_count == total,
+        "dirty_item_ids": [str(item.get("id")) for item in dirty_items if item.get("id")],
+        "satisfied_item_ids": [str(item.get("id")) for item in satisfied_items if item.get("id")],
+        "status_counts": dict(acceptance_index.get("status_counts") or _acceptance_status_counts(items)),
+        "metadata": {
+            "authority": "projection_only",
+            "semantic_owner": "taskboard_final_verifier",
+            "dirty_count": dirty_count,
+            "green_count": green_count,
+            "total_items": total,
+            "acceptance_progress_percent": _acceptance_progress_percent(green_count, total),
+            "verifier_cache_hit_count": sum(1 for item in items if item.get("cache_status") == "hit"),
+            "verifier_cache_miss_count": sum(1 for item in items if item.get("cache_status") == "miss"),
+        },
+    }
+
+
+def build_task_board_scoped_evidence_view(
+    acceptance_index: Mapping[str, Any],
+    *,
+    evidence_view: Mapping[str, Any] | None = None,
+    evidence_ledger: Mapping[str, Any] | None = None,
+    max_items: int = 32,
+    body_chars: int = 480,
+) -> dict[str, Any]:
+    """Build a bounded hot evidence projection for dirty acceptance items only."""
+
+    evidence_items = _evidence_items_by_id(evidence_view=evidence_view, evidence_ledger=evidence_ledger)
+    selected_items = [
+        dict(item)
+        for item in _sequence_of_mappings(acceptance_index.get("items"))
+        if _acceptance_item_dirty(item)
+    ][:max_items]
+    selected_evidence_ids: list[str] = []
+    for item in selected_items:
+        for key in ("linked_evidence_ids", "linked_locator_ids"):
+            for evidence_id in _clean_str_sequence(item.get(key)):
+                _append_unique(selected_evidence_ids, evidence_id)
+                for related_id in _expanded_related_evidence_ids([evidence_id], evidence_items):
+                    _append_unique(selected_evidence_ids, related_id)
+    if not selected_evidence_ids:
+        for evidence_id in _fallback_scoped_evidence_ids(
+            selected_items,
+            evidence_items=evidence_items,
+            evidence_view=evidence_view,
+            max_items=max_items,
+        ):
+            _append_unique(selected_evidence_ids, evidence_id)
+
+    scoped_items: list[dict[str, Any]] = []
+    for evidence_id in selected_evidence_ids:
+        evidence_item = evidence_items.get(evidence_id)
+        if evidence_item is None:
+            continue
+        scoped_items.append(_scoped_evidence_item(evidence_item, body_chars=body_chars))
+        if len(scoped_items) >= max_items:
+            break
+
+    return {
+        "schema_version": TASK_BOARD_SCOPED_EVIDENCE_VIEW_SCHEMA_VERSION,
+        "board_id": acceptance_index.get("board_id"),
+        "revision_id": acceptance_index.get("revision_id"),
+        "selected_acceptance_item_ids": [str(item.get("id")) for item in selected_items if item.get("id")],
+        "evidence_items": scoped_items,
+        "metadata": {
+            "authority": "projection_only",
+            "source": "taskboard_acceptance_dirty_set",
+            "scoped_to_dirty_acceptance_items": True,
+            "evidence_item_count": len(scoped_items),
+            "evidence_bytes_sent_to_verifier": sum(len(str(item.get("snippet") or "")) for item in scoped_items),
+            "body_chars": max(body_chars, 0),
         },
     }
 
@@ -287,7 +413,7 @@ def build_task_board_focus_payload(
     selected_item_ids = [
         str(item.get("id"))
         for item in items
-        if str(item.get("status") or "unknown") in {"unknown", "active", "blocked", "deferred"}
+        if str(item.get("status") or "unknown") in {"unknown", "active", "setback", "blocked", "deferred"}
         and item.get("id")
     ][:max_items]
     runnable_card_ids = _ids_from_schedule(schedule_view, "runnable_card_ids")
@@ -355,12 +481,24 @@ def _apply_verification_to_acceptance_items(index_items: dict[str, dict[str, Any
         if not criterion:
             continue
         item = _ensure_acceptance_item(index_items, criterion, source="verifier")
-        satisfied = _boolish(check.get("satisfied", check.get("is_satisfied", check.get("passed"))))
+        satisfied = check.get("satisfied") is True
         item["status"] = "satisfied" if satisfied else "blocked"
         item["source"] = "verifier"
         item["status_reason"] = _clean_str(check.get("reason")) or (
-            "Verifier marked the criterion satisfied." if satisfied else "Verifier marked the criterion missing."
+            "Verifier marked the criterion satisfied."
+            if satisfied
+            else "Verifier criterion check did not provide satisfied=true."
         )
+        verification_ref = _clean_str(
+            check.get("verification_ref")
+            or check.get("ref")
+            or check.get("id")
+            or verification.get("verification_ref")
+            or verification.get("id")
+        )
+        verification_ref = verification_ref or f"verification:{_stable_fingerprint(check)[7:19]}"
+        if verification_ref:
+            item["last_verification_ref"] = verification_ref
         for evidence_id in _clean_str_sequence(check.get("evidence_ids")):
             _append_unique(item["linked_evidence_ids"], evidence_id)
         for locator_id in _clean_str_sequence(check.get("locator_ids")):
@@ -386,7 +524,11 @@ def _apply_explicit_state_facts_to_acceptance_items(
             continue
         item = _ensure_acceptance_item(index_items, criterion, source="host_policy")
         status = str(fact.get("status") or "").strip().lower()
-        if bool(fact.get("blocking")) or status in {"dirty", "unresolved", "failed", "blocked"}:
+        if status == "setback" and not bool(fact.get("blocking")):
+            item["status"] = "setback"
+            item["source"] = "host_policy"
+            item["status_reason"] = criterion
+        elif bool(fact.get("blocking")) or status in {"dirty", "unresolved", "failed", "blocked"}:
             item["status"] = "blocked"
             item["source"] = "host_policy"
             item["status_reason"] = criterion
@@ -396,10 +538,497 @@ def _apply_explicit_state_facts_to_acceptance_items(
             item["status_reason"] = criterion
 
 
+def _annotate_acceptance_incremental_fields(
+    items: Sequence[dict[str, Any]],
+    *,
+    revision: TaskBoardRevision,
+    evidence_view: Mapping[str, Any] | None,
+    evidence_ledger: Mapping[str, Any] | None,
+    verification: Mapping[str, Any] | None,
+    previous_acceptance_index: Mapping[str, Any] | None,
+    cost_telemetry: Mapping[str, Any] | None,
+) -> None:
+    previous = _previous_acceptance_items(previous_acceptance_index)
+    evidence_items = _evidence_items_by_id(evidence_view=evidence_view, evidence_ledger=evidence_ledger)
+    usage_summary = _verification_usage_summary(verification, cost_telemetry)
+
+    for item in items:
+        previous_item = _matching_previous_acceptance_item(item, previous)
+        current_verification_ref = _clean_str(item.get("last_verification_ref"))
+        if previous_item is not None and not current_verification_ref:
+            for key in ("linked_card_ids", "linked_evidence_ids", "linked_locator_ids"):
+                item[key] = _sorted_unique_strings([*_clean_str_sequence(item.get(key)), *_clean_str_sequence(previous_item.get(key))])
+            previous_ref = _clean_str(previous_item.get("last_verification_ref"))
+            if previous_ref:
+                item["last_verification_ref"] = previous_ref
+        item["verdict_fingerprint"] = _acceptance_item_fingerprint(
+            item,
+            revision=revision,
+            evidence_items=evidence_items,
+        )
+        _annotate_acceptance_item_cache_state(
+            item,
+            previous_item=previous_item,
+            current_verification_ref=current_verification_ref,
+            usage_summary=usage_summary,
+        )
+
+
+def _annotate_acceptance_item_cache_state(
+    item: dict[str, Any],
+    *,
+    previous_item: Mapping[str, Any] | None,
+    current_verification_ref: str | None,
+    usage_summary: Mapping[str, Any],
+) -> None:
+    status = _normalize_acceptance_status(item.get("status"))
+    item["status"] = status
+    item.setdefault("last_verification_ref", "")
+    item.setdefault("cost_summary", {})
+
+    if current_verification_ref:
+        item["cache_status"] = "refresh"
+        item["dirty_reason"] = "" if status in _ACCEPTANCE_GREEN_STATUSES else "verifier_reported_missing"
+        item["cost_summary"] = _acceptance_item_cost_summary(item, usage_summary=usage_summary)
+        return
+
+    if status in {"setback", "blocked"}:
+        item["cache_status"] = "miss"
+        item["dirty_reason"] = "host_or_card_setback" if status == "setback" else "host_or_card_blocked"
+        if previous_item is not None:
+            item["cost_summary"] = dict(previous_item.get("cost_summary") or {})
+        return
+
+    if previous_item is None:
+        item["cache_status"] = "miss" if status not in _ACCEPTANCE_GREEN_STATUSES else "unavailable"
+        item["dirty_reason"] = "" if status in _ACCEPTANCE_GREEN_STATUSES else "no_cached_verdict"
+        return
+
+    previous_status = _normalize_acceptance_status(previous_item.get("status"))
+    previous_fingerprint = _clean_str(previous_item.get("verdict_fingerprint"))
+    current_fingerprint = _clean_str(item.get("verdict_fingerprint"))
+    item["cost_summary"] = dict(previous_item.get("cost_summary") or {})
+
+    if status == "not_applicable":
+        item["cache_status"] = (
+            "hit"
+            if previous_status == "not_applicable" and previous_fingerprint and previous_fingerprint == current_fingerprint
+            else "unavailable"
+        )
+        item["dirty_reason"] = ""
+        previous_ref = _clean_str(previous_item.get("last_verification_ref"))
+        if previous_ref:
+            item["last_verification_ref"] = previous_ref
+        return
+
+    if previous_status in _ACCEPTANCE_GREEN_STATUSES and previous_fingerprint and previous_fingerprint == current_fingerprint:
+        item["status"] = previous_status
+        item["source"] = "verdict_cache"
+        item["status_reason"] = "Reused prior verifier verdict because the acceptance fingerprint is unchanged."
+        item["cache_status"] = "hit"
+        item["dirty_reason"] = ""
+        previous_ref = _clean_str(previous_item.get("last_verification_ref"))
+        if previous_ref:
+            item["last_verification_ref"] = previous_ref
+        return
+
+    item["cache_status"] = "miss"
+    if previous_status in _ACCEPTANCE_GREEN_STATUSES:
+        item["dirty_reason"] = "verdict_fingerprint_changed"
+    elif status in _ACCEPTANCE_GREEN_STATUSES:
+        item["dirty_reason"] = ""
+    else:
+        item["dirty_reason"] = "previous_verdict_not_green"
+
+
+def _previous_acceptance_items(
+    acceptance_index: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Mapping[str, Any]]]:
+    by_id: dict[str, Mapping[str, Any]] = {}
+    by_criterion: dict[str, Mapping[str, Any]] = {}
+    if isinstance(acceptance_index, Mapping):
+        for item in _sequence_of_mappings(acceptance_index.get("items")):
+            item_id = _clean_str(item.get("id"))
+            criterion = _normalize_text(item.get("criterion"))
+            if item_id:
+                by_id[item_id] = item
+            if criterion:
+                by_criterion[criterion] = item
+    return {"by_id": by_id, "by_criterion": by_criterion}
+
+
+def _matching_previous_acceptance_item(
+    item: Mapping[str, Any],
+    previous: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> Mapping[str, Any] | None:
+    item_id = _clean_str(item.get("id"))
+    if item_id:
+        by_id = previous.get("by_id") or {}
+        match = by_id.get(item_id)
+        if match is not None:
+            return match
+    criterion = _normalize_text(item.get("criterion"))
+    if criterion:
+        by_criterion = previous.get("by_criterion") or {}
+        return by_criterion.get(criterion)
+    return None
+
+
+def _acceptance_item_fingerprint(
+    item: Mapping[str, Any],
+    *,
+    revision: TaskBoardRevision,
+    evidence_items: Mapping[str, Mapping[str, Any]],
+) -> str:
+    card_by_id = revision.graph.card_by_id()
+    linked_cards: list[Mapping[str, Any]] = []
+    for card_id in _clean_str_sequence(item.get("linked_card_ids")):
+        card = card_by_id.get(card_id)
+        result = revision.card_results.get(card_id)
+        linked_cards.append(
+            {
+                "card": card.to_dict() if card is not None else {"id": card_id, "missing": True},
+                "result": result.to_dict() if result is not None else None,
+            }
+        )
+    linked_evidence: list[Mapping[str, Any]] = []
+    for evidence_id in _expanded_related_evidence_ids(item.get("linked_evidence_ids"), evidence_items):
+        evidence_item = evidence_items.get(evidence_id)
+        if evidence_item is None:
+            linked_evidence.append({"id": evidence_id, "missing": True})
+        else:
+            linked_evidence.append(_evidence_fingerprint_payload(evidence_item))
+    return _stable_fingerprint(
+        {
+            "criterion": item.get("criterion"),
+            "linked_card_ids": _clean_str_sequence(item.get("linked_card_ids")),
+            "linked_evidence_ids": _clean_str_sequence(item.get("linked_evidence_ids")),
+            "linked_locator_ids": _clean_str_sequence(item.get("linked_locator_ids")),
+            "linked_cards": linked_cards,
+            "linked_evidence": linked_evidence,
+        }
+    )
+
+
+def _evidence_items_by_id(
+    *,
+    evidence_view: Mapping[str, Any] | None,
+    evidence_ledger: Mapping[str, Any] | None,
+) -> dict[str, Mapping[str, Any]]:
+    result: dict[str, Mapping[str, Any]] = {}
+    for source in (evidence_view, evidence_ledger):
+        if not isinstance(source, Mapping):
+            continue
+        for key in ("evidence_items", "items"):
+            for item in _sequence_of_mappings(source.get(key)):
+                aliases = _evidence_item_aliases(item)
+                for alias in aliases:
+                    result.setdefault(alias, item)
+    return result
+
+
+def _evidence_item_aliases(item: Mapping[str, Any]) -> list[str]:
+    aliases: list[str] = []
+    for key in ("id", "evidence_id", "locator_id", "cite_as", "path", "record_id", "artifact_id"):
+        text = _clean_str(item.get(key))
+        if text:
+            _append_unique(aliases, text)
+    return aliases
+
+
+def _expanded_related_evidence_ids(
+    evidence_ids: Any,
+    evidence_items: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    selected_ids = _clean_str_sequence(evidence_ids)
+    expanded = list(selected_ids)
+    selected_paths = {
+        path
+        for evidence_id in selected_ids
+        if (item := evidence_items.get(evidence_id)) is not None
+        if (path := _clean_str(item.get("path")))
+    }
+    if not selected_paths:
+        return expanded
+    seen_item_ids: set[str] = set(expanded)
+    for item in _unique_evidence_items(evidence_items):
+        item_id = _clean_str(item.get("id"))
+        path = _clean_str(item.get("path"))
+        if not item_id or item_id in seen_item_ids or path not in selected_paths:
+            continue
+        _append_unique(expanded, item_id)
+        seen_item_ids.add(item_id)
+    return expanded
+
+
+def _fallback_scoped_evidence_ids(
+    selected_acceptance_items: Sequence[Mapping[str, Any]],
+    *,
+    evidence_items: Mapping[str, Mapping[str, Any]],
+    evidence_view: Mapping[str, Any] | None,
+    max_items: int,
+) -> list[str]:
+    if not selected_acceptance_items:
+        return []
+    has_required_dirty_item = any(
+        str(item.get("requirement_level") or "").strip().lower() in {"", "required"}
+        for item in selected_acceptance_items
+    )
+    if not has_required_dirty_item:
+        return []
+
+    scoped_paths = _evidence_scope_paths(evidence_view)
+    candidates: list[tuple[int, str, Mapping[str, Any]]] = []
+    for item in _unique_evidence_items(evidence_items):
+        item_id = _clean_str(item.get("id") or item.get("evidence_id") or item.get("locator_id") or item.get("cite_as"))
+        if not item_id:
+            continue
+        path = _clean_str(item.get("path") or item.get("artifact_path"))
+        if scoped_paths and path and path not in scoped_paths:
+            continue
+        kind = str(item.get("kind") or item.get("type") or "").strip().lower()
+        priority: int | None = None
+        if kind == "workspace_artifact.readback":
+            priority = 0
+        elif "acceptance_locator" in kind or "artifact_locator" in kind:
+            priority = 1
+        elif kind == "workspace_artifact.targeted_readback":
+            priority = 2
+        elif kind == "workspace_artifact.acceptance_coverage":
+            priority = 3
+        if priority is None:
+            continue
+        candidates.append((priority, item_id, item))
+
+    candidates.sort(key=lambda entry: (entry[0], entry[1]))
+    selected: list[str] = []
+    for _priority, item_id, _item in candidates:
+        _append_unique(selected, item_id)
+        if len(selected) >= max_items:
+            break
+    return selected
+
+
+def _evidence_scope_paths(evidence_view: Mapping[str, Any] | None) -> set[str]:
+    if not isinstance(evidence_view, Mapping):
+        return set()
+    paths: set[str] = set()
+    for key in ("artifact_refs", "file_refs", "evidence_refs", "evidence_items"):
+        for item in _sequence_of_mappings(evidence_view.get(key)):
+            path = _clean_str(item.get("path") or item.get("artifact_path"))
+            if path:
+                paths.add(path)
+    return paths
+
+
+def _unique_evidence_items(evidence_items: Mapping[str, Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    unique: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for item in evidence_items.values():
+        item_id = _clean_str(item.get("id")) or _stable_fingerprint(item)
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        unique.append(item)
+    return unique
+
+
+def _evidence_fingerprint_payload(item: Mapping[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key in (
+        "id",
+        "kind",
+        "type",
+        "status",
+        "raw_status",
+        "body_state",
+        "content_state",
+        "path",
+        "field",
+        "value",
+        "claim",
+        "criterion",
+        "artifact_id",
+        "record_id",
+        "url",
+        "source_url",
+        "canonical_url",
+        "truncated",
+        "sha256",
+        "digest",
+        "checksum",
+    ):
+        if item.get(key) not in (None, "", [], {}):
+            payload[key] = _fingerprint_value(item.get(key))
+    for key in ("body", "content", "markdown", "preview", "raw", "result", "text"):
+        if item.get(key) not in (None, "", [], {}):
+            payload[f"{key}_fingerprint"] = _stable_fingerprint(item.get(key))
+    return payload
+
+
+def _verification_usage_summary(
+    verification: Mapping[str, Any] | None,
+    cost_telemetry: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for source in (verification, cost_telemetry):
+        if not isinstance(source, Mapping):
+            continue
+        usage = source.get("usage")
+        if isinstance(usage, Mapping):
+            summary.update(_numeric_mapping(usage))
+        summary.update(_numeric_mapping({key: source.get(key) for key in ("model_requests", "input_chars", "output_chars", "tokens", "cost")}))
+    return summary
+
+
+def _acceptance_item_cost_summary(
+    item: Mapping[str, Any],
+    *,
+    usage_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    summary = dict(usage_summary)
+    if not summary:
+        return {}
+    summary.setdefault("newly_green_items", 1 if _normalize_acceptance_status(item.get("status")) in _ACCEPTANCE_GREEN_STATUSES else 0)
+    model_requests = _coerce_float(summary.get("model_requests"))
+    newly_green = _coerce_float(summary.get("newly_green_items"))
+    if model_requests is not None and newly_green and newly_green > 0:
+        summary["model_requests_per_newly_green_item"] = model_requests / newly_green
+    return summary
+
+
+def _numeric_mapping(value: Mapping[str, Any]) -> dict[str, int | float]:
+    result: dict[str, int | float] = {}
+    for key, raw in value.items():
+        number = _coerce_float(raw)
+        if number is None:
+            continue
+        result[str(key)] = int(number) if number.is_integer() else number
+    return result
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, "", [], {}):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _acceptance_status_counts(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    status_counts = {status: 0 for status in sorted(_ACCEPTANCE_STATUSES)}
+    for item in items:
+        status = _normalize_acceptance_status(item.get("status"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return status_counts
+
+
+def _acceptance_incremental_metadata(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    previous_acceptance_index: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    total = len(items)
+    green_count = sum(1 for item in items if _normalize_acceptance_status(item.get("status")) in _ACCEPTANCE_GREEN_STATUSES)
+    dirty_count = sum(1 for item in items if _acceptance_item_dirty(item))
+    cache_hit_count = sum(1 for item in items if item.get("cache_status") == "hit")
+    cache_miss_count = sum(1 for item in items if item.get("cache_status") == "miss")
+    previous_green_count = 0
+    if isinstance(previous_acceptance_index, Mapping):
+        previous_green_count = sum(
+            1
+            for item in _sequence_of_mappings(previous_acceptance_index.get("items"))
+            if _normalize_acceptance_status(item.get("status")) in _ACCEPTANCE_GREEN_STATUSES
+        )
+    newly_green_count = max(green_count - previous_green_count, 0)
+    model_requests = 0.0
+    seen_verification_refs: set[str] = set()
+    for item in items:
+        if item.get("cache_status") != "refresh" or not isinstance(item.get("cost_summary"), Mapping):
+            continue
+        ref = _clean_str(item.get("last_verification_ref")) or _clean_str(item.get("id")) or str(len(seen_verification_refs))
+        if ref in seen_verification_refs:
+            continue
+        seen_verification_refs.add(ref)
+        model_requests += _coerce_float((item.get("cost_summary") or {}).get("model_requests")) or 0
+    return {
+        "total_items": total,
+        "dirty_count": dirty_count,
+        "green_count": green_count,
+        "acceptance_progress_percent": _acceptance_progress_percent(green_count, total),
+        "verifier_cache_hit_count": cache_hit_count,
+        "verifier_cache_miss_count": cache_miss_count,
+        "newly_green_count": newly_green_count,
+        "model_calls_without_green_delta": int(model_requests) if model_requests and newly_green_count == 0 else 0,
+    }
+
+
+def _acceptance_progress_percent(green_count: int, total: int) -> int:
+    if total <= 0:
+        return 0
+    return int(round((green_count / total) * 100))
+
+
+def _acceptance_item_dirty(item: Mapping[str, Any]) -> bool:
+    dirty_reason = _clean_str(item.get("dirty_reason"))
+    if dirty_reason:
+        return True
+    return _normalize_acceptance_status(item.get("status")) not in _ACCEPTANCE_GREEN_STATUSES
+
+
+def _scoped_evidence_item(item: Mapping[str, Any], *, body_chars: int) -> dict[str, Any]:
+    scoped: dict[str, Any] = {}
+    for key, value in item.items():
+        key_text = str(key)
+        if key_text in _HOT_REF_CONTENT_KEYS or key_text in _COLD_INTEGRITY_KEYS:
+            continue
+        if key_text == "provenance" and isinstance(value, Mapping):
+            scoped[key_text] = _sanitize_mapping(value)
+            continue
+        scoped[key_text] = _sanitize_value(value)
+    snippet = _snippet_value(item, body_chars=body_chars)
+    if snippet:
+        scoped["snippet"] = snippet
+        scoped["body"] = snippet
+    return scoped
+
+
+def _snippet_value(item: Mapping[str, Any], *, body_chars: int) -> str:
+    if body_chars <= 0:
+        return ""
+    for key in ("body", "content", "markdown", "text", "preview", "result", "raw"):
+        value = item.get(key)
+        if value in (None, "", [], {}):
+            continue
+        text = value if isinstance(value, str) else json.dumps(_fingerprint_value(value), ensure_ascii=False, sort_keys=True, default=str)
+        if len(text) <= body_chars:
+            return text
+        return text[:body_chars] + "...[truncated]"
+    return ""
+
+
+def _stable_fingerprint(value: Any) -> str:
+    encoded = json.dumps(_fingerprint_value(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _fingerprint_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _fingerprint_value(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_fingerprint_value(item) for item in value]
+    if isinstance(value, bytes | bytearray):
+        return {"bytes_sha256": hashlib.sha256(bytes(value)).hexdigest(), "length": len(value)}
+    return value
+
+
 def _ensure_acceptance_item(index_items: dict[str, dict[str, Any]], criterion: str, *, source: str) -> dict[str, Any]:
     normalized = _normalize_text(criterion)
     for item in index_items.values():
         if _normalize_text(item.get("criterion")) == normalized:
+            if source == "user":
+                item["requirement_level"] = "required"
             return item
     item_id = f"{source}:{len(index_items) + 1}:{_slug(criterion)}"
     item = {
@@ -408,6 +1037,7 @@ def _ensure_acceptance_item(index_items: dict[str, dict[str, Any]], criterion: s
         "status": "unknown",
         "status_reason": "Projected from TaskBoard state.",
         "source": source,
+        "requirement_level": "required" if source == "user" else "advisory",
         "linked_card_ids": [],
         "linked_evidence_ids": [],
         "linked_locator_ids": [],
@@ -473,11 +1103,21 @@ def _ids_from_schedule(schedule: Mapping[str, Any], key: str) -> list[str]:
 
 def _acceptance_index_summary(acceptance_index: Mapping[str, Any], *, max_items: int) -> dict[str, Any]:
     items = [dict(item) for item in _sequence_of_mappings(acceptance_index.get("items"))]
-    changed = [item for item in items if str(item.get("status") or "") in {"active", "blocked", "deferred", "satisfied"}]
+    changed = [
+        item
+        for item in items
+        if str(item.get("status") or "") in {"active", "setback", "blocked", "deferred", "satisfied"}
+    ]
+    metadata = dict(acceptance_index.get("metadata") or {})
     return {
         "schema_version": acceptance_index.get("schema_version"),
         "total_items": len(items),
         "status_counts": dict(acceptance_index.get("status_counts") or {}),
+        "dirty_count": metadata.get("dirty_count"),
+        "green_count": metadata.get("green_count"),
+        "acceptance_progress_percent": metadata.get("acceptance_progress_percent"),
+        "verifier_cache_hit_count": metadata.get("verifier_cache_hit_count"),
+        "verifier_cache_miss_count": metadata.get("verifier_cache_miss_count"),
         "items": [_sanitize_mapping(item) for item in changed[:max_items]],
     }
 
@@ -626,9 +1266,3 @@ def _slug(value: Any) -> str:
     normalized = _normalize_text(value)
     slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
     return slug[:48] or "item"
-
-
-def _boolish(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in _TRUTHY

@@ -31,6 +31,8 @@ from agently.core.orchestration import (
     build_task_board_evidence_view,
     build_task_board_focus_payload,
     build_task_board_handoff_projection,
+    build_task_board_incremental_verification_plan,
+    build_task_board_scoped_evidence_view,
     coerce_task_board_planning_result,
     resolve_task_board_planning_policy,
     task_board_blocking_state_facts,
@@ -136,7 +138,14 @@ _TASKBOARD_DEPENDENCY_READBACK_MAX_REFS = 4
 _TASKBOARD_SOURCE_REFS_MAX = 16
 _TASKBOARD_PROMPT_RESULT_CHARS = 1600
 _TASKBOARD_STREAM_SUMMARY_CHARS = 3000
-_TASKBOARD_RECOVERABLE_CARD_STATUSES = {"failed", "error", "timed_out", "blocked"}
+_TASKBOARD_SETBACK_CARD_STATUS = "setback"
+_TASKBOARD_RECOVERABLE_CARD_STATUSES = {
+    "failed",
+    "error",
+    "timed_out",
+    "blocked",
+    _TASKBOARD_SETBACK_CARD_STATUS,
+}
 _WORKSPACE_ARTIFACT_PREVIEW_BYTES = 4000
 _WORKSPACE_ARTIFACT_CONTENT_KEYS = ("content", "markdown", "body", "text")
 _WORKSPACE_ARTIFACT_RESULT_BODY_KEYS = (
@@ -696,6 +705,8 @@ __all__ = [
     "build_task_board_evidence_view",
     "build_task_board_focus_payload",
     "build_task_board_handoff_projection",
+    "build_task_board_incremental_verification_plan",
+    "build_task_board_scoped_evidence_view",
     "coerce_task_board_planning_result",
     "collect_evidence_use",
     "evidence_envelope_from_value",
