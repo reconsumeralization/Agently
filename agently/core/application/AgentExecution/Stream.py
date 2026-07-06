@@ -18,7 +18,7 @@ import asyncio
 import html
 import json
 from contextlib import suppress
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, cast
 
 from agently.types.data import AgentExecutionStreamData
@@ -43,6 +43,9 @@ def project_agent_execution_text_delta(item: Any) -> str | None:
 def _project_done_item_text(path: str, value: Any, meta: Any, *, source: str) -> str | None:
     item_meta = meta if isinstance(meta, Mapping) else {}
     stream_kind = str(item_meta.get("stream_kind") or "")
+    taskboard_status = _taskboard_status_text(path, value)
+    if taskboard_status is not None:
+        return taskboard_status
     if stream_kind == "progress":
         if str(item_meta.get("progress_source") or "") == "model":
             return None
@@ -103,6 +106,254 @@ def _phase_text(value: Any) -> str:
     prefix = f"Iteration {iteration}: " if iteration not in (None, "") else ""
     suffix = f" ({status})" if status else ""
     return f"{prefix}phase {phase}{suffix}."
+
+
+def _taskboard_status_text(path: str, value: Any) -> str | None:
+    if not path.startswith("agent_task.taskboard.") or not isinstance(value, Mapping):
+        return None
+    if path == "agent_task.taskboard.plan":
+        return _format_taskboard_status_block(
+            title="TaskBoard planned",
+            revision=value.get("revision"),
+            schedule=None,
+            card_results=None,
+        )
+    if path.startswith("agent_task.taskboard.tick.") and path.endswith(".scheduled"):
+        return _format_taskboard_status_block(
+            title=_taskboard_tick_title(path, "scheduled"),
+            revision=value.get("revision"),
+            schedule=value.get("schedule"),
+            card_results=value.get("card_results"),
+        )
+    if path.startswith("agent_task.taskboard.tick.") and path.endswith(".completed"):
+        return _format_taskboard_status_block(
+            title=_taskboard_tick_title(path, "updated"),
+            revision=value.get("revision"),
+            schedule=value.get("schedule"),
+            card_results=value.get("card_results"),
+        )
+    return None
+
+
+def _taskboard_tick_title(path: str, fallback: str) -> str:
+    parts = path.split(".")
+    for index, part in enumerate(parts):
+        if part == "tick" and index + 1 < len(parts):
+            tick_index = parts[index + 1].strip()
+            if tick_index:
+                return f"TaskBoard tick {tick_index} {fallback}"
+    return f"TaskBoard {fallback}"
+
+
+def _format_taskboard_status_block(
+    *,
+    title: str,
+    revision: Any,
+    schedule: Any,
+    card_results: Any,
+) -> str | None:
+    cards = _taskboard_display_cards(revision, schedule, card_results)
+    if not cards:
+        return None
+    board_id = _mapping_text(revision, "board_id") or "taskboard"
+    revision_id = _mapping_text(revision, "revision_id") or _mapping_text(schedule, "revision_id")
+    counts = _taskboard_status_counts(cards)
+    total = len(cards)
+    completed = counts.get("completed", 0)
+    header = f"**{title}** `{_markdown_inline_code(board_id)}`"
+    if revision_id:
+        header += f" - revision `{_markdown_inline_code(revision_id)}`"
+    summary_bits = [
+        f"{completed}/{total} completed",
+        f"{counts.get('in_progress', 0)} in progress",
+        f"{counts.get('not_started', 0)} not started",
+    ]
+    if counts.get("failed", 0):
+        summary_bits.append(f"{counts['failed']} failed")
+    if counts.get("degraded", 0):
+        summary_bits.append(f"{counts['degraded']} degraded")
+    lines = [
+        header,
+        f"Progress: {' - '.join(summary_bits)}",
+        "",
+        "| State | Card | Task |",
+        "| --- | --- | --- |",
+    ]
+    max_rows = 8
+    for card in cards[:max_rows]:
+        state = card["display_state"]
+        lines.append(
+            "| "
+            + _markdown_table_cell(_taskboard_state_label(state))
+            + " | "
+            + f"`{_markdown_inline_code(card['id'])}`"
+            + " | "
+            + _markdown_table_cell(card.get("objective") or card["id"])
+            + " |"
+        )
+    omitted = len(cards) - max_rows
+    if omitted > 0:
+        lines.append(f"| ... | ... | {omitted} more cards omitted. |")
+    return "\n".join(lines) + "\n\n"
+
+
+def _taskboard_display_cards(revision: Any, schedule: Any, card_results: Any) -> list[dict[str, Any]]:
+    revision_view = revision if isinstance(revision, Mapping) else {}
+    schedule_view = schedule if isinstance(schedule, Mapping) else {}
+    result_view = _taskboard_result_view(revision_view, card_results)
+    cards: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    graph_value = revision_view.get("graph")
+    graph: Mapping[str, Any] = graph_value if isinstance(graph_value, Mapping) else {}
+    for raw_card in _sequence_of_mappings(graph.get("cards")):
+        card_id = _clean_taskboard_text(raw_card.get("id") or raw_card.get("card_id"))
+        if not card_id:
+            continue
+        seen.add(card_id)
+        cards.append(
+            {
+                "id": card_id,
+                "objective": _clean_taskboard_text(raw_card.get("objective") or raw_card.get("goal")),
+                "status": _clean_taskboard_text(raw_card.get("status")),
+                "failure_policy": _clean_taskboard_text(raw_card.get("failure_policy")),
+                "display_state": _taskboard_display_state(card_id, raw_card, result_view.get(card_id), schedule_view),
+            }
+        )
+    for card_id in _taskboard_schedule_ids(schedule_view) + list(result_view):
+        if card_id in seen:
+            continue
+        seen.add(card_id)
+        result = result_view.get(card_id)
+        cards.append(
+            {
+                "id": card_id,
+                "objective": "",
+                "status": _clean_taskboard_text(result.get("status")) if isinstance(result, Mapping) else "",
+                "failure_policy": "",
+                "display_state": _taskboard_display_state(card_id, {}, result, schedule_view),
+            }
+        )
+    return cards
+
+
+def _taskboard_result_view(revision: Mapping[str, Any], card_results: Any) -> dict[str, Mapping[str, Any]]:
+    raw_results = card_results if isinstance(card_results, Mapping) else revision.get("card_results")
+    results: dict[str, Mapping[str, Any]] = {}
+    if isinstance(raw_results, Mapping):
+        for raw_id, raw_result in raw_results.items():
+            card_id = _clean_taskboard_text(raw_id)
+            if not card_id:
+                continue
+            if isinstance(raw_result, Mapping):
+                results[card_id] = raw_result
+            elif raw_result not in (None, ""):
+                results[card_id] = {"status": str(raw_result)}
+    raw_statuses = revision.get("card_result_statuses")
+    if isinstance(raw_statuses, Mapping):
+        for raw_id, raw_status in raw_statuses.items():
+            card_id = _clean_taskboard_text(raw_id)
+            if card_id and card_id not in results:
+                results[card_id] = {"status": str(raw_status)}
+    return results
+
+
+def _taskboard_schedule_ids(schedule: Mapping[str, Any]) -> list[str]:
+    ids: list[str] = []
+    for key in ("completed_card_ids", "runnable_card_ids", "blocked_card_ids"):
+        for card_id in _sequence_of_strings(schedule.get(key)):
+            if card_id not in ids:
+                ids.append(card_id)
+    return ids
+
+
+def _taskboard_display_state(
+    card_id: str,
+    card: Mapping[str, Any],
+    result: Any,
+    schedule: Mapping[str, Any],
+) -> str:
+    result_status = _normalize_taskboard_status(result.get("status")) if isinstance(result, Mapping) else ""
+    card_status = _normalize_taskboard_status(card.get("status"))
+    failure_policy = _normalize_taskboard_status(card.get("failure_policy"))
+    metadata: Mapping[str, Any] = {}
+    if isinstance(result, Mapping):
+        metadata_value = result.get("metadata")
+        if isinstance(metadata_value, Mapping):
+            metadata = metadata_value
+    if result_status in {"completed", "accepted", "succeeded", "success", "ok"}:
+        return "completed"
+    if result_status in {"degraded", "partial", "setback", "skipped", "deferred"}:
+        return "degraded"
+    if result_status in {"failed", "error", "timeout", "timed_out", "cancelled", "blocked"}:
+        if failure_policy in {"optional", "degradable"} or metadata.get("deferred") is True:
+            return "degraded"
+        return "failed"
+    completed_ids = set(_sequence_of_strings(schedule.get("completed_card_ids")))
+    runnable_ids = set(_sequence_of_strings(schedule.get("runnable_card_ids")))
+    if card_id in completed_ids or card_status in {"completed", "accepted", "succeeded", "success", "ok"}:
+        return "completed"
+    if card_status in {"degraded", "partial", "setback", "skipped", "deferred"}:
+        return "degraded"
+    if card_status in {"failed", "error", "timeout", "timed_out", "cancelled"}:
+        return "failed"
+    if card_id in runnable_ids or card_status in {"running", "ready", "active", "in_progress"}:
+        return "in_progress"
+    return "not_started"
+
+
+def _taskboard_status_counts(cards: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts = {"not_started": 0, "in_progress": 0, "completed": 0, "failed": 0, "degraded": 0}
+    for card in cards:
+        state = str(card.get("display_state") or "not_started")
+        counts[state if state in counts else "not_started"] += 1
+    return counts
+
+
+def _taskboard_state_label(state: str) -> str:
+    labels = {
+        "not_started": "⏳ Not started",
+        "in_progress": "🔄 In progress",
+        "completed": "✅ Completed",
+        "failed": "❌ Failed",
+        "degraded": "⚠️ Degraded",
+    }
+    return labels.get(state, labels["not_started"])
+
+
+def _normalize_taskboard_status(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def _clean_taskboard_text(value: Any) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    return " ".join(str(value).split()).strip()
+
+
+def _sequence_of_mappings(value: Any) -> list[Mapping[str, Any]]:
+    if isinstance(value, list | tuple):
+        return [item for item in value if isinstance(item, Mapping)]
+    return []
+
+
+def _sequence_of_strings(value: Any) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = _clean_taskboard_text(item)
+        if text:
+            result.append(text)
+    return result
+
+
+def _markdown_table_cell(value: Any) -> str:
+    text = _compact_inline_text(value, max_chars=96)
+    return text.replace("|", "\\|") or "-"
+
+
+def _markdown_inline_code(value: Any) -> str:
+    return _compact_inline_text(value, max_chars=80).replace("`", "'") or "-"
 
 
 def _action_observation_text(value: Any, meta: Mapping[str, Any]) -> str:

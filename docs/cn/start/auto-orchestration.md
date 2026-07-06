@@ -247,7 +247,10 @@ progress model 只接收 operator-safe snapshot；底层 Workspace/SQLite fallba
 
 对于文本消费方，`get_async_generator(type="delta")` 仍然是公开文本流。task-strategy
 execution 中，它既包含模型生成的文本增量，也会把部分过程事件投影成段落文本：
-模板 progress、snapshot、heartbeat 状态、phase 状态、retry marker 和任务终态结果。UI 如果需要
+模板 progress、snapshot、heartbeat 状态、phase 状态、Action observation、TaskBoard 状态表、
+retry marker 和任务终态结果。TaskBoard 状态表只是结构化 board event 的展示投影，
+把 card 状态汇总为未开始、进行中、完成、失败、降级五类；完成与质量判断仍来自
+verifier 和 host guard 结构化事实，而不是表格文本本身。UI 如果需要
 原始结构化事件载荷，包括 `path`、`value`、`delta`、`is_complete` 和 `meta`，应使用
 `type="instant"`。当某个结构化 execution item 也能投影成自然语言流式文本时，
 `instant` 会先产出原始 item，然后额外产出一个 synthetic

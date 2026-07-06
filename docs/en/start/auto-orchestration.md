@@ -273,7 +273,12 @@ model input.
 For text consumers, `get_async_generator(type="delta")` remains the public text
 stream. In task-strategy executions it includes model-generated text increments
 and also projects selected process events into paragraph text: template progress,
-snapshots, heartbeat status, phase status, retry markers, and the terminal task result.
+snapshots, heartbeat status, phase status, action observations, TaskBoard status
+tables, retry markers, and the terminal task result. TaskBoard tables are
+display-only projections from structured board events. They summarize card
+state as not started, in progress, completed, failed, or degraded; completion
+and quality still come from verifier and host-guard facts, not from the table
+text.
 Use `type="instant"` when the UI needs the original structured event payloads
 with `path`, `value`, `delta`, `is_complete`, and `meta`. When a structured
 execution item can also be represented as natural-language stream text,
