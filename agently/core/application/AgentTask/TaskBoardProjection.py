@@ -266,6 +266,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "cards": [
                 {
                     "id": card.id,
+                    "objective": cls._truncate_prompt_text(card.objective, 160),
                     "status": card.status,
                     "depends_on": list(card.depends_on),
                     "failure_policy": card.failure_policy,

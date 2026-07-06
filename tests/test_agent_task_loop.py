@@ -289,6 +289,78 @@ def test_agent_task_process_progress_delta_uses_only_explicit_progress_event():
     assert project_agent_execution_text_delta(progress_item) == "Reading the bounded source evidence.\n\n"
 
 
+def test_taskboard_delta_projects_structured_status_table():
+    item = AgentExecutionStreamData(
+        path="agent_task.taskboard.tick.2.completed",
+        value={
+            "revision": {
+                "board_id": "demo-board",
+                "revision_id": "rev-2",
+                "status": "running",
+                "graph": {
+                    "cards": [
+                        {"id": "collect", "objective": "Collect source facts.", "status": "pending"},
+                        {"id": "draft", "objective": "Draft the answer.", "status": "pending"},
+                        {"id": "final", "objective": "Finalize the user-facing answer.", "status": "pending"},
+                        {
+                            "id": "audit",
+                            "objective": "Run the required audit.",
+                            "failure_policy": "required",
+                        },
+                        {
+                            "id": "optional-source",
+                            "objective": "Try an optional source.",
+                            "failure_policy": "optional",
+                        },
+                    ],
+                },
+            },
+            "schedule": {
+                "revision_id": "rev-1",
+                "runnable_card_ids": ["draft"],
+                "blocked_card_ids": ["final"],
+                "completed_card_ids": ["collect"],
+            },
+            "card_results": {
+                "collect": {"card_id": "collect", "status": "completed"},
+                "audit": {"card_id": "audit", "status": "failed"},
+                "optional-source": {"card_id": "optional-source", "status": "failed"},
+            },
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+    )
+
+    text = project_agent_execution_text_delta(item)
+
+    assert text is not None
+    assert text.startswith("**TaskBoard tick 2 updated** `demo-board` - revision `rev-2`")
+    assert "Progress: 1/5 completed - 1 in progress - 1 not started - 1 failed - 1 degraded" in text
+    assert "| ✅ Completed | `collect` | Collect source facts. |" in text
+    assert "| 🔄 In progress | `draft` | Draft the answer. |" in text
+    assert "| ⏳ Not started | `final` | Finalize the user-facing answer. |" in text
+    assert "| ❌ Failed | `audit` | Run the required audit. |" in text
+    assert "| ⚠️ Degraded | `optional-source` | Try an optional source. |" in text
+    assert "card_results" not in text
+
+
+def test_taskboard_stream_revision_keeps_objective_for_delta_status_table():
+    revision = TaskBoardRevision.create(
+        board_id="stream-objective",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "stream-objective-graph",
+                "cards": [{"id": "collect", "objective": "Collect source facts for the status table."}],
+            }
+        ),
+    )
+
+    compact = AgentTask._compact_taskboard_revision_for_stream(revision)
+
+    assert compact["cards"][0]["objective"] == "Collect source facts for the status table."
+
+
 class _FakeChildExecutionStream:
     id = "child-execution-1"
 
