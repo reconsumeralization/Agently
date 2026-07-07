@@ -37,7 +37,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             "iteration": iteration_index,
             "goal": self.goal,
             "success_criteria": self.success_criteria,
-            "task_context_contract": self._task_context_contract(),
+            "task_context_contract": self._task_context_contract_for_model_prompt(),
             "plan": DataFormatter.sanitize(plan),
             "execution_prompt": self._execution_prompt_context(),
             "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
@@ -50,7 +50,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         delivery_contract = {
             "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
             "deliverable_mode": plan.get("deliverable_mode"),
-            "task_context_contract": self._task_context_contract(),
+            "task_context_contract": self._task_context_contract_for_model_prompt(),
             "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
         }
         if repair_context:
@@ -362,7 +362,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "work_unit": work_unit.to_dict(),
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
                 "preferred_execution_shape": effective_shape,
                 "step_plan": step_plan,
                 "plan": DataFormatter.sanitize(plan),

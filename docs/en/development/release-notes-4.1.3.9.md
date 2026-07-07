@@ -16,7 +16,7 @@ and compact model-hot packaging.
 
 This release also promotes the pluggable `SessionMemory` protocol and the built-in
 `AgentlyMemory` sample plugin. HITL approval/suggestion/guidance/insertion work
-is not part of 4.1.3.9 and moves to the 4.1.3.10 development line.
+is not part of 4.1.3.9 and moves to the 4.1.4 development line.
 
 ## Recommended Shape
 
@@ -78,7 +78,7 @@ vector_index = LocalVectorIndex(embedder, similarity="cosine")
 - Release manifest: `compatibility/releases/4.1.3.9.json`.
 - Recommended `agently-devtools`: `>=0.1.10,<0.2.0`.
 - The next development-line manifest is `compatibility/in-development.json` and
-  targets `4.1.3.10`.
+  targets `4.1.4`.
 
 ## Acceptance Evidence
 
@@ -90,7 +90,7 @@ vector_index = LocalVectorIndex(embedder, similarity="cosine")
 - Companion guidance: `../Agently-Skills` request guidance updated for Workspace
   retrieval and Session memory.
 
-## Deferred To 4.1.3.10
+## Deferred To 4.1.4
 
 4.1.3.9 does not complete HITL approval/suggestion/guidance/insertion flows,
 long-task task-execution memory beyond the released Session/Workspace substrate,

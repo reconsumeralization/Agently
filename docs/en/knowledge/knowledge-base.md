@@ -95,9 +95,9 @@ chunks = collection.query(
 )
 ```
 
-### After-turn ingestion
+### After-turn write-back
 
-If your agent's output should become future context (e.g., a self-improving knowledge base), add a step after the request that ingests the answer back into the collection:
+If your agent's output should become future context (e.g., a self-improving knowledge base), add a step after the request that writes the answer back into the collection:
 
 ```python
 result = agent.input(user_question).start()
@@ -108,7 +108,7 @@ collection.add([{
 }])
 ```
 
-Be deliberate — auto-ingesting model output without review is how knowledge bases poison themselves.
+Be deliberate — writing model output back without review is how knowledge bases poison themselves.
 
 ### Inside a TriggerFlow
 

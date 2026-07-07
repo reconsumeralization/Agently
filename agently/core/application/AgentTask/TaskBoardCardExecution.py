@@ -207,7 +207,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
                 "card": context.card.to_dict(),
                 "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
@@ -232,8 +232,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "Execute exactly one TaskBoard card. "
                 "Provide short card_intent and decision_basis fields before the card result fields to frame this "
                 "card-local decision; do not include raw chain-of-thought or hidden reasoning. "
-                "Use task_context_contract.current_time when the card needs current/latest/as-of evidence; label older "
-                "or historical source material with its time boundary. "
+                "Use task_context_contract.current_time only when the card needs current/latest/as-of evidence; label older "
+                "or historical source material with its time boundary. Do not treat the runtime/current date as a "
+                "business fact, incident date, deployment date, publication date, approval date, or validation date "
+                "unless the goal or verifier-visible evidence explicitly provides it. "
                 "taskboard_evidence_view is the compact evidence summary; request full content only through available "
                 "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
                 "the same failing source or method when a bounded fallback can satisfy the card. dependency_readbacks "
@@ -252,7 +254,18 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "Only return failed or blocked when the card cannot produce the required outcome or the missing "
                 "evidence is truly critical. If this card produces the user-facing deliverable, provide the complete "
                 "bounded body in candidate_final_result, final_result, or artifact_markdown when it fits the bounded "
-                "response. For a long, sectioned, or file-backed deliverable that cannot fit the bounded response, "
+                "response. Preserve task-provided facts exactly. Do not add concrete times, dates, publication states, "
+                "validation states, numbers, source headings, or status details unless they are visible in the goal, "
+                "dependency evidence, or evidence_ledger, or are explicitly derived from those facts and labeled as "
+                "derived. Preserve uncertainty and evidence strength exactly: statements such as 'no known data loss', "
+                "'audit still running', 'not yet published', or 'needs sign-off' must not be rewritten into confirmed "
+                "absence, completed validation, publication, approval, or resolution. When evidence says no data loss "
+                "is known and an audit is still running, do not state or imply that data is intact, complete, safe, "
+                "fully verified, or that no data was lost. Keep the response bounded. "
+                "Unless the user explicitly requests a fill-in template, do not leave unresolved placeholders such as "
+                "[date], [time], [name], [Your Name], [Title], TODO, or TBD in a final deliverable; omit unknown "
+                "details or write a role-generic sentence grounded in available facts. "
+                "For a long, sectioned, or file-backed deliverable that cannot fit the bounded response, "
                 "return artifact_manifest as a structured deliverable contract with path='final.md', section "
                 "ids/titles, brief section intent, and source/evidence refs to use; artifact_manifest is not itself "
                 "the deliverable body or proof of completion. Do not include full section content in "
@@ -355,7 +368,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 delivery_contract={
                     "card": DataFormatter.sanitize(context.card.to_dict()),
                     "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
-                    "task_context_contract": self._task_context_contract(),
+                    "task_context_contract": self._task_context_contract_for_model_prompt(),
                     "scoped_retrieval": DataFormatter.sanitize(self._taskboard_card_scoped_retrieval(context.card)),
                 },
                 quality_gates=(
@@ -683,7 +696,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "task_id": self.id,
             "goal": self.goal,
             "success_criteria": self.success_criteria,
-            "task_context_contract": self._task_context_contract(),
+            "task_context_contract": self._task_context_contract_for_model_prompt(),
             "card": context.card.to_dict(),
             "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
             "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
@@ -709,8 +722,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "This card is for synthesis, verification, finalization, or deciding the next board action; "
             "provide short card_intent and decision_basis fields before the control result fields; do not include raw "
             "chain-of-thought or hidden reasoning. "
-            "Use task_context_contract.current_time when current/latest/as-of evidence matters, and label older "
-            "or historical source material with its time boundary. "
+            "Use task_context_contract.current_time only when current/latest/as-of evidence matters, and label older "
+            "or historical source material with its time boundary. Do not treat the runtime/current date as a "
+            "business fact, incident date, deployment date, publication date, approval date, or validation date "
+            "unless the goal or verifier-visible evidence explicitly provides it. "
             "do not plan or call tools from this request. taskboard_evidence_view is the compact evidence summary "
             "and preserve cold refs as pointers. Treat evidence_ledger as the authoritative grounding ledger and "
             "bind factual claims through evidence_use ids. failed/empty items support unavailability only; ref_only "
@@ -731,6 +746,16 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "do not mention a source title without its verifier-visible URL/path when such a ref exists. "
             "Apply workspace_delivery_policy: when this card is authorized to write required final deliverable paths, "
             "use the required path in artifact_manifest.path instead of a working/evidence path. "
+            "Preserve task-provided facts exactly. Do not add concrete times, dates, publication states, validation "
+            "states, numbers, source headings, or status details unless they are visible in the goal, dependency "
+            "evidence, or evidence_ledger, or are explicitly derived from those facts and labeled as derived. "
+            "Preserve uncertainty and evidence strength exactly: no-known-loss, still-running audit, unpublished "
+            "manifest, missing sign-off, and unresolved warning states must not become confirmed absence, complete "
+            "validation, publication, approval, or fix. When evidence says no data loss is known and an audit is "
+            "still running, do not state or imply that data is intact, complete, safe, fully verified, or that no data was lost. "
+            "Unless the user explicitly requests a fill-in template, do not leave unresolved placeholders such as "
+            "[date], [time], [name], [Your Name], [Title], TODO, or TBD in a final deliverable; omit unknown "
+            "details or write a role-generic sentence grounded in available facts. "
             "For file-backed deliverables, return acceptance_points with expected headings or exact anchors for "
             "critical verification points; do not invent line numbers or trusted file refs. "
             "After the main control result fields, include short self_check, short_summary, and progress_message for "
@@ -842,7 +867,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "output": DataFormatter.sanitize(control_output_schema),
                     "output_format": "json",
                 },
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
             },
             quality_gates=(
                 {

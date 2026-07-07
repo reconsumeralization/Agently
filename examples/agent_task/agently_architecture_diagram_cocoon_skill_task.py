@@ -321,7 +321,7 @@ async def main() -> None:
         return {"status": "ok", "sources": sources, "architecture_status_facts": ARCHITECTURE_STATUS_FACTS}
 
     agent.use_actions(fetch_agently_architecture_sources)
-    await workspace.ingest(
+    await workspace.put(
         content={
             "task": TASK_ID,
             "output_file": OUTPUT_FILE,

@@ -289,7 +289,7 @@ async def main() -> None:
     workspace = agent.workspace
     if workspace is None:
         raise RuntimeError("Workspace was not initialized.")
-    await workspace.ingest(
+    await workspace.put(
         content={
             "task": TASK_ID,
             "outputs": {

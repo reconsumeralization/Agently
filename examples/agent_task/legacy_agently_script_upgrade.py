@@ -234,7 +234,7 @@ async def main(argv: list[str] | None = None):
         env=run_env,
     )
 
-    await workspace.ingest(
+    await workspace.put(
         content={
             "path": "legacy_script.py",
             "legacy_script_content": legacy_script,

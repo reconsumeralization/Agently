@@ -470,6 +470,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
+                "factual_integrity_requirements": {
+                    "required": True,
+                    "summary": (
+                        "The final deliverable must not add unsupported concrete facts or inflate certainty. "
+                        "Concrete dates, times, publication states, validation states, approvals, resolutions, "
+                        "numbers, source headings, and exact source facts must be visible in the goal, execution "
+                        "evidence, or artifact readback, or explicitly labeled as derived. The system/runtime/current "
+                        "date is execution context only; it is not evidence for a business, incident, deployment, "
+                        "publication, approval, or validation date unless the task evidence explicitly says so. Preserve pending, "
+                        "unknown, no-known-loss, not-published, needs-sign-off, and unresolved states exactly."
+                    ),
+                },
                 "iteration": iteration_index,
                 "plan": self._compact_verifier_prompt_value(plan, max_chars=_VERIFIER_PROMPT_ITEM_CHARS),
                 "candidate_final_result": self._compact_verifier_prompt_value(
@@ -541,6 +553,20 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "summary pages. Reject candidates that ignore a more specific verifier-visible source and ground the "
             "deliverable only in a weaker source. Reject candidates that introduce unsupported source facts, syllabus "
             "headings, repository details, dates, numbers, or report conclusions. "
+            "Treat unsupported concrete additions as material even when an individual success criterion does not name "
+            "them: extra deployment times, incident dates, publication states, validation states, numbered source "
+            "points, or exact source facts must be visible in the goal, execution evidence, or verifier-visible "
+            "readback, or explicitly marked as derived from those facts. Treat the runtime/current date as non-evidence; "
+            "reject a deliverable that adds it as an incident, deployment, publication, approval, validation, or "
+            "business date unless that date is visible in the goal or verifier-visible evidence. "
+            "Unless the user explicitly requests a fill-in template, reject final deliverables that contain unresolved "
+            "template placeholders such as [date], [time], [name], [Your Name], [Title], TODO, or TBD. Ask for a "
+            "grounded non-placeholder revision instead of accepting a template as final. "
+            "Reject certainty inflation: 'no known data loss' is not the same as confirmed absence of data loss; "
+            "'audit still running' is not complete verification; 'not yet published' is not published; 'needs "
+            "sign-off' is not approved. If evidence says no data loss is known and an audit is still running, "
+            "reject claims that data is intact, complete, safe, fully verified, or that no data was lost unless "
+            "verifier-visible evidence explicitly confirms that stronger state. Preserve uncertainty, pending status, and evidence strength exactly. "
             "If bounded previews are enough to contradict the candidate, set is_complete=false. If the previews are "
             "too truncated to verify a material claim, set is_complete=false and ask for scoped evidence readback. "
             "If execution metadata, action records, diagnostics, command output, or verifier-visible evidence shows "
@@ -581,6 +607,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "After the judgment fields, include compact criterion_checks, verification_summary, and progress_message "
             "for downstream repair context and human progress. These fields are process summaries only; they are not "
             "completion evidence and must not contain raw chain-of-thought or long evidence bodies. "
+            "Always return factual_integrity_check as a separate structured check. Set satisfied=false when the "
+            "deliverable adds unsupported concrete facts or inflates certainty, even if every explicit success "
+            "criterion is otherwise satisfied. "
+            "When returning a terminal judgment, also include final_response as a concise user-facing status or answer "
+            "note based only on the same visible evidence and structured judgment. For file-backed deliverables, "
+            "mention the artifact path/ref and any known limitation instead of copying the whole file body. "
+            "final_response is display context only and must not be used as completion evidence. "
             "Set requires_block=true only when the task cannot continue."
         )
         request.output(
@@ -610,9 +643,24 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 ),
                 "final_result_required": (bool, "True when the goal expects a concrete returned final deliverable"),
                 "final_result": (str, "Final business result when complete"),
+                "final_response": (
+                    str,
+                    "Concise user-facing terminal answer/status note; display context only, not completion evidence.",
+                    False,
+                ),
                 "criterion_checks": (
                     [dict],
                     "Compact per-criterion checks: [{criterion, satisfied: bool, status?, summary, evidence_ids?, gaps?}]. The satisfied boolean is required; status text is display-only.",
+                    False,
+                ),
+                "factual_integrity_check": (
+                    {
+                        "satisfied": (bool, "True only when no unsupported concrete additions or certainty inflation are present.", False),
+                        "unsupported_additions": ([str], "Concrete unsupported additions found in the candidate.", False),
+                        "certainty_inflation": ([str], "Statements that overstate pending, unknown, partial, unresolved, unpublished, or unapproved facts.", False),
+                        "summary": (str, "Concise factual integrity judgment.", False),
+                    },
+                    "Required factual integrity check independent of ordinary criterion checks.",
                     False,
                 ),
                 "verification_summary": (
@@ -2210,6 +2258,20 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return checked
 
     @classmethod
+    def _verification_factual_integrity_is_satisfied(cls, check: Mapping[str, Any]) -> bool:
+        return check.get("satisfied") is True
+
+    @classmethod
+    def _verification_factual_integrity_messages(cls, check: Mapping[str, Any]) -> list[str]:
+        messages: list[str] = []
+        for key in ("unsupported_additions", "certainty_inflation"):
+            messages.extend(cls._normalize_string_list(check.get(key)))
+        summary = str(check.get("summary") or "").strip()
+        if summary and summary not in messages:
+            messages.append(summary)
+        return messages
+
+    @classmethod
     def _is_liveness_stall_error(cls, error: Mapping[str, Any]) -> bool:
         error_type = str(error.get("error_type") or error.get("type") or "")
         status = str(error.get("status") or "")
@@ -3263,6 +3325,25 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if normalized["missing_criteria"]:
             normalized["is_complete"] = False
             guard_reasons.append("missing_criteria_present")
+        factual_integrity_check = verification.get("factual_integrity_check")
+        if isinstance(factual_integrity_check, Mapping):
+            normalized["factual_integrity_check"] = DataFormatter.sanitize(dict(factual_integrity_check))
+            if not self._verification_factual_integrity_is_satisfied(factual_integrity_check):
+                normalized["is_complete"] = False
+                guard_reasons.append("factual_integrity_failed")
+                factual_messages = self._verification_factual_integrity_messages(factual_integrity_check)
+                if not factual_messages:
+                    factual_messages = [
+                        "Factual integrity check did not confirm that the deliverable avoids unsupported concrete facts and certainty inflation."
+                    ]
+                normalized["missing_criteria"] = self._merge_string_lists(
+                    normalized.get("missing_criteria"),
+                    factual_messages,
+                )
+                normalized["acceptance_delta"] = self._merge_string_lists(
+                    normalized.get("acceptance_delta"),
+                    factual_messages,
+                )
         final_result_required = self._normalize_bool(verification.get("final_result_required"), default=False)
         trusted_workspace_artifact_refs = self._trusted_workspace_artifact_refs_from_summary(execution_evidence_summary)
         risky_actions, non_blocking_failed_actions = self._execution_risk_actions(execution_evidence_summary)

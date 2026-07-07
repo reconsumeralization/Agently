@@ -15,16 +15,17 @@ task information across repeated execution steps.
 
 This release does not introduce autonomous WorkLoop planning. Application code,
 TriggerFlow definitions, or ordinary Python loops still decide when to observe,
-ingest, search, checkpoint, and build context.
+write records, search, checkpoint, and build context.
 
 ## Highlights
 
 - `agent.use_workspace(...)` configures one Workspace with structured records,
   SQLite metadata/FTS, managed content storage, and an editable `files_root`.
-- `agent.workspace` exposes `ingest(...)`, `put(...)`, `get(...)`,
+- `agent.workspace` exposes `put(...)`, `get(...)`,
   `get_data(...)`, `search(...)`, `link(...)`, `links(...)`,
   `checkpoint(...)`, `latest_checkpoint(...)`, `history(...)`,
-  `capabilities()`, and `build_context(...)`.
+  `capabilities()`, and `build_context(...)`; `ingest(...)` is retained as a
+  compatibility alias for older code.
 - Recall is plugin-shaped through `ContextPlanner`, `Retriever`, and
   `ContextBuilder`; default `auto` and `software_dev` profiles are available.
 - `agent.enable_workspace_file_actions(...)` exposes the Workspace file working
@@ -41,7 +42,7 @@ ingest, search, checkpoint, and build context.
 ```python
 agent = Agently.create_agent("issue-run").use_workspace("./.agently/runs/issue-123")
 
-record = await agent.workspace.ingest(
+record = await agent.workspace.put(
     content={"route": None, "status": "failed"},
     collection="observations",
     kind="route_attempt",
@@ -76,7 +77,7 @@ Action outputs are not automatically memory. Store them explicitly:
 
 ```python
 result = agent.action.execute_action("inspect_workspace_files", {"cmd": "cat notes/runtime.txt"})
-await agent.workspace.ingest(
+await agent.workspace.put(
     content={"stdout": result["data"]["stdout"]},
     collection="observations",
     kind="action_output",
@@ -93,7 +94,7 @@ await agent.workspace.ingest(
   checkpoints, and builds Recall context.
 - `examples/workspace/workspace_with_action_output.py` demonstrates writing a
   file through Workspace file actions, reading it through a shell action, then
-  explicitly ingesting the action output into Workspace before building context.
+  explicitly writing the action output into Workspace before building context.
 
 ## Compatibility
 

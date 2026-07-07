@@ -1991,14 +1991,14 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
         goal="Use scoped search before reading large files.",
         success_criteria=["Evidence is grounded."],
     )
-    await task.workspace.ingest(
+    await task.workspace.put(
         content="Alpha deadline is 2026-07-01. Use this bounded evidence.",
         collection="observations",
         kind="note",
         summary="alpha deadline note",
         scope={"case_id": "alpha"},
     )
-    await task.workspace.ingest(
+    await task.workspace.put(
         content="Beta deadline is unrelated.",
         collection="observations",
         kind="note",
@@ -3505,7 +3505,7 @@ async def test_taskboard_required_final_deliverable_promotion_replaces_stale_tar
         await ref_for("working/taskboard/coverage-and-finalize/final.md"),
     ]
 
-    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs(refs)
+    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs([*refs, dict(refs[0])])
 
     final_read = await task.workspace.read_file("final.md", max_bytes=len(full_body.encode("utf-8")) + 1)
     assert final_read["content"] == full_body
@@ -3513,6 +3513,107 @@ async def test_taskboard_required_final_deliverable_promotion_replaces_stale_tar
     assert promoted_refs[0]["source_path"] == "working/taskboard/coverage-and-finalize/final.md"
     assert promoted_refs[0]["sha256"] == final_read["sha256"]
     assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_required_final_deliverable_promotion_uses_unique_trusted_source(tmp_path):
+    agent = _create_agent("agent-taskboard-final-deliverable-unique-source").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-deliverable-unique-source",
+        goal="Produce support_reply.md at the required deliverable path.",
+        success_criteria=["support_reply.md contains the completed customer reply."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "support_reply.md"}]}},
+    )
+    body = "# Support Reply\n\nCompleted customer reply body."
+    await task.workspace.write_file("final.md", body)
+    read_result = await task.workspace.read_file("final.md", max_bytes=4000)
+    refs = [
+        {
+            "path": "final.md",
+            "bytes": int(read_result["bytes"]),
+            "sha256": str(read_result["sha256"]),
+            "media_type": read_result.get("media_type"),
+            "content_kind": "text",
+            "role": "workspace_artifact",
+            "source": "test.final-md",
+            "preview": str(read_result.get("content") or ""),
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "truncated": bool(read_result.get("truncated")),
+        }
+    ]
+
+    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs([*refs, dict(refs[0])])
+
+    target_read = await task.workspace.read_file("support_reply.md", max_bytes=4000)
+    assert target_read["content"] == body
+    assert promoted_refs[0]["path"] == "support_reply.md"
+    assert promoted_refs[0]["source_path"] == "final.md"
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "selected"
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][1]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_required_final_deliverable_promotion_uses_repair_source_over_existing_target(tmp_path):
+    agent = _create_agent("agent-taskboard-final-deliverable-repair-source").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-deliverable-repair-source",
+        goal="Repair incident_learning.md at the required deliverable path.",
+        success_criteria=["incident_learning.md contains only grounded incident facts."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "incident_learning.md"}]}},
+    )
+    stale_body = (
+        "# Incident Learning Note\n\n"
+        "**Date:** 2026-07-07\n\n"
+        "## Open Risks\n\n"
+        "The long-term prevention work is not yet implemented. No other risks are currently known.\n"
+        + "\n".join(f"Unsupported stale detail {index}." for index in range(20))
+    )
+    repaired_body = (
+        "# Incident Learning Note\n\n"
+        "## Open Risks\n\n"
+        "The long-term prevention work is identified but not yet implemented.\n"
+    )
+    await task.workspace.write_file("incident_learning.md", stale_body)
+    await task.workspace.write_file("final.md", repaired_body)
+
+    async def ref_for(path: str, source: str) -> dict[str, Any]:
+        read_result = await task.workspace.read_file(path, max_bytes=4000)
+        return {
+            "path": path,
+            "bytes": int(read_result["bytes"]),
+            "sha256": str(read_result["sha256"]),
+            "media_type": read_result.get("media_type"),
+            "content_kind": "text",
+            "role": "workspace_artifact",
+            "source": source,
+            "preview": str(read_result.get("content") or ""),
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "truncated": bool(read_result.get("truncated")),
+        }
+
+    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs(
+        [
+            await ref_for("incident_learning.md", "agent_task.taskboard.card.write_incident_note.workspace_artifact"),
+            await ref_for("final.md", "agent_task.taskboard.card.final-verification-repair.workspace_artifact"),
+        ]
+    )
+
+    target_read = await task.workspace.read_file("incident_learning.md", max_bytes=4000)
+    assert target_read["content"] == repaired_body
+    assert promoted_refs[0]["path"] == "incident_learning.md"
+    assert promoted_refs[0]["source_path"] == "final.md"
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["reason"] == (
+        "unique_final_verification_repair_source_for_required_deliverable"
+    )
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][1]["status"] == "delivered"
 
 
 @pytest.mark.asyncio
@@ -4247,6 +4348,10 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
 
     assert result["status"] == "completed"
     assert result["final_result"].startswith("Workspace artifact delivered at reports/final.md")
+    assert "final_response" in result
+    assert "Completed" in result["final_response"]
+    assert "reports/final.md" in result["final_response"]
+    assert await task.async_get_text() == result["final_response"]
     verification = meta["iterations"][0]["verification"]
     assert verification["is_complete"] is True
     assert verification["final_result_via_workspace_artifact"] is True
@@ -4328,6 +4433,11 @@ async def test_agent_task_workspace_artifact_refs_survive_incomplete_verificatio
     assert result["status"] == "max_iterations"
     assert result["accepted"] is False
     assert result["artifact_status"] == "partial"
+    assert "final_response" in result
+    assert "Partial result available" in result["final_response"]
+    assert "reports/partial.md" in result["final_response"]
+    assert "stronger cited evidence" in result["final_response"]
+    assert await task.async_get_text() == result["final_response"]
     delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
     assert delivery["status"] == "delivered"
     assert delivery["file_refs"][0]["path"] == "reports/partial.md"
@@ -6366,6 +6476,77 @@ def test_verification_criterion_checks_require_structured_satisfied_boolean():
     ) is True
 
 
+def test_verification_factual_integrity_check_blocks_completion(tmp_path):
+    agent = _create_agent("agent-factual-integrity-check").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="factual-integrity-check",
+        goal="Produce a support reply.",
+        success_criteria=["The support reply preserves stated uncertainty."],
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Explicit criteria are satisfied.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": False,
+            "final_result": "",
+            "factual_integrity_check": {
+                "satisfied": False,
+                "unsupported_additions": ["Added unsupported mitigation time 13:45 UTC."],
+                "certainty_inflation": ["Changed no known data loss into confirmed no data loss."],
+                "summary": "The artifact contains unsupported concrete details.",
+            },
+        },
+        execution_evidence_summary={},
+    )
+
+    assert verification["is_complete"] is False
+    assert "factual_integrity_failed" in verification["guard_reasons"]
+    assert "Added unsupported mitigation time 13:45 UTC." in verification["missing_criteria"]
+    assert "Changed no known data loss into confirmed no data loss." in verification["acceptance_delta"]
+
+
+def test_verification_factual_integrity_check_allows_clean_completion(tmp_path):
+    agent = _create_agent("agent-factual-integrity-clean").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="factual-integrity-clean",
+        goal="Produce a support reply.",
+        success_criteria=["The support reply preserves stated uncertainty."],
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "All checks passed.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": False,
+            "final_result": "",
+            "factual_integrity_check": {
+                "satisfied": True,
+                "unsupported_additions": [],
+                "certainty_inflation": [],
+                "summary": "No unsupported concrete additions.",
+            },
+        },
+        execution_evidence_summary={},
+    )
+
+    assert verification["is_complete"] is True
+    assert verification.get("guard_reasons") in (None, [])
+    assert verification["factual_integrity_check"]["satisfied"] is True
+
+
 def test_verification_keeps_liveness_failure_blocking_without_criterion_checks(tmp_path):
     agent = _create_agent("agent-soft-liveness-needs-checks").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -6609,6 +6790,8 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
 
     assert result["status"] == "completed"
     assert result["iterations"] == 2
+    assert "final_response" in result
+    assert await result_facade.async_get_text() == result["final_response"]
     assert result_facade.task_refs["task_id"] == "legacy-script-upgrade"
     assert result_facade.task_refs["status"] == "completed"
     assert execution_meta["task_refs"]["task_id"] == "legacy-script-upgrade"
@@ -6657,7 +6840,7 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert "plan ready" in delta_text
     assert "execution evidence was captured" in delta_text
     assert "all success criteria are satisfied" in delta_text
-    assert "Final result:" in delta_text
+    assert result["final_response"] in delta_text
     assert "Operator summary for INC-4242." in delta_text
     phase_names = [item["phase"] for item in meta["diagnostics"]["phases"]]
     assert "configured" in phase_names

@@ -166,6 +166,10 @@ async def run_model_request_route(
             "accepted": False,
             "artifact_status": "blocked",
             "reason": capability_failure["reason"],
+            "final_response": (
+                "Task encountered a blocking condition. "
+                f"No complete final deliverable was accepted. Reason: {capability_failure['reason']}"
+            ),
             "required_capabilities": capability_failure,
         }
     execution.close_snapshot = {"status": "success", "route": "model_request"}

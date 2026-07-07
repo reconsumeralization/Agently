@@ -102,20 +102,85 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             for ref in target_refs
             if str(ref.get("sha256") or "").strip()
         }
-        candidates: list[tuple[int, str, str, Mapping[str, Any]]] = []
+        same_name_candidates: list[tuple[int, str, str, Mapping[str, Any], str]] = []
+        fallback_candidates: list[tuple[int, str, str, Mapping[str, Any], str]] = []
+        repair_candidates: list[tuple[int, str, str, Mapping[str, Any], str]] = []
         for ref in current_refs:
             if not self._is_trusted_workspace_artifact_ref(ref):
                 continue
             path_key = self._taskboard_workspace_path_key(ref.get("path"))
             if not path_key or path_key == target_path_key:
                 continue
-            if self._taskboard_workspace_path_name(path_key) != target_name:
+            if not self._workspace_artifact_candidate_path_is_local(path_key):
                 continue
             byte_count = self._coerce_non_negative_int(ref.get("bytes"))
             sha256 = str(ref.get("sha256") or "").strip()
             if byte_count <= 0 or not sha256:
                 continue
-            candidates.append((byte_count, sha256, path_key, ref))
+            source = str(ref.get("source") or "").strip()
+            reason = (
+                "final_verification_repair_source"
+                if source.startswith("agent_task.taskboard.card.final-verification-repair")
+                or "taskboard_final_verification_repair" in source
+                else ""
+            )
+            candidate = (byte_count, sha256, path_key, ref, reason)
+            fallback_candidates.append(candidate)
+            if reason == "final_verification_repair_source":
+                repair_candidates.append(candidate)
+            if self._taskboard_workspace_path_name(path_key) == target_name:
+                same_name_candidates.append(candidate)
+        same_name_candidates = self._taskboard_unique_final_deliverable_promotion_candidates(same_name_candidates)
+        fallback_candidates = self._taskboard_unique_final_deliverable_promotion_candidates(fallback_candidates)
+        repair_candidates = self._taskboard_unique_final_deliverable_promotion_candidates(repair_candidates)
+        candidates = same_name_candidates
+        if not candidates and target_refs and len(repair_candidates) == 1:
+            candidates = repair_candidates
+            self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
+                DataFormatter.sanitize(
+                    {
+                        "status": "selected",
+                        "reason": "unique_final_verification_repair_source_for_required_deliverable",
+                        "target_path": target_path_key,
+                        "source_path": repair_candidates[0][2],
+                    }
+                )
+            )
+        elif not candidates and target_refs and len(repair_candidates) > 1:
+            self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
+                DataFormatter.sanitize(
+                    {
+                        "status": "skipped",
+                        "reason": "final_verification_repair_source_ambiguous",
+                        "target_path": target_path_key,
+                        "candidate_paths": [item[2] for item in repair_candidates],
+                    }
+                )
+            )
+        if not candidates and missing_required and not target_refs:
+            if len(fallback_candidates) == 1:
+                candidates = fallback_candidates
+                self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
+                    DataFormatter.sanitize(
+                        {
+                            "status": "selected",
+                            "reason": "unique_trusted_source_for_required_deliverable",
+                            "target_path": target_path_key,
+                            "source_path": fallback_candidates[0][2],
+                        }
+                    )
+                )
+            elif len(fallback_candidates) > 1:
+                self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
+                    DataFormatter.sanitize(
+                        {
+                            "status": "skipped",
+                            "reason": "unique_required_deliverable_source_ambiguous",
+                            "target_path": target_path_key,
+                            "candidate_paths": [item[2] for item in fallback_candidates],
+                        }
+                    )
+                )
         if not candidates:
             return None
 
@@ -140,16 +205,30 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         best = best_candidates[0]
         if best[1] in target_sha_values:
             return None
-        if target_refs and target_bytes >= best[0]:
+        best_reason = best[4]
+        if target_refs and target_bytes >= best[0] and best_reason != "final_verification_repair_source":
             return None
         if (
             target_refs
             and not missing_required
+            and best_reason != "final_verification_repair_source"
             and target_bytes >= _WORKSPACE_ARTIFACT_PREVIEW_BYTES
             and best[0] - target_bytes < _WORKSPACE_ARTIFACT_PREVIEW_BYTES
         ):
             return None
         return dict(best[3])
+
+    @staticmethod
+    def _taskboard_unique_final_deliverable_promotion_candidates(
+        candidates: Sequence[tuple[int, str, str, Mapping[str, Any], str]],
+    ) -> list[tuple[int, str, str, Mapping[str, Any], str]]:
+        unique: dict[tuple[str, str], tuple[int, str, str, Mapping[str, Any], str]] = {}
+        for candidate in candidates:
+            key = (candidate[2], candidate[1])
+            previous = unique.get(key)
+            if previous is None or candidate[0] > previous[0]:
+                unique[key] = candidate
+        return list(unique.values())
 
     async def _taskboard_materialize_required_final_deliverable_refs(
         self,
@@ -1096,6 +1175,19 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             "usable, what degraded or unavailable evidence constrained the work, and which requested requirements "
             "remain unmet. Set degraded=true only when the response intentionally relies on disclosed partial, "
             "unavailable, optional, or degraded evidence rather than a full evidence path. "
+            "Do not add concrete times, dates, publication states, validation states, numbers, source headings, or "
+            "status details unless they are visible in the goal, evidence_ledger, trusted artifact readback, or "
+            "source_refs, or are explicitly marked as derived from those facts. The runtime/current date is execution "
+            "context only; do not write it as a business, incident, deployment, publication, approval, or validation "
+            "date unless task evidence explicitly provides it. Unsupported concrete additions must "
+            "be reported as gaps instead of accepted as harmless prose. Preserve uncertainty and evidence strength "
+            "exactly: no-known-loss, still-running audit, unpublished manifest, missing sign-off, and unresolved "
+            "warning states must not become confirmed absence, complete validation, publication, approval, or fix. "
+            "When evidence says no data loss is known and an audit is still running, do not state or imply that data "
+            "is intact, complete, safe, fully verified, or that no data was lost. "
+            "Unless the user explicitly requests a fill-in template, do not leave unresolved placeholders such as "
+            "[date], [time], [name], [Your Name], [Title], TODO, or TBD in a final deliverable; omit unknown "
+            "details or write a role-generic sentence grounded in available facts. "
             "After the final result fields, include short self_check, short_summary, and progress_message for "
             "downstream verification/repair context and human progress. These process fields are not evidence and "
             "must not include raw chain-of-thought or long evidence bodies."
@@ -1363,6 +1455,15 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         known_limits: list[str] = []
         quality_notes: list[str] = []
         process_notes: list[str] = []
+        final_verification_complete = (
+            isinstance(final_verification, Mapping)
+            and final_verification.get("is_complete") is True
+        )
+        acceptance_all_satisfied = (
+            isinstance(acceptance_verification_plan, Mapping)
+            and acceptance_verification_plan.get("all_satisfied") is True
+        )
+        resolved_terminal_state = final_verification_complete and acceptance_all_satisfied
 
         for card_id in ordered_card_ids[: max(max_cards, 0)]:
             result = card_results.get(card_id)
@@ -1439,7 +1540,11 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 card_note["completion_summary"] = summary
             if progress:
                 card_note["progress_message"] = progress
-            if card_limits:
+            card_limits_are_resolved_process = resolved_terminal_state and (
+                status_lower in {"setback", "blocked", "failed", "skipped"}
+                or card_id.startswith("final-verification-repair")
+            )
+            if card_limits and not card_limits_are_resolved_process:
                 card_note["known_limits"] = card_limits[:4]
             if card_quality_notes:
                 card_note["quality_notes"] = card_quality_notes[:4]
@@ -1448,7 +1553,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
 
             cards.append(card_note)
             for note in card_limits:
-                known_limits.append(f"{card_id}: {note}")
+                if card_limits_are_resolved_process:
+                    process_notes.append(f"{card_id}: resolved earlier setback - {note}")
+                else:
+                    known_limits.append(f"{card_id}: {note}")
             for note in card_quality_notes:
                 quality_notes.append(f"{card_id}: {note}")
 
@@ -1625,12 +1733,29 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             summary["reason"] = reason
         if final_verification.get("verification_source") not in (None, "", [], {}):
             summary["verification_source"] = DataFormatter.sanitize(final_verification.get("verification_source"))
+        is_complete = final_verification.get("is_complete") is True
+        failure_analysis = cls._taskboard_completion_field_texts(
+            final_verification,
+            ("failure_analysis",),
+            max_items=max_notes,
+        )
         known_limits = cls._taskboard_completion_field_texts(
             final_verification,
-            ("missing_criteria", "failure_analysis", "acceptance_delta"),
+            ("missing_criteria",),
+            max_items=max_notes,
+        )
+        acceptance_delta = cls._taskboard_completion_field_texts(
+            final_verification,
+            ("acceptance_delta",),
             max_items=max_notes,
         )
         quality_notes: list[str] = []
+        if is_complete:
+            quality_notes.extend(failure_analysis)
+            quality_notes.extend(acceptance_delta)
+        else:
+            known_limits.extend(failure_analysis)
+            known_limits.extend(acceptance_delta)
         criterion_notes: list[dict[str, Any]] = []
         raw_checks = final_verification.get("criterion_checks")
         checks = raw_checks if isinstance(raw_checks, Sequence) and not isinstance(raw_checks, str | bytes | bytearray) else ()
@@ -1797,66 +1922,28 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         degraded_finalization_attempted: bool,
         completion_notes: Mapping[str, Any] | None = None,
     ) -> str:
-        provided = str(final.get("final_response") or "").strip()
-        disclosure = cls._taskboard_completion_notes_disclosure(completion_notes)
-        if provided:
-            if not disclosure:
-                return provided
-            provided_lower = provided.casefold()
-            disclosure_notes = disclosure.split(":", 1)[-1].strip(" .")
-            disclosure_seen = any(
-                note and note.casefold() in provided_lower
-                for note in [part.strip() for part in disclosure_notes.split(";")]
-            )
-            if disclosure_seen:
-                return provided
-            return f"{provided.rstrip()} {disclosure}".strip()
-
-        final_result = str(final.get("final_result") or "").strip()
-        ref_paths = [
-            str(ref.get("path") or "").strip()
-            for ref in final_refs
-            if isinstance(ref, Mapping) and str(ref.get("path") or "").strip()
-        ]
-        ref_paths = list(dict.fromkeys(ref_paths))
-        if ref_paths:
-            deliverable = "Deliverable artifact: " + ", ".join(ref_paths[:4]) + "."
-        elif final_result:
-            if len(final_result) <= 700:
-                deliverable = f"Deliverable result: {final_result}"
-            else:
-                deliverable = "Deliverable result is available in final_result; it is not duplicated in this status note."
-        else:
-            deliverable = "No complete final deliverable was accepted."
-
-        normalized_missing = cls._normalize_string_list(missing_criteria)
-        reason_text = str(reason or final.get("degradation_reason") or "").strip()
-        degradation_reason = str(final.get("degradation_reason") or "").strip()
-        if not degradation_reason and degraded_finalization_attempted:
-            degradation_reason = f"TaskBoard terminal board status was {str(board_status or 'unknown')}."
-        if not degradation_reason and artifact_status == "degraded":
-            degradation_reason = reason_text
-
-        if accepted:
-            if artifact_status == "degraded":
-                response = "Completed with disclosed degradation. " + deliverable
-                if degradation_reason:
-                    response += f" Degradation: {degradation_reason}"
-            else:
-                response = "Completed. " + deliverable
-                if reason_text:
-                    response += f" Summary: {reason_text}"
-        else:
-            response = "Partial result available, but the task was not fully accepted. " + deliverable
-            if reason_text:
-                response += f" Reason: {reason_text}"
-            if degradation_reason:
-                response += f" Degradation: {degradation_reason}"
-            if normalized_missing:
-                response += " Unmet requirements: " + "; ".join(normalized_missing[:5]) + "."
-        if disclosure:
-            response += " " + disclosure
-        return response.strip()
+        has_known_limits = bool(cls._taskboard_completion_notes_known_limits(completion_notes))
+        should_disclose_notes = (not accepted) or artifact_status == "degraded" or has_known_limits
+        disclosure = (
+            cls._taskboard_completion_notes_disclosure(completion_notes)
+            if should_disclose_notes
+            else ""
+        )
+        return cls._agent_task_user_final_response(
+            final=final,
+            accepted=accepted,
+            artifact_status=artifact_status,
+            status="completed" if accepted else "blocked",
+            reason=reason,
+            missing_criteria=missing_criteria,
+            final_refs=final_refs,
+            final_result=final.get("final_result"),
+            degraded=artifact_status == "degraded",
+            degradation_reason=str(final.get("degradation_reason") or ""),
+            degraded_finalization_attempted=degraded_finalization_attempted,
+            board_status=board_status,
+            disclosure=disclosure,
+        )
 
     @staticmethod
     def _looks_like_candidate_prefix(value: str, candidate: str) -> bool:

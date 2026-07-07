@@ -15,7 +15,7 @@ Agently 4.1.3.9 把 Workspace 推进为 records、files、AgentTask scoped evide
 
 本版本也发布可插拔 `SessionMemory` 协议和内置样板插件 `AgentlyMemory`。
 HITL approval / suggestion / guidance / insertion 不属于 4.1.3.9，本批原定未完成目标
-移动到 4.1.3.10 开发线。
+移动到 4.1.4 开发线。
 
 ## 推荐用法
 
@@ -75,7 +75,7 @@ vector_index = LocalVectorIndex(embedder, similarity="cosine")
 - Release manifest: `compatibility/releases/4.1.3.9.json`。
 - 推荐 `agently-devtools`: `>=0.1.10,<0.2.0`。
 - 下一条 development-line manifest 是 `compatibility/in-development.json`，目标版本
-  是 `4.1.3.10`。
+  是 `4.1.4`。
 
 ## 验收证据
 
@@ -87,7 +87,7 @@ vector_index = LocalVectorIndex(embedder, similarity="cosine")
 - Companion guidance：`../Agently-Skills` request guidance 已同步 Workspace retrieval
   与 Session memory。
 
-## 延期到 4.1.3.10
+## 延期到 4.1.4
 
 4.1.3.9 不完成 HITL approval / suggestion / guidance / insertion，不完成超出本版
 Session/Workspace memory 底座之外的长任务 task-execution memory，也不完成尚未验收的

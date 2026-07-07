@@ -145,13 +145,13 @@ async def test_workspace_search_defaults_to_session_scope(tmp_path, monkeypatch)
     first = Agently.create_agent("scope-a").activate_session(session_id="scope-a")
     second = Agently.create_agent("scope-b").activate_session(session_id="scope-b")
 
-    await first.workspace.ingest(
+    await first.workspace.put(
         content="visible only to session a",
         collection="observations",
         kind="scoped",
         summary="shared keyword",
     )
-    await second.workspace.ingest(
+    await second.workspace.put(
         content="visible only to session b",
         collection="observations",
         kind="scoped",
@@ -199,12 +199,12 @@ async def test_agent_tasks_share_script_workspace_db_and_isolate_files(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_workspace_local_ingest_search_link_and_get(tmp_path):
+async def test_workspace_local_put_search_link_and_get(tmp_path):
     agent = Agently.create_agent("workspace-test").use_workspace(tmp_path / "run")
     workspace = agent.workspace
     assert workspace is not None
 
-    ref = await workspace.ingest(
+    ref = await workspace.put(
         content="pytest failed in route fallback test\nstack trace",
         collection="observations",
         kind="test_output",
@@ -445,6 +445,41 @@ def test_workspace_manager_registers_builtin_profiles():
     assert "auto" in Agently.workspace.list_context_profiles()
     assert "text" in Agently.workspace.list_file_io_handlers()
     assert "pdf" in Agently.workspace.list_file_io_handlers()
+
+
+@pytest.mark.asyncio
+async def test_workspace_put_accepts_content_keyword_and_compat_profiles(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "put-profiles")
+
+    record_ref = await workspace.put(
+        content="profile-backed put record",
+        collection="observations",
+        kind="note",
+        summary="profile-backed put",
+        scope={"case_id": "put-profile"},
+        profile="fast",
+    )
+    assert await workspace.get_data(record_ref) == "profile-backed put record"
+    assert record_ref["scope"]["case_id"] == "put-profile"
+
+    checkpoint_ref = await workspace.put(
+        content={"status": "ready"},
+        collection="checkpoints",
+        kind="checkpoint",
+        scope={"run_id": "put-profile-run", "step_id": "phase-1"},
+        profile="checkpoint",
+    )
+    latest = await workspace.get_checkpoint("put-profile-run")
+    assert latest is not None
+    assert latest["id"] == checkpoint_ref["id"]
+
+    alias_ref = await workspace.ingest(
+        content="legacy alias record",
+        collection="observations",
+        kind="note",
+        scope={"case_id": "ingest-alias"},
+    )
+    assert await workspace.get_data(alias_ref) == "legacy alias record"
 
 
 @pytest.mark.asyncio
@@ -794,7 +829,7 @@ async def test_workspace_build_context_returns_refs_and_budget_diagnostics(tmp_p
     agent = Agently.create_agent("workspace-recall").use_workspace(tmp_path / "run")
     workspace = agent.workspace
     assert workspace is not None
-    failure_ref = await workspace.ingest(
+    failure_ref = await workspace.put(
         content="route fallback failed because provider returned no route candidate",
         collection="observations",
         kind="test_output",
@@ -802,7 +837,7 @@ async def test_workspace_build_context_returns_refs_and_budget_diagnostics(tmp_p
         scope={"task_id": "issue-123"},
         source={"type": "command", "name": "pytest"},
     )
-    await workspace.ingest(
+    await workspace.put(
         content="unrelated release note draft",
         collection="artifacts",
         kind="note",
@@ -832,21 +867,21 @@ async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_
     agent = Agently.create_agent("workspace-fts-safe-query").use_workspace(tmp_path / "run")
     workspace = agent.workspace
     assert workspace is not None
-    version_ref = await workspace.ingest(
+    version_ref = await workspace.put(
         content="Agently 4.1.3.4 task loop fix",
         collection="observations",
         kind="note",
         summary="Agently 4.1.3.4 task loop fix",
         scope={"task_id": "fts-safe"},
     )
-    dotted_ref = await workspace.ingest(
+    dotted_ref = await workspace.put(
         content="foo.bar import failed during verification",
         collection="observations",
         kind="note",
         summary="foo.bar import failed",
         scope={"task_id": "fts-safe"},
     )
-    question_ref = await workspace.ingest(
+    question_ref = await workspace.put(
         content="interview question preparation",
         collection="observations",
         kind="note",
@@ -874,7 +909,7 @@ async def test_workspace_search_sanitizes_fts_queries_for_natural_task_text(tmp_
 @pytest.mark.asyncio
 async def test_workspace_search_preserves_deterministic_shape_for_small_candidate_pool(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-grep-aliases")
-    await workspace.ingest(
+    await workspace.put(
         content="release deadline is Monday",
         collection="observations",
         kind="note",
@@ -1922,8 +1957,8 @@ async def test_workspace_prune_scope_removes_only_matching_lineage_subtree(tmp_p
     (second.files_root / "keep").mkdir(parents=True)
     (second.files_root / "keep" / "result.txt").write_text("durable execution file", encoding="utf-8")
 
-    first_ref = await first.ingest(content="first execution", collection="observations", kind="partition")
-    second_ref = await second.ingest(content="second execution", collection="observations", kind="partition")
+    first_ref = await first.put(content="first execution", collection="observations", kind="partition")
+    second_ref = await second.put(content="second execution", collection="observations", kind="partition")
     await first.put_checkpoint("exec-1", {"status": "first"}, step_id="phase-1")
     second_checkpoint = await second.put_checkpoint("exec-2", {"status": "second"}, step_id="phase-1")
     await first.append_runtime_event("exec-1", {"event_type": "first"})

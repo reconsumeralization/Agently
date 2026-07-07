@@ -1617,9 +1617,9 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
     bound_inputs = block.input_bindings.get("bound_inputs", {})
     if not isinstance(bound_inputs, Mapping):
         bound_inputs = {}
-    operation = str(bound_inputs.get("operation") or bound_inputs.get("op") or "ingest").strip()
-    if operation == "ingest":
-        ref = await workspace.ingest(
+    operation = str(bound_inputs.get("operation") or bound_inputs.get("op") or "put").strip()
+    if operation in {"put", "ingest"}:
+        ref = await workspace.put(
             content=bound_inputs.get("content", data.value),
             collection=str(bound_inputs.get("collection") or "observations"),
             kind=str(bound_inputs.get("kind") or "blocks_workspace_operation"),
@@ -1627,8 +1627,12 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
             source=dict(bound_inputs.get("source") or {"type": "blocks", "execution_block_id": block.id}),
             summary=bound_inputs.get("summary"),
             meta=dict(bound_inputs.get("meta") or {}),
+            profile=bound_inputs.get("profile"),
         )
-        return {"operation": operation, "workspace_refs": [ref], "ref": ref}
+        result = {"operation": "put", "workspace_refs": [ref], "ref": ref}
+        if operation == "ingest":
+            result["compat_operation"] = "ingest"
+        return result
     if operation == "put_checkpoint":
         ref = await workspace.put_checkpoint(
             str(bound_inputs.get("run_id") or block.source_plan_block_id or block.id),

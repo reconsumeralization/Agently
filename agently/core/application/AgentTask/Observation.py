@@ -25,7 +25,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         plan: dict[str, Any],
         context_pack: "WorkspaceContextPackage",
     ) -> "WorkspaceRecordRef":
-        record_ref = await self.workspace.ingest(
+        record_ref = await self.workspace.put(
             content={
                 "iteration": iteration_index,
                 "plan": DataFormatter.sanitize(plan),
@@ -52,7 +52,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         execution_result: Any,
         execution_meta: dict[str, Any],
     ) -> tuple["WorkspaceRecordRef", "WorkspaceRecordRef | None"]:
-        record_ref = await self.workspace.ingest(
+        record_ref = await self.workspace.put(
             content={
                 "iteration": iteration_index,
                 "plan": DataFormatter.sanitize(plan),
@@ -169,7 +169,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 final_result=final_result or {},
                 explicit_state_facts=explicit_state_facts,
             )
-            record_ref = await self.workspace.ingest(
+            record_ref = await self.workspace.put(
                 content={
                     "schema_version": "agent_task_taskboard_checkpoint/v1",
                     "task_id": self.id,
@@ -289,7 +289,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         verification: dict[str, Any],
         observation_ref: "WorkspaceRecordRef",
     ) -> "WorkspaceRecordRef":
-        record_ref = await self.workspace.ingest(
+        record_ref = await self.workspace.put(
             content={
                 "iteration": iteration_index,
                 "verification": DataFormatter.sanitize(verification),
@@ -384,7 +384,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "completion_evidence": False,
         }
         try:
-            record_ref = await self.workspace.ingest(
+            record_ref = await self.workspace.put(
                 content=content,
                 collection="reflections",
                 kind="agent_task_reflection",
