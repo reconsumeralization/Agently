@@ -439,7 +439,7 @@ async def test_blocks_compile_skill_activation_before_model_action_dag_segment()
 
 
 @pytest.mark.asyncio
-async def test_blocks_workspace_operation_ingests_through_workspace_resource(tmp_path):
+async def test_blocks_workspace_operation_puts_through_workspace_resource_with_ingest_alias(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace")
     graph = Agently.blocks.compile(
         {
@@ -467,7 +467,8 @@ async def test_blocks_workspace_operation_ingests_through_workspace_resource(tmp
     evidence = Agently.blocks.map_evidence(graph, snapshot)
     block_output = evidence.execution_block_results[0]["output"]
     ref = block_output["ref"]
-    assert block_output["operation"] == "ingest"
+    assert block_output["operation"] == "put"
+    assert block_output["compat_operation"] == "ingest"
     assert evidence.workspace_refs == (ref["id"],)
     assert await workspace.get_data(ref) == {"answer": "ok"}
 
@@ -475,14 +476,14 @@ async def test_blocks_workspace_operation_ingests_through_workspace_resource(tmp
 @pytest.mark.asyncio
 async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace-search")
-    expected_ref = await workspace.ingest(
+    expected_ref = await workspace.put(
         content="Alpha deadline is 2026-07-01. Keep this scoped evidence short.",
         collection="observations",
         kind="note",
         summary="alpha deadline note",
         scope={"task_id": "alpha"},
     )
-    await workspace.ingest(
+    await workspace.put(
         content="Beta deadline is unrelated and must stay outside the scoped result.",
         collection="observations",
         kind="note",
@@ -602,7 +603,7 @@ async def test_blocks_workspace_operation_search_preserves_record_representation
 @pytest.mark.asyncio
 async def test_blocks_workspace_operation_search_calls_workspace_retrieve(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace-retrieve-options")
-    expected_ref = await workspace.ingest(
+    expected_ref = await workspace.put(
         content="Alpha deadline is 2026-07-01.",
         collection="observations",
         kind="note",
@@ -697,7 +698,7 @@ async def test_blocks_workspace_operation_search_empty_result_enters_ledger(tmp_
 async def test_blocks_workspace_operation_search_can_use_workspace_files_surface(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace-file-search")
     await workspace.write_file("notes/todo.md", "alpha\nrelease deadline is 2026-07-01\n")
-    await workspace.ingest(
+    await workspace.put(
         content="Indexed record is unrelated to the file-only query.",
         collection="observations",
         kind="note",
@@ -1041,3 +1042,49 @@ def test_task_dag_executor_blocks_path_still_rejects_invalid_dag():
             },
             blocks=Agently.blocks,
         )
+
+
+@pytest.mark.asyncio
+async def test_blocks_external_wait_forwards_exchange_metadata_to_envelope():
+    graph = Agently.blocks.compile(
+        {
+            "plan_id": "plan-external-wait-metadata",
+            "plan_blocks": [
+                {
+                    "id": "callback",
+                    "plan_block_id": "external_wait",
+                    "kind": "external_wait",
+                    "bound_inputs": {
+                        "type": "webhook",
+                        "exchange_kind": "clarification",
+                        "interrupt_id": "external-callback",
+                        "payload": {"ticket_id": "INC-42"},
+                        "channel_id": "blocks-channel",
+                        "provider_id": "blocks-provider",
+                        "wait_mode": "connected_then_disconnected",
+                        "hot_wait_timeout": 7.5,
+                        "response_payload_schema": {"type": "object", "required": ["status"]},
+                        "audit_metadata": {"case": "blocks-passthrough"},
+                    },
+                }
+            ],
+        }
+    )
+    execution = await Agently.blocks.bind_runtime(graph).async_start_execution(
+        None,
+        wait_for_result=False,
+        workspace=False,
+    )
+    pending = execution.get_pending_interrupts()
+    envelope = pending["external-callback"]["external_wait_request"]
+
+    assert envelope["channel_id"] == "blocks-channel"
+    assert envelope["provider_id"] == "blocks-provider"
+    assert envelope["wait_mode"] == "connected_then_disconnected"
+    assert envelope["hot_wait_timeout"] == 7.5
+    assert envelope["response_payload_schema"] == {"type": "object", "required": ["status"]}
+    assert envelope["audit_metadata"]["case"] == "blocks-passthrough"
+    assert envelope["exchange_kind"] == "clarification"
+
+    await execution.async_continue_with("external-callback", {"status": "ready"})
+    await execution.async_close(timeout=5)

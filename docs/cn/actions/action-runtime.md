@@ -138,6 +138,13 @@ safe shell profile，例如 `pwd`、`ls`、`rg`、`cat`、`git status`、`git di
 `git log`、`python -m pytest` 和 `python -m pyright`。stdout/stderr 以有界 preview
 返回；某个 stream 超过 `max_output_chars` 时，完整 stream 会写入 Workspace root 下的
 `artifacts/shell/`，并在 action result 中返回引用。
+`allow_unsafe` 是 host-only 的直接执行授权，不会出现在模型可见的 shell action schema
+中；模型计划出的 action input 里即使包含该字段也会被清洗。模型选择的命令超出 safe
+profile 时，应通过需要审批的 action 或 ExecutionExchange provider 路由，而不是允许
+模型输出自行授予 bypass。
+自定义 action 如果需要仅 host/direct call 可用的参数，可以用
+`meta={"host_only_input_keys": [...]}` 声明；Action Runtime 会从模型计划出的
+`structured_plan` 和 native tool-call 输入里清洗这些 key，同时保留 host/direct call。
 
 内置能力 package 位于 `agently.builtins.actions`。例如：
 
@@ -150,9 +157,13 @@ agent.use_actions(Browse())
 
 Search 是 Action-native package，不进入 ExecutionResource；proxy、timeout、
 backend、region 都属于 package/executor 配置。Browse 也是 Action-native；默认主线是
-Playwright -> restricted curl -> BS4，pyautogui 保留为 legacy/advanced 配置。curl backend
-是 Browse 内部的 URL fetch fallback，不是暴露给模型的 shell access。如果 Browse action
-需要托管 browser/page/session，可以启用 Browser ExecutionResource provider。
+Jina Reader -> Playwright -> BS4 -> restricted curl，pyautogui 保留为
+legacy/advanced 配置。curl backend 是 Browse 内部的 URL fetch fallback，不是暴露给模型的
+shell access。Jina Reader 会把目标 public URL 交给 `https://r.jina.ai/` 做
+URL-to-Markdown 恢复；当默认 Reader endpoint 出现传输或服务错误时，会自动尝试官方替代
+endpoint `https://r.jinaai.cn/`。如果应用不能接受这个外部服务边界，可以显式关闭：
+`Browse(enable_jina_reader=False, fallback_order=("playwright", "bs4", "curl"))`。
+如果 Browse action 需要托管 browser/page/session，可以启用 Browser ExecutionResource provider。
 
 Agent Client Protocol（ACP）coding agent 作为 Action capability 暴露，不是
 AgentExecution route。使用 `agent.use_acp(on_missing="skip")` 可以扫描本地
@@ -206,6 +217,14 @@ SHA-256 和截断标记，消费方可以明确知道 preview 不是完整证据
 显式返回 `artifacts` 或 `artifact_refs` 的 action 即使输出很小也使用同一合同。
 这包括 `MCPActionExecutor` 暴露的 MCP resource/content block；Agently 记录
 声明过的 artifact metadata，但不会通过扫描目录推断未声明的文件写入。
+如果宿主 action 会生成供 AgentTask 或 TaskBoard 后续消费的文件，建议返回带
+path、size/bytes、media type，以及可用时 SHA-256 的 typed `file_refs` 或
+`artifact_refs`。只有 `{filename, path, size}` 这类 path-only payload 时，Agently
+会把它保留为有界 Action result evidence 和 ref pointer；只有当 path 位于
+Workspace files root 内且 Workspace readback 成功时，才会升级为可信 Workspace
+file ref。
+Search、Browse 等内置 Web actions 在运行时不会弹出包安装确认。可选依赖缺失会
+作为结构化 Action failure 暴露给宿主，由宿主决定安装、重试或降级。
 如果 digest 对后续规划或回复 hot path 仍然过大，Agently 会再次压缩模型可见 digest：
 `result` 保留有界 digest，重复的 `data` / `model_digest` 字段可能变成
 `same_as="result"` 指针，artifact refs 会省略 preview 正文但保留 readback id。

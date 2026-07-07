@@ -23,7 +23,10 @@ class Browse(_Browse):
         self.tool_info_list = [
             {
                 "name": "browse",
-                "desc": "Browse the page at {url} with fallback chain: playwright -> bs4; pyautogui is optional legacy fallback.",
+                "desc": (
+                    "Browse the page at {url} with fallback chain: "
+                    "Jina Reader -> Playwright -> BS4 -> restricted curl; pyautogui is an optional advanced fallback."
+                ),
                 "kwargs": {"url": ("str", "Accessible URL")},
                 "func": self.browse,
             }

@@ -72,6 +72,9 @@ if TYPE_CHECKING:
     from .Manager import WorkspaceManager
 
 
+_MISSING = object()
+
+
 class Workspace:
     """Workspace API bound to one backend."""
 
@@ -329,13 +332,37 @@ class Workspace:
 
     async def put(
         self,
-        record_or_content: Any,
+        record_or_content: Any = _MISSING,
         *,
+        content: Any = _MISSING,
         collection: str,
         kind: str | None = None,
         meta: dict[str, Any] | None = None,
+        profile: str | None = None,
         **kwargs,
     ):
+        if record_or_content is _MISSING:
+            if content is _MISSING:
+                raise TypeError("Workspace.put(...) requires record_or_content or content.")
+            record_or_content = content
+        elif content is not _MISSING:
+            raise TypeError("Workspace.put(...) accepts either record_or_content or content, not both.")
+        profile_name = str(profile or "").strip()
+        if profile_name:
+            handler = self.manager.get_profile(profile_name)
+            scope_value = kwargs.get("scope")
+            source_value = kwargs.get("source")
+            summary_value = kwargs.get("summary")
+            return await handler.ingest(
+                workspace=self,
+                content=record_or_content,
+                collection=collection,
+                kind=kind,
+                scope=self._scoped_record_scope(scope_value if isinstance(scope_value, dict) else None),
+                source=source_value if isinstance(source_value, dict) else {},
+                summary=summary_value if isinstance(summary_value, str) or summary_value is None else str(summary_value),
+                meta=meta,
+            )
         if self.default_scope:
             kwargs["scope"] = self._scoped_record_scope(kwargs.get("scope"))
         return await self.backend.put(record_or_content, collection=collection, kind=kind, meta=meta, **kwargs)
@@ -1629,16 +1656,15 @@ class Workspace:
         meta: dict[str, Any] | None = None,
         profile: str = "fast",
     ):
-        handler = self.manager.get_profile(profile)
-        return await handler.ingest(
-            workspace=self,
+        return await self.put(
             content=content,
             collection=collection,
             kind=kind,
-            scope=self._scoped_record_scope(scope),
+            scope=scope,
             source=source or {},
             summary=summary,
             meta=meta,
+            profile=profile or "fast",
         )
 
     async def build_context(

@@ -27,7 +27,7 @@ SerializableRuntimeDataNamespace = SerializableStateDataNamespace
 from .FunctionShifter import FunctionShifter
 from .DataFormatter import DataFormatter
 from .DataPathBuilder import DataPathBuilder
-from .LazyImport import LazyImport
+from .LazyImport import LazyImport, LazyImportDependencyError
 from .DataLocator import DataLocator
 from .GeneratorConsumer import GeneratorConsumer
 from .StreamingJSONCompleter import StreamingJSONCompleter

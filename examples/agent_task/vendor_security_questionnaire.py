@@ -83,7 +83,7 @@ async def main() -> None:
         return SECURITY_CONTEXT
 
     agent.use_actions(fetch_security_context)
-    await workspace.ingest(
+    await workspace.put(
         content=SECURITY_CONTEXT,
         collection="observations",
         kind="vendor_security_context",

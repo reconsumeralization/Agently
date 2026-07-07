@@ -14,7 +14,7 @@
 
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, cast
 import asyncio
 import hashlib
 import json
@@ -26,7 +26,7 @@ import tempfile
 import time
 import unicodedata
 import webbrowser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 from agently.utils import LazyImport
 
@@ -145,6 +145,7 @@ class Browse:
     )
 
     BS4_STRATEGY_MIN_LENGTH = 20
+    JINA_READER_BACKEND_ALIASES = {"jina", "jina-reader", "jina_reader", "reader"}
 
     BLOCKED_PAGE_MARKERS = (
         "web application firewall",
@@ -156,6 +157,13 @@ class Browse:
         'id="waf"',
         "access denied",
         "request blocked",
+        "target url returned error",
+        "blocked by network security",
+        "log in to your reddit account",
+        "developer token",
+        "login required",
+        "sina visitor system",
+        "passport.weibo.com/visitor",
         "captcha",
         "errorcode:",
     )
@@ -166,14 +174,20 @@ class Browse:
         timeout: int | None = None,
         headers: dict[str, str] | None = None,
         *,
-        fallback_order: tuple[str, ...] = ("playwright", "curl", "bs4"),
+        fallback_order: tuple[str, ...] = ("jina_reader", "playwright", "bs4", "curl"),
         enable_pyautogui: bool = False,
         enable_playwright: bool = True,
         enable_curl: bool = True,
+        enable_jina_reader: bool = True,
         enable_bs4: bool = True,
         response_mode: Literal["markdown", "text"] = "markdown",
         max_content_length: int = 12000,
         min_content_length: int = 40,
+        jina_reader_endpoint: str = "https://r.jina.ai/",
+        jina_reader_fallback_endpoints: tuple[str, ...] | list[str] | str | None = ("https://r.jinaai.cn/",),
+        jina_reader_headers: dict[str, str] | None = None,
+        jina_reader_engine: Literal["auto", "browser", "curl"] | None = "auto",
+        jina_reader_timeout: int | None = 10,
         pyautogui_pause: float = 0.05,
         pyautogui_fail_safe: bool = True,
         pyautogui_new_tab: bool = True,
@@ -210,10 +224,16 @@ class Browse:
         self.enable_pyautogui = enable_pyautogui
         self.enable_playwright = enable_playwright
         self.enable_curl = enable_curl
+        self.enable_jina_reader = enable_jina_reader
         self.enable_bs4 = enable_bs4
         self.response_mode = response_mode
         self.max_content_length = max_content_length
         self.min_content_length = max(1, int(min_content_length))
+        self.jina_reader_endpoint = jina_reader_endpoint
+        self.jina_reader_fallback_endpoints = self._normalize_endpoint_list(jina_reader_fallback_endpoints)
+        self.jina_reader_headers = dict(jina_reader_headers or {})
+        self.jina_reader_engine = jina_reader_engine
+        self.jina_reader_timeout = jina_reader_timeout
 
         self.pyautogui_pause = pyautogui_pause
         self.pyautogui_fail_safe = pyautogui_fail_safe
@@ -280,6 +300,9 @@ class Browse:
             )
         browse_desc = (
             "Browse an accessible web page and return its main readable content. "
+            "The default strategy tries Jina Reader for LLM-friendly markdown first, "
+            "then falls back to Playwright, BS4, and restricted curl when Reader transport "
+            "fails or returns an obvious block/error shell. "
             "Protocol guidance: when an http URL, bare domain, root path, or guessed path returns "
             "a blocked/WAF/error page, short content, status such as 410, or an empty shell, try the "
             "same host through https and canonical entry pages before concluding the whole domain is "
@@ -300,6 +323,7 @@ class Browse:
                 "component": "builtins.actions.Browse",
                 "legacy_tool_facade": "agently.builtins.tools.Browse",
                 "fallback_order": list(self.fallback_order),
+                "enable_jina_reader": self.enable_jina_reader,
                 "use_browser_environment": managed_browser,
             },
         )
@@ -380,7 +404,7 @@ class Browse:
 
     @classmethod
     def _pick_main_root(cls, soup):
-        from bs4 import Tag
+        Tag = LazyImport.from_import("bs4", "Tag", install_name="beautifulsoup4", auto_install=False)
 
         best_node = None
         best_length = 0
@@ -400,7 +424,7 @@ class Browse:
 
     @classmethod
     def _pick_body_root(cls, soup):
-        from bs4 import Tag
+        Tag = LazyImport.from_import("bs4", "Tag", install_name="beautifulsoup4", auto_install=False)
 
         if isinstance(soup.body, Tag):
             return soup.body
@@ -569,6 +593,113 @@ class Browse:
         return links
 
     @staticmethod
+    def _extract_links_from_markdown(content: str, *, base_url: str, max_links: int) -> list[dict[str, str]]:
+        links: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"(?<!!)\[([^\]\n]{0,300})\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)", str(content or "")):
+            href = match.group(2).strip()
+            if not href or href.startswith("#"):
+                continue
+            absolute = urljoin(base_url, href)
+            parsed = urlparse(absolute)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            if absolute in seen:
+                continue
+            seen.add(absolute)
+            text = " ".join(match.group(1).split())
+            links.append({"url": absolute, "text": text})
+            if max_links > 0 and len(links) >= max_links:
+                break
+        return links
+
+    def _jina_reader_url(self, url: str) -> str:
+        endpoint = self._normalize_endpoint(str(self.jina_reader_endpoint or "").strip() or "https://r.jina.ai/")
+        return self._jina_reader_url_for_endpoint(endpoint, url)
+
+    @staticmethod
+    def _normalize_endpoint(endpoint: str) -> str:
+        endpoint_text = str(endpoint or "").strip() or "https://r.jina.ai/"
+        return endpoint_text.rstrip("/") + "/"
+
+    @classmethod
+    def _normalize_endpoint_list(cls, value: tuple[str, ...] | list[str] | str | None) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            items = [item.strip() for item in value.split(",")]
+        else:
+            items = [str(item).strip() for item in value]
+        endpoints: list[str] = []
+        for item in items:
+            if not item:
+                continue
+            endpoint = cls._normalize_endpoint(item)
+            if endpoint not in endpoints:
+                endpoints.append(endpoint)
+        return tuple(endpoints)
+
+    def _jina_reader_endpoints(self) -> list[str]:
+        endpoints: list[str] = []
+        for endpoint in (
+            self._normalize_endpoint(str(self.jina_reader_endpoint or "").strip() or "https://r.jina.ai/"),
+            *self.jina_reader_fallback_endpoints,
+        ):
+            endpoint = self._normalize_endpoint(endpoint)
+            if endpoint not in endpoints:
+                endpoints.append(endpoint)
+        return endpoints
+
+    def _jina_reader_url_for_endpoint(self, endpoint: str, url: str) -> str:
+        endpoint = self._normalize_endpoint(endpoint)
+        safe_url_chars = ":/?#[]@!$&'()*+,;=%"
+        return f"{endpoint.rstrip('/')}/{quote(self._normalize_url(url), safe=safe_url_chars)}"
+
+    def _jina_reader_request_headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "text/markdown, text/plain;q=0.9, application/json;q=0.8, */*;q=0.5",
+            "X-Preset": "agent",
+            "X-Retain-Links": "all" if self.playwright_include_links else "text",
+            "X-Retain-Images": "alt",
+            "X-Retain-Media": "text",
+        }
+        if self.response_mode == "text":
+            headers["X-Respond-With"] = "text"
+        if self.jina_reader_engine:
+            headers["X-Engine"] = str(self.jina_reader_engine)
+        timeout = self.jina_reader_timeout if self.jina_reader_timeout is not None else self.timeout
+        if isinstance(timeout, (int, float)) and timeout:
+            headers["X-Timeout"] = str(min(180, max(1, int(timeout))))
+        accept_language = self.headers.get("Accept-Language")
+        if accept_language:
+            headers["Accept-Language"] = accept_language
+        headers.update(self.jina_reader_headers)
+        return headers
+
+    @staticmethod
+    def _exception_detail(error: BaseException) -> str:
+        def describe(item: BaseException) -> str:
+            name = item.__class__.__name__
+            message = str(item).strip()
+            if message:
+                return f"{name}: {message}"
+            arg_text = ", ".join(
+                repr(arg) for arg in getattr(item, "args", ()) if str(arg).strip() or repr(arg) not in {"''", '""'}
+            )
+            if arg_text:
+                return f"{name}: {arg_text}"
+            item_repr = repr(item)
+            if item_repr and item_repr not in {f"{name}()", f"{name}('')", f'{name}("")'}:
+                return f"{name}: {item_repr}"
+            return name
+
+        parts = [describe(error)]
+        cause = error.__cause__ or error.__context__
+        if cause is not None:
+            parts.append(f"caused by {describe(cause)}")
+        return ": ".join(parts)
+
+    @staticmethod
     def _extract_canonical_links(soup: Any, *, base_url: str) -> list[str]:
         links: list[str] = []
         for selector in ('link[rel="canonical"]', 'meta[property="og:url"]'):
@@ -656,6 +787,14 @@ class Browse:
             "proxy",
             "ssl",
             "tls",
+            "429",
+            "rate limit",
+            "too many requests",
+            "502",
+            "503",
+            "504",
+            "gateway",
+            "service unavailable",
         )
         return any(marker in message or marker in error_name for marker in transient_markers)
 
@@ -1072,7 +1211,7 @@ class Browse:
                     "url": url,
                 }
 
-            import pyautogui
+            pyautogui = cast(Any, LazyImport.import_package("pyautogui", auto_install=False))
 
             modifier = "command" if os_name == "Darwin" else "ctrl"
             pyautogui.PAUSE = self.pyautogui_pause
@@ -1188,8 +1327,12 @@ class Browse:
         return read_result
 
     async def _playwright_open(self, url: str) -> dict[str, Any]:
-        LazyImport.import_package("playwright", auto_install=False)
-        from playwright.async_api import async_playwright
+        playwright_async = LazyImport.import_package(
+            "playwright.async_api",
+            install_name="playwright",
+            auto_install=False,
+        )
+        async_playwright = getattr(playwright_async, "async_playwright")
 
         requested_url = str(url or "")
         url = self._normalize_url(requested_url)
@@ -1299,11 +1442,10 @@ class Browse:
             }
 
     async def _bs4_browse(self, url: str) -> str | dict[str, Any]:
-        LazyImport.import_package("httpx")
-        LazyImport.import_package("bs4", install_name="beautifulsoup4")
-
-        from bs4 import BeautifulSoup
-        from httpx import AsyncClient
+        httpx = LazyImport.import_package("httpx", auto_install=False)
+        bs4 = LazyImport.import_package("bs4", install_name="beautifulsoup4", auto_install=False)
+        AsyncClient = getattr(httpx, "AsyncClient")
+        BeautifulSoup = getattr(bs4, "BeautifulSoup")
 
         target_url = self._normalize_url(url)
         try:
@@ -1444,8 +1586,8 @@ class Browse:
         if result.get("content_kind") == "remote_file":
             return result
 
-        LazyImport.import_package("bs4", install_name="beautifulsoup4")
-        from bs4 import BeautifulSoup
+        bs4 = LazyImport.import_package("bs4", install_name="beautifulsoup4", auto_install=False)
+        BeautifulSoup = getattr(bs4, "BeautifulSoup")
 
         content_bytes = result.pop("content_bytes", b"")
         soup = BeautifulSoup(content_bytes, "html.parser")
@@ -1463,6 +1605,98 @@ class Browse:
             "canonical_links": canonical_links,
         }
 
+    async def _jina_reader_browse(self, url: str) -> str | dict[str, Any]:
+        httpx = LazyImport.import_package("httpx", auto_install=False)
+        AsyncClient = getattr(httpx, "AsyncClient")
+
+        target_url = self._normalize_url(url)
+        parsed = urlparse(target_url)
+        if parsed.scheme not in {"http", "https"}:
+            return f"Can not browse '{target_url}'.\tError: Jina Reader requires an http or https URL."
+
+        extension = Path(parsed.path).suffix.lower()
+        if extension in self.REMOTE_FILE_EXTENSIONS:
+            return (
+                f"Can not browse '{target_url}'.\tError: Jina Reader backend skips remote-file URLs; "
+                "use a local Browse backend with Workspace materialization."
+            )
+
+        timeout = self.jina_reader_timeout if self.jina_reader_timeout is not None else self.timeout
+        request_timeout = max(1, int(timeout or 30))
+        headers = self._jina_reader_request_headers()
+        endpoint_errors: list[str] = []
+        for endpoint in self._jina_reader_endpoints():
+            reader_url = self._jina_reader_url_for_endpoint(endpoint, target_url)
+            try:
+                async with AsyncClient(proxy=self.proxy, timeout=request_timeout) as client:
+                    if parsed.fragment:
+                        response = await client.post(endpoint, headers=headers, data={"url": target_url})
+                    else:
+                        response = await client.get(reader_url, headers=headers)
+            except Exception as error:
+                error_text = self._exception_detail(error)
+                endpoint_errors.append(f"{endpoint} request failed: {error_text}")
+                continue
+
+            media_type = self._media_type_from_content_type(str(response.headers.get("content-type", "")))
+            if response.status_code >= 500 or response.status_code == 429:
+                preview = " ".join(str(response.text or "").split())[:300]
+                detail = f": {preview}" if preview else ""
+                endpoint_errors.append(f"{endpoint} returned HTTP {response.status_code}{detail}")
+                continue
+            if response.status_code >= 400:
+                preview = " ".join(str(response.text or "").split())[:300]
+                detail = f": {preview}" if preview else ""
+                return f"Can not browse '{target_url}'.\tError: Jina Reader returned HTTP {response.status_code}{detail}"
+
+            title = ""
+            final_url = target_url
+            content = str(response.text or "")
+            if media_type == "application/json":
+                try:
+                    payload = response.json()
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    content = str(payload.get("content") or payload.get("text") or "")
+                    title = str(payload.get("title") or "")
+                    final_url = self._normalize_url(str(payload.get("url") or payload.get("source_url") or target_url))
+
+            if final_url == target_url:
+                for line in content.splitlines()[:8]:
+                    if line.lower().startswith("url source:"):
+                        final_url = self._normalize_url(line.split(":", 1)[1])
+                        break
+
+            content = self._normalize_content(content)
+            if not content:
+                return f"Can not fetch any content from {target_url}!"
+
+            links = self._extract_links_from_markdown(
+                content,
+                base_url=final_url or target_url,
+                max_links=self.playwright_max_links,
+            )
+            return {
+                "ok": True,
+                "content_kind": "reader_text",
+                "requested_url": target_url,
+                "url": final_url or target_url,
+                "status": response.status_code,
+                "media_type": media_type or "text/markdown",
+                "headers": {"content-type": str(response.headers.get("content-type", ""))},
+                "title": title,
+                "content": content,
+                "links": links,
+                "canonical_links": [final_url] if final_url and final_url != target_url else [],
+                "reader_url": reader_url,
+                "reader_endpoint": endpoint,
+                "reader_endpoint_attempts": self._jina_reader_endpoints(),
+            }
+
+        error_text = " | ".join(endpoint_errors) if endpoint_errors else "no Jina Reader endpoint configured"
+        return f"Can not browse '{target_url}'.\tError: Jina Reader request failed: {error_text}"
+
     async def _browse_with_trace(self, url: str) -> dict[str, Any]:
         requested_url = str(url or "")
         normalized_url = self._normalize_url(requested_url)
@@ -1476,10 +1710,18 @@ class Browse:
                 continue
             if backend == "curl" and not self.enable_curl:
                 continue
+            if backend in self.JINA_READER_BACKEND_ALIASES and not self.enable_jina_reader:
+                continue
             if backend == "bs4" and not self.enable_bs4:
                 continue
 
-            for candidate in candidates or [{"url": normalized_url, "reason": "requested", "security_downgrade": False}]:
+            backend_candidates = candidates or [
+                {"url": normalized_url, "reason": "requested", "security_downgrade": False}
+            ]
+            if backend in self.JINA_READER_BACKEND_ALIASES and backend_candidates:
+                backend_candidates = [backend_candidates[0]]
+
+            for candidate in backend_candidates:
                 candidate_url = str(candidate.get("url") or normalized_url)
                 candidate_reason = str(candidate.get("reason") or "requested")
                 security_downgrade = bool(candidate.get("security_downgrade"))
@@ -1491,6 +1733,8 @@ class Browse:
                             result = await self._playwright_open(candidate_url)
                         elif backend == "curl":
                             result = await self._curl_browse(candidate_url)
+                        elif backend in self.JINA_READER_BACKEND_ALIASES:
+                            result = await self._jina_reader_browse(candidate_url)
                         elif backend == "bs4":
                             result = await self._bs4_browse(candidate_url)
                         else:

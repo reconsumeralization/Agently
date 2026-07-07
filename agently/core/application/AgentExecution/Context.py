@@ -168,6 +168,7 @@ class AgentExecutionContext:
         self.last_progress_event: dict[str, Any] | None = None
         self.stage_events: list[dict[str, Any]] = []
         self._progress_callback: Callable[[dict[str, Any]], Any] | None = None
+        self._exchange_callback: Callable[[str, list[dict[str, Any]], dict[str, Any]], Any] | None = None
         self.action_scope: dict[str, Any] = {}
         self.action_artifact_recall_records: list[dict[str, Any]] = []
         self.action_records: list[dict[str, Any]] = []
@@ -398,6 +399,63 @@ class AgentExecutionContext:
             if hasattr(result, "__await__"):
                 task = loop.create_task(result)
                 task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        except Exception:
+            return
+
+    def set_exchange_callback(
+        self,
+        callback: Callable[[str, list[dict[str, Any]], dict[str, Any]], Any] | None,
+    ):
+        self._exchange_callback = callback
+
+    def notify_exchange(
+        self,
+        action: str,
+        exchanges: list[dict[str, Any]],
+        *,
+        meta: dict[str, Any] | None = None,
+    ):
+        """Project a human-exchange lifecycle moment onto the owning execution.
+
+        ``action`` is ``"pending"`` or ``"resolved"``; ``exchanges`` carries the
+        normalized ExecutionExchangeView list. Fired by execution-handle owners
+        (ActionFlow) through the contextvar seam; a missing callback means no
+        AgentExecution owns this run and the notification is dropped.
+        """
+        callback = self._exchange_callback
+        if callback is None:
+            return
+        try:
+            result = callback(str(action), list(exchanges), dict(meta or {}))
+        except Exception:
+            return
+        if result is None:
+            return
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            if hasattr(result, "__await__"):
+                task = loop.create_task(result)
+                task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        except Exception:
+            return
+
+    async def async_notify_exchange(
+        self,
+        action: str,
+        exchanges: list[dict[str, Any]],
+        *,
+        meta: dict[str, Any] | None = None,
+    ):
+        """Awaited variant of :meth:`notify_exchange` for async emit ordering."""
+        callback = self._exchange_callback
+        if callback is None:
+            return
+        try:
+            result = callback(str(action), list(exchanges), dict(meta or {}))
+            if hasattr(result, "__await__"):
+                await result
         except Exception:
             return
 

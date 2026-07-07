@@ -174,14 +174,14 @@ class WorkspaceManager:
         if not normalized:
             raise ValueError("Workspace profile name must be non-empty.")
         if not hasattr(handler, "ingest"):
-            raise TypeError("Workspace profile handler must provide async ingest(...).")
+            raise TypeError("Workspace put profile handler is invalid.")
         self._profiles[normalized] = handler  # type: ignore[assignment]
         return self
 
     def get_profile(self, name: str) -> IngestionProfile:
         normalized = str(name or "fast").strip() or "fast"
         if normalized not in self._profiles:
-            raise WorkspaceConfigurationError(f"Workspace ingestion profile is not registered: { normalized }")
+            raise WorkspaceConfigurationError(f"Workspace put profile is not registered: { normalized }")
         return self._profiles[normalized]
 
     def list_profiles(self) -> list[str]:

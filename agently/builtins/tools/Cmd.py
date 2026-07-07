@@ -27,7 +27,6 @@ class Cmd(_Cmd):
                 "kwargs": {
                     "cmd": ("str | list[str]", "Command to run"),
                     "workdir": ("str | None", "Working directory"),
-                    "allow_unsafe": ("bool", "Allow command outside allowlist"),
                 },
                 "func": self.run,
             }

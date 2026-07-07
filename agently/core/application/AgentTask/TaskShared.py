@@ -31,6 +31,8 @@ from agently.core.orchestration import (
     build_task_board_evidence_view,
     build_task_board_focus_payload,
     build_task_board_handoff_projection,
+    build_task_board_incremental_verification_plan,
+    build_task_board_scoped_evidence_view,
     coerce_task_board_planning_result,
     resolve_task_board_planning_policy,
     task_board_blocking_state_facts,
@@ -39,7 +41,10 @@ from agently.core.orchestration import (
     task_board_planning_output_schema,
 )
 from agently.core.orchestration.TaskBoard.TaskBoardValidation import task_board_card_required
-from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
+from agently.core.application.AgentExecution.Stream import (
+    AgentExecutionTextDeltaProjector,
+    project_agent_execution_text_delta,
+)
 from agently.core.model.StructuredOutputParser import parse_output_contract_dict
 from agently.types.data import AgentExecutionStreamData, ReplanSignal, TaskBoardCardResult, TaskBoardRevision
 from agently.types.trigger_flow import TriggerFlowRuntimeData
@@ -136,7 +141,14 @@ _TASKBOARD_DEPENDENCY_READBACK_MAX_REFS = 4
 _TASKBOARD_SOURCE_REFS_MAX = 16
 _TASKBOARD_PROMPT_RESULT_CHARS = 1600
 _TASKBOARD_STREAM_SUMMARY_CHARS = 3000
-_TASKBOARD_RECOVERABLE_CARD_STATUSES = {"failed", "error", "timed_out", "blocked"}
+_TASKBOARD_SETBACK_CARD_STATUS = "setback"
+_TASKBOARD_RECOVERABLE_CARD_STATUSES = {
+    "failed",
+    "error",
+    "timed_out",
+    "blocked",
+    _TASKBOARD_SETBACK_CARD_STATUS,
+}
 _WORKSPACE_ARTIFACT_PREVIEW_BYTES = 4000
 _WORKSPACE_ARTIFACT_CONTENT_KEYS = ("content", "markdown", "body", "text")
 _WORKSPACE_ARTIFACT_RESULT_BODY_KEYS = (
@@ -334,6 +346,129 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
             return text
         return text[: max(0, _PROCESS_SUMMARY_TEXT_CHARS - 24)].rstrip() + " [truncated]"
 
+    @classmethod
+    def _agent_task_user_final_response(
+        cls,
+        *,
+        final: Mapping[str, Any] | None = None,
+        accepted: bool,
+        artifact_status: str,
+        status: str = "",
+        reason: str = "",
+        missing_criteria: Any = None,
+        final_refs: Sequence[Mapping[str, Any]] | None = None,
+        final_result: Any = None,
+        degraded: bool = False,
+        degradation_reason: str = "",
+        degraded_finalization_attempted: bool = False,
+        board_status: str = "",
+        disclosure: str = "",
+    ) -> str:
+        final_map = final if isinstance(final, Mapping) else {}
+        provided = str(final_map.get("final_response") or "").strip()
+        disclosure = str(disclosure or "").strip()
+        result_value = final_result if final_result is not None else final_map.get("final_result")
+        ref_paths = [
+            str(ref.get("path") or "").strip()
+            for ref in list(final_refs or [])
+            if isinstance(ref, Mapping) and str(ref.get("path") or "").strip()
+        ]
+        ref_paths = list(dict.fromkeys(ref_paths))
+        if ref_paths:
+            deliverable = "Deliverable artifact: " + ", ".join(ref_paths[:4]) + "."
+        else:
+            result_text = cls._agent_task_final_result_text(result_value)
+            if result_text:
+                if len(result_text) <= 700:
+                    deliverable = f"Deliverable result: {result_text}"
+                else:
+                    deliverable = (
+                        "Deliverable result is available in final_result; "
+                        "it is not duplicated in this status note."
+                    )
+            elif accepted:
+                deliverable = "No separate final artifact was produced."
+            else:
+                deliverable = "No complete final deliverable was accepted."
+
+        normalized_artifact_status = str(artifact_status or "").strip().lower()
+        normalized_missing = cls._agent_task_string_list(missing_criteria)
+        reason_text = str(reason or final_map.get("reason") or "").strip()
+        degradation_reason = str(degradation_reason or final_map.get("degradation_reason") or "").strip()
+        if not degradation_reason and degraded_finalization_attempted:
+            degradation_reason = f"TaskBoard terminal board status was {str(board_status or 'unknown')}."
+        if not degradation_reason and (degraded or normalized_artifact_status == "degraded"):
+            degradation_reason = reason_text
+
+        if provided and accepted:
+            additions: list[str] = []
+            provided_lower = provided.casefold()
+            if (normalized_artifact_status == "degraded" or degraded) and degradation_reason:
+                degradation_note = f"Limitation: {degradation_reason}"
+                if degradation_reason.casefold() not in provided_lower:
+                    additions.append(degradation_note)
+            if disclosure:
+                disclosure_notes = disclosure.split(":", 1)[-1].strip(" .")
+                disclosure_seen = any(
+                    note and note.casefold() in provided_lower
+                    for note in [part.strip() for part in disclosure_notes.split(";")]
+                )
+                if not disclosure_seen:
+                    additions.append(disclosure)
+            if additions:
+                return f"{provided.rstrip()} {' '.join(additions)}".strip()
+            return provided
+
+        if accepted:
+            if normalized_artifact_status == "degraded" or degraded:
+                response = "Completed with disclosed limitations. " + deliverable
+                if degradation_reason:
+                    response += f" Limitation: {degradation_reason}"
+            else:
+                response = "Completed. " + deliverable
+                if reason_text:
+                    response += f" Summary: {reason_text}"
+        elif normalized_artifact_status == "blocked":
+            response = "Task encountered a blocking condition. " + deliverable
+            if reason_text:
+                response += f" Reason: {reason_text}"
+        else:
+            response = "Partial result available, but the task was not fully accepted. " + deliverable
+            if reason_text:
+                response += f" Reason: {reason_text}"
+            if degradation_reason:
+                response += f" Limitation: {degradation_reason}"
+        if normalized_missing:
+            response += " Unmet requirements: " + "; ".join(normalized_missing[:5]) + "."
+        if disclosure:
+            response += " " + disclosure
+        return response.strip()
+
+    @staticmethod
+    def _agent_task_final_result_text(value: Any) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        if isinstance(value, str):
+            return " ".join(value.split())
+        try:
+            return json.dumps(DataFormatter.sanitize(value), ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return " ".join(str(value).split())
+
+    @staticmethod
+    def _agent_task_string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            text = value.strip()
+            return [text] if text else []
+        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+            result: list[str] = []
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    result.append(text)
+            return result
+        return []
+
     @staticmethod
     def _is_process_summary_stream_path(path: Any) -> bool:
         text = str(path or "").strip()
@@ -454,6 +589,30 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
                 "liveness_timeouts": "Operational idle/no-progress timeouts may still protect against stuck execution.",
             },
         }
+
+    def _task_context_contract_for_model_prompt(self) -> dict[str, Any]:
+        contract = self._task_context_contract()
+        contract["current_time"] = {
+            "available": True,
+            "visibility": "omitted_from_default_model_hot_path",
+            "reason": (
+                "Concrete runtime date/time values are execution context only and are not supplied to "
+                "default model generation, verification, or finalization prompts."
+            ),
+        }
+        temporal_policy = dict(contract.get("temporal_policy") or {})
+        temporal_policy["currentness_reference"] = (
+            "Concrete runtime current_time values are omitted from this model prompt. Do not infer, "
+            "write, or verify a current date/time as a business fact unless it appears in the user task, "
+            "source evidence, readback, or an explicit caller-supplied as-of fact."
+        )
+        temporal_policy["general_decision_context"] = (
+            "The runtime/current date is not general business evidence. If the task genuinely requires "
+            "current/latest/as-of grounding, use explicit task facts or source/tool evidence and label "
+            "their time boundary."
+        )
+        contract["temporal_policy"] = temporal_policy
+        return contract
 
 
 _AgentTaskT = TypeVar("_AgentTaskT", bound=AgentTaskMixinBase)
@@ -646,6 +805,7 @@ __all__ = [
     "time",
     "uuid",
     "AgentExecutionStreamData",
+    "AgentExecutionTextDeltaProjector",
     "AgentTaskEffectiveExecutionStrategy",
     "AgentTaskExecutionStrategy",
     "AgentTaskMixinBase",
@@ -696,6 +856,8 @@ __all__ = [
     "build_task_board_evidence_view",
     "build_task_board_focus_payload",
     "build_task_board_handoff_projection",
+    "build_task_board_incremental_verification_plan",
+    "build_task_board_scoped_evidence_view",
     "coerce_task_board_planning_result",
     "collect_evidence_use",
     "evidence_envelope_from_value",

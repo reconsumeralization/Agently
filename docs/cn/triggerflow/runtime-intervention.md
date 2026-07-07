@@ -1,6 +1,6 @@
 ---
 title: Runtime Intervention
-description: 在不暂停、不改写运行中 graph 的前提下，向 TriggerFlow execution 补充上下文。
+description: 在不暂停、不改写运行中 graph 的前提下，向 TriggerFlow execution 添加运行时引导上下文。
 keywords: Agently, TriggerFlow, runtime intervention, intervention_point, 人工上下文
 ---
 
@@ -8,9 +8,9 @@ keywords: Agently, TriggerFlow, runtime intervention, intervention_point, 人工
 
 > Languages: [English](../../en/triggerflow/runtime-intervention.md) · **中文**
 
-Runtime intervention 让外部代码在 execution 仍然 open 时补充上下文。TriggerFlow 会立刻记录这条上下文，然后在安全边界让后续 chunk 可见。
+Runtime intervention 让外部代码在 execution 仍然 open 时添加运行时引导上下文。TriggerFlow 会立刻记录这条上下文，然后在安全边界让后续 chunk 可见。
 
-用户在 workflow 运行中补充备注、修正、附件摘要或其他上下文时，用 runtime intervention。workflow 必须停下来等待外部答案时，用 [Pause 与 Resume](pause-and-resume.md)。
+用户在 workflow 运行中追加备注、修正、附件摘要或下一步引导时，用 runtime intervention。workflow 必须停下来等待外部答案时，用 [Pause 与 Resume](pause-and-resume.md)。
 
 ## 模式
 
@@ -55,14 +55,14 @@ chunk 通过 `data.interventions` 或 `data.get_interventions(...)` 读取已经
 
 ```python
 async def risk_assessment(data: TriggerFlowRuntimeData):
-    supplements = data.get_interventions(status="inserted", target="before_risk")
+    guidance_items = data.get_interventions(status="inserted", target="before_risk")
     result = await assess_with_model(
         {
             "terms": data.input,
-            "supplements": [item["payload"] for item in supplements],
+            "guidance": [item["payload"] for item in guidance_items],
         }
     )
-    for item in supplements:
+    for item in guidance_items:
         await data.async_mark_intervention_consumed(
             item["id"],
             status="applied",

@@ -205,7 +205,6 @@ class ActionResourceRegistrar:
             kwargs={
                 "cmd": ("str | list[str]", "Command to run inside the sandbox."),
                 "workdir": ("str | None", "Working directory inside allowed roots."),
-                "allow_unsafe": ("bool", "Bypass the command allowlist."),
             },
             executor=action._create_executor(
                 "BashSandboxActionExecutor",
@@ -221,6 +220,7 @@ class ActionResourceRegistrar:
             side_effect_level="exec",
             sandbox_required=True,
             expose_to_model=expose_to_model,
+            meta={"host_only_input_keys": ["allow_unsafe"]},
             execution_resources=cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"bash:{ action_id }",

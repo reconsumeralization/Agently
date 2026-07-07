@@ -1617,9 +1617,9 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
     bound_inputs = block.input_bindings.get("bound_inputs", {})
     if not isinstance(bound_inputs, Mapping):
         bound_inputs = {}
-    operation = str(bound_inputs.get("operation") or bound_inputs.get("op") or "ingest").strip()
-    if operation == "ingest":
-        ref = await workspace.ingest(
+    operation = str(bound_inputs.get("operation") or bound_inputs.get("op") or "put").strip()
+    if operation in {"put", "ingest"}:
+        ref = await workspace.put(
             content=bound_inputs.get("content", data.value),
             collection=str(bound_inputs.get("collection") or "observations"),
             kind=str(bound_inputs.get("kind") or "blocks_workspace_operation"),
@@ -1627,8 +1627,12 @@ async def _execute_workspace_operation_block(block: ExecutionBlock, data: Trigge
             source=dict(bound_inputs.get("source") or {"type": "blocks", "execution_block_id": block.id}),
             summary=bound_inputs.get("summary"),
             meta=dict(bound_inputs.get("meta") or {}),
+            profile=bound_inputs.get("profile"),
         )
-        return {"operation": operation, "workspace_refs": [ref], "ref": ref}
+        result = {"operation": "put", "workspace_refs": [ref], "ref": ref}
+        if operation == "ingest":
+            result["compat_operation"] = "ingest"
+        return result
     if operation == "put_checkpoint":
         ref = await workspace.put_checkpoint(
             str(bound_inputs.get("run_id") or block.source_plan_block_id or block.id),
@@ -2162,12 +2166,14 @@ async def _execute_approval_wait_block(block: ExecutionBlock, data: TriggerFlowR
             "source_plan_block_id": block.source_plan_block_id,
         },
     )
+    exchange_kwargs = _bound_exchange_metadata(bound_inputs)
     gate_result = await policy_approval.async_gate(
         data,
         request_payload,
         handler=bound_inputs.get("handler"),
         interrupt_id=bound_inputs.get("interrupt_id"),
         resume_to="self",
+        **exchange_kwargs,
     )
     if data.execution.is_waiting():
         return gate_result
@@ -2185,6 +2191,29 @@ async def _execute_approval_wait_block(block: ExecutionBlock, data: TriggerFlowR
     return output
 
 
+def _bound_exchange_metadata(bound_inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Collect optional ExecutionExchange metadata from block bound inputs.
+
+    Only explicitly bound fields are forwarded so gate/pause defaults (and
+    interaction-posture routing) stay in charge when authors omit them.
+    """
+    exchange_kwargs: dict[str, Any] = {}
+    for key in (
+        "channel_id",
+        "provider_id",
+        "wait_mode",
+        "hot_wait_timeout",
+        "cold_persistence_policy",
+        "request_payload_schema",
+        "response_payload_schema",
+        "audit_metadata",
+    ):
+        value = bound_inputs.get(key)
+        if value is not None:
+            exchange_kwargs[key] = value
+    return exchange_kwargs
+
+
 async def _execute_external_wait_block(block: ExecutionBlock, data: TriggerFlowRuntimeData) -> Any:
     bound_inputs = block.input_bindings.get("bound_inputs", {})
     if not isinstance(bound_inputs, Mapping):
@@ -2198,6 +2227,7 @@ async def _execute_external_wait_block(block: ExecutionBlock, data: TriggerFlowR
         payload=bound_inputs.get("payload", {}),
         interrupt_id=bound_inputs.get("interrupt_id"),
         resume_to="self",
+        **_bound_exchange_metadata(bound_inputs),
     )
 
 

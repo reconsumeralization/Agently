@@ -45,7 +45,7 @@ async def main():
             "workspace_file": "notes/runtime.txt",
             "artifact_count": len(shell_result.get("artifact_refs", [])),
         }
-        observation_ref = await workspace.ingest(
+        observation_ref = await workspace.put(
             content=observation,
             collection="observations",
             kind="action_output",
@@ -105,7 +105,7 @@ asyncio.run(main())
 # run_bash("cat notes/runtime.txt", workdir=workspace.files_root)
 #   |
 #   v
-# workspace.ingest(action output as observation)
+# workspace.put(action output as observation)
 #   |
 #   v
 # workspace.build_context(...) -> ContextPackage contains the action-output record

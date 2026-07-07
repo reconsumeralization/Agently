@@ -13,7 +13,7 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.core.orchestration import TaskBoard, build_task_board_evidence_view
+from agently.core.orchestration import TaskBoard, build_task_board_acceptance_index, build_task_board_evidence_view
 from agently.core.application.AgentTask.BlockCarrier import (
     WorkUnitIntent,
     WorkUnitResult,
@@ -21,7 +21,10 @@ from agently.core.application.AgentTask.BlockCarrier import (
     select_carrier_output_policy,
 )
 from agently.core.application.AgentTask import AgentTask
-from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
+from agently.core.application.AgentExecution.Stream import (
+    AgentExecutionTextDeltaProjector,
+    project_agent_execution_text_delta,
+)
 from agently.types.data import (
     AgentlyRequestData,
     AgentExecutionStreamData,
@@ -289,6 +292,424 @@ def test_agent_task_process_progress_delta_uses_only_explicit_progress_event():
     assert project_agent_execution_text_delta(progress_item) == "Reading the bounded source evidence.\n\n"
 
 
+def test_taskboard_delta_projects_structured_status_table():
+    item = AgentExecutionStreamData(
+        path="agent_task.taskboard.tick.2.completed",
+        value={
+            "revision": {
+                "board_id": "demo-board",
+                "revision_id": "rev-2",
+                "status": "running",
+                "graph": {
+                    "cards": [
+                        {"id": "collect", "objective": "Collect source facts.", "status": "pending"},
+                        {"id": "draft", "objective": "Draft the answer.", "status": "pending"},
+                        {"id": "final", "objective": "Finalize the user-facing answer.", "status": "pending"},
+                        {
+                            "id": "audit",
+                            "objective": "Run the required audit.",
+                            "failure_policy": "required",
+                        },
+                        {
+                            "id": "optional-source",
+                            "objective": "Try an optional source.",
+                            "failure_policy": "optional",
+                        },
+                    ],
+                },
+            },
+            "schedule": {
+                "revision_id": "rev-1",
+                "runnable_card_ids": ["draft"],
+                "blocked_card_ids": ["final"],
+                "completed_card_ids": ["collect"],
+            },
+            "card_results": {
+                "collect": {"card_id": "collect", "status": "completed"},
+                "audit": {"card_id": "audit", "status": "failed"},
+                "optional-source": {"card_id": "optional-source", "status": "failed"},
+            },
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+    )
+
+    text = project_agent_execution_text_delta(item)
+
+    assert text is not None
+    assert text.startswith("**TaskBoard tick 2 updated** `demo-board` - revision `rev-2`")
+    assert "Progress: 1/5 completed - 1 in progress - 1 not started - 1 failed - 1 degraded" in text
+    assert "| ✅ Completed | `collect` | Collect source facts. |" in text
+    assert "| 🔄 In progress | `draft` | Draft the answer. |" in text
+    assert "| ⏳ Not started | `final` | Finalize the user-facing answer. |" in text
+    assert "| ❌ Failed | `audit` | Run the required audit. |" in text
+    assert "| ⚠️ Degraded | `optional-source` | Try an optional source. |" in text
+    assert "card_results" not in text
+
+
+def test_taskboard_delta_projector_compacts_repeated_tick_updates():
+    revision = {
+        "board_id": "demo-board",
+        "revision_id": "rev-2",
+        "graph": {
+            "cards": [
+                {"id": "collect", "objective": "Collect source facts.", "status": "pending"},
+                {"id": "draft", "objective": "Draft the answer.", "status": "pending"},
+            ]
+        },
+    }
+    planned = AgentExecutionStreamData(
+        path="agent_task.taskboard.plan",
+        value={"revision": revision},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+    )
+    tick = AgentExecutionStreamData(
+        path="agent_task.taskboard.tick.1.completed",
+        value={
+            "revision": revision,
+            "schedule": {
+                "revision_id": "rev-2",
+                "completed_card_ids": ["collect"],
+                "runnable_card_ids": ["draft"],
+            },
+            "card_results": {"collect": {"status": "completed"}},
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+    )
+    projector = AgentExecutionTextDeltaProjector()
+
+    planned_text = projector.project(planned)
+    tick_text = projector.project(tick)
+
+    assert planned_text is not None
+    assert "| State | Card | Task |" in planned_text
+    assert tick_text is not None
+    assert "Changes:" in tick_text
+    assert "| State | Card | Task |" not in tick_text
+    assert "✅ Completed `collect` Collect source facts. (was ⏳ Not started)" in tick_text
+    assert "🔄 In progress `draft` Draft the answer. (was ⏳ Not started)" in tick_text
+
+
+def test_flat_delta_projector_describes_plan_with_previous_completed_action():
+    context = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.context",
+        value={
+            "message": "Iteration 1: context pack ready with 2 item(s).",
+            "iteration": 1,
+            "stage": "context",
+            "snapshot": {"context_item_count": 2},
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "context", "iteration": 1, "task_id": "flat-task"},
+    )
+    item = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.plan",
+        value={
+            "message": "Iteration 1: plan ready; next bounded step is selected.",
+            "iteration": 1,
+            "stage": "plan",
+            "snapshot": {
+                "execution_shape": "direct",
+                "step_instruction": "Read the source file and draft the final answer.",
+                "expected_evidence": "Source facts are bounded and cited.",
+                "rationale": "The task needs one focused pass over the source.",
+            },
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "plan", "iteration": 1, "task_id": "flat-task"},
+    )
+    projector = AgentExecutionTextDeltaProjector()
+
+    context_text = projector.project(context)
+    text = projector.project(item)
+
+    assert context_text is not None
+    assert context_text == "Iteration 1: context is ready with 2 item(s).\n\n"
+    assert text is not None
+    assert text.startswith("Iteration 1: plan ready.")
+    assert text.endswith("\n\n")
+    assert "Previous completed action: prepared the working context with 2 item(s)." in text
+    assert "Current action plan: Read the source file and draft the final answer." in text
+    assert "Expected evidence: Source facts are bounded and cited." in text
+    assert "| State | Step | Detail |" not in text
+    assert "execution_result" not in text
+
+
+def test_flat_delta_projector_summarizes_completed_actions_and_terminal_result():
+    projector = AgentExecutionTextDeltaProjector()
+    context = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.context",
+        value={
+            "message": "Iteration 1: context pack ready with 2 item(s).",
+            "iteration": 1,
+            "stage": "context",
+            "snapshot": {"context_item_count": 2},
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "context", "iteration": 1, "task_id": "flat-task"},
+    )
+    execution = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.execution",
+        value={
+            "message": "Iteration 1: bounded step finished; execution evidence was captured.",
+            "iteration": 1,
+            "stage": "execution",
+            "snapshot": {
+                "execution_result": {
+                    "short_summary": "Drafted the answer from bounded source evidence.",
+                    "remaining_work": ["Verify final acceptance."],
+                }
+            },
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "execution", "iteration": 1, "task_id": "flat-task"},
+    )
+    verification = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.verification",
+        value={
+            "message": "Iteration 1: verification passed.",
+            "iteration": 1,
+            "stage": "verification",
+            "snapshot": {
+                "is_complete": True,
+                "reason": "All requested facts are covered.",
+            },
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "verification", "iteration": 1, "task_id": "flat-task"},
+    )
+    result_item = AgentExecutionStreamData(
+        path="result",
+        value={
+            "status": "completed",
+            "accepted": True,
+            "artifact_status": "accepted",
+            "final_result": "Final answer prepared from bounded source evidence.",
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+    )
+
+    context_text = projector.project(context)
+    execution_text = projector.project(execution)
+    verification_text = projector.project(verification)
+    result_text = projector.project(result_item)
+
+    assert context_text is not None
+    assert context_text == "Iteration 1: context is ready with 2 item(s).\n\n"
+    assert execution_text is not None
+    assert execution_text.endswith("\n\n")
+    assert "Iteration 1: completed action: Drafted the answer from bounded source evidence." in execution_text
+    assert "| State | Step | Detail |" not in execution_text
+    assert verification_text is not None
+    assert verification_text.endswith("\n\n")
+    assert "Iteration 1: verification passed: All requested facts are covered." in verification_text
+    assert result_text is not None
+    assert result_text.endswith("\n\n")
+    assert result_text.startswith("Task summary:")
+    assert "What was done:" in result_text
+    assert "- Drafted the answer from bounded source evidence." in result_text
+    assert "- verified the final result." in result_text
+    assert "Result:" in result_text
+    assert "Final answer prepared from bounded source evidence." in result_text
+
+
+def test_text_delta_projector_separates_model_delta_from_process_projection_and_retry_marker():
+    projector = AgentExecutionTextDeltaProjector()
+    body = AgentExecutionStreamData(
+        path="model.delta",
+        value=None,
+        delta="Drafting first attempt...",
+        event_type="delta",
+        is_complete=False,
+        source="model_request",
+    )
+    retry = AgentExecutionStreamData(
+        path="$status",
+        value={"status": "failed", "retry": True, "reason": "provider stream reset"},
+        event_type="done",
+        is_complete=True,
+        source="model_request",
+    )
+    replacement = AgentExecutionStreamData(
+        path="model.delta",
+        value=None,
+        delta="Drafting replacement...",
+        event_type="delta",
+        is_complete=False,
+        source="model_request",
+    )
+    verification = AgentExecutionStreamData(
+        path="agent_task.iteration.2.snapshot",
+        value={"stage": "verification", "snapshot": {"is_complete": True}},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        meta={"stream_kind": "snapshot", "stage": "verification", "iteration": 2},
+    )
+
+    rendered = "".join(
+        text
+        for text in (
+            projector.project(body),
+            projector.project(retry),
+            projector.project(replacement),
+            projector.project(verification),
+        )
+        if text is not None
+    )
+
+    assert "Drafting first attempt...\n\n<$retry>provider stream reset</$retry>\n\nDrafting replacement..." in rendered
+    assert "Drafting replacement...\n\nIteration 2: verification passed." in rendered
+
+
+def test_taskboard_stream_revision_keeps_objective_for_delta_status_table():
+    revision = TaskBoardRevision.create(
+        board_id="stream-objective",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "stream-objective-graph",
+                "cards": [{"id": "collect", "objective": "Collect source facts for the status table."}],
+            }
+        ),
+    )
+
+    compact = AgentTask._compact_taskboard_revision_for_stream(revision)
+
+    assert compact["cards"][0]["objective"] == "Collect source facts for the status table."
+
+
+class _FakeChildExecutionStream:
+    id = "child-execution-1"
+
+    def __init__(self, source_item: AgentExecutionStreamData):
+        self._source_item = source_item
+        self.requested_types: list[str] = []
+
+    async def get_async_generator(self, type: str = "instant"):
+        self.requested_types.append(type)
+        if type == "instant":
+            yield self._source_item
+            yield AgentExecutionStreamData(
+                path="$delta",
+                value=self._source_item.delta,
+                delta=self._source_item.delta,
+                event_type="delta",
+                is_complete=False,
+                source="agent_execution",
+                route=self._source_item.route,
+                meta={
+                    "stream_kind": "text_projection",
+                    "projection_source_path": self._source_item.path,
+                    "projection_source_event_type": self._source_item.event_type,
+                },
+            )
+            return
+        assert type == "all"
+        yield ("agent_execution", self._source_item)
+
+
+def _minimal_agent_task_stream_owner() -> Any:
+    task = object.__new__(AgentTask)
+    task.id = "agent-task-stream-test"
+    task.status = "running"
+    task._stream_items = []
+    task._stream_queues = []
+    task._last_stream_emit_monotonic = 0.0
+    return task
+
+
+def _child_delta_item() -> AgentExecutionStreamData:
+    return AgentExecutionStreamData(
+        path="answer",
+        value="A",
+        delta="A",
+        event_type="delta",
+        is_complete=False,
+        source="model_request",
+        route="model_request",
+        meta={"field_path": "answer", "response_id": "response-1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_task_flat_child_stream_uses_raw_events_without_synthetic_delta_projection():
+    task = _minimal_agent_task_stream_owner()
+    child_execution = _FakeChildExecutionStream(_child_delta_item())
+
+    await task._bridge_step_execution_stream(1, child_execution)
+
+    delta_chunks = [
+        chunk
+        for chunk in (AgentTask._project_stream_item(item, "delta") for item in task._stream_items)
+        if chunk is not None
+    ]
+    child_paths = [(item.meta or {}).get("child_path") for item in task._stream_items]
+
+    assert delta_chunks == ["A"]
+    assert child_paths == ["answer"]
+    assert child_execution.requested_types == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_agent_task_taskboard_child_stream_uses_raw_events_without_synthetic_delta_projection():
+    task = _minimal_agent_task_stream_owner()
+    child_execution = _FakeChildExecutionStream(_child_delta_item())
+
+    await task._bridge_taskboard_card_execution_stream("collect", child_execution)
+
+    delta_chunks = [
+        chunk
+        for chunk in (AgentTask._project_stream_item(item, "delta") for item in task._stream_items)
+        if chunk is not None
+    ]
+    child_paths = [(item.meta or {}).get("child_path") for item in task._stream_items]
+
+    assert delta_chunks == ["A"]
+    assert child_paths == ["answer"]
+    assert child_execution.requested_types == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_agent_task_taskboard_control_stream_preserves_done_event_type():
+    task = _minimal_agent_task_stream_owner()
+    done_item = AgentExecutionStreamData(
+        path="final_result",
+        value="complete",
+        event_type="done",
+        is_complete=True,
+        source="model_request",
+    )
+
+    emitted = await task._emit_taskboard_control_stream_item("collect", done_item)
+
+    assert emitted.event_type == "done"
+    assert emitted.is_complete is True
+    assert emitted.delta is None
+
+
 def test_agent_task_action_observation_delta_projects_safe_progress_text():
     started = AgentExecutionStreamData(
         path="agent_task.action.started",
@@ -328,16 +749,15 @@ def test_agent_task_action_observation_delta_projects_safe_progress_text():
     )
 
     assert project_agent_execution_text_delta(started) == (
-        'Action started: grep_workspace (shell_search). Input: {"query": "deadline", "scope": "workspace"}\n\n'
+        "Action started: grep_workspace (shell_search). Input: query=deadline\n\n"
     )
     completed_text = project_agent_execution_text_delta(completed)
     assert completed_text is not None
     assert completed_text.endswith("\n\n")
     assert "Action completed: grep_workspace (shell_search)." in completed_text
-    assert "Result:" in completed_text
-    assert "deadline is 2026-07-01" in completed_text
+    assert "Result: path notes.md" in completed_text
     assert "Refs: notes.md" in completed_text
-    assert project_agent_execution_text_delta(failed) == "Action failed: read_file. Error: file not found\n\n"
+    assert project_agent_execution_text_delta(failed) == "Action setback: read_file failed. Error: file not found\n\n"
 
 
 def test_evidence_ledger_guard_rejects_structurally_invalid_support():
@@ -1571,14 +1991,14 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
         goal="Use scoped search before reading large files.",
         success_criteria=["Evidence is grounded."],
     )
-    await task.workspace.ingest(
+    await task.workspace.put(
         content="Alpha deadline is 2026-07-01. Use this bounded evidence.",
         collection="observations",
         kind="note",
         summary="alpha deadline note",
         scope={"case_id": "alpha"},
     )
-    await task.workspace.ingest(
+    await task.workspace.put(
         content="Beta deadline is unrelated.",
         collection="observations",
         kind="note",
@@ -2671,6 +3091,93 @@ def _create_agent(name: str = "agent-task-loop-test"):
 
 
 @pytest.mark.asyncio
+async def test_agent_task_guidance_records_workspace_refs_without_evidence_items(tmp_path):
+    agent = _create_agent("agent-task-guidance-record").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="guidance-record-task",
+        goal="Prepare the incident summary.",
+        success_criteria=["The summary uses the operator's latest context."],
+        execution="flat",
+        max_iterations=1,
+    )
+
+    guidance = await task.async_add_guidance(
+        "Use the operator's newly uploaded incident note as the primary context.",
+        author="operator",
+        target="task",
+        meta={"source": "test"},
+    )
+
+    assert guidance["kind"] == "guidance"
+    assert guidance["status"] == "received"
+    assert guidance["workspace_ref"]["collection"] == "guidance"
+    assert task.workspace_refs["guidance"] == [guidance["workspace_ref"]["id"]]
+    assert task.guidance_items[0]["id"] == guidance["id"]
+
+    record_body = await task.workspace.get_data(guidance["workspace_ref"])
+    assert record_body["schema_version"] == "agent_task_guidance/v1"
+    assert record_body["guidance_id"] == guidance["id"]
+    assert record_body["content"] == "Use the operator's newly uploaded incident note as the primary context."
+    assert "evidence_items" not in record_body
+
+    guidance_events = [item for item in task._stream_items if item.path == "agent_task.guidance.received"]
+    assert guidance_events
+    assert isinstance(guidance_events[0].meta, dict)
+    assert guidance_events[0].meta["stream_kind"] == "guidance"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_guidance_safe_boundary_records_checkpoint_projection(tmp_path):
+    agent = _create_agent("agent-taskboard-guidance-boundary").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-guidance-boundary",
+        goal="Draft the board-backed response.",
+        success_criteria=["The board-backed response uses operator context."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft the response.",
+            "done_when": ["The response reflects the latest operator context."],
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-guidance-boundary",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "taskboard-guidance-boundary-graph",
+                "cards": [card.to_dict()],
+            }
+        ),
+        revision_id="rev-0",
+    )
+
+    guidance = await task.async_add_guidance(
+        "Use the operator's late clarification when drafting the response.",
+        author="operator",
+        target={"card_id": "draft"},
+    )
+    applied = await task._apply_guidance_boundary(iteration_index=1, boundary="taskboard_tick")
+    record_ref, _checkpoint_ref = await task._record_taskboard_checkpoint(
+        stage="tick",
+        tick_index=1,
+        revision=revision,
+    )
+
+    assert applied[0]["id"] == guidance["id"]
+    assert task.guidance_items[0]["status"] == "applied"
+    assert len(revision.graph.cards) == 1
+    assert record_ref is not None
+    checkpoint_body = await task.workspace.get_data(record_ref)
+    assert checkpoint_body["guidance"][0]["id"] == guidance["id"]
+    assert checkpoint_body["guidance"][0]["status"] == "applied"
+    assert checkpoint_body["guidance"][0]["target"] == {"card_id": "draft"}
+
+
+@pytest.mark.asyncio
 async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-helper")
     task = AgentTask.__new__(AgentTask)
@@ -2998,7 +3505,7 @@ async def test_taskboard_required_final_deliverable_promotion_replaces_stale_tar
         await ref_for("working/taskboard/coverage-and-finalize/final.md"),
     ]
 
-    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs(refs)
+    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs([*refs, dict(refs[0])])
 
     final_read = await task.workspace.read_file("final.md", max_bytes=len(full_body.encode("utf-8")) + 1)
     assert final_read["content"] == full_body
@@ -3006,6 +3513,107 @@ async def test_taskboard_required_final_deliverable_promotion_replaces_stale_tar
     assert promoted_refs[0]["source_path"] == "working/taskboard/coverage-and-finalize/final.md"
     assert promoted_refs[0]["sha256"] == final_read["sha256"]
     assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_required_final_deliverable_promotion_uses_unique_trusted_source(tmp_path):
+    agent = _create_agent("agent-taskboard-final-deliverable-unique-source").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-deliverable-unique-source",
+        goal="Produce support_reply.md at the required deliverable path.",
+        success_criteria=["support_reply.md contains the completed customer reply."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "support_reply.md"}]}},
+    )
+    body = "# Support Reply\n\nCompleted customer reply body."
+    await task.workspace.write_file("final.md", body)
+    read_result = await task.workspace.read_file("final.md", max_bytes=4000)
+    refs = [
+        {
+            "path": "final.md",
+            "bytes": int(read_result["bytes"]),
+            "sha256": str(read_result["sha256"]),
+            "media_type": read_result.get("media_type"),
+            "content_kind": "text",
+            "role": "workspace_artifact",
+            "source": "test.final-md",
+            "preview": str(read_result.get("content") or ""),
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "truncated": bool(read_result.get("truncated")),
+        }
+    ]
+
+    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs([*refs, dict(refs[0])])
+
+    target_read = await task.workspace.read_file("support_reply.md", max_bytes=4000)
+    assert target_read["content"] == body
+    assert promoted_refs[0]["path"] == "support_reply.md"
+    assert promoted_refs[0]["source_path"] == "final.md"
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "selected"
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][1]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_required_final_deliverable_promotion_uses_repair_source_over_existing_target(tmp_path):
+    agent = _create_agent("agent-taskboard-final-deliverable-repair-source").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-deliverable-repair-source",
+        goal="Repair incident_learning.md at the required deliverable path.",
+        success_criteria=["incident_learning.md contains only grounded incident facts."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "incident_learning.md"}]}},
+    )
+    stale_body = (
+        "# Incident Learning Note\n\n"
+        "**Date:** 2026-07-07\n\n"
+        "## Open Risks\n\n"
+        "The long-term prevention work is not yet implemented. No other risks are currently known.\n"
+        + "\n".join(f"Unsupported stale detail {index}." for index in range(20))
+    )
+    repaired_body = (
+        "# Incident Learning Note\n\n"
+        "## Open Risks\n\n"
+        "The long-term prevention work is identified but not yet implemented.\n"
+    )
+    await task.workspace.write_file("incident_learning.md", stale_body)
+    await task.workspace.write_file("final.md", repaired_body)
+
+    async def ref_for(path: str, source: str) -> dict[str, Any]:
+        read_result = await task.workspace.read_file(path, max_bytes=4000)
+        return {
+            "path": path,
+            "bytes": int(read_result["bytes"]),
+            "sha256": str(read_result["sha256"]),
+            "media_type": read_result.get("media_type"),
+            "content_kind": "text",
+            "role": "workspace_artifact",
+            "source": source,
+            "preview": str(read_result.get("content") or ""),
+            "read_bytes": int(read_result.get("read_bytes") or 0),
+            "truncated": bool(read_result.get("truncated")),
+        }
+
+    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs(
+        [
+            await ref_for("incident_learning.md", "agent_task.taskboard.card.write_incident_note.workspace_artifact"),
+            await ref_for("final.md", "agent_task.taskboard.card.final-verification-repair.workspace_artifact"),
+        ]
+    )
+
+    target_read = await task.workspace.read_file("incident_learning.md", max_bytes=4000)
+    assert target_read["content"] == repaired_body
+    assert promoted_refs[0]["path"] == "incident_learning.md"
+    assert promoted_refs[0]["source_path"] == "final.md"
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["reason"] == (
+        "unique_final_verification_repair_source_for_required_deliverable"
+    )
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][1]["status"] == "delivered"
 
 
 @pytest.mark.asyncio
@@ -3740,6 +4348,10 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
 
     assert result["status"] == "completed"
     assert result["final_result"].startswith("Workspace artifact delivered at reports/final.md")
+    assert "final_response" in result
+    assert "Completed" in result["final_response"]
+    assert "reports/final.md" in result["final_response"]
+    assert await task.async_get_text() == result["final_response"]
     verification = meta["iterations"][0]["verification"]
     assert verification["is_complete"] is True
     assert verification["final_result_via_workspace_artifact"] is True
@@ -3821,6 +4433,11 @@ async def test_agent_task_workspace_artifact_refs_survive_incomplete_verificatio
     assert result["status"] == "max_iterations"
     assert result["accepted"] is False
     assert result["artifact_status"] == "partial"
+    assert "final_response" in result
+    assert "Partial result available" in result["final_response"]
+    assert "reports/partial.md" in result["final_response"]
+    assert "stronger cited evidence" in result["final_response"]
+    assert await task.async_get_text() == result["final_response"]
     delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
     assert delivery["status"] == "delivered"
     assert delivery["file_refs"][0]["path"] == "reports/partial.md"
@@ -5187,11 +5804,11 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(tmp_path, monkeypatch):
-    agent = _create_agent("agent-taskboard-final-repairable-block").use_workspace(tmp_path / "workspace")
+async def test_taskboard_finalization_repairs_structured_continuation_verdict(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-final-continuation-repair").use_workspace(tmp_path / "workspace")
     task = AgentTask(
         agent,
-        task_id="taskboard-final-repairable-block",
+        task_id="taskboard-final-continuation-repair",
         goal="Return a complete final report.",
         success_criteria=["The final report includes required sections."],
         execution="taskboard",
@@ -5207,9 +5824,9 @@ async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(
     )
     revision = TaskBoardRevision.from_value(
         {
-            "board_id": "taskboard-final-repairable-block",
+            "board_id": "taskboard-final-continuation-repair",
             "revision_id": "rev-1",
-            "graph": {"graph_id": "taskboard-final-repairable-block-graph", "cards": [card.to_dict()]},
+            "graph": {"graph_id": "taskboard-final-continuation-repair-graph", "cards": [card.to_dict()]},
             "card_results": {
                 "draft": TaskBoardCardResult(
                     card_id="draft",
@@ -5224,12 +5841,12 @@ async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(
         }
     )
 
-    async def verifier_requires_block_for_repairable_gap(*_args, **_kwargs):
+    async def verifier_requests_continuation_for_repairable_gap(*_args, **_kwargs):
         return {
             "is_complete": False,
-            "requires_block": True,
+            "requires_block": False,
             "reason": "The final deliverable is missing a required section.",
-            "failure_analysis": "This is a repairable artifact gap.",
+            "failure_analysis": "The artifact can continue with a localized repair.",
             "acceptance_delta": ["Add the missing required section."],
             "missing_criteria": ["Missing required section."],
             "replan_instruction": "Repair final.md by adding the missing section.",
@@ -5246,7 +5863,7 @@ async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(
         return None
 
     monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
-    monkeypatch.setattr(cast(Any, task), "_request_verification", verifier_requires_block_for_repairable_gap)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", verifier_requests_continuation_for_repairable_gap)
     monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
     monkeypatch.setattr(cast(Any, task), "_emit", noop)
 
@@ -5271,6 +5888,21 @@ async def test_taskboard_finalization_repairs_repairable_requires_block_verdict(
     ]
     assert len(repair_cards) == 1
     assert "Missing required section." in repair_cards[0].evidence_contract["missing_criteria"]
+
+
+def test_taskboard_final_verification_does_not_parse_repairable_reason_text():
+    assert (
+        AgentTask._taskboard_final_verification_allows_repair(
+            {
+                "is_complete": False,
+                "requires_block": True,
+                "reason": "This sounds repairable, retryable, and localized.",
+                "failure_analysis": "Please repair final.md.",
+            },
+            blocking_state_facts=[],
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -5453,6 +6085,96 @@ async def test_taskboard_finalization_promotes_single_terminal_candidate_without
     assert result == {"terminal": True, "status": "completed"}
     assert calls == {"finalizer": 0, "verifier": 1}
     assert task.result["taskboard"]["finalization_source"] == "candidate_promotion"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_skips_verifier_when_acceptance_cache_is_clean(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-final-clean-acceptance-cache").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-clean-acceptance-cache",
+        goal="Return the final report.",
+        success_criteria=["The completed card result is returned."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft the final report.",
+            "required_outputs": ["Final report"],
+            "metadata": {"acceptance_criteria": ["The completed card result is returned."]},
+        }
+    )
+    base_revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "taskboard-final-clean-acceptance-cache",
+            "revision_id": "rev-1",
+            "graph": {"graph_id": "taskboard-final-clean-acceptance-cache-graph", "cards": [card.to_dict()]},
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "final_result": "Final report body from the completed terminal card.",
+                        "remaining_work": [],
+                    },
+                ).to_dict()
+            },
+        }
+    )
+    previous_index = build_task_board_acceptance_index(
+        base_revision,
+        success_criteria=task.success_criteria,
+        verification={
+            "criterion_checks": [
+                {
+                    "criterion": "The completed card result is returned.",
+                    "satisfied": True,
+                    "reason": "Prior verifier accepted the terminal card.",
+                    "verification_ref": "verification:clean",
+                }
+            ]
+        },
+        evidence_view=build_task_board_evidence_view(base_revision).to_dict(),
+    )
+    revision = TaskBoardRevision.from_value(
+        {**base_revision.to_dict(), "metadata": {"taskboard_acceptance_index": previous_index}}
+    )
+    calls = {"finalizer": 0, "verifier": 0}
+
+    async def fail_finalizer(*_args, **_kwargs):
+        calls["finalizer"] += 1
+        raise AssertionError("TaskBoard finalizer should be skipped for promotable terminal candidate.")
+
+    async def fail_verifier(*_args, **_kwargs):
+        calls["verifier"] += 1
+        raise AssertionError("Clean acceptance cache should skip terminal model verification.")
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", fail_verifier)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert result == {"terminal": True, "status": "completed"}
+    assert calls == {"finalizer": 0, "verifier": 0}
+    assert task.result["accepted"] is True
+    assert task.result["taskboard"]["acceptance_verification_plan"]["all_satisfied"] is True
+    assert task.result["taskboard"]["final_verification"]["verification_source"] == "taskboard_acceptance_cache"
 
 
 @pytest.mark.asyncio
@@ -5677,8 +6399,18 @@ def test_verification_accepts_file_backed_result_despite_soft_liveness_failure(t
             "final_result_required": True,
             "final_result": "final.md",
             "criterion_checks": [
-                {"criterion": "sections", "status": "satisfied", "summary": "All required sections are present."},
-                {"criterion": "grounding", "status": "satisfied", "summary": "Grounding guard is clear."},
+                {
+                    "criterion": "sections",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "All required sections are present.",
+                },
+                {
+                    "criterion": "grounding",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "Grounding guard is clear.",
+                },
             ],
         },
         execution_evidence_summary={
@@ -5720,6 +6452,99 @@ def test_verification_accepts_file_backed_result_despite_soft_liveness_failure(t
     assert "Execution step status is failed" not in " ".join(verification.get("repair_constraints", []))
     assert verification["final_result_via_workspace_artifact"] is True
     assert verification["non_blocking_execution_status"]["error_type"] == "RuntimeStageStallError"
+
+
+def test_verification_criterion_checks_require_structured_satisfied_boolean():
+    assert AgentTask._verification_criteria_are_satisfied(
+        [
+            {
+                "criterion": "grounding",
+                "status": "satisfied",
+                "summary": "Display-only model status text is not enough.",
+            }
+        ]
+    ) is False
+    assert AgentTask._verification_criteria_are_satisfied(
+        [
+            {
+                "criterion": "grounding",
+                "satisfied": True,
+                "status": "satisfied",
+                "summary": "Structured boolean is the completion signal.",
+            }
+        ]
+    ) is True
+
+
+def test_verification_factual_integrity_check_blocks_completion(tmp_path):
+    agent = _create_agent("agent-factual-integrity-check").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="factual-integrity-check",
+        goal="Produce a support reply.",
+        success_criteria=["The support reply preserves stated uncertainty."],
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Explicit criteria are satisfied.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": False,
+            "final_result": "",
+            "factual_integrity_check": {
+                "satisfied": False,
+                "unsupported_additions": ["Added unsupported mitigation time 13:45 UTC."],
+                "certainty_inflation": ["Changed no known data loss into confirmed no data loss."],
+                "summary": "The artifact contains unsupported concrete details.",
+            },
+        },
+        execution_evidence_summary={},
+    )
+
+    assert verification["is_complete"] is False
+    assert "factual_integrity_failed" in verification["guard_reasons"]
+    assert "Added unsupported mitigation time 13:45 UTC." in verification["missing_criteria"]
+    assert "Changed no known data loss into confirmed no data loss." in verification["acceptance_delta"]
+
+
+def test_verification_factual_integrity_check_allows_clean_completion(tmp_path):
+    agent = _create_agent("agent-factual-integrity-clean").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="factual-integrity-clean",
+        goal="Produce a support reply.",
+        success_criteria=["The support reply preserves stated uncertainty."],
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "All checks passed.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": False,
+            "final_result": "",
+            "factual_integrity_check": {
+                "satisfied": True,
+                "unsupported_additions": [],
+                "certainty_inflation": [],
+                "summary": "No unsupported concrete additions.",
+            },
+        },
+        execution_evidence_summary={},
+    )
+
+    assert verification["is_complete"] is True
+    assert verification.get("guard_reasons") in (None, [])
+    assert verification["factual_integrity_check"]["satisfied"] is True
 
 
 def test_verification_keeps_liveness_failure_blocking_without_criterion_checks(tmp_path):
@@ -5965,6 +6790,8 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
 
     assert result["status"] == "completed"
     assert result["iterations"] == 2
+    assert "final_response" in result
+    assert await result_facade.async_get_text() == result["final_response"]
     assert result_facade.task_refs["task_id"] == "legacy-script-upgrade"
     assert result_facade.task_refs["status"] == "completed"
     assert execution_meta["task_refs"]["task_id"] == "legacy-script-upgrade"
@@ -6011,9 +6838,9 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert any(item.path == "result" for item in stream_items)
     assert "building a Workspace context pack" in delta_text
     assert "plan ready" in delta_text
-    assert "bounded step finished" in delta_text
+    assert "execution evidence was captured" in delta_text
     assert "all success criteria are satisfied" in delta_text
-    assert "Final result:" in delta_text
+    assert result["final_response"] in delta_text
     assert "Operator summary for INC-4242." in delta_text
     phase_names = [item["phase"] for item in meta["diagnostics"]["phases"]]
     assert "configured" in phase_names
@@ -6912,6 +7739,152 @@ def test_framework_action_loop_guard_diagnostic_does_not_force_execution_risk_gu
     assert "execution_risk_actions_present" not in verification.get("guard_reasons", [])
     assert verification["non_blocking_failed_actions"] == ["action_loop"]
     assert "Unresolved execution risk actions" not in " ".join(verification.get("missing_criteria", []))
+
+
+def test_blocked_step_with_only_nonblocking_read_failures_can_accept_completed_artifact(tmp_path):
+    agent = _create_agent("agent-task-blocked-read-failure-completed-artifact").use_workspace(
+        tmp_path / "task-workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Produce a source-grounded brief.",
+        success_criteria=["The brief is complete and cites available evidence."],
+        execution="flat",
+        options={
+            "planner_capabilities": [
+                {"id": "browse", "kind": "action", "side_effect_level": "read", "replay_safe": True}
+            ]
+        },
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The final brief is complete; a source page was unavailable and disclosed.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "final.md",
+            "criterion_checks": [
+                {"criterion": "The brief is complete and cites available evidence.", "satisfied": True}
+            ],
+        },
+        execution_evidence_summary={
+            "status": "blocked",
+            "action_ids": ["browse", "action_loop"],
+            "failed_actions": ["browse"],
+            "blocked_actions": ["action_loop"],
+            "approval_required_actions": [],
+            "required_actions": [],
+            "artifact_refs": [
+                {
+                    "path": "final.md",
+                    "role": "workspace_artifact",
+                    "sha256": "abc123",
+                    "readback": {"content": "Complete brief with disclosed source limitation."},
+                }
+            ],
+        },
+        grounding_guard={"valid": True, "blocking_count": 0, "diagnostics": []},
+    )
+
+    assert verification["is_complete"] is True
+    assert "execution_status_failed" not in verification.get("guard_reasons", [])
+    assert "execution_risk_actions_present" not in verification.get("guard_reasons", [])
+    assert verification["non_blocking_failed_actions"] == ["browse", "action_loop"]
+    assert verification["non_blocking_execution_status"]["status"] == "blocked"
+
+
+def test_step_local_required_read_action_is_scoped_without_task_required_guard(tmp_path):
+    agent = _create_agent("agent-task-step-local-required-action").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a source-grounded brief.",
+        success_criteria=["The brief is complete and cites available evidence."],
+        execution="flat",
+        options={
+            "planner_capabilities": [
+                {"id": "browse", "kind": "action", "side_effect_level": "read", "replay_safe": True}
+            ]
+        },
+    )
+
+    class FakeExecution:
+        def __init__(self):
+            self.used_actions: list[list[str]] = []
+            self.required_actions: list[list[str]] = []
+            self.route_policies: list[dict[str, object]] = []
+
+        def use_actions(self, action_ids):
+            self.used_actions.append(list(action_ids))
+
+        def require_actions(self, action_ids):
+            self.required_actions.append(list(action_ids))
+
+        def route_policy(self, value):
+            self.route_policies.append(dict(value))
+
+    execution = FakeExecution()
+    plan = {
+        "execution_shape": "actions",
+        "step_scope": {"allowed_capability_ids": ["browse"]},
+        "required_action_ids": ["browse"],
+    }
+
+    step_execution = task._configure_step_execution(execution, plan)
+
+    assert execution.used_actions == [["browse"]]
+    assert execution.required_actions == []
+    assert step_execution["step_required_action_ids"] == ["browse"]
+    assert step_execution["task_required_action_ids"] == []
+    assert step_execution["action_scope_source"] == "step_required_action_ids"
+
+
+def test_task_contract_required_read_action_still_uses_required_guard(tmp_path):
+    agent = _create_agent("agent-task-contract-required-action").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a source-grounded brief.",
+        success_criteria=["The required source action succeeds."],
+        execution="flat",
+        options={
+            "planner_capabilities": [
+                {"id": "browse", "kind": "action", "side_effect_level": "read", "replay_safe": True}
+            ],
+            "capability_constraints": {"actions": {"required": ["browse"]}},
+        },
+    )
+
+    class FakeExecution:
+        def __init__(self):
+            self.used_actions: list[list[str]] = []
+            self.required_actions: list[list[str]] = []
+            self.route_policies: list[dict[str, object]] = []
+
+        def use_actions(self, action_ids):
+            self.used_actions.append(list(action_ids))
+
+        def require_actions(self, action_ids):
+            self.required_actions.append(list(action_ids))
+
+        def route_policy(self, value):
+            self.route_policies.append(dict(value))
+
+    execution = FakeExecution()
+    plan = {
+        "execution_shape": "actions",
+        "step_scope": {"allowed_capability_ids": ["browse"]},
+        "required_action_ids": ["browse"],
+    }
+
+    step_execution = task._configure_step_execution(execution, plan)
+
+    assert execution.required_actions == [["browse"]]
+    assert step_execution["task_required_action_ids"] == ["browse"]
+    assert step_execution["step_required_action_ids"] == []
 
 
 def test_unknown_failed_action_still_blocks_execution_risk_guard(tmp_path):
@@ -8134,6 +9107,98 @@ def test_step_scope_restricts_step_actions_from_structured_field(tmp_path):
     assert step_execution["step_scope"]["allowed_capability_ids"] == ["fetch_sources"]
 
 
+def test_step_scope_uses_agent_execution_use_actions_when_available(tmp_path):
+    from agently.core.application import AgentTask
+
+    agent = _capability_gate_agent("agent-task-step-scope-use-actions")
+    task = AgentTask(
+        agent,
+        goal="Gather evidence in a scoped step.",
+        success_criteria=["Evidence gathered."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    class _FakeExecution:
+        def __init__(self):
+            self.used_actions: list[list[str]] = []
+            self.applied_route_policy: dict[str, Any] | None = None
+
+        def use_actions(self, action_ids):
+            self.used_actions.append(list(action_ids))
+
+        def route_policy(self, value):
+            self.applied_route_policy = value
+
+        def record_consumed_option(self, *args, **kwargs):
+            pass
+
+    execution = _FakeExecution()
+    plan = cast(Any, task)._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "gather only",
+            "expected_evidence": "x",
+            "rationale": "y",
+            "step_scope": {"allowed_capability_ids": ["fetch_sources"]},
+        }
+    )
+    step_execution = cast(Any, task)._configure_step_execution(execution, plan)
+
+    assert execution.used_actions == [["fetch_sources"]]
+    assert step_execution["action_scope_source"] == "step_scope"
+
+
+def test_step_required_action_ids_scope_actions_without_contract_guard(tmp_path):
+    from agently.core.application import AgentTask
+
+    agent = _capability_gate_agent("agent-task-step-required-actions")
+    task = AgentTask(
+        agent,
+        goal="Run a required action.",
+        success_criteria=["Required action evidence exists."],
+        workspace=tmp_path / "task-workspace",
+        max_iterations=1,
+    )
+
+    class _FakeExecution:
+        def __init__(self):
+            self.required_actions: list[list[str]] = []
+            self.used_actions: list[list[str]] = []
+            self.applied_route_policy: dict[str, Any] | None = None
+
+        def use_actions(self, action_ids):
+            self.used_actions.append(list(action_ids))
+
+        def require_actions(self, action_ids):
+            self.required_actions.append(list(action_ids))
+
+        def route_policy(self, value):
+            self.applied_route_policy = value
+
+        def record_consumed_option(self, *args, **kwargs):
+            pass
+
+    execution = _FakeExecution()
+    plan = cast(Any, task)._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "run required probe",
+            "expected_evidence": "action record",
+            "rationale": "user required the action",
+            "required_action_ids": ["probe_action"],
+        }
+    )
+    step_execution = cast(Any, task)._configure_step_execution(execution, plan)
+
+    assert execution.used_actions == [["probe_action"]]
+    assert execution.required_actions == []
+    assert step_execution["required_action_ids"] == ["probe_action"]
+    assert step_execution["step_required_action_ids"] == ["probe_action"]
+    assert step_execution["task_required_action_ids"] == []
+    assert step_execution["action_scope_source"] == "step_required_action_ids"
+
+
 def test_auto_step_plan_suppresses_dag_after_prior_dag_failure(tmp_path):
     from agently.core.application import AgentTask
 
@@ -8574,6 +9639,181 @@ def test_cumulative_evidence_ledger_keeps_current_action_result_when_old_items_o
         ledger,
     )
     assert guard["valid"] is True
+
+
+def test_verifier_ledger_preserves_pinned_finalizer_action_result_after_block_compaction():
+    target_id = "agent_task_action_result:write_xlsx_file:act_call_target"
+    evidence_items: list[dict[str, Any]] = []
+    for index in range(109):
+        evidence_items.append(
+            {
+                "id": f"workspace_artifact_readback:noise:{index}",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": f"noise-{index}.md",
+                "body": f"Noise evidence {index}",
+            }
+        )
+    evidence_items.append(
+        {
+            "id": target_id,
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "write_xlsx_file",
+            "action_call_id": "act_call_target",
+            "path": "/tmp/run/artifacts/report.xlsx",
+            "body": '{"filename":"report.xlsx","path":"/tmp/run/artifacts/report.xlsx","size":5990}',
+        }
+    )
+
+    ledger = AgentTask._evidence_ledger_from_execution_meta(
+        {
+            "status": "completed",
+            "logs": {},
+            "blocks": {
+                "evidence": {
+                    "evidence_items": evidence_items,
+                    "pinned_evidence_ids": [target_id],
+                }
+            },
+        }
+    )
+
+    ids = [item.get("id") for item in ledger.get("items", [])]
+    assert target_id in ids
+
+
+def test_path_only_host_file_action_result_remains_evidence_ref():
+    host_path = "/tmp/agently-host-artifacts/report.xlsx"
+    ledger = AgentTask._evidence_ledger_from_execution_meta(
+        {
+            "status": "completed",
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "write_xlsx_file",
+                        "status": "success",
+                        "action_call_id": "act_call_xlsx",
+                        "data": {
+                            "filename": "report.xlsx",
+                            "path": host_path,
+                            "size": 5990,
+                        },
+                    }
+                ],
+                "route_logs": {},
+            },
+        }
+    )
+
+    action_item = next(
+        item
+        for item in ledger["items"]
+        if item.get("kind") == "agent_task.action.result"
+        and item.get("action_id") == "write_xlsx_file"
+    )
+    assert action_item["id"] == "agent_task_action_result:write_xlsx_file:act_call_xlsx"
+    assert action_item["path"] == host_path
+    assert "report.xlsx" in str(action_item.get("body"))
+    assert "5990" in str(action_item.get("body"))
+    assert any(ref.get("value") == host_path for ref in ledger.get("source_refs", []))
+
+
+@pytest.mark.asyncio
+async def test_path_only_host_file_action_upgrades_only_after_workspace_readback(tmp_path):
+    agent = _create_agent("agent-task-host-file-workspace-readback").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Return a generated file.",
+        success_criteria=["The generated file is available as a trusted Workspace ref."],
+        execution="taskboard",
+    )
+    await task.workspace.write_file("reports/final.txt", "generated file body")
+    absolute_path = str(task.workspace.resolve_file_path("reports/final.txt"))
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_xlsx_file",
+                    "status": "success",
+                    "action_call_id": "act_call_workspace",
+                    "data": {
+                        "filename": "final.txt",
+                        "path": absolute_path,
+                        "size": 19,
+                    },
+                }
+            ],
+            "route_logs": {},
+        },
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "status": "completed",
+            "artifact_manifest": {"path": "reports/final.txt"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.host_file.workspace_readback",
+    )
+
+    assert delivered["file_refs"][0]["path"] == "reports/final.txt"
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+
+
+@pytest.mark.asyncio
+async def test_path_only_host_file_action_outside_workspace_stays_external_diagnostic(tmp_path):
+    agent = _create_agent("agent-task-host-file-outside-workspace").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Return a generated file.",
+        success_criteria=["The generated file boundary is preserved."],
+        execution="taskboard",
+    )
+    external_path = tmp_path / "host-artifacts" / "report.xlsx"
+    external_path.parent.mkdir()
+    external_path.write_bytes(b"external artifact")
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_xlsx_file",
+                    "status": "success",
+                    "action_call_id": "act_call_external",
+                    "data": {
+                        "filename": "report.xlsx",
+                        "path": str(external_path),
+                        "size": external_path.stat().st_size,
+                    },
+                }
+            ],
+            "route_logs": {},
+        },
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "status": "completed",
+            "artifact_manifest": {"path": "report.xlsx"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.host_file.external_pointer",
+    )
+
+    diagnostic_codes = {
+        item.get("code")
+        for item in delivered.get("diagnostics", [])
+        if isinstance(item, Mapping)
+    }
+    assert delivered.get("file_refs") == []
+    assert "agent_task.workspace_artifact.action_file_outside_workspace" in diagnostic_codes
+    assert delivered["status"] == "blocked"
 
 
 def test_cumulative_verifier_evidence_uses_raw_action_data_when_digest_missing(tmp_path):

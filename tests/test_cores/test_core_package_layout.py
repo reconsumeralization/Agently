@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 from pathlib import Path
+from typing import get_args
 
 
 def test_core_root_exports_remain_stable():
@@ -59,10 +60,17 @@ def test_core_root_exports_remain_stable():
 
 
 def test_execution_exchange_types_are_publicly_importable():
-    from agently.types.data import ExecutionExchangeProviderResult, ExecutionExchangeRequest
+    from agently.types.data import (
+        ExecutionExchangeKind,
+        ExecutionExchangeProviderResult,
+        ExecutionExchangeRequest,
+    )
     from agently.types.plugins import ExecutionExchangeProvider
     from agently.types.trigger_flow import TriggerFlowExternalWaitRequest
 
+    exchange_kinds = set(get_args(ExecutionExchangeKind))
+    assert "guidance" in exchange_kinds
+    assert "supplement" not in exchange_kinds
     assert ExecutionExchangeProviderResult.__name__ == "ExecutionExchangeProviderResult"
     assert ExecutionExchangeRequest.__name__ == "ExecutionExchangeRequest"
     assert TriggerFlowExternalWaitRequest is ExecutionExchangeRequest

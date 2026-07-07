@@ -23,6 +23,7 @@ from agently.utils.RequestScheduler import RequestScheduler
 from agently.core import (
     Action,
     DynamicTask,
+    ExecutionExchangeManager,
     ExecutionResourceManager,
     PolicyApprovalManager,
     PluginManager,
@@ -81,6 +82,10 @@ execution_resource: ExecutionResourceManager = ExecutionResourceManager(
     event_center=event_center,
 )
 policy_approval: PolicyApprovalManager = PolicyApprovalManager(
+    settings=settings,
+    event_center=event_center,
+)
+execution_exchange: ExecutionExchangeManager = ExecutionExchangeManager(
     settings=settings,
     event_center=event_center,
 )

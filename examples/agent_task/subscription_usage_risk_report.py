@@ -72,7 +72,7 @@ async def main() -> None:
         return USAGE_CONTEXT
 
     agent.use_actions(fetch_subscription_usage)
-    await workspace.ingest(
+    await workspace.put(
         content=USAGE_CONTEXT,
         collection="observations",
         kind="subscription_usage_context",

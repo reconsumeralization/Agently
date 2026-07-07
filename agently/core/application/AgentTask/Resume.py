@@ -67,8 +67,13 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                         "last_verification": {
                             "is_complete": bool(verification.get("is_complete")),
                             "requires_block": bool(verification.get("requires_block")),
+                            "status": "completed" if bool(verification.get("is_complete")) else "",
+                            "accepted": bool(verification.get("is_complete")),
+                            "artifact_status": "accepted" if bool(verification.get("is_complete")) else "",
                             "reason": str(verification.get("reason") or ""),
                             "final_result": str(verification.get("final_result") or ""),
+                            "final_response": str(verification.get("final_response") or ""),
+                            "missing_criteria": self._normalize_string_list(verification.get("missing_criteria")),
                         },
                     }
                 ),
@@ -91,6 +96,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         revision: Any,
         evidence_view: Mapping[str, Any],
         runtime_topology: Mapping[str, Any],
+        acceptance_index: Mapping[str, Any] | None = None,
         handoff_projection: Mapping[str, Any] | None = None,
         terminal_reason: str | None = None,
         final_result: Mapping[str, Any] | None = None,
@@ -141,6 +147,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                             "terminal_reason": terminal_reason,
                             "revision": effective_revision.to_dict(),
                             "evidence_view": evidence_view,
+                            "acceptance_index": dict(acceptance_index or {}),
                             "handoff_projection": dict(handoff_projection or {}),
                             "runtime_topology": dict(runtime_topology),
                             "workspace_refs": DataFormatter.sanitize(self.workspace_refs),
@@ -154,6 +161,8 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                             "artifact_status": final_result.get("artifact_status"),
                             "reason": reason,
                             "final_result": final_result_text,
+                            "final_response": str(final_result.get("final_response") or ""),
+                            "missing_criteria": self._normalize_string_list(final_result.get("missing_criteria")),
                         },
                     }
                 ),
@@ -267,30 +276,53 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
     def resume(self, *args: Any, **kwargs: Any):
         raise TypeError("Use the async classmethod AgentTask.async_resume(agent, task_id, ...).")
 
-    @staticmethod
+    @classmethod
     def _terminal_result_from_resume(
+        cls,
         *,
         task_id: str,
         resumed_from_iteration: int,
         last_verification: dict[str, Any],
     ) -> dict[str, Any] | None:
         if bool(last_verification.get("is_complete")):
+            final_result = last_verification.get("final_result") or ""
+            artifact_status = last_verification.get("artifact_status") or "accepted"
             return {
                 "status": str(last_verification.get("status") or "completed") or "completed",
                 "accepted": bool(last_verification.get("accepted", True)),
-                "artifact_status": last_verification.get("artifact_status") or "accepted",
+                "artifact_status": artifact_status,
                 "task_id": task_id,
-                "final_result": last_verification.get("final_result") or "",
+                "final_result": final_result,
+                "final_response": cls._agent_task_user_final_response(
+                    final=last_verification,
+                    accepted=True,
+                    artifact_status=str(artifact_status),
+                    status=str(last_verification.get("status") or "completed") or "completed",
+                    reason=str(last_verification.get("reason") or ""),
+                    missing_criteria=last_verification.get("missing_criteria", []),
+                    final_result=final_result,
+                ),
                 "iterations": resumed_from_iteration,
                 "resumed": True,
             }
         if bool(last_verification.get("requires_block")):
+            artifact_status = last_verification.get("artifact_status") or "blocked"
+            reason = last_verification.get("reason") or "Verifier blocked the task."
             return {
                 "status": str(last_verification.get("status") or "blocked") or "blocked",
                 "accepted": False,
-                "artifact_status": last_verification.get("artifact_status") or "blocked",
+                "artifact_status": artifact_status,
                 "task_id": task_id,
-                "reason": last_verification.get("reason") or "Verifier blocked the task.",
+                "reason": reason,
+                "final_response": cls._agent_task_user_final_response(
+                    final=last_verification,
+                    accepted=False,
+                    artifact_status=str(artifact_status),
+                    status=str(last_verification.get("status") or "blocked") or "blocked",
+                    reason=str(reason),
+                    missing_criteria=last_verification.get("missing_criteria", []),
+                    final_result=last_verification.get("final_result") or "",
+                ),
                 "iterations": resumed_from_iteration,
                 "resumed": True,
             }

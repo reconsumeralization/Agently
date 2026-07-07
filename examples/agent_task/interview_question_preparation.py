@@ -510,7 +510,7 @@ async def main(argv: list[str] | None = None):
     )
     agent.use_skills(["interview-question-preparer"], mode="required")
 
-    await workspace.ingest(
+    await workspace.put(
         content=interview_input,
         collection="observations",
         kind="interview_target",

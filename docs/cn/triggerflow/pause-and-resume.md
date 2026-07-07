@@ -108,6 +108,11 @@ asyncio.run(main())
 
 模型自主决定中断的文档审查例子见 `examples/step_by_step/11-triggerflow-19_document_review_pause_resume.py`：模型拥有的 gate 先判断是否需要人工复核，需要时调用 `pause_for(..., resume_to="self")`，恢复后同一 gate 通过 `data.is_resume` 与 `data.resume` 继续。
 
+host 拥有 approval transport 时，应使用 ExecutionExchange provider seam，而不是
+发明第二套 pause/resume channel。provider 只负责发布 typed request；TriggerFlow
+仍拥有 interrupt ledger 和 `continue_with(...)` 恢复。示例见
+`examples/step_by_step/11-triggerflow-23_execution_exchange_provider.py`。
+
 ## 跨进程重启的 pause
 
 `pause_for(...)` 可以和 execution snapshot load 配合：

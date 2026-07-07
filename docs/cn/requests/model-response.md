@@ -119,7 +119,11 @@ attempt 的事实作为结构化 stream item 保留下来：`$status` 表达 ret
 `type="instant"` 会保留每条原始结构化 item；当该 item 还能投影成自然语言文本时，
 会紧跟着追加一个 synthetic `AgentExecutionStreamData`，其 `path="$delta"`、
 `event_type="delta"`、`source="agent_execution"`，并带有
-`meta["stream_kind"] == "text_projection"`。`type="all"` 仍是 raw audit stream，
+`meta["stream_kind"] == "text_projection"`。AgentTask Flat snapshot 可以投影为线性
+plan/action 摘要；TaskBoard plan/tick event 可以先投影为紧凑 Markdown 状态表，
+再在后续投影为 card 状态变化摘要。
+heartbeat item 保持 structured-only，
+不会追加 synthetic `$delta` 文本。`type="all"` 仍是 raw audit stream，
 不包含这些 synthetic projection item。
 
 ```python
@@ -128,17 +132,22 @@ async for item in execution.get_async_generator(type="instant"):
     if item.path == "$status":
         print(item.value["status"], item.meta["response_id"])
     elif item.path == "$delta" and item.delta:
+        # 统一自然语言流槽位。
         print(item.delta, end="", flush=True)
     elif item.path == "model.delta" and item.delta:
-        print(item.delta, end="", flush=True)
+        # 带源地址的模型 delta。它用于结构化 UI 状态，不要再写入
+        # 已经消费 "$delta" 的同一个文本输出面。
+        ui_state[item.path] = ui_state.get(item.path, "") + item.delta
 ```
 
 无参 execution generator 默认也是同一个 `delta` 投影，所以
 `execution.get_generator()` 和 `execution.get_async_generator()` 都产出字符串。
 consumer 需要结构化 `$status` 而不是文本标记时，使用 `type="instant"` 或
 `type="all"`。UI 同时需要结构化状态更新和派生 `$delta` 文本槽时用
-`type="instant"`；records、DevTools-style replay 或审计场景需要避免派生 item 混入
-source fact 时用 `type="all"`。
+`type="instant"`，但要把两个输出面分开：`$delta` 渲染为统一自然语言流，
+`model.delta` 或字段路径等带源地址的 delta 只更新自己的结构化状态槽。不要把两者
+追加到同一个可见文本 buffer。records、DevTools-style replay、内部桥接或审计场景
+需要避免派生 item 混入 source fact 时用 `type="all"`。
 
 如果多个字段共用一个 CLI 输出区域，不要把 `.is_complete` 当成全局展示顺序屏障。
 结构化 parser 往往是因为已经看到下一个 path 开始，才确认上一个 path 已关闭，

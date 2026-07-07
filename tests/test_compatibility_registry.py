@@ -67,12 +67,13 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.10"
-    assert in_development["release_train"] == "2026-07-4.1.3.10-dev"
-    assert "4.1.3.10 work" in in_development["notes"]
+    assert in_development["target_version"] == "4.1.4"
+    assert in_development["release_train"] == "2026-07-4.1.4-dev"
+    assert "4.1.4 work" in in_development["notes"]
     assert "4.1.3.9 Workspace retrieval and Session memory release" in in_development["notes"]
-    assert "Human-in-the-loop capabilities" in in_development["notes"]
-    assert "long-task task-execution memory" in in_development["notes"]
+    assert "AgentExecution strategy selection" in in_development["notes"]
+    assert "TaskBoard incremental acceptance" in in_development["notes"]
+    assert "long-task artifact hardening" in in_development["notes"]
     assert "4.1.3.9 Workspace retrieval, SessionMemory" in in_development["notes"]
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
@@ -170,13 +171,22 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "AgentExecution.goals" in task_loop_contract["surface"]
     assert "Agent.create_task" in task_loop_contract["surface"]
     assert "Agent.create_task_loop" in task_loop_contract["surface"]
+    assert "AgentExecution.strategy(\"auto\")" in task_loop_contract["surface"]
+    assert "AgentExecution.strategy(\"direct\")" in task_loop_contract["surface"]
+    assert "AgentExecution.strategy(\"flat\")" in task_loop_contract["surface"]
+    assert "AgentExecution.strategy(\"taskboard\")" in task_loop_contract["surface"]
     assert "AgentExecution.use_dynamic_task" not in task_loop_contract["surface"]
     assert "Agent.resume" in task_loop_contract["surface"]
     assert "Agent.async_resume" in task_loop_contract["surface"]
     assert "AgentExecution.success_criteria" not in task_loop_contract["surface"]
+    assert "AgentExecution.async_add_guidance" in task_loop_contract["surface"]
+    assert "AgentExecution.add_guidance" in task_loop_contract["surface"]
     assert "AgentExecutionResult.task_refs" in task_loop_contract["surface"]
     assert "without .output()" in task_loop_contract["artifact_stream_contract"]
     assert "targeted_readbacks" in task_loop_contract["artifact_stream_contract"]
+    assert "runtime_guidance_contract" in task_loop_contract
+    assert "Workspace collection guidance" in task_loop_contract["runtime_guidance_contract"]
+    assert "not EvidenceEnvelope completion evidence" in task_loop_contract["runtime_guidance_contract"]
     assert "content/content_preview/text/excerpt/snippet" in task_loop_contract["contract"]
     assert "TaskBoard final verification carries board source_refs" in task_loop_contract["contract"]
     assert "agent.goal(goal_or_goals, success_criteria=None)" in task_loop_contract["contract"]
@@ -192,7 +202,12 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "AgentTask does not impose model-request, iteration, TaskBoard tick, or Action round quotas" in task_loop_contract["contract"]
     assert "no-progress and idle timeouts remain liveness guards" in task_loop_contract["contract"]
     assert "TaskDAG is no longer an AgentTask bounded-step strategy" in task_loop_contract["contract"]
+    assert 'AgentExecution.strategy("auto"|"direct"|"flat"|"taskboard")' in task_loop_contract["contract"]
+    assert "direct forces the model_request route" in task_loop_contract["contract"]
+    assert 'Legacy AgentExecution.strategy("task"|"task_loop"|"long_task") remains compatibility-only' in task_loop_contract["contract"]
     assert 'AgentExecutionStreamData path="$delta"' in task_loop_contract["contract"]
+    assert "Flat plan/action summaries" in task_loop_contract["contract"]
+    assert "TaskBoard status tables" in task_loop_contract["contract"]
     assert 'get_async_generator(type="all") remains the raw audit stream' in task_loop_contract["contract"]
     assert "compatibility/convenience facade over DAG" in task_loop_contract["contract"]
     assert "Agent.use_dynamic_task(...) and AgentExecution.use_dynamic_task(...) fail fast" in task_loop_contract["contract"]
@@ -201,6 +216,10 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "task-strategy AgentExecution drafts" in task_loop_contract["contract"]
     assert "not a separate recommended AgentTask execution owner" in task_loop_contract["contract"]
     assert "accepted=true" in task_loop_contract["contract"]
+    assert "final_response" in task_loop_contract["contract"]
+    assert "get_text()/async_get_text() prefer final_response" in task_loop_contract["contract"]
+    assert "without an extra narrator request" in task_loop_contract["contract"]
+    assert "artifact_status=degraded" in task_loop_contract["contract"]
     assert "artifact_status=partial" in task_loop_contract["contract"]
     assert "agent.resume(task_id)" in task_loop_contract["contract"]
     assert "compatibility aliases only" in task_loop_contract["contract"]

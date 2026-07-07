@@ -81,19 +81,112 @@ def evidence_envelope_from_value(value: Any) -> EvidenceEnvelope:
     return EvidenceEnvelope.from_value({"evidence_items": ()})
 
 
+def _ledger_item_selection_priority(item: Mapping[str, Any]) -> int:
+    """Rank a raw ledger item for keep-under-budget selection.
+
+    0: content-bearing support (a usable body exists and the item is not a
+       failure) — e.g. an action result or readback that actually carries the
+       read source content;
+    1: unavailability facts (failed/empty items that support missingness
+       claims);
+    2: ref-only pointers (locators/refs without readback content).
+    A bounded view must never evict class-0 items in favor of class-2 ones:
+    that is how a PDF that WAS read gets re-judged as unread in later
+    verifier turns.
+    """
+    status = str(item.get("status") or "ok").strip().lower()
+    if status in {"failed", "empty"}:
+        return 1
+    body_state = str(item.get("body_state") or "").strip().lower()
+    if body_state in {"full", "bounded", "truncated"}:
+        return 0
+    body = _first_body_value(item)
+    if isinstance(body, str) and body.strip():
+        return 0
+    if body not in (None, "", [], {}):
+        return 0
+    return 2
+
+
+def _select_ledger_items_for_budget(
+    raw_items: Sequence[Any],
+    max_items: int,
+    *,
+    budget_selection: str = "ordered",
+) -> list[Mapping[str, Any]]:
+    """Choose which raw items enter a bounded ledger view.
+
+    ``ordered`` (default) keeps the caller's order and lets the render loop
+    truncate at the cap — for callers that already curated the order (for
+    example the verifier ledger's pin/kind prioritization). ``content_first``
+    is for uncurated floods (a whole-board evidence view): over budget it
+    keeps items by selection priority while preserving the original relative
+    order inside each priority class, so content-bearing readbacks are never
+    evicted by ref-only pointer spam.
+    """
+    mappings = [item for item in raw_items if isinstance(item, Mapping)]
+    if budget_selection != "content_first" or len(mappings) <= max_items:
+        return mappings
+    selected: list[tuple[int, Mapping[str, Any]]] = []
+    for priority in (0, 1, 2):
+        for index, item in enumerate(mappings):
+            if _ledger_item_selection_priority(item) == priority:
+                selected.append((index, item))
+                if len(selected) >= max_items:
+                    return [item for _, item in sorted(selected, key=lambda entry: entry[0])]
+    return [item for _, item in sorted(selected, key=lambda entry: entry[0])]
+
+
+def _overflow_item_ref(item: Mapping[str, Any], *, cite_as: str) -> dict[str, Any]:
+    """Body-less key evidence point for items past the rendered-body budget.
+
+    The point of record — this evidence exists, what it is, and its
+    read/status state — stays citable and resolvable even when the body text
+    did not fit the view. Existence must never be a casualty of the body
+    budget: that is how an already-read source gets re-judged as unread."""
+    ref: dict[str, Any] = {
+        "id": str(item.get("id") or ""),
+        "cite_as": cite_as,
+        "kind": str(item.get("kind") or ""),
+        "status": str(item.get("status") or "ok"),
+        "body_state": str(item.get("body_state") or "ref_only"),
+        "body_not_rendered": True,
+    }
+    for field in _ALIAS_FIELDS:
+        if field in {"id", "cite_as"}:
+            continue
+        value = _first_ref_value(item, (field,))
+        if value:
+            ref[field] = value
+    aliases = item.get("aliases")
+    if isinstance(aliases, Sequence) and not isinstance(aliases, str | bytes | bytearray):
+        compact_aliases = [str(alias).strip() for alias in aliases if str(alias or "").strip()]
+        if compact_aliases:
+            ref["aliases"] = compact_aliases[:8]
+    return DataFormatter.sanitize(ref)
+
+
 def evidence_ledger_view(
     value: Any,
     *,
     max_items: int = 64,
     body_chars: int = 1200,
     include_body: bool = True,
+    budget_selection: str = "ordered",
+    max_overflow_refs: int = 240,
 ) -> dict[str, Any]:
     envelope = evidence_envelope_from_value(value)
     items: list[dict[str, Any]] = []
     source_refs: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {"ok": 0, "failed": 0, "empty": 0}
     body_state_counts: dict[str, int] = {"full": 0, "bounded": 0, "truncated": 0, "ref_only": 0}
-    for raw_item in envelope.evidence_items:
+    selected_items = _select_ledger_items_for_budget(
+        envelope.evidence_items,
+        max_items,
+        budget_selection=budget_selection,
+    )
+    selected_keys = {id(raw_item) for raw_item in selected_items[:max_items]}
+    for raw_item in selected_items:
         if not isinstance(raw_item, Mapping):
             continue
         compact_item = _compact_ledger_item(
@@ -112,30 +205,53 @@ def evidence_ledger_view(
             source_refs.append(ref)
         if len(items) >= max_items:
             break
-    return DataFormatter.sanitize(
-        {
-            "schema_version": EVIDENCE_LEDGER_VIEW_SCHEMA_VERSION,
-            "source_schema_version": envelope.schema_version,
-            "items": items,
-            "item_count": len(envelope.evidence_items),
-            "items_omitted": max(0, len(envelope.evidence_items) - len(items)),
-            "status_counts": status_counts,
-            "body_state_counts": body_state_counts,
-            "source_refs": _dedupe_refs(source_refs),
-            "acceptance_locator_view": acceptance_locator_view_from_ledger({"items": items}),
-            "grounding_rules": {
-                "ok_content": "status=ok with body_state full/bounded/truncated supports only visible content.",
-                "ref_only": "body_state=ref_only supports only discovery/ref-pointer claims until readback evidence exists.",
-                "failed_empty": "status=failed or status=empty supports unavailability/missingness claims only.",
-                "truncated": "body_state=truncated cannot by itself support whole-document or exhaustive claims.",
-            },
-            "reference_rule": (
-                "Cite evidence by its cite_as (eN) or canonical id from this ledger. For a file or "
-                "section claim, cite the bounded readback evidence id whose path/heading matches; do not "
-                "invent free-text locator labels and do not reuse a verification or record id as evidence."
-            ),
-        }
-    )
+    overflow_item_refs: list[dict[str, Any]] = []
+    if len(envelope.evidence_items) > len(items) and max_overflow_refs > 0:
+        remainder = [
+            raw_item
+            for raw_item in envelope.evidence_items
+            if isinstance(raw_item, Mapping) and id(raw_item) not in selected_keys
+        ]
+        for raw_item in _select_ledger_items_for_budget(
+            remainder,
+            max_overflow_refs,
+            budget_selection="content_first",
+        ):
+            overflow_item_refs.append(
+                _overflow_item_ref(raw_item, cite_as=f"e{len(items) + len(overflow_item_refs) + 1}")
+            )
+            if len(overflow_item_refs) >= max_overflow_refs:
+                break
+    view: dict[str, Any] = {
+        "schema_version": EVIDENCE_LEDGER_VIEW_SCHEMA_VERSION,
+        "source_schema_version": envelope.schema_version,
+        "items": items,
+        "item_count": len(envelope.evidence_items),
+        "items_omitted": max(0, len(envelope.evidence_items) - len(items)),
+        "status_counts": status_counts,
+        "body_state_counts": body_state_counts,
+        "source_refs": _dedupe_refs(source_refs),
+        "acceptance_locator_view": acceptance_locator_view_from_ledger({"items": items}),
+        "grounding_rules": {
+            "ok_content": "status=ok with body_state full/bounded/truncated supports only visible content.",
+            "ref_only": "body_state=ref_only supports only discovery/ref-pointer claims until readback evidence exists.",
+            "failed_empty": "status=failed or status=empty supports unavailability/missingness claims only.",
+            "truncated": "body_state=truncated cannot by itself support whole-document or exhaustive claims.",
+        },
+        "reference_rule": (
+            "Cite evidence by its cite_as (eN) or canonical id from this ledger. For a file or "
+            "section claim, cite the bounded readback evidence id whose path/heading matches; do not "
+            "invent free-text locator labels and do not reuse a verification or record id as evidence."
+        ),
+    }
+    if overflow_item_refs:
+        view["overflow_item_refs"] = overflow_item_refs
+        view["grounding_rules"]["overflow"] = (
+            "overflow_item_refs are key evidence points whose body did not fit the view budget: "
+            "they are citable and their status/body_state semantics apply, but their content is "
+            "not rendered here. body_not_rendered=true never means the evidence is unread or missing."
+        )
+    return DataFormatter.sanitize(view)
 
 
 def source_refs_from_ledger(value: Any, *, max_refs: int = 32) -> list[dict[str, Any]]:
@@ -217,7 +333,16 @@ def validate_evidence_use(evidence_use: Any, ledger_value: Any) -> dict[str, Any
         else evidence_ledger_view(ledger_value, include_body=False)
     )
     raw_items = ledger.get("items") if isinstance(ledger, Mapping) else ()
-    raw_item_sequence = raw_items if isinstance(raw_items, Sequence) and not isinstance(raw_items, str | bytes | bytearray) else ()
+    raw_item_sequence: list[Any] = (
+        list(raw_items)
+        if isinstance(raw_items, Sequence) and not isinstance(raw_items, str | bytes | bytearray)
+        else []
+    )
+    # Overflow key evidence points are citable records too: an id that exists
+    # on the board must resolve even when its body did not fit the view budget.
+    overflow_refs = ledger.get("overflow_item_refs") if isinstance(ledger, Mapping) else ()
+    if isinstance(overflow_refs, Sequence) and not isinstance(overflow_refs, str | bytes | bytearray):
+        raw_item_sequence.extend(ref for ref in overflow_refs if isinstance(ref, Mapping))
     items_by_id = {
         str(item.get("id")): item
         for item in raw_item_sequence

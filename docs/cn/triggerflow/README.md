@@ -9,9 +9,9 @@
 5. [模式](patterns.md)：分支、match、batch、for_each、事件驱动循环。
 6. [Sub-Flow](sub-flow.md)：父子 flow 组合。
 7. [持久化与 Blueprint](persistence-and-blueprint.md)：save/load 与定义导出。
-8. [Pause 与 Resume](pause-and-resume.md)：人工介入和外部恢复。
+8. [Pause 与 Resume](pause-and-resume.md)：人工介入、ExecutionExchange provider 和外部恢复。
 9. [分布式 Pause 与 Resume 边界](distributed-pause-resume.md)：宿主管理恢复、resource ownership 与生产边界。
-10. [Runtime Intervention](runtime-intervention.md)：不暂停、不改 graph，向运行中的 execution 补充上下文。
+10. [Runtime Intervention](runtime-intervention.md)：不暂停、不改 graph，向运行中的 execution 添加运行时引导上下文。
 11. [模型集成](model-integration.md)：在 chunk 内调用 agent / request。
 12. [Execution Result](execution-result.md)：读取 snapshot、state、兼容 result、intervention 和 metadata。
 13. [兼容](compatibility.md)：迁移旧 `.end()`、`set_result()`、`runtime_data`。

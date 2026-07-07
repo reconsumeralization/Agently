@@ -470,6 +470,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
+                "factual_integrity_requirements": {
+                    "required": True,
+                    "summary": (
+                        "The final deliverable must not add unsupported concrete facts or inflate certainty. "
+                        "Concrete dates, times, publication states, validation states, approvals, resolutions, "
+                        "numbers, source headings, and exact source facts must be visible in the goal, execution "
+                        "evidence, or artifact readback, or explicitly labeled as derived. The system/runtime/current "
+                        "date is execution context only; it is not evidence for a business, incident, deployment, "
+                        "publication, approval, or validation date unless the task evidence explicitly says so. Preserve pending, "
+                        "unknown, no-known-loss, not-published, needs-sign-off, and unresolved states exactly."
+                    ),
+                },
                 "iteration": iteration_index,
                 "plan": self._compact_verifier_prompt_value(plan, max_chars=_VERIFIER_PROMPT_ITEM_CHARS),
                 "candidate_final_result": self._compact_verifier_prompt_value(
@@ -516,7 +528,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "current_evidence_ledger is the current step view; evidence_ledger includes prior iteration evidence that "
             "is verifier-visible. Do not perform or assume extra readback outside this ledger. failed/empty ledger "
             "items are facts of unavailability only; ref_only items prove only a URL/path/ref was found; bounded or "
-            "truncated content supports only the visible body. grounding_guard contains deterministic id/status/body "
+            "truncated content supports only the visible body. overflow_item_refs are key evidence points whose body "
+            "did not fit the view budget: an overflow item with status=ok and body_state full/bounded/truncated is a "
+            "record that the readback HAPPENED — never conclude a source was unread or unviewed while such an item "
+            "exists for it. grounding_guard contains deterministic id/status/body "
             "state diagnostics that identify evidence-binding gaps. Treat blocking_count as a reason to request "
             "binding repair or additional scoped evidence when a required claim remains unsupported; do not reject a "
             "long artifact solely because an exact locator label missed while equivalent verifier-visible readback "
@@ -538,6 +553,20 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "summary pages. Reject candidates that ignore a more specific verifier-visible source and ground the "
             "deliverable only in a weaker source. Reject candidates that introduce unsupported source facts, syllabus "
             "headings, repository details, dates, numbers, or report conclusions. "
+            "Treat unsupported concrete additions as material even when an individual success criterion does not name "
+            "them: extra deployment times, incident dates, publication states, validation states, numbered source "
+            "points, or exact source facts must be visible in the goal, execution evidence, or verifier-visible "
+            "readback, or explicitly marked as derived from those facts. Treat the runtime/current date as non-evidence; "
+            "reject a deliverable that adds it as an incident, deployment, publication, approval, validation, or "
+            "business date unless that date is visible in the goal or verifier-visible evidence. "
+            "Unless the user explicitly requests a fill-in template, reject final deliverables that contain unresolved "
+            "template placeholders such as [date], [time], [name], [Your Name], [Title], TODO, or TBD. Ask for a "
+            "grounded non-placeholder revision instead of accepting a template as final. "
+            "Reject certainty inflation: 'no known data loss' is not the same as confirmed absence of data loss; "
+            "'audit still running' is not complete verification; 'not yet published' is not published; 'needs "
+            "sign-off' is not approved. If evidence says no data loss is known and an audit is still running, "
+            "reject claims that data is intact, complete, safe, fully verified, or that no data was lost unless "
+            "verifier-visible evidence explicitly confirms that stronger state. Preserve uncertainty, pending status, and evidence strength exactly. "
             "If bounded previews are enough to contradict the candidate, set is_complete=false. If the previews are "
             "too truncated to verify a material claim, set is_complete=false and ask for scoped evidence readback. "
             "If execution metadata, action records, diagnostics, command output, or verifier-visible evidence shows "
@@ -578,6 +607,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "After the judgment fields, include compact criterion_checks, verification_summary, and progress_message "
             "for downstream repair context and human progress. These fields are process summaries only; they are not "
             "completion evidence and must not contain raw chain-of-thought or long evidence bodies. "
+            "Always return factual_integrity_check as a separate structured check. Set satisfied=false when the "
+            "deliverable adds unsupported concrete facts or inflates certainty, even if every explicit success "
+            "criterion is otherwise satisfied. "
+            "When returning a terminal judgment, also include final_response as a concise user-facing status or answer "
+            "note based only on the same visible evidence and structured judgment. For file-backed deliverables, "
+            "mention the artifact path/ref and any known limitation instead of copying the whole file body. "
+            "final_response is display context only and must not be used as completion evidence. "
             "Set requires_block=true only when the task cannot continue."
         )
         request.output(
@@ -607,9 +643,24 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 ),
                 "final_result_required": (bool, "True when the goal expects a concrete returned final deliverable"),
                 "final_result": (str, "Final business result when complete"),
+                "final_response": (
+                    str,
+                    "Concise user-facing terminal answer/status note; display context only, not completion evidence.",
+                    False,
+                ),
                 "criterion_checks": (
                     [dict],
-                    "Compact per-criterion checks: [{criterion, status, summary, evidence_ids?, gaps?}].",
+                    "Compact per-criterion checks: [{criterion, satisfied: bool, status?, summary, evidence_ids?, gaps?}]. The satisfied boolean is required; status text is display-only.",
+                    False,
+                ),
+                "factual_integrity_check": (
+                    {
+                        "satisfied": (bool, "True only when no unsupported concrete additions or certainty inflation are present.", False),
+                        "unsupported_additions": ([str], "Concrete unsupported additions found in the candidate.", False),
+                        "certainty_inflation": ([str], "Statements that overstate pending, unknown, partial, unresolved, unpublished, or unapproved facts.", False),
+                        "summary": (str, "Concise factual integrity judgment.", False),
+                    },
+                    "Required factual integrity check independent of ordinary criterion checks.",
                     False,
                 ),
                 "verification_summary": (
@@ -2094,9 +2145,32 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         trusted_workspace_artifact_refs: Sequence[Mapping[str, Any]],
         grounding_guard: Mapping[str, Any] | None,
         final_result_required: bool,
+        non_blocking_action_ids: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
         if execution_status not in {"failed", "error", "timed_out", "blocked"}:
             return None
+        non_blocking_actions = set(cls._normalize_string_list(non_blocking_action_ids))
+
+        def action_id_from_record(action: Mapping[str, Any]) -> str:
+            return str(action.get("action_id") or action.get("id") or action.get("name") or "").strip()
+
+        def status_is_terminal_issue(status_value: Any) -> bool:
+            return str(status_value or "").strip().lower() in {
+                "failed",
+                "failure",
+                "error",
+                "timed_out",
+                "timeout",
+                "blocked",
+            }
+
+        def error_record_is_nonblocking(error: Mapping[str, Any]) -> bool:
+            action_id = str(error.get("action_id") or error.get("id") or error.get("name") or "").strip()
+            if action_id and action_id in non_blocking_actions:
+                return True
+            diagnostic_code = str(error.get("code") or "").strip()
+            return diagnostic_code == "action_loop.max_rounds_reached" and "action_loop" in non_blocking_actions
+
         if not final_result_required or not trusted_workspace_artifact_refs:
             return None
         if not cls._trusted_workspace_artifact_refs_have_readback(trusted_workspace_artifact_refs):
@@ -2111,30 +2185,52 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             return None
         if not cls._verification_criteria_are_satisfied(verification.get("criterion_checks")):
             return None
-        if cls._normalize_string_list(execution_evidence_summary.get("failed_actions")):
+        if [
+            action_id
+            for action_id in cls._normalize_string_list(execution_evidence_summary.get("failed_actions"))
+            if action_id not in non_blocking_actions
+        ]:
             return None
-        if cls._normalize_string_list(execution_evidence_summary.get("blocked_actions")):
+        if [
+            action_id
+            for action_id in cls._normalize_string_list(execution_evidence_summary.get("blocked_actions"))
+            if action_id not in non_blocking_actions
+        ]:
             return None
         if cls._normalize_string_list(execution_evidence_summary.get("approval_required_actions")):
             return None
         action_statuses = execution_evidence_summary.get("action_statuses")
         if isinstance(action_statuses, Mapping):
-            for value in action_statuses.values():
-                if str(value or "").strip().lower() in {"failed", "failure", "error", "timed_out", "timeout", "blocked"}:
+            for action_id, value in action_statuses.items():
+                if status_is_terminal_issue(value) and str(action_id or "").strip() not in non_blocking_actions:
                     return None
         for action in execution_evidence_summary.get("actions", []) or []:
             if not isinstance(action, Mapping):
                 continue
             status = str(action.get("status") or "").strip().lower()
-            if status in {"failed", "failure", "error", "timed_out", "timeout", "blocked"}:
+            if status_is_terminal_issue(status) and action_id_from_record(action) not in non_blocking_actions:
                 return None
 
         errors = execution_evidence_summary.get("errors")
         error_records = [dict(error) for error in errors if isinstance(error, Mapping)] if isinstance(errors, list) else []
         if not error_records:
-            return None
+            if not non_blocking_actions:
+                return None
+            return {
+                "status": execution_status,
+                "error_type": "",
+                "stage": "",
+                "message": "Execution status came only from non-blocking action diagnostics.",
+                "last_progress_event": None,
+                "idle_seconds": None,
+                "elapsed_seconds": None,
+                "non_blocking_action_ids": sorted(non_blocking_actions),
+                "diagnostic_only": True,
+            }
         first_error = error_records[0]
-        if not cls._is_liveness_stall_error(first_error):
+        if not cls._is_liveness_stall_error(first_error) and not all(
+            error_record_is_nonblocking(error) for error in error_records
+        ):
             return None
         return {
             "status": execution_status,
@@ -2144,6 +2240,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "last_progress_event": first_error.get("last_progress_event"),
             "idle_seconds": first_error.get("idle_seconds"),
             "elapsed_seconds": first_error.get("elapsed_seconds"),
+            "non_blocking_action_ids": sorted(non_blocking_actions),
             "diagnostic_only": True,
         }
 
@@ -2151,16 +2248,28 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     def _verification_criteria_are_satisfied(cls, criterion_checks: Any) -> bool:
         if not isinstance(criterion_checks, Sequence) or isinstance(criterion_checks, str | bytes | bytearray):
             return False
-        satisfied_statuses = {"satisfied", "passed", "pass", "ok", "complete", "completed", "accepted"}
         checked = False
         for check in criterion_checks:
             if not isinstance(check, Mapping):
                 continue
-            status = str(check.get("status") or "").strip().lower()
-            if status not in satisfied_statuses:
+            if check.get("satisfied") is not True:
                 return False
             checked = True
         return checked
+
+    @classmethod
+    def _verification_factual_integrity_is_satisfied(cls, check: Mapping[str, Any]) -> bool:
+        return check.get("satisfied") is True
+
+    @classmethod
+    def _verification_factual_integrity_messages(cls, check: Mapping[str, Any]) -> list[str]:
+        messages: list[str] = []
+        for key in ("unsupported_additions", "certainty_inflation"):
+            messages.extend(cls._normalize_string_list(check.get(key)))
+        summary = str(check.get("summary") or "").strip()
+        if summary and summary not in messages:
+            messages.append(summary)
+        return messages
 
     @classmethod
     def _is_liveness_stall_error(cls, error: Mapping[str, Any]) -> bool:
@@ -2176,23 +2285,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         )
 
     @classmethod
-    def _completion_like_guard_text(cls, value: Any) -> bool:
-        text = str(value or "").strip().lower()
-        if not text:
-            return False
-        return any(
-            marker in text
-            for marker in (
-                "task complete",
-                "no replan needed",
-                "verification successful",
-                "deliverable complete",
-                "complete and accepted",
-                "all success criteria are satisfied",
-            )
-        )
-
-    @classmethod
     def _align_guarded_verification_fields(
         cls,
         normalized: dict[str, Any],
@@ -2202,33 +2294,20 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if normalized.get("is_complete") is True or not guard_reasons:
             return
         raw_verification = raw_verification or {}
+        if raw_verification.get("is_complete") is not True:
+            return
         missing = cls._normalize_string_list(normalized.get("missing_criteria"))
         guard_label = ", ".join(str(reason) for reason in guard_reasons if str(reason).strip()) or "verification_guard"
-        summary = missing[0] if missing else f"Verification is blocked by {guard_label}."
-        guarded_reason = f"Verification is not complete: {summary}"
-        if cls._completion_like_guard_text(normalized.get("reason")):
-            normalized["reason"] = guarded_reason
-        if cls._completion_like_guard_text(normalized.get("failure_analysis")):
-            normalized["failure_analysis"] = guarded_reason
-        progress_message = normalized.get("progress_message", raw_verification.get("progress_message"))
-        if cls._completion_like_guard_text(progress_message):
+        summary = missing[0] if missing else f"Verification needs more evidence for {guard_label}."
+        guarded_reason = f"Verification needs another step: {summary}"
+        normalized["reason"] = guarded_reason
+        normalized["failure_analysis"] = guarded_reason
+        if normalized.get("progress_message") not in (None, "", [], {}) or raw_verification.get("progress_message") not in (None, "", [], {}):
             normalized["progress_message"] = guarded_reason
-        if (
-            not str(normalized.get("replan_instruction") or "").strip()
-            or cls._completion_like_guard_text(normalized.get("replan_instruction"))
-        ):
-            normalized["replan_instruction"] = (
-                "Run another bounded step and produce explicit evidence for the guarded criteria."
-            )
-        filtered_requirements = [
-            item
-            for item in cls._normalize_string_list(normalized.get("next_step_requirements"))
-            if not cls._completion_like_guard_text(item)
-        ]
-        normalized["next_step_requirements"] = cls._merge_string_lists(
-            filtered_requirements,
-            [normalized.get("replan_instruction")] if normalized.get("replan_instruction") else [],
+        normalized["replan_instruction"] = (
+            "Run another bounded step and produce explicit evidence for the guarded criteria."
         )
+        normalized["next_step_requirements"] = [normalized["replan_instruction"]]
 
     @classmethod
     def _trusted_workspace_artifact_ref_summary(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
@@ -2440,6 +2519,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     @classmethod
     def _evidence_ledger_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
         evidence_items: list[dict[str, Any]] = []
+        pinned_evidence_ids = cls._pinned_evidence_ids_from_execution_meta(execution_meta)
         blocks = execution_meta.get("blocks")
         if isinstance(blocks, Mapping):
             evidence = blocks.get("evidence")
@@ -2449,7 +2529,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 if isinstance(raw_block_items, Sequence) and not isinstance(
                     raw_block_items, str | bytes | bytearray
                 ):
-                    block_evidence["evidence_items"] = cls._prioritized_verifier_evidence_items(raw_block_items)
+                    block_evidence["evidence_items"] = cls._prioritized_verifier_evidence_items(
+                        raw_block_items,
+                        pinned_evidence_ids=pinned_evidence_ids,
+                    )
                 block_ledger = evidence_ledger_view(block_evidence, max_items=80, body_chars=2400)
                 evidence_items.extend(
                     dict(item)
@@ -2458,21 +2541,62 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 )
         evidence_items.extend(cls._action_result_evidence_items_from_execution_meta(execution_meta))
         return evidence_ledger_view(
-            {"evidence_items": cls._prioritized_verifier_evidence_items(evidence_items)},
+            {
+                "evidence_items": cls._prioritized_verifier_evidence_items(
+                    evidence_items,
+                    pinned_evidence_ids=pinned_evidence_ids,
+                )
+            },
             max_items=120,
             body_chars=2400,
         )
 
     @classmethod
-    def _prioritized_verifier_evidence_items(cls, items: Sequence[Any]) -> list[dict[str, Any]]:
-        ordered: list[tuple[int, int, dict[str, Any]]] = []
+    def _pinned_evidence_ids_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> set[str]:
+        pinned: set[str] = set()
+
+        def collect(value: Any) -> None:
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    pinned.add(text)
+                return
+            if isinstance(value, Mapping):
+                for key in ("id", "evidence_id"):
+                    text = str(value.get(key) or "").strip()
+                    if text:
+                        pinned.add(text)
+                return
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+                for item in value:
+                    collect(item)
+
+        collect(execution_meta.get("pinned_evidence_ids"))
+        blocks = execution_meta.get("blocks")
+        if isinstance(blocks, Mapping):
+            evidence = blocks.get("evidence")
+            if isinstance(evidence, Mapping):
+                collect(evidence.get("pinned_evidence_ids"))
+        return pinned
+
+    @classmethod
+    def _prioritized_verifier_evidence_items(
+        cls,
+        items: Sequence[Any],
+        *,
+        pinned_evidence_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        pinned = pinned_evidence_ids or set()
+        ordered: list[tuple[int, int, int, dict[str, Any]]] = []
         for index, item in enumerate(items):
             if not isinstance(item, Mapping):
                 continue
             sanitized = dict(DataFormatter.sanitize(item))
-            ordered.append((cls._verifier_evidence_item_priority(sanitized), index, sanitized))
-        ordered.sort(key=lambda entry: (entry[0], entry[1]))
-        return [item for _, _, item in ordered]
+            evidence_id = str(sanitized.get("id") or "").strip()
+            pin_priority = -1 if evidence_id and evidence_id in pinned else 0
+            ordered.append((pin_priority, cls._verifier_evidence_item_priority(sanitized), index, sanitized))
+        ordered.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+        return [item for _, _, _, item in ordered]
 
     @staticmethod
     def _verifier_evidence_item_priority(item: Mapping[str, Any]) -> int:
@@ -3201,8 +3325,30 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if normalized["missing_criteria"]:
             normalized["is_complete"] = False
             guard_reasons.append("missing_criteria_present")
+        factual_integrity_check = verification.get("factual_integrity_check")
+        if isinstance(factual_integrity_check, Mapping):
+            normalized["factual_integrity_check"] = DataFormatter.sanitize(dict(factual_integrity_check))
+            if not self._verification_factual_integrity_is_satisfied(factual_integrity_check):
+                normalized["is_complete"] = False
+                guard_reasons.append("factual_integrity_failed")
+                factual_messages = self._verification_factual_integrity_messages(factual_integrity_check)
+                if not factual_messages:
+                    factual_messages = [
+                        "Factual integrity check did not confirm that the deliverable avoids unsupported concrete facts and certainty inflation."
+                    ]
+                normalized["missing_criteria"] = self._merge_string_lists(
+                    normalized.get("missing_criteria"),
+                    factual_messages,
+                )
+                normalized["acceptance_delta"] = self._merge_string_lists(
+                    normalized.get("acceptance_delta"),
+                    factual_messages,
+                )
         final_result_required = self._normalize_bool(verification.get("final_result_required"), default=False)
         trusted_workspace_artifact_refs = self._trusted_workspace_artifact_refs_from_summary(execution_evidence_summary)
+        risky_actions, non_blocking_failed_actions = self._execution_risk_actions(execution_evidence_summary)
+        if non_blocking_failed_actions:
+            normalized["non_blocking_failed_actions"] = non_blocking_failed_actions
         execution_status = str(execution_evidence_summary.get("status") or "").strip().lower()
         if execution_status in {"failed", "error", "timed_out", "blocked"}:
             execution_errors = execution_evidence_summary.get("errors", [])
@@ -3222,6 +3368,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 trusted_workspace_artifact_refs=trusted_workspace_artifact_refs,
                 grounding_guard=grounding_guard,
                 final_result_required=final_result_required,
+                non_blocking_action_ids=non_blocking_failed_actions,
             )
             if liveness_diagnostic is not None:
                 normalized["non_blocking_execution_status"] = liveness_diagnostic
@@ -3281,9 +3428,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 normalized["replan_instruction"] = "Handle structured ReplanSignal before accepting completion" + (
                     f": {'; '.join(reasons)}." if reasons else "."
                 )
-        risky_actions, non_blocking_failed_actions = self._execution_risk_actions(execution_evidence_summary)
-        if non_blocking_failed_actions:
-            normalized["non_blocking_failed_actions"] = non_blocking_failed_actions
         if risky_actions:
             normalized["is_complete"] = False
             guard_reasons.append("execution_risk_actions_present")

@@ -207,7 +207,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
                 "card": context.card.to_dict(),
                 "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
@@ -232,8 +232,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "Execute exactly one TaskBoard card. "
                 "Provide short card_intent and decision_basis fields before the card result fields to frame this "
                 "card-local decision; do not include raw chain-of-thought or hidden reasoning. "
-                "Use task_context_contract.current_time when the card needs current/latest/as-of evidence; label older "
-                "or historical source material with its time boundary. "
+                "Use task_context_contract.current_time only when the card needs current/latest/as-of evidence; label older "
+                "or historical source material with its time boundary. Do not treat the runtime/current date as a "
+                "business fact, incident date, deployment date, publication date, approval date, or validation date "
+                "unless the goal or verifier-visible evidence explicitly provides it. "
                 "taskboard_evidence_view is the compact evidence summary; request full content only through available "
                 "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
                 "the same failing source or method when a bounded fallback can satisfy the card. dependency_readbacks "
@@ -252,7 +254,18 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "Only return failed or blocked when the card cannot produce the required outcome or the missing "
                 "evidence is truly critical. If this card produces the user-facing deliverable, provide the complete "
                 "bounded body in candidate_final_result, final_result, or artifact_markdown when it fits the bounded "
-                "response. For a long, sectioned, or file-backed deliverable that cannot fit the bounded response, "
+                "response. Preserve task-provided facts exactly. Do not add concrete times, dates, publication states, "
+                "validation states, numbers, source headings, or status details unless they are visible in the goal, "
+                "dependency evidence, or evidence_ledger, or are explicitly derived from those facts and labeled as "
+                "derived. Preserve uncertainty and evidence strength exactly: statements such as 'no known data loss', "
+                "'audit still running', 'not yet published', or 'needs sign-off' must not be rewritten into confirmed "
+                "absence, completed validation, publication, approval, or resolution. When evidence says no data loss "
+                "is known and an audit is still running, do not state or imply that data is intact, complete, safe, "
+                "fully verified, or that no data was lost. Keep the response bounded. "
+                "Unless the user explicitly requests a fill-in template, do not leave unresolved placeholders such as "
+                "[date], [time], [name], [Your Name], [Title], TODO, or TBD in a final deliverable; omit unknown "
+                "details or write a role-generic sentence grounded in available facts. "
+                "For a long, sectioned, or file-backed deliverable that cannot fit the bounded response, "
                 "return artifact_manifest as a structured deliverable contract with path='final.md', section "
                 "ids/titles, brief section intent, and source/evidence refs to use; artifact_manifest is not itself "
                 "the deliverable body or proof of completion. Do not include full section content in "
@@ -355,7 +368,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 delivery_contract={
                     "card": DataFormatter.sanitize(context.card.to_dict()),
                     "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
-                    "task_context_contract": self._task_context_contract(),
+                    "task_context_contract": self._task_context_contract_for_model_prompt(),
                     "scoped_retrieval": DataFormatter.sanitize(self._taskboard_card_scoped_retrieval(context.card)),
                 },
                 quality_gates=(
@@ -647,7 +660,19 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             context.revision,
             success_criteria=self.success_criteria,
             evidence_view=evidence_view,
+            evidence_ledger=evidence_ledger,
             explicit_state_facts=task_board_explicit_state_facts(context.revision, evidence_view=evidence_view),
+            previous_acceptance_index=(
+                getattr(self, "_latest_taskboard_acceptance_index", None)
+                if isinstance(getattr(self, "_latest_taskboard_acceptance_index", None), Mapping)
+                else None
+            ),
+        )
+        acceptance_verification_plan = build_task_board_incremental_verification_plan(acceptance_index)
+        scoped_evidence_view = build_task_board_scoped_evidence_view(
+            acceptance_index,
+            evidence_view=evidence_view,
+            evidence_ledger=evidence_ledger,
         )
         focus_payload = build_task_board_focus_payload(
             context.revision,
@@ -671,12 +696,14 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "task_id": self.id,
             "goal": self.goal,
             "success_criteria": self.success_criteria,
-            "task_context_contract": self._task_context_contract(),
+            "task_context_contract": self._task_context_contract_for_model_prompt(),
             "card": context.card.to_dict(),
             "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
             "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
             "evidence_ledger": evidence_ledger,
             "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+            "taskboard_acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+            "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
             "taskboard_focus_payload": DataFormatter.sanitize(focus_payload),
             "dependency_readbacks": dependency_readbacks,
             "available_readback": self._taskboard_available_readback(evidence_view),
@@ -695,8 +722,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "This card is for synthesis, verification, finalization, or deciding the next board action; "
             "provide short card_intent and decision_basis fields before the control result fields; do not include raw "
             "chain-of-thought or hidden reasoning. "
-            "Use task_context_contract.current_time when current/latest/as-of evidence matters, and label older "
-            "or historical source material with its time boundary. "
+            "Use task_context_contract.current_time only when current/latest/as-of evidence matters, and label older "
+            "or historical source material with its time boundary. Do not treat the runtime/current date as a "
+            "business fact, incident date, deployment date, publication date, approval date, or validation date "
+            "unless the goal or verifier-visible evidence explicitly provides it. "
             "do not plan or call tools from this request. taskboard_evidence_view is the compact evidence summary "
             "and preserve cold refs as pointers. Treat evidence_ledger as the authoritative grounding ledger and "
             "bind factual claims through evidence_use ids. failed/empty items support unavailability only; ref_only "
@@ -717,6 +746,16 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "do not mention a source title without its verifier-visible URL/path when such a ref exists. "
             "Apply workspace_delivery_policy: when this card is authorized to write required final deliverable paths, "
             "use the required path in artifact_manifest.path instead of a working/evidence path. "
+            "Preserve task-provided facts exactly. Do not add concrete times, dates, publication states, validation "
+            "states, numbers, source headings, or status details unless they are visible in the goal, dependency "
+            "evidence, or evidence_ledger, or are explicitly derived from those facts and labeled as derived. "
+            "Preserve uncertainty and evidence strength exactly: no-known-loss, still-running audit, unpublished "
+            "manifest, missing sign-off, and unresolved warning states must not become confirmed absence, complete "
+            "validation, publication, approval, or fix. When evidence says no data loss is known and an audit is "
+            "still running, do not state or imply that data is intact, complete, safe, fully verified, or that no data was lost. "
+            "Unless the user explicitly requests a fill-in template, do not leave unresolved placeholders such as "
+            "[date], [time], [name], [Your Name], [Title], TODO, or TBD in a final deliverable; omit unknown "
+            "details or write a role-generic sentence grounded in available facts. "
             "For file-backed deliverables, return acceptance_points with expected headings or exact anchors for "
             "critical verification points; do not invent line numbers or trusted file refs. "
             "After the main control result fields, include short self_check, short_summary, and progress_message for "
@@ -735,7 +774,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "Short control-card decision factors; no raw chain-of-thought.",
                 False,
             ),
-            "status": (str, "completed, blocked, failed, or skipped for this card", False),
+            "status": (str, "completed, setback, blocked, failed, or skipped for this card", False),
             "answer": (str, "Card-local synthesis or decision summary", True),
             "candidate_final_result": (
                 str,
@@ -828,12 +867,12 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "output": DataFormatter.sanitize(control_output_schema),
                     "output_format": "json",
                 },
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
             },
             quality_gates=(
                 {
                     "kind": "taskboard_control_card_status",
-                    "allowed_statuses": ["completed", "blocked", "failed", "skipped"],
+                    "allowed_statuses": ["completed", "setback", "blocked", "failed", "skipped"],
                 },
             ),
             runtime_preferences={
@@ -1090,14 +1129,15 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         item: Any,
     ) -> AgentExecutionStreamData:
         raw_path = str(getattr(item, "path", "") or "stream")
+        event_type: Literal["delta", "done"] = "delta" if getattr(item, "event_type", None) == "delta" else "done"
         delta = None if self._is_process_summary_stream_path(raw_path) else getattr(item, "delta", None)
         display_meta = self._taskboard_control_stream_display_meta(raw_path)
         return await self._emit(
             f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.control.{raw_path}",
             getattr(item, "value", None),
-            event_type="delta",
+            event_type=event_type,
             delta=delta,
-            is_complete=bool(getattr(item, "is_complete", False)),
+            is_complete=bool(getattr(item, "is_complete", event_type == "done")),
             meta={
                 "task_id": self.id,
                 "status": self.status,
@@ -1166,7 +1206,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
 
     async def _bridge_taskboard_card_execution_stream(self, card_id: str, execution: Any) -> None:
         try:
-            async for item in execution.get_async_generator(type="instant"):
+            async for stream_record in execution.get_async_generator(type="all"):
+                if isinstance(stream_record, tuple) and len(stream_record) == 2:
+                    _, item = stream_record
+                else:
+                    item = stream_record
                 await self._emit_taskboard_card_execution_stream_item(card_id, execution, item)
         except asyncio.CancelledError:
             raise
@@ -1428,7 +1472,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 return "blocked"
         if isinstance(card_output, Mapping):
             status = str(card_output.get("status") or "completed").strip().lower()
-            if status in {"completed", "blocked", "failed", "skipped"}:
+            if status in {"completed", "setback", "blocked", "failed", "skipped"}:
                 return status
             remaining = card_output.get("remaining_work")
             if isinstance(remaining, Sequence) and not isinstance(remaining, str | bytes | bytearray) and remaining:
@@ -1439,15 +1483,26 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
     def _taskboard_control_card_status(cls, card_output: Any) -> str:
         if isinstance(card_output, Mapping):
             status = str(card_output.get("status") or "completed").strip().lower()
-            if status in {"completed", "blocked", "failed", "skipped"}:
+            next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
+            workspace_patch_delivery = card_output.get("workspace_patch_delivery")
+            if (
+                next_action == "patch"
+                and status in {"completed", "skipped"}
+                and card_output.get("sufficient") is not False
+                and isinstance(workspace_patch_delivery, Mapping)
+                and str(workspace_patch_delivery.get("status") or "").strip().lower() == "completed"
+            ):
                 return status
-            next_action = str(card_output.get("next_board_action") or "").strip().lower()
-            if next_action in {"readback", "needs_readback", "repair", "patch", "continue", "block"}:
+            if next_action in {"readback", "needs_readback", "repair", "patch", "continue"}:
+                return "setback"
+            if next_action in {"block", "stop"}:
                 return "blocked"
+            if status in {"completed", "setback", "blocked", "failed", "skipped"}:
+                return status
             remaining = card_output.get("remaining_work")
             gaps = card_output.get("gaps")
             if cls._has_remaining_work(remaining) or cls._has_remaining_work(gaps):
-                return "blocked"
+                return "setback"
         return "completed"
 
     @staticmethod

@@ -144,6 +144,15 @@ allowlist, Agently uses a small safe shell profile for commands such as `pwd`,
 `python -m pyright`. Stdout and stderr are returned as bounded previews; if a
 stream exceeds `max_output_chars`, the full stream is written under the
 Workspace root at `artifacts/shell/` and referenced from the action result.
+`allow_unsafe` is a host-only direct execution grant; it is not exposed in
+model-visible shell action schemas and is stripped from model-planned action
+inputs. If a model-selected command is outside the safe profile, route it
+through an approval-required action or an ExecutionExchange provider instead of
+letting model output grant its own bypass.
+Custom actions that need direct-call-only parameters can mark them with
+`meta={"host_only_input_keys": [...]}`; Action Runtime strips those keys from
+model-planned `structured_plan` and native tool-call inputs while preserving
+host/direct calls.
 
 Built-in capability packages live under `agently.builtins.actions`. For example:
 
@@ -156,10 +165,17 @@ agent.use_actions(Browse())
 
 Search is an Action-native package and does not use ExecutionResource;
 proxy, timeout, backend, and region are package/executor configuration. Browse
-is also Action-native; its default path is Playwright -> restricted curl -> BS4,
-while pyautogui is kept as legacy/advanced configuration. The curl backend is a
-Browse-internal URL fetch fallback, not model-visible shell access. If a Browse action needs a managed
-browser/page/session, register it with a Browser ExecutionResource provider enabled.
+is also Action-native; its default path is Jina Reader -> Playwright -> BS4 ->
+restricted curl, while pyautogui is kept as legacy/advanced configuration. The
+curl backend is a Browse-internal URL fetch fallback, not model-visible shell
+access. Jina Reader delegates the target public URL to `https://r.jina.ai/` for
+URL-to-Markdown recovery and automatically tries the official alternate endpoint
+`https://r.jinaai.cn/` when the primary Reader endpoint has a transport or
+service failure. Disable it explicitly with
+`Browse(enable_jina_reader=False, fallback_order=("playwright", "bs4", "curl"))`
+when that external service boundary is not acceptable.
+If a Browse action needs a managed browser/page/session, register it with a
+Browser ExecutionResource provider enabled.
 
 Agent Client Protocol (ACP) coding agents are exposed as Action capability, not
 as an AgentExecution route. Use `agent.use_acp(on_missing="skip")` to
@@ -227,6 +243,17 @@ Actions that explicitly return `artifacts` or `artifact_refs` use the same
 contract even when the output is small. This includes MCP resource/content
 blocks surfaced by `MCPActionExecutor`; Agently records the declared artifact
 metadata, but it does not infer undeclared file writes by scanning directories.
+Host actions that create files for later AgentTask or TaskBoard consumption
+should return typed `file_refs` or `artifact_refs` with the path, size or bytes,
+media type, and SHA-256 when available. A path-only payload such as
+`{"filename": "...", "path": "...", "size": ...}` stays visible as bounded
+Action result evidence and a ref pointer, but it is not treated as a trusted
+Workspace file unless the path is inside the Workspace files root and Workspace
+readback succeeds.
+Built-in web actions such as Search and Browse do not prompt for package
+installation while running. Missing optional dependencies surface as structured
+Action failures so service hosts can decide whether to install, retry, or fall
+back.
 When the digest is still too large for later planning or reply hot paths,
 Agently compacts the model-visible digest again: `result` keeps the bounded
 digest, duplicate `data` / `model_digest` fields may become `same_as="result"`

@@ -32,7 +32,8 @@ from agently.types.data import (
 
 _TASK_BOARD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 _TERMINAL_CARD_STATUSES = {"completed", "failed", "blocked", "skipped"}
-_SATISFYING_DEGRADED_STATUSES = {"failed", "blocked", "skipped"}
+_SATISFYING_DEGRADED_STATUSES = {"failed", "blocked", "skipped", "setback"}
+_SETBACK_CARD_STATUSES = {"setback"}
 
 
 @dataclass(frozen=True)
@@ -281,6 +282,8 @@ def _derive_board_status(
     ]
     if any(status in {"failed", "error"} for status in required_statuses):
         return "failed"
+    if any(status in _SETBACK_CARD_STATUSES for status in statuses.values()):
+        return "running"
     if any(status == "blocked" for status in required_statuses):
         return "blocked"
 

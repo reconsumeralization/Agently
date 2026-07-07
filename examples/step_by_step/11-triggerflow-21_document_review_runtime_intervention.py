@@ -16,7 +16,7 @@ The vendor may terminate the agreement immediately if it believes delivery
 conditions have changed.
 """
 
-SUPPLEMENTAL_CONTEXT = {
+GUIDANCE_CONTEXT = {
     "attachment": "latest-price-table",
     "acceptance_deadline": "2026-06-30",
     "termination_notice_days": 15,
@@ -36,24 +36,24 @@ def build_document_review_flow() -> TriggerFlow:
 
     async def assess_risk(data: TriggerFlowRuntimeData):
         interventions = data.get_interventions(status="inserted", target="risk-review")
-        supplements = [item["payload"] for item in interventions]
+        guidance_items = [item["payload"] for item in interventions]
         notice_days = max(
             [
-                int(supplement.get("termination_notice_days", 0))
-                for supplement in supplements
-                if isinstance(supplement, dict)
+                int(guidance.get("termination_notice_days", 0))
+                for guidance in guidance_items
+                if isinstance(guidance, dict)
             ]
             or [0]
         )
         risk_level = "medium" if notice_days >= 15 else "high"
         assessment = {
             "risk_level": risk_level,
-            "supplement_count": len(supplements),
+            "guidance_count": len(guidance_items),
             "payment_deadline": next(
                 (
-                    supplement.get("acceptance_deadline")
-                    for supplement in supplements
-                    if isinstance(supplement, dict) and supplement.get("acceptance_deadline")
+                    guidance.get("acceptance_deadline")
+                    for guidance in guidance_items
+                    if isinstance(guidance, dict) and guidance.get("acceptance_deadline")
                 ),
                 None,
             ),
@@ -73,7 +73,7 @@ def build_document_review_flow() -> TriggerFlow:
         final_report = {
             "doc_id": data.get_state("doc_id"),
             "risk_level": assessment.get("risk_level"),
-            "supplement_count": assessment.get("supplement_count"),
+            "guidance_count": assessment.get("guidance_count"),
             "payment_deadline": assessment.get("payment_deadline"),
         }
         await data.async_set_state("final_report", final_report)
@@ -94,7 +94,7 @@ async def main():
     start_task = asyncio.create_task(execution.async_start(DOCUMENT_DRAFT))
     await asyncio.sleep(0.01)
     intervention = await execution.async_intervene(
-        SUPPLEMENTAL_CONTEXT,
+        GUIDANCE_CONTEXT,
         author="legal-reviewer",
         target="risk-review",
         note="Reviewer uploaded Attachment A while extraction was still running.",
@@ -123,7 +123,7 @@ async def main():
     assert snapshot["final_report"] == {
         "doc_id": "contract-2026-09",
         "risk_level": "medium",
-        "supplement_count": 1,
+        "guidance_count": 1,
         "payment_deadline": "2026-06-30",
     }
 
@@ -139,9 +139,9 @@ if __name__ == "__main__":
 #  'target': 'risk-review'}
 # [FINAL_REPORT]
 # {'doc_id': 'contract-2026-09',
+#  'guidance_count': 1,
 #  'payment_deadline': '2026-06-30',
-#  'risk_level': 'medium',
-#  'supplement_count': 1}
+#  'risk_level': 'medium'}
 #
 # How it works:
 # - The flow declares .intervention_point(name="before_risk_assessment", ...),

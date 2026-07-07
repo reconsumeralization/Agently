@@ -49,7 +49,7 @@ report_path = agent.workspace.file_area_path("reports", "weekly.md", create=True
 ```python
 agent = Agently.create_agent("repo-worker")
 
-ref = await agent.workspace.ingest(
+ref = await agent.workspace.put(
     content=pytest_output,
     collection="observations",
     kind="test_output",
@@ -181,7 +181,7 @@ backend 时，execution 会使用显式选择的 Workspace。
 
 不要依赖多个显式隔离的 Workspace 之间自动通讯。如果 TriggerFlow execution 过程中需要在
 隔离 Workspace 之间移动信息，应在业务逻辑里显式完成：从源 Workspace grep/read，
-再写入或 ingest 到目标 Workspace，并把生成的 refs link 起来。Workspace 本身不提供
+再写入目标 Workspace，并把生成的 refs link 起来。Workspace 本身不提供
 跨空间 messaging 或 replication 协议。
 
 ## 存什么
@@ -538,4 +538,7 @@ Workspace 行为：多个 Agent 和 TriggerFlow execution 共享一个物理 `wo
 
 `examples/workspace/workspace_with_action_output.py` 展示 Action 边界：file action
 写入 `workspace.files_root`，shell action 读取该文件，应用代码把 action output 显式
-ingest 为 Workspace observation，再通过 ContextBuilder 打包成 ContextPackage。
+写成 Workspace observation，再通过 ContextBuilder 打包成 ContextPackage。
+
+`workspace.ingest(...)` 仅作为旧代码兼容 alias 保留。新代码应使用
+`workspace.put(...)`；确实需要旧 profile 路径时，把 `profile=...` 传给 `put`。

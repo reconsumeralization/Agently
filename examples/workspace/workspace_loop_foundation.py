@@ -34,7 +34,7 @@ def build_flow(agent):
                 else "fallback route selected after patch"
             ],
         }
-        observation_ref = await agent.workspace.ingest(
+        observation_ref = await agent.workspace.put(
             content=observation,
             collection="observations",
             kind="loop_observation",
@@ -53,7 +53,7 @@ def build_flow(agent):
             "next": "stop" if status == "fixed" else "retry_with_patch",
             "context_item_count": len(context_pack["items"]),
         }
-        decision_ref = await agent.workspace.ingest(
+        decision_ref = await agent.workspace.put(
             content=decision,
             collection="decisions",
             kind="loop_decision",

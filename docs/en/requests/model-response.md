@@ -123,6 +123,10 @@ streams preserve model attempt facts as structured stream items. In particular,
 also be projected to natural-language text, immediately appends a synthetic
 `AgentExecutionStreamData` item with `path="$delta"`, `event_type="delta"`,
 `source="agent_execution"`, and `meta["stream_kind"] == "text_projection"`.
+AgentTask Flat snapshots may project to linear plan/action summaries, while
+TaskBoard plan/tick events may project to compact Markdown status tables first
+and later card-state summaries.
+Heartbeat items are structured-only and do not append synthetic `$delta` text.
 `type="all"` remains the raw audit stream and does not include those synthetic
 projection items.
 
@@ -132,18 +136,24 @@ async for item in execution.get_async_generator(type="instant"):
     if item.path == "$status":
         print(item.value["status"], item.meta["response_id"])
     elif item.path == "$delta" and item.delta:
+        # Unified natural-language stream slot.
         print(item.delta, end="", flush=True)
     elif item.path == "model.delta" and item.delta:
-        print(item.delta, end="", flush=True)
+        # Source-addressed model delta. Use this for structured UI state, not
+        # for the same text surface that consumes "$delta".
+        ui_state[item.path] = ui_state.get(item.path, "") + item.delta
 ```
 
 The no-argument execution generator defaults to the same `delta` projection, so
 `execution.get_generator()` and `execution.get_async_generator()` yield strings.
 Use `type="instant"` or `type="all"` when the consumer needs the structured
 `$status` item instead of the text marker. Use `type="instant"` when a UI needs
-both structured state updates and the derived `$delta` text slot; use
-`type="all"` for records, DevTools-style replay, or audits that must not mix
-derived items with source facts.
+both structured state updates and the derived `$delta` text slot, but keep
+those surfaces separate: render `$delta` as the unified natural-language stream
+and render source-addressed deltas such as `model.delta` or field paths only into
+their own structured state slots. Do not append both to the same visible text
+buffer. Use `type="all"` for records, DevTools-style replay, internal bridges,
+or audits that must not mix derived items with source facts.
 
 For shared-output CLI rendering, do not treat `.is_complete` as a global
 display-order barrier. A structured parser often confirms that one path is

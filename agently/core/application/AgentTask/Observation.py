@@ -25,7 +25,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         plan: dict[str, Any],
         context_pack: "WorkspaceContextPackage",
     ) -> "WorkspaceRecordRef":
-        record_ref = await self.workspace.ingest(
+        record_ref = await self.workspace.put(
             content={
                 "iteration": iteration_index,
                 "plan": DataFormatter.sanitize(plan),
@@ -52,7 +52,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         execution_result: Any,
         execution_meta: dict[str, Any],
     ) -> tuple["WorkspaceRecordRef", "WorkspaceRecordRef | None"]:
-        record_ref = await self.workspace.ingest(
+        record_ref = await self.workspace.put(
             content={
                 "iteration": iteration_index,
                 "plan": DataFormatter.sanitize(plan),
@@ -122,13 +122,37 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             evidence_view = build_task_board_evidence_view(effective_revision).to_dict()
             schedule = TaskBoard(effective_revision, handler=lambda _context: None).schedule()
             explicit_state_facts = task_board_explicit_state_facts(effective_revision, evidence_view=evidence_view)
+            previous_acceptance_index = getattr(self, "_latest_taskboard_acceptance_index", None)
+            if not isinstance(previous_acceptance_index, Mapping):
+                revision_metadata = getattr(effective_revision, "metadata", {})
+                previous_acceptance_index = (
+                    revision_metadata.get("taskboard_acceptance_index")
+                    if isinstance(revision_metadata, Mapping)
+                    and isinstance(revision_metadata.get("taskboard_acceptance_index"), Mapping)
+                    else None
+                )
+            verification_payload = {}
+            if isinstance(final_result, Mapping):
+                taskboard_result = final_result.get("taskboard")
+                if isinstance(taskboard_result, Mapping) and isinstance(taskboard_result.get("final_verification"), Mapping):
+                    verification_payload = taskboard_result["final_verification"]
+                else:
+                    verification_payload = final_result
             acceptance_index = build_task_board_acceptance_index(
                 effective_revision,
                 success_criteria=self.success_criteria,
-                verification=final_result or {},
+                verification=verification_payload,
                 evidence_view=evidence_view,
                 explicit_state_facts=explicit_state_facts,
+                previous_acceptance_index=previous_acceptance_index,
             )
+            acceptance_verification_plan = build_task_board_incremental_verification_plan(acceptance_index)
+            scoped_evidence_view = build_task_board_scoped_evidence_view(
+                acceptance_index,
+                evidence_view=evidence_view,
+            )
+            guidance_projection = self._guidance_context_projection()
+            self._latest_taskboard_acceptance_index = DataFormatter.sanitize(acceptance_index)
             revision_id = str(effective_revision.revision_id)
             step_id = f"taskboard-{stage}-{tick_index}-{revision_id}"
             handoff_projection = build_task_board_handoff_projection(
@@ -145,7 +169,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 final_result=final_result or {},
                 explicit_state_facts=explicit_state_facts,
             )
-            record_ref = await self.workspace.ingest(
+            record_ref = await self.workspace.put(
                 content={
                     "schema_version": "agent_task_taskboard_checkpoint/v1",
                     "task_id": self.id,
@@ -156,6 +180,9 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     "revision": DataFormatter.sanitize(revision_dict),
                     "evidence_view": DataFormatter.sanitize(evidence_view),
                     "acceptance_index": DataFormatter.sanitize(acceptance_index),
+                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
+                    "guidance": DataFormatter.sanitize(guidance_projection),
                     "handoff_projection": DataFormatter.sanitize(handoff_projection),
                     "runtime_topology": DataFormatter.sanitize(runtime_topology or {}),
                     "terminal_reason": terminal_reason,
@@ -193,6 +220,9 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     "revision_id": revision_id,
                     "revision_ref": record_ref.get("id"),
                     "acceptance_index": DataFormatter.sanitize(acceptance_index),
+                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
+                    "guidance": DataFormatter.sanitize(guidance_projection),
                     "handoff_projection": DataFormatter.sanitize(handoff_projection),
                     "terminal_reason": terminal_reason,
                     "final_status": (final_result or {}).get("status"),
@@ -235,6 +265,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 tick_index=tick_index,
                 revision=effective_revision,
                 evidence_view=evidence_view,
+                acceptance_index=acceptance_index,
                 handoff_projection=handoff_projection,
                 runtime_topology=runtime_topology or {},
                 terminal_reason=terminal_reason,
@@ -258,7 +289,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         verification: dict[str, Any],
         observation_ref: "WorkspaceRecordRef",
     ) -> "WorkspaceRecordRef":
-        record_ref = await self.workspace.ingest(
+        record_ref = await self.workspace.put(
             content={
                 "iteration": iteration_index,
                 "verification": DataFormatter.sanitize(verification),
@@ -353,7 +384,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "completion_evidence": False,
         }
         try:
-            record_ref = await self.workspace.ingest(
+            record_ref = await self.workspace.put(
                 content=content,
                 collection="reflections",
                 kind="agent_task_reflection",
@@ -437,6 +468,8 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "max_iterations": self.max_iterations,
             "iterations": DataFormatter.sanitize(self.iterations),
             "reflections": DataFormatter.sanitize(self.reflections),
+            "guidance_items": DataFormatter.sanitize(getattr(self, "guidance_items", [])),
+            "guidance_refs": DataFormatter.sanitize(self.workspace_refs.get("guidance", [])),
             "resumed_from_iteration": self._resumed_from_iteration,
             "resumed_iteration_summaries": DataFormatter.sanitize(self._resumed_iteration_summaries),
             "result": DataFormatter.sanitize(self.result),
@@ -461,9 +494,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
     ) -> AsyncGenerator[Any, None]:
         if content is not None and type is None:
             type = content
+        text_projector = AgentExecutionTextDeltaProjector() if type == "delta" else None
         if self._completed:
             for item in self._stream_items:
-                projected = self._project_stream_item(item, type)
+                projected = self._project_stream_item(item, type, text_projector=text_projector)
                 if projected is not None:
                     yield projected
             return
@@ -477,7 +511,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 item = await queue.get()
                 if item is None:
                     break
-                projected = self._project_stream_item(item, type)
+                projected = self._project_stream_item(item, type, text_projector=text_projector)
                 if projected is not None:
                     yield projected
             await start_task
@@ -489,11 +523,16 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         return FunctionShifter.syncify_async_generator(self.get_async_generator(*args, **kwargs))
 
     @staticmethod
-    def _project_stream_item(item: Any, type: Any) -> Any:
+    def _project_stream_item(
+        item: Any,
+        type: Any,
+        *,
+        text_projector: AgentExecutionTextDeltaProjector | None = None,
+    ) -> Any:
         if type == "all":
             return ("agent_task", item)
         if type == "delta":
-            return project_agent_execution_text_delta(item)
+            return text_projector.project(item) if text_projector is not None else project_agent_execution_text_delta(item)
         return item
 
     async def _emit_progress(
@@ -1476,14 +1515,21 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     result_preview = fallback_preview
                     break
         if result_preview is not None:
-            compact["result_preview"] = cls._compact_action_preview_value(result_preview, max_chars=5200)
+            compact_result_preview = cls._compact_action_preview_value(result_preview, max_chars=5200)
+            if isinstance(result_preview, Mapping) and isinstance(compact_result_preview, dict):
+                result_path = result_preview.get("path") or result_preview.get("output_path") or result_preview.get("file_path")
+                if result_path:
+                    for key in ("filename", "file_name", "size"):
+                        if key in result_preview and result_preview.get(key) not in (None, "", [], {}):
+                            compact_result_preview[key] = DataFormatter.sanitize(result_preview.get(key))
+            compact["result_preview"] = compact_result_preview
         result_preview_meta = digest.get("result_preview_meta") if isinstance(digest, Mapping) else None
         if result_preview_meta is None:
             result_preview_meta = record.get("result_preview_meta")
         if result_preview_meta is None and isinstance(result_preview, Mapping):
             result_preview_meta = {
                 key: result_preview.get(key)
-                for key in ("chars", "bytes", "sha256", "truncated", "read_bytes")
+                for key in ("chars", "bytes", "sha256", "truncated", "read_bytes", "size")
                 if key in result_preview
             }
         if result_preview_meta is not None:
@@ -1627,6 +1673,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "execution_strategy": self.execution_strategy,
             "effective_execution_strategy": self.effective_execution_strategy,
             "max_iterations": self.max_iterations,
+            "guidance_count": len(getattr(self, "guidance_items", []) or []),
             "verify": self.verify,
         }
 

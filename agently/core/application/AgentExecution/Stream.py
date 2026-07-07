@@ -18,7 +18,7 @@ import asyncio
 import html
 import json
 from contextlib import suppress
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, cast
 
 from agently.types.data import AgentExecutionStreamData
@@ -43,20 +43,19 @@ def project_agent_execution_text_delta(item: Any) -> str | None:
 def _project_done_item_text(path: str, value: Any, meta: Any, *, source: str) -> str | None:
     item_meta = meta if isinstance(meta, Mapping) else {}
     stream_kind = str(item_meta.get("stream_kind") or "")
+    taskboard_status = _taskboard_status_text(path, value)
+    if taskboard_status is not None:
+        return taskboard_status
     if stream_kind == "progress":
         if str(item_meta.get("progress_source") or "") == "model":
             return None
-        return _paragraph(_mapping_text(value, "message"))
+        return _paragraph(_progress_text(value, item_meta))
     if stream_kind == "snapshot":
-        return _paragraph(_mapping_text(value, "message"))
+        return _paragraph(_snapshot_text(value, item_meta))
     if stream_kind == "heartbeat":
-        if isinstance(value, Mapping):
-            stage = str(value.get("stage") or "the current step")
-            quiet_for = value.get("quiet_for_seconds")
-            if quiet_for is not None:
-                return _paragraph(f"Still working on {stage}; no new stream events for {quiet_for} seconds.")
-            return _paragraph(f"Still working on {stage}.")
-        return _paragraph("Still working; no new stream events yet.")
+        return None
+    if stream_kind == "guidance":
+        return _paragraph(_guidance_text(value, item_meta))
     if stream_kind == "action_observation":
         return _paragraph(_action_observation_text(value, item_meta))
     if stream_kind == "phase":
@@ -92,6 +91,65 @@ def _terminal_error_text(value: Any) -> str:
     return f"Task failed: {error_type}"
 
 
+def _progress_text(value: Any, meta: Mapping[str, Any]) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    explicit_message = _mapping_text(value, "message")
+    if explicit_message:
+        return explicit_message
+    stage = str(meta.get("stage") or value.get("stage") or "").strip()
+    iteration = value.get("iteration") if value.get("iteration") not in (None, "") else meta.get("iteration")
+    label = _iteration_label(iteration)
+    if stage == "context":
+        return f"{label} preparing the working context."
+    if stage in {"plan", "taskboard_plan"}:
+        return f"{label} planning the next step."
+    if stage == "execute":
+        return f"{label} executing the selected step."
+    if stage == "verify":
+        return f"{label} verifying the result against the success criteria."
+    if stage == "continue":
+        return f"{label} more work remains; carrying the evidence into the next step."
+    if stage == "completed":
+        return "All success criteria are satisfied; the task is complete."
+    if stage == "blocked":
+        return f"{label} task hit a setback and needs operator guidance."
+    if stage in {"replan", "replanned"}:
+        return f"{label} more evidence is needed; planning another step."
+    if stage in {"max_iterations", "capability_unavailable", "timed_out"}:
+        return _mapping_text(value, "message")
+    return _mapping_text(value, "message")
+
+
+def _snapshot_text(value: Any, meta: Mapping[str, Any]) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    stage = str(meta.get("stage") or value.get("stage") or "").strip()
+    iteration = meta.get("iteration") if meta.get("iteration") not in (None, "") else value.get("iteration")
+    label = _iteration_label(iteration)
+    snapshot = value.get("snapshot")
+    snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+    if stage == "context":
+        count = snapshot.get("context_item_count")
+        if count not in (None, ""):
+            return f"{label} context is ready with {count} item(s)."
+        return f"{label} context is ready."
+    if stage in {"plan", "taskboard_plan"}:
+        return f"{label} plan ready."
+    if stage == "execution":
+        execution_result = snapshot.get("execution_result")
+        if _status_is_failed(execution_result):
+            return f"{label} execution hit a setback; evidence was captured for recovery."
+        return f"{label} execution evidence was captured."
+    if stage == "verification":
+        if snapshot.get("is_complete") is True:
+            return f"{label} verification passed."
+        if snapshot.get("requires_block") is True:
+            return f"{label} verification found an issue that needs operator guidance."
+        return f"{label} verification needs another step."
+    return _mapping_text(value, "message")
+
+
 def _phase_text(value: Any) -> str:
     if not isinstance(value, Mapping):
         return ""
@@ -100,9 +158,543 @@ def _phase_text(value: Any) -> str:
         return ""
     iteration = value.get("iteration")
     status = str(value.get("status") or "").strip()
-    prefix = f"Iteration {iteration}: " if iteration not in (None, "") else ""
+    label = _iteration_label(iteration)
+    if phase == "configured":
+        return ""
+    if phase == "planned":
+        return f"{label} plan accepted."
+    if phase == "executing":
+        return f"{label} execution started."
+    if phase == "evidence_recorded":
+        return f"{label} evidence recorded."
+    if phase == "verified":
+        return ""
+    if phase == "guarded":
+        return ""
+    if phase == "replanned":
+        return f"{label} continuing with a revised plan."
+    if phase == "terminal":
+        if status == "completed":
+            return "Task completed."
+        if status:
+            return f"Task ended with status {status}."
+        return "Task ended."
     suffix = f" ({status})" if status else ""
-    return f"{prefix}phase {phase}{suffix}."
+    return f"{label} {phase.replace('_', ' ')}{suffix}."
+
+
+def _guidance_text(value: Any, meta: Mapping[str, Any]) -> str:
+    status = str(meta.get("guidance_status") or "").strip()
+    if not status and isinstance(value, Mapping):
+        status = str(value.get("status") or "").strip()
+    if status in {"received", "queued", "forwarded"}:
+        return "Guidance received; it will be applied at the next safe task boundary."
+    if status == "applied":
+        return "Guidance applied at the next safe task boundary."
+    if status == "received_after_terminal":
+        return "Guidance received after the task had already ended; it was recorded for audit."
+    if status in {"ignored", "not_applied"}:
+        return "Guidance was recorded but not applied to this task run."
+    return "Guidance update recorded."
+
+
+def _iteration_label(iteration: Any) -> str:
+    return f"Iteration {iteration}:" if iteration not in (None, "") else "Task:"
+
+
+def _taskboard_status_text(path: str, value: Any) -> str | None:
+    projection = _taskboard_status_projection(path, value)
+    if projection is None:
+        return None
+    return _format_taskboard_status_projection(projection)
+
+
+def _taskboard_status_projection(path: str, value: Any) -> dict[str, Any] | None:
+    if not path.startswith("agent_task.taskboard.") or not isinstance(value, Mapping):
+        return None
+    title: str
+    revision: Any
+    schedule: Any
+    card_results: Any
+    if path == "agent_task.taskboard.plan":
+        title = "TaskBoard planned"
+        revision = value.get("revision")
+        schedule = None
+        card_results = None
+    elif path.startswith("agent_task.taskboard.tick.") and path.endswith(".scheduled"):
+        title = _taskboard_tick_title(path, "scheduled")
+        revision = value.get("revision")
+        schedule = value.get("schedule")
+        card_results = value.get("card_results")
+    elif path.startswith("agent_task.taskboard.tick.") and path.endswith(".completed"):
+        title = _taskboard_tick_title(path, "updated")
+        revision = value.get("revision")
+        schedule = value.get("schedule")
+        card_results = value.get("card_results")
+    else:
+        return None
+    cards = _taskboard_display_cards(revision, schedule, card_results)
+    if not cards:
+        return None
+    board_id = _mapping_text(revision, "board_id") or "taskboard"
+    revision_id = _mapping_text(revision, "revision_id") or _mapping_text(schedule, "revision_id")
+    return {
+        "title": title,
+        "board_id": board_id,
+        "revision_id": revision_id,
+        "cards": cards,
+        "counts": _taskboard_status_counts(cards),
+    }
+
+
+def _taskboard_tick_title(path: str, fallback: str) -> str:
+    parts = path.split(".")
+    for index, part in enumerate(parts):
+        if part == "tick" and index + 1 < len(parts):
+            tick_index = parts[index + 1].strip()
+            if tick_index:
+                return f"TaskBoard tick {tick_index} {fallback}"
+    return f"TaskBoard {fallback}"
+
+
+def _format_taskboard_status_block(
+    *,
+    title: str,
+    revision: Any,
+    schedule: Any,
+    card_results: Any,
+) -> str | None:
+    cards = _taskboard_display_cards(revision, schedule, card_results)
+    if not cards:
+        return None
+    board_id = _mapping_text(revision, "board_id") or "taskboard"
+    revision_id = _mapping_text(revision, "revision_id") or _mapping_text(schedule, "revision_id")
+    return _format_taskboard_status_projection(
+        {
+            "title": title,
+            "board_id": board_id,
+            "revision_id": revision_id,
+            "cards": cards,
+            "counts": _taskboard_status_counts(cards),
+        }
+    )
+
+
+def _format_taskboard_status_projection(projection: Mapping[str, Any]) -> str | None:
+    cards = projection.get("cards")
+    if not isinstance(cards, Sequence) or isinstance(cards, str | bytes | bytearray) or not cards:
+        return None
+    header = _taskboard_projection_header(projection)
+    lines = [
+        header,
+        f"Progress: {_taskboard_progress_summary(projection)}",
+        "",
+        "| State | Card | Task |",
+        "| --- | --- | --- |",
+    ]
+    max_rows = 8
+    for card in cards[:max_rows]:
+        if not isinstance(card, Mapping):
+            continue
+        state = card["display_state"]
+        lines.append(
+            "| "
+            + _markdown_table_cell(_taskboard_state_label(state))
+            + " | "
+            + f"`{_markdown_inline_code(card['id'])}`"
+            + " | "
+            + _markdown_table_cell(card.get("objective") or card["id"])
+            + " |"
+        )
+    omitted = len(cards) - max_rows
+    if omitted > 0:
+        lines.append(f"| ... | ... | {omitted} more cards omitted. |")
+    return "\n".join(lines) + "\n\n"
+
+
+def _format_taskboard_status_update(
+    projection: Mapping[str, Any],
+    previous_cards: Mapping[str, Mapping[str, Any]],
+) -> str | None:
+    cards = projection.get("cards")
+    if not isinstance(cards, Sequence) or isinstance(cards, str | bytes | bytearray) or not cards:
+        return None
+    lines = [
+        _taskboard_projection_header(projection),
+        f"Progress: {_taskboard_progress_summary(projection)}",
+        "",
+    ]
+    changes: list[str] = []
+    for raw_card in cards:
+        if not isinstance(raw_card, Mapping):
+            continue
+        card_id = _clean_taskboard_text(raw_card.get("id"))
+        if not card_id:
+            continue
+        state = str(raw_card.get("display_state") or "not_started")
+        previous = previous_cards.get(card_id)
+        previous_state = str(previous.get("display_state") or "") if isinstance(previous, Mapping) else ""
+        objective = _clean_taskboard_text(raw_card.get("objective") or card_id)
+        if not previous:
+            changes.append(f"- {_taskboard_state_label(state)} `{_markdown_inline_code(card_id)}` {objective}")
+        elif previous_state != state:
+            changes.append(
+                "- "
+                + f"{_taskboard_state_label(state)} `{_markdown_inline_code(card_id)}` {objective} "
+                + f"(was {_taskboard_state_label(previous_state)})"
+            )
+    if changes:
+        lines.append("Changes:")
+        lines.extend(changes[:8])
+        omitted = len(changes) - 8
+        if omitted > 0:
+            lines.append(f"- ... {omitted} more changes omitted.")
+    else:
+        lines.append("No card state changes.")
+    return "\n".join(lines) + "\n\n"
+
+
+def _taskboard_projection_header(projection: Mapping[str, Any]) -> str:
+    title = _clean_taskboard_text(projection.get("title")) or "TaskBoard"
+    board_id = _clean_taskboard_text(projection.get("board_id")) or "taskboard"
+    revision_id = _clean_taskboard_text(projection.get("revision_id"))
+    header = f"**{title}** `{_markdown_inline_code(board_id)}`"
+    if revision_id:
+        header += f" - revision `{_markdown_inline_code(revision_id)}`"
+    return header
+
+
+def _taskboard_progress_summary(projection: Mapping[str, Any]) -> str:
+    cards = projection.get("cards")
+    counts_value = projection.get("counts")
+    counts = counts_value if isinstance(counts_value, Mapping) else {}
+    total = len(cards) if isinstance(cards, Sequence) and not isinstance(cards, str | bytes | bytearray) else 0
+    summary_bits = [
+        f"{counts.get('completed', 0)}/{total} completed",
+        f"{counts.get('in_progress', 0)} in progress",
+        f"{counts.get('not_started', 0)} not started",
+    ]
+    if counts.get("failed", 0):
+        summary_bits.append(f"{counts['failed']} failed")
+    if counts.get("degraded", 0):
+        summary_bits.append(f"{counts['degraded']} degraded")
+    return " - ".join(summary_bits)
+
+
+def _taskboard_card_state_map(projection: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    cards = projection.get("cards")
+    result: dict[str, Mapping[str, Any]] = {}
+    if not isinstance(cards, Sequence) or isinstance(cards, str | bytes | bytearray):
+        return result
+    for raw_card in cards:
+        if not isinstance(raw_card, Mapping):
+            continue
+        card_id = _clean_taskboard_text(raw_card.get("id"))
+        if card_id:
+            result[card_id] = {
+                "display_state": _clean_taskboard_text(raw_card.get("display_state") or "not_started"),
+                "objective": _clean_taskboard_text(raw_card.get("objective") or ""),
+            }
+    return result
+
+
+def _taskboard_display_cards(revision: Any, schedule: Any, card_results: Any) -> list[dict[str, Any]]:
+    revision_view = revision if isinstance(revision, Mapping) else {}
+    schedule_view = schedule if isinstance(schedule, Mapping) else {}
+    result_view = _taskboard_result_view(revision_view, card_results)
+    cards: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    graph_value = revision_view.get("graph")
+    graph: Mapping[str, Any] = graph_value if isinstance(graph_value, Mapping) else {}
+    for raw_card in _sequence_of_mappings(graph.get("cards")):
+        card_id = _clean_taskboard_text(raw_card.get("id") or raw_card.get("card_id"))
+        if not card_id:
+            continue
+        seen.add(card_id)
+        cards.append(
+            {
+                "id": card_id,
+                "objective": _clean_taskboard_text(raw_card.get("objective") or raw_card.get("goal")),
+                "status": _clean_taskboard_text(raw_card.get("status")),
+                "failure_policy": _clean_taskboard_text(raw_card.get("failure_policy")),
+                "display_state": _taskboard_display_state(card_id, raw_card, result_view.get(card_id), schedule_view),
+            }
+        )
+    for card_id in _taskboard_schedule_ids(schedule_view) + list(result_view):
+        if card_id in seen:
+            continue
+        seen.add(card_id)
+        result = result_view.get(card_id)
+        cards.append(
+            {
+                "id": card_id,
+                "objective": "",
+                "status": _clean_taskboard_text(result.get("status")) if isinstance(result, Mapping) else "",
+                "failure_policy": "",
+                "display_state": _taskboard_display_state(card_id, {}, result, schedule_view),
+            }
+        )
+    return cards
+
+
+def _taskboard_result_view(revision: Mapping[str, Any], card_results: Any) -> dict[str, Mapping[str, Any]]:
+    raw_results = card_results if isinstance(card_results, Mapping) else revision.get("card_results")
+    results: dict[str, Mapping[str, Any]] = {}
+    if isinstance(raw_results, Mapping):
+        for raw_id, raw_result in raw_results.items():
+            card_id = _clean_taskboard_text(raw_id)
+            if not card_id:
+                continue
+            if isinstance(raw_result, Mapping):
+                results[card_id] = raw_result
+            elif raw_result not in (None, ""):
+                results[card_id] = {"status": str(raw_result)}
+    raw_statuses = revision.get("card_result_statuses")
+    if isinstance(raw_statuses, Mapping):
+        for raw_id, raw_status in raw_statuses.items():
+            card_id = _clean_taskboard_text(raw_id)
+            if card_id and card_id not in results:
+                results[card_id] = {"status": str(raw_status)}
+    return results
+
+
+def _taskboard_schedule_ids(schedule: Mapping[str, Any]) -> list[str]:
+    ids: list[str] = []
+    for key in ("completed_card_ids", "runnable_card_ids", "blocked_card_ids"):
+        for card_id in _sequence_of_strings(schedule.get(key)):
+            if card_id not in ids:
+                ids.append(card_id)
+    return ids
+
+
+def _taskboard_display_state(
+    card_id: str,
+    card: Mapping[str, Any],
+    result: Any,
+    schedule: Mapping[str, Any],
+) -> str:
+    result_status = _normalize_taskboard_status(result.get("status")) if isinstance(result, Mapping) else ""
+    card_status = _normalize_taskboard_status(card.get("status"))
+    failure_policy = _normalize_taskboard_status(card.get("failure_policy"))
+    metadata: Mapping[str, Any] = {}
+    if isinstance(result, Mapping):
+        metadata_value = result.get("metadata")
+        if isinstance(metadata_value, Mapping):
+            metadata = metadata_value
+    if result_status in {"completed", "accepted", "succeeded", "success", "ok"}:
+        return "completed"
+    if result_status in {"degraded", "partial", "setback", "skipped", "deferred"}:
+        return "degraded"
+    if result_status in {"failed", "error", "timeout", "timed_out", "cancelled", "blocked"}:
+        if failure_policy in {"optional", "degradable"} or metadata.get("deferred") is True:
+            return "degraded"
+        return "failed"
+    completed_ids = set(_sequence_of_strings(schedule.get("completed_card_ids")))
+    runnable_ids = set(_sequence_of_strings(schedule.get("runnable_card_ids")))
+    if card_id in completed_ids or card_status in {"completed", "accepted", "succeeded", "success", "ok"}:
+        return "completed"
+    if card_status in {"degraded", "partial", "setback", "skipped", "deferred"}:
+        return "degraded"
+    if card_status in {"failed", "error", "timeout", "timed_out", "cancelled"}:
+        return "failed"
+    if card_id in runnable_ids or card_status in {"running", "ready", "active", "in_progress"}:
+        return "in_progress"
+    return "not_started"
+
+
+def _taskboard_status_counts(cards: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts = {"not_started": 0, "in_progress": 0, "completed": 0, "failed": 0, "degraded": 0}
+    for card in cards:
+        state = str(card.get("display_state") or "not_started")
+        counts[state if state in counts else "not_started"] += 1
+    return counts
+
+
+def _taskboard_state_label(state: str) -> str:
+    labels = {
+        "not_started": "⏳ Not started",
+        "in_progress": "🔄 In progress",
+        "completed": "✅ Completed",
+        "failed": "❌ Failed",
+        "degraded": "⚠️ Degraded",
+    }
+    return labels.get(state, labels["not_started"])
+
+
+def _normalize_taskboard_status(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def _clean_taskboard_text(value: Any) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    return " ".join(str(value).split()).strip()
+
+
+def _sequence_of_mappings(value: Any) -> list[Mapping[str, Any]]:
+    if isinstance(value, list | tuple):
+        return [item for item in value if isinstance(item, Mapping)]
+    return []
+
+
+def _sequence_of_strings(value: Any) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = _clean_taskboard_text(item)
+        if text:
+            result.append(text)
+    return result
+
+
+_FLAT_SNAPSHOT_STAGES = {"context", "plan", "execution", "verification"}
+
+
+def _flat_snapshot_projection(path: str, value: Any, meta: Mapping[str, Any]) -> dict[str, Any] | None:
+    if not path.startswith("agent_task.iteration.") or ".snapshot." not in path or not isinstance(value, Mapping):
+        return None
+    stage = str(meta.get("stage") or value.get("stage") or "").strip()
+    if not stage:
+        parts = path.split(".")
+        try:
+            stage = parts[parts.index("snapshot") + 1]
+        except (ValueError, IndexError):
+            stage = ""
+    if stage not in _FLAT_SNAPSHOT_STAGES:
+        return None
+    iteration = value.get("iteration") if value.get("iteration") not in (None, "") else meta.get("iteration")
+    if iteration in (None, ""):
+        parts = path.split(".")
+        try:
+            iteration = parts[parts.index("iteration") + 1]
+        except (ValueError, IndexError):
+            iteration = ""
+    snapshot = value.get("snapshot")
+    snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+    task_id = _clean_taskboard_text(meta.get("task_id"))
+    return {
+        "iteration": iteration,
+        "stage": stage,
+        "task_id": task_id,
+        "snapshot": snapshot,
+        "message": _mapping_text(value, "message"),
+    }
+
+
+def _flat_snapshot_detail(stage: str, snapshot: Mapping[str, Any], message: str = "") -> str:
+    if stage == "context":
+        count = snapshot.get("context_item_count")
+        if count not in (None, ""):
+            return f"prepared the working context with {count} item(s)"
+        return "Context ready."
+    if stage == "plan":
+        for key in ("step_instruction", "expected_evidence", "rationale"):
+            text = _compact_inline_text(snapshot.get(key), max_chars=180)
+            if text:
+                return text
+        return "selected the next bounded step"
+    if stage == "execution":
+        execution_result = snapshot.get("execution_result")
+        if isinstance(execution_result, Mapping):
+            for key in ("progress_message", "short_summary", "step_result", "answer", "summary"):
+                text = _compact_inline_text(execution_result.get(key), max_chars=180)
+                if text:
+                    return text
+            remaining = _sequence_of_strings(execution_result.get("remaining_work"))
+            if remaining:
+                return "recorded remaining work: " + _compact_inline_text(remaining[0], max_chars=150)
+        if _status_is_failed(execution_result):
+            return "hit a setback and captured recovery evidence"
+        return "captured execution evidence"
+    if stage == "verification":
+        process_summary = snapshot.get("process_summary")
+        if isinstance(process_summary, Mapping):
+            for key in ("progress_message", "verification_summary", "short_summary"):
+                text = _compact_inline_text(process_summary.get(key), max_chars=180)
+                if text:
+                    return text
+        for key in ("progress_message", "verification_summary", "reason", "failure_analysis"):
+            text = _compact_inline_text(snapshot.get(key), max_chars=180)
+            if text:
+                return text
+        missing = _sequence_of_strings(snapshot.get("missing_criteria"))
+        if missing:
+            return "needs: " + _compact_inline_text(missing[0], max_chars=150)
+        if snapshot.get("is_complete") is True:
+            return "verification passed"
+        return "verification needs another step"
+    return message
+
+
+def _flat_action_sentence(text: str) -> str:
+    normalized = _compact_inline_text(text, max_chars=220)
+    if not normalized:
+        return ""
+    if normalized.endswith((".", "!", "?")):
+        return normalized
+    return normalized + "."
+
+
+def _format_flat_plan_text(
+    *,
+    iteration: Any,
+    snapshot: Mapping[str, Any],
+    previous_action: str | None,
+) -> str:
+    label = _iteration_label(iteration)
+    plan = _flat_snapshot_detail("plan", snapshot)
+    expected = _compact_inline_text(snapshot.get("expected_evidence"), max_chars=180)
+    lines = [f"{label} plan ready."]
+    if previous_action:
+        lines.append(f"Previous completed action: {_flat_action_sentence(previous_action)}")
+    if plan:
+        lines.append(f"Current action plan: {_flat_action_sentence(plan)}")
+    if expected and expected != plan:
+        lines.append(f"Expected evidence: {_flat_action_sentence(expected)}")
+    return "\n".join(lines)
+
+
+def _format_flat_execution_text(*, iteration: Any, detail: str, failed: bool) -> str:
+    label = _iteration_label(iteration)
+    if failed:
+        return f"{label} action hit a setback: {_flat_action_sentence(detail)} Evidence was captured for recovery."
+    return f"{label} completed action: {_flat_action_sentence(detail)} The execution evidence was captured."
+
+
+def _format_flat_verification_text(*, iteration: Any, snapshot: Mapping[str, Any], detail: str) -> str:
+    label = _iteration_label(iteration)
+    if snapshot.get("is_complete") is True:
+        return f"{label} verification passed: {_flat_action_sentence(detail)}"
+    if snapshot.get("requires_block") is True:
+        return f"{label} verification found an issue that needs guidance: {_flat_action_sentence(detail)}"
+    next_steps = _sequence_of_strings(snapshot.get("next_step_requirements"))
+    if next_steps:
+        return f"{label} verification needs another step: {_flat_action_sentence(next_steps[0])}"
+    return f"{label} verification needs another step: {_flat_action_sentence(detail)}"
+
+
+def _format_flat_terminal_summary(value: Any, completed_actions: Sequence[str]) -> str:
+    base_result = _terminal_result_text(value)
+    lines = ["Task summary:"]
+    if completed_actions:
+        lines.append("What was done:")
+        for action in completed_actions[-6:]:
+            lines.append(f"- {_flat_action_sentence(action)}")
+    if base_result:
+        lines.append("")
+        lines.append("Result:")
+        lines.append(base_result)
+    return "\n".join(lines)
+
+
+def _markdown_table_cell(value: Any) -> str:
+    text = _compact_inline_text(value, max_chars=96)
+    return text.replace("|", "\\|") or "-"
+
+
+def _markdown_inline_code(value: Any) -> str:
+    return _compact_inline_text(value, max_chars=80).replace("`", "'") or "-"
 
 
 def _action_observation_text(value: Any, meta: Mapping[str, Any]) -> str:
@@ -116,19 +708,19 @@ def _action_observation_text(value: Any, meta: Mapping[str, Any]) -> str:
     status = str(value.get("status") or "").strip().lower()
     if phase == "started" or status == "started":
         text = f"Action started: {label}."
-        input_summary = _compact_inline_text(value.get("input_summary"))
+        input_summary = _action_input_text(value)
         if input_summary:
             text += f" Input: {input_summary}"
         return text
     if phase == "failed" or status in {"failed", "error", "timeout", "timed_out", "blocked"}:
-        text = f"Action failed: {label}."
+        text = f"Action setback: {label} failed."
         error = _compact_inline_text(value.get("error"))
         if error:
             text += f" Error: {error}"
         return text
     if phase == "completed" or value.get("success") is True or status in {"success", "succeeded", "completed", "ok"}:
         text = f"Action completed: {label}."
-        output_summary = _compact_inline_text(value.get("output_summary"))
+        output_summary = _action_output_text(value)
         if output_summary:
             text += f" Result: {output_summary}"
         refs_text = _action_refs_text(value)
@@ -136,6 +728,51 @@ def _action_observation_text(value: Any, meta: Mapping[str, Any]) -> str:
             text += f" Refs: {refs_text}"
         return text
     return f"Action update: {label} ({status})." if status else f"Action update: {label}."
+
+
+def _action_input_text(value: Mapping[str, Any]) -> str:
+    raw = value.get("input_summary")
+    if raw in (None, "", [], {}):
+        raw = value.get("input") or value.get("action_input")
+    if isinstance(raw, Mapping):
+        if raw.get("query") not in (None, ""):
+            return f"query={_compact_inline_text(raw.get('query'), max_chars=120)}"
+        if raw.get("url") not in (None, ""):
+            return f"url={_compact_inline_text(raw.get('url'), max_chars=160)}"
+        if raw.get("path") not in (None, ""):
+            return f"path={_compact_inline_text(raw.get('path'), max_chars=140)}"
+        if raw.get("cmd") not in (None, "") or raw.get("command") not in (None, ""):
+            return "command provided"
+        keys = [str(key) for key, item in raw.items() if item not in (None, "", [], {})]
+        return "inputs: " + ", ".join(keys[:4]) if keys else ""
+    if isinstance(raw, Sequence) and not isinstance(raw, str | bytes | bytearray):
+        return f"{len(raw)} input item(s)"
+    return _compact_inline_text(raw, max_chars=160)
+
+
+def _action_output_text(value: Mapping[str, Any]) -> str:
+    raw = value.get("output_summary")
+    if raw in (None, "", [], {}):
+        raw = value.get("result_summary") or value.get("result_preview") or value.get("output")
+    if isinstance(raw, Mapping):
+        path = raw.get("path")
+        if path not in (None, ""):
+            if raw.get("readable") is True:
+                return f"read {_compact_inline_text(path, max_chars=140)}"
+            if raw.get("writable") is True or raw.get("ok") is True:
+                return f"wrote {_compact_inline_text(path, max_chars=140)}"
+            return f"path {_compact_inline_text(path, max_chars=140)}"
+        if raw.get("content") not in (None, ""):
+            return "content preview available"
+        if raw.get("items") not in (None, "", [], {}):
+            items = raw.get("items")
+            if isinstance(items, Sequence) and not isinstance(items, str | bytes | bytearray):
+                return f"returned {len(items)} item(s)"
+        keys = [str(key) for key, item in raw.items() if item not in (None, "", [], {})]
+        return "structured result: " + ", ".join(keys[:4]) if keys else ""
+    if isinstance(raw, Sequence) and not isinstance(raw, str | bytes | bytearray):
+        return f"returned {len(raw)} item(s)"
+    return _compact_inline_text(raw, max_chars=180)
 
 
 def _action_refs_text(value: Mapping[str, Any]) -> str:
@@ -179,10 +816,14 @@ def _terminal_result_text(value: Any) -> str:
         return f"Final result:\n{text}" if text else "Task finished."
     status = str(value.get("status") or "").strip()
     accepted = value.get("accepted")
+    artifact_status = str(value.get("artifact_status") or "").strip()
+    final_response = str(value.get("final_response") or "").strip()
+    if final_response:
+        return final_response
     final_result = value.get("final_result")
     reason = str(value.get("reason") or "").strip()
     if final_result not in (None, ""):
-        heading = "Task completed" if status == "completed" or accepted is True else f"Task finished with status {status or 'unknown'}"
+        heading = _terminal_result_heading(status=status, accepted=accepted, artifact_status=artifact_status)
         return f"{heading}.\nFinal result:\n{_value_to_text(final_result)}"
     if reason:
         if status:
@@ -191,6 +832,32 @@ def _terminal_result_text(value: Any) -> str:
     if status:
         return f"Task finished with status {status}."
     return "Task finished."
+
+
+def _terminal_result_heading(*, status: str, accepted: Any, artifact_status: str) -> str:
+    normalized_artifact = artifact_status.lower().replace("-", "_")
+    if accepted is True and normalized_artifact == "degraded":
+        return "Task completed with disclosed limitations"
+    if accepted is False and normalized_artifact == "partial":
+        return "Partial result available"
+    if status == "completed" or accepted is True:
+        return "Task completed"
+    return f"Task finished with status {status or 'unknown'}"
+
+
+def _status_is_failed(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        if value.get("success") is False:
+            return True
+        status = str(value.get("status") or "").strip().lower()
+        if status in {"failed", "error", "blocked", "timeout", "timed_out", "cancelled"}:
+            return True
+        error = value.get("error")
+        if isinstance(error, Mapping) and error:
+            return True
+        if error not in (None, "", [], {}):
+            return True
+    return False
 
 
 def _value_to_text(value: Any) -> str:
@@ -217,6 +884,146 @@ def _format_retry_marker(value: Any) -> str:
     if not text:
         text = "Retrying model request."
     return f"<$retry>{html.escape(text, quote=False)}</$retry>"
+
+
+class AgentExecutionTextDeltaProjector:
+    """Stateful public-delta renderer for human-facing stream consumption."""
+
+    def __init__(self):
+        self._last_kind: str | None = None
+        self._last_text_tail = ""
+        self._taskboard_states: dict[str, dict[str, Mapping[str, Any]]] = {}
+        self._flat_last_completed_action: dict[str, str] = {}
+        self._flat_completed_actions: dict[str, list[str]] = {}
+
+    def project(self, item: Any) -> str | None:
+        text = project_agent_execution_text_delta(item)
+        if text is None:
+            return None
+        kind = self._projection_kind(item)
+        if kind == "taskboard":
+            text = self._project_taskboard_text(item, fallback=text)
+            if text is None:
+                return None
+        elif kind == "flat_snapshot":
+            text = self._project_flat_snapshot_text(item, fallback=text)
+            if text is None:
+                return None
+        elif kind == "flat_terminal":
+            text = self._project_flat_terminal_text(item, fallback=text)
+            if text is None:
+                return None
+        text = self._with_stream_boundaries(text, kind)
+        self._last_kind = kind
+        self._last_text_tail = text[-8:]
+        return text
+
+    def _projection_kind(self, item: Any) -> str:
+        path = str(getattr(item, "path", "") or "")
+        value = getattr(item, "value", None)
+        if _is_retry_status_marker_source(path, value):
+            return "retry"
+        if _taskboard_status_projection(path, value) is not None:
+            return "taskboard"
+        meta = getattr(item, "meta", None)
+        item_meta = meta if isinstance(meta, Mapping) else {}
+        if _flat_snapshot_projection(path, value, item_meta) is not None:
+            return "flat_snapshot"
+        source = str(getattr(item, "source", "") or "")
+        if path == "result" and source == "agent_task" and self._flat_completed_actions:
+            return "flat_terminal"
+        if getattr(item, "event_type", None) == "delta":
+            return "model_delta"
+        return "process"
+
+    def _project_taskboard_text(self, item: Any, *, fallback: str) -> str | None:
+        path = str(getattr(item, "path", "") or "")
+        value = getattr(item, "value", None)
+        projection = _taskboard_status_projection(path, value)
+        if projection is None:
+            return fallback
+        board_id = _clean_taskboard_text(projection.get("board_id")) or "taskboard"
+        current_state = _taskboard_card_state_map(projection)
+        previous_state = self._taskboard_states.get(board_id)
+        self._taskboard_states[board_id] = current_state
+        if previous_state is None or path == "agent_task.taskboard.plan":
+            return _format_taskboard_status_projection(projection)
+        return _format_taskboard_status_update(projection, previous_state)
+
+    def _project_flat_snapshot_text(self, item: Any, *, fallback: str) -> str | None:
+        path = str(getattr(item, "path", "") or "")
+        value = getattr(item, "value", None)
+        meta = getattr(item, "meta", None)
+        item_meta = meta if isinstance(meta, Mapping) else {}
+        projection = _flat_snapshot_projection(path, value, item_meta)
+        if projection is None:
+            return fallback
+        task_key = self._flat_task_key(item, projection)
+        iteration = projection.get("iteration")
+        stage = str(projection.get("stage") or "")
+        snapshot = projection.get("snapshot")
+        snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+        message = str(projection.get("message") or "")
+        detail = _flat_snapshot_detail(stage, snapshot, message)
+        if stage == "context":
+            self._flat_last_completed_action[task_key] = detail
+            return fallback
+        if stage == "plan":
+            return _paragraph(
+                _format_flat_plan_text(
+                    iteration=iteration,
+                    snapshot=snapshot,
+                    previous_action=self._flat_last_completed_action.get(task_key),
+                )
+            )
+        if stage == "execution":
+            failed = _status_is_failed(snapshot.get("execution_result"))
+            self._flat_last_completed_action[task_key] = detail
+            self._flat_completed_actions.setdefault(task_key, []).append(detail)
+            return _paragraph(_format_flat_execution_text(iteration=iteration, detail=detail, failed=failed))
+        if stage == "verification":
+            if snapshot.get("is_complete") is True:
+                self._flat_completed_actions.setdefault(task_key, []).append("verified the final result")
+            return _paragraph(_format_flat_verification_text(iteration=iteration, snapshot=snapshot, detail=detail))
+        return fallback
+
+    def _project_flat_terminal_text(self, item: Any, *, fallback: str) -> str | None:
+        value = getattr(item, "value", None)
+        task_key = self._flat_task_key(item, {})
+        actions = self._flat_completed_actions.get(task_key)
+        if not actions and self._flat_completed_actions:
+            actions = next(iter(self._flat_completed_actions.values()))
+        if not actions:
+            return fallback
+        return _paragraph(_format_flat_terminal_summary(value, actions))
+
+    def _flat_task_key(self, item: Any, projection: Mapping[str, Any]) -> str:
+        meta = getattr(item, "meta", None)
+        item_meta = meta if isinstance(meta, Mapping) else {}
+        return (
+            _clean_taskboard_text(projection.get("task_id"))
+            or _clean_taskboard_text(getattr(item, "task_id", ""))
+            or _clean_taskboard_text(item_meta.get("task_id"))
+            or "task"
+        )
+
+    def _with_stream_boundaries(self, text: str, kind: str) -> str:
+        if not text:
+            return text
+        if kind == "model_delta":
+            return text
+        if kind == "retry":
+            return self._ensure_leading_boundary(text).rstrip() + "\n\n"
+        if self._last_kind == "model_delta":
+            return self._ensure_leading_boundary(text)
+        return text
+
+    def _ensure_leading_boundary(self, text: str) -> str:
+        if not self._last_text_tail:
+            return text
+        if self._last_text_tail.endswith("\n\n"):
+            return text
+        return "\n\n" + text
 
 
 class AgentExecutionStream:

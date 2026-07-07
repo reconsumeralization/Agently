@@ -20,6 +20,8 @@ from typing import Any, TYPE_CHECKING, cast
 from agently.utils import DataFormatter
 from agently.utils.LanguagePolicy import language_policy_from_prompt_snapshot
 
+from .runtime_guidance import drain_pending_guidance_to_task
+
 if TYPE_CHECKING:
     from .execution import AgentExecution
 
@@ -46,6 +48,10 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             "accepted": False,
             "artifact_status": "blocked",
             "reason": reason,
+            "final_response": (
+                "Task encountered a blocking condition. "
+                f"No complete final deliverable was accepted. Reason: {reason}"
+            ),
         }
 
     task_options = execution.task_strategy_options()
@@ -155,6 +161,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             if callable(handler):
                 setattr(task, stage_name, handler)
     execution.task_record = task
+    await drain_pending_guidance_to_task(execution, task)
     execution.task_refs = {
         "task_id": task.id,
         "strategy": route_meta.get("strategy") or execution.strategy_name or "task",

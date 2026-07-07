@@ -29,6 +29,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 f"Iteration {iteration_index}: building a Workspace context pack for the task goal.",
             )
             await self._emit(f"agent_task.iteration.{iteration_index}.started", {"iteration": iteration_index})
+            await self._apply_guidance_boundary(iteration_index=iteration_index, boundary="flat_context")
             context_pack = await self._await_task_deadline(
                 self._build_context(),
                 stage="context",
@@ -390,12 +391,22 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
         if bool(verification.get("is_complete")):
             self.status = "completed"
+            final_result = verification.get("final_result") or execution_result
             self.result = {
                 "status": "completed",
                 "accepted": True,
                 "artifact_status": "accepted",
                 "task_id": self.id,
-                "final_result": verification.get("final_result") or execution_result,
+                "final_result": final_result,
+                "final_response": self._agent_task_user_final_response(
+                    final=verification,
+                    accepted=True,
+                    artifact_status="accepted",
+                    status="completed",
+                    reason=str(verification.get("reason") or ""),
+                    missing_criteria=verification.get("missing_criteria", []),
+                    final_result=final_result,
+                ),
                 "iterations": iteration_index,
                 "verification": verification,
             }
@@ -414,15 +425,30 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
         if verification.get("requires_block"):
             self.status = "blocked"
+            reason = verification.get("reason") or "Verifier blocked the task."
+            blocked_final_result = verification.get("final_result") or ""
+            blocked_final_refs = execution_result.get("file_refs", []) if isinstance(execution_result, Mapping) else []
             self.result = {
                 "status": "blocked",
                 "accepted": False,
                 "artifact_status": "blocked",
                 "task_id": self.id,
-                "reason": verification.get("reason") or "Verifier blocked the task.",
+                "reason": reason,
+                "final_response": self._agent_task_user_final_response(
+                    final=verification,
+                    accepted=False,
+                    artifact_status="blocked",
+                    status="blocked",
+                    reason=str(reason),
+                    missing_criteria=verification.get("missing_criteria", []),
+                    final_refs=blocked_final_refs,
+                    final_result=blocked_final_result,
+                ),
                 "iterations": iteration_index,
                 "verification": verification,
             }
+            if blocked_final_result not in (None, ""):
+                self.result["final_result"] = blocked_final_result
             await self._emit_progress(
                 iteration_index,
                 "blocked",
@@ -447,15 +473,29 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             else:
                 self.status = "max_iterations"
                 reason = verification.get("reason") or "Task did not pass verification before max_iterations."
+            partial_final_result = verification.get("final_result") or ""
+            partial_final_refs = execution_result.get("file_refs", []) if isinstance(execution_result, Mapping) else []
             self.result = {
                 "status": self.status,
                 "accepted": False,
                 "artifact_status": "partial",
                 "task_id": self.id,
                 "reason": reason,
+                "final_response": self._agent_task_user_final_response(
+                    final=verification,
+                    accepted=False,
+                    artifact_status="partial",
+                    status=self.status,
+                    reason=str(reason),
+                    missing_criteria=verification.get("missing_criteria", []),
+                    final_refs=partial_final_refs,
+                    final_result=partial_final_result,
+                ),
                 "iterations": iteration_index,
                 "verification": verification,
             }
+            if partial_final_result not in (None, ""):
+                self.result["final_result"] = partial_final_result
             if missing_capabilities:
                 self.result["missing_required_capabilities"] = missing_capabilities
             await self._emit_progress(
@@ -579,12 +619,13 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
     async def _build_context(self) -> "WorkspaceContextPackage":
         try:
-            return await self.workspace.build_context(
+            context_pack = await self.workspace.build_context(
                 goal=self.goal,
                 scope={"task_id": self.id},
                 budget=self.context_budget,
                 profile=self.context_profile,
             )
+            return self._context_pack_with_guidance(context_pack)
         except Exception as error:
             fallback_reason: dict[str, Any] = {
                 "type": error.__class__.__name__,
@@ -608,19 +649,21 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                         fallback_error, fallback=fallback_error.__class__.__name__
                     ),
                 }
-                return cast(
-                    "WorkspaceContextPackage",
-                    {
-                        "goal": self.goal,
-                        "profile": self.context_profile,
-                        "items": [],
-                        "omitted": [],
-                        "diagnostics": {"fallback_reason": fallback_reason},
-                    },
+                return self._context_pack_with_guidance(
+                    cast(
+                        "WorkspaceContextPackage",
+                        {
+                            "goal": self.goal,
+                            "profile": self.context_profile,
+                            "items": [],
+                            "omitted": [],
+                            "diagnostics": {"fallback_reason": fallback_reason},
+                        },
+                    )
                 )
             diagnostics = fallback.setdefault("diagnostics", {})
             diagnostics["fallback_reason"] = fallback_reason
-            return fallback
+            return self._context_pack_with_guidance(fallback)
 
     def _step_execution_policy(self) -> dict[str, Any]:
         agent_task_options = self.options.get("agent_task")
@@ -815,6 +858,13 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
         normalized["step_scope"] = {"allowed_capability_ids": allowed_capability_ids}
         normalized["allowed_action_ids"] = allowed_capability_ids
+        required_action_ids = self._normalize_string_list(
+            normalized.get("required_action_ids")
+            or normalized.get("required_actions")
+            or raw_scope.get("required_action_ids")
+            or raw_scope.get("required_actions")
+        )
+        normalized["required_action_ids"] = required_action_ids
         scoped_retrieval = self._normalize_scoped_retrieval_plan(normalized.get("scoped_retrieval"))
         if scoped_retrieval:
             normalized["scoped_retrieval"] = scoped_retrieval
@@ -1066,16 +1116,52 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         if not isinstance(step_scope, dict):
             step_scope = {}
         allowed_capability_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
-        if allowed_capability_ids and effective_shape in {"direct", "actions"}:
-            local_action_ids = getattr(execution, "local_action_ids", None)
-            if isinstance(local_action_ids, list):
-                for capability_id in allowed_capability_ids:
-                    if capability_id not in local_action_ids:
-                        local_action_ids.append(capability_id)
-            sync_action_scope = getattr(execution, "_sync_action_scope", None)
-            if callable(sync_action_scope):
-                sync_action_scope(source="AgentTask.step_scope")
-        action_scope_source = "step_scope" if allowed_capability_ids else ""
+        raw_required_action_ids = self._normalize_string_list(plan.get("required_action_ids"))
+        task_contract_required_action_ids = self._task_contract_required_action_ids()
+        task_required_action_ids = [
+            action_id for action_id in raw_required_action_ids if action_id in task_contract_required_action_ids
+        ]
+        step_required_action_ids = [
+            action_id for action_id in raw_required_action_ids if action_id not in task_contract_required_action_ids
+        ]
+        scoped_action_ids = self._merge_string_lists(allowed_capability_ids, step_required_action_ids)
+        if scoped_action_ids and effective_shape in {"direct", "actions"}:
+            use_actions = getattr(execution, "use_actions", None)
+            if callable(use_actions):
+                use_actions(scoped_action_ids)
+            else:
+                local_action_ids = getattr(execution, "local_action_ids", None)
+                if isinstance(local_action_ids, list):
+                    for capability_id in scoped_action_ids:
+                        if capability_id not in local_action_ids:
+                            local_action_ids.append(capability_id)
+                sync_action_scope = getattr(execution, "_sync_action_scope", None)
+                if callable(sync_action_scope):
+                    sync_action_scope(source="AgentTask.step_scope")
+        action_scope_source = (
+            "step_required_action_ids"
+            if step_required_action_ids
+            else ("step_scope" if allowed_capability_ids else "")
+        )
+        if task_required_action_ids and effective_shape in {"direct", "actions"}:
+            require_actions = getattr(execution, "require_actions", None)
+            if callable(require_actions):
+                require_actions(task_required_action_ids)
+            else:
+                local_action_ids = getattr(execution, "local_action_ids", None)
+                if isinstance(local_action_ids, list):
+                    for action_id in task_required_action_ids:
+                        if action_id not in local_action_ids:
+                            local_action_ids.append(action_id)
+                local_required_action_ids = getattr(execution, "local_required_action_ids", None)
+                if isinstance(local_required_action_ids, list):
+                    for action_id in task_required_action_ids:
+                        if action_id not in local_required_action_ids:
+                            local_required_action_ids.append(action_id)
+                sync_action_scope = getattr(execution, "_sync_action_scope", None)
+                if callable(sync_action_scope):
+                    sync_action_scope(source="AgentTask.required_action_ids")
+            action_scope_source = "required_action_ids"
         if effective_shape == "actions" and not allowed_capability_ids:
             action_capability_ids = [
                 str(item.get("id") or "").strip()
@@ -1095,6 +1181,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "dag_allowed": dag_allowed,
             "dag_shape_degraded": dag_shape_degraded,
             "step_scope": DataFormatter.sanitize(step_scope),
+            "required_action_ids": DataFormatter.sanitize(raw_required_action_ids),
+            "task_required_action_ids": DataFormatter.sanitize(task_required_action_ids),
+            "step_required_action_ids": DataFormatter.sanitize(step_required_action_ids),
             "action_scope_source": action_scope_source,
             "policy": DataFormatter.sanitize(policy),
         }
@@ -1284,6 +1373,30 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 pending.append(capability_id)
         return pending
 
+    def _task_contract_required_action_ids(self) -> set[str]:
+        required: set[str] = set()
+        option_sources: list[Any] = [self.options]
+        agent_task_options = self.options.get("agent_task") if isinstance(self.options, Mapping) else None
+        if isinstance(agent_task_options, Mapping):
+            option_sources.append(agent_task_options)
+        for source in option_sources:
+            if not isinstance(source, Mapping):
+                continue
+            constraints = source.get("capability_constraints")
+            if isinstance(constraints, Mapping):
+                actions = constraints.get("actions")
+                raw_required = actions.get("required", []) if isinstance(actions, Mapping) else constraints.get("required_actions", [])
+                required.update(self._normalize_string_list(raw_required))
+        for requirement in self._capability_evidence_requirements():
+            if not requirement.get("required", True):
+                continue
+            if str(requirement.get("kind") or "capability_used") != "action_succeeded":
+                continue
+            capability_id = str(requirement.get("capability_id") or "").strip()
+            if capability_id:
+                required.add(capability_id)
+        return required
+
     def _untried_read_action_continuation(
         self,
         execution_evidence_summary: Mapping[str, Any],
@@ -1397,7 +1510,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
                 "iteration": iteration_index,
                 "previous_iterations": previous_iterations,
                 "repair_context": repair_context,
@@ -1434,9 +1547,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "Before choosing the execution shape, provide short turn_intent and decision_basis fields to frame this "
             "single-step decision; do not include raw chain-of-thought, hidden reasoning, or completion claims there. "
             "Treat execution_prompt as caller-provided task context, including any input, instructions, and output contract. "
-            "Use task_context_contract.current_time for current-time facts and current/latest/as-of source boundaries, "
-            "and use task_context_contract for ref-backed "
-            "intermediate-resource handling. It is not a resource cap. "
+            "Use task_context_contract for prompt-safe temporal policy and ref-backed intermediate-resource handling. "
+            "Concrete runtime current_time values may be omitted from the model hot path; do not infer or write a "
+            "current date/time as a business fact unless it appears in task facts or source evidence. It is not a resource cap. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
             "When repair_context is present, use it as verification feedback: understand why prior work was incomplete, "
             "compare the acceptance delta, and then choose the next bounded step. The verifier does not choose tools, "
@@ -1458,7 +1571,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             + strategy_note
             + capability_note
             + " Optionally set step_scope.allowed_capability_ids to limit this bounded step to specific capability "
-            "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability."
+            "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability. "
+            "When the user explicitly requires a named action/tool to be called, or the next step cannot be accepted "
+            "without that exact action's execution record, set required_action_ids to those action ids instead of "
+            "claiming the action was requested in prose."
             " For Workspace, repository, or file-backed evidence, prefer scoped retrieval before bulk reads when it can "
             "reduce prompt input. If useful, return scoped_retrieval.query_groups with prioritized exact phrases or "
             "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. Workspace.retrieve/read executors only "
@@ -1516,6 +1632,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "step_scope": (
                     dict,
                     "Optional structured scope: {allowed_capability_ids: [...]}; empty means no restriction",
+                    False,
+                ),
+                "required_action_ids": (
+                    [str],
+                    "Action ids that must produce real ActionRuntime evidence in this bounded step; use for explicit user-required tools/actions",
                     False,
                 ),
                 "scoped_retrieval": (
@@ -1632,7 +1753,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "task_id": self.id,
             "goal": self.goal,
             "success_criteria": self.success_criteria,
-            "task_context_contract": self._task_context_contract(),
+            "task_context_contract": self._task_context_contract_for_model_prompt(),
             "iteration": iteration_index,
             "plan": DataFormatter.sanitize(plan),
             "step_execution": step_execution,
@@ -1659,9 +1780,15 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     f"The AgentTask requested execution_strategy is {self.execution_strategy}; "
                     f"the effective execution_strategy is {self.effective_execution_strategy or self.execution_strategy}. "
                     "Respect the caller-provided execution_prompt context and output contract when present. "
-                    "Use task_context_contract.current_time when the task asks for current/latest/as-of evidence, and "
+                    "Use task_context_contract for prompt-safe temporal policy; do not infer or write a current "
+                    "date/time as a business fact unless it appears in task facts or source evidence. "
                     "keep downloads, web snapshots, notes, generated code, and large extracted text as refs until scoped "
                     "readback is needed. "
+                    "Unless the user explicitly requests a fill-in template, do not leave unresolved placeholders such as "
+                    "[date], [time], [name], [Your Name], [Title], TODO, or TBD in a final deliverable; omit unknown "
+                    "details or write a role-generic sentence grounded in available facts. "
+                    "When evidence says no data loss is known and an audit is still running, do not state or imply that data "
+                    "is intact, complete, safe, fully verified, or that no data was lost. "
                     "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
                     "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
                     "of burying the only copy inside evidence when it fits the bounded output. If the plan deliverable_mode "
@@ -1919,7 +2046,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
     async def _bridge_step_execution_stream(self, iteration_index: int, execution: Any) -> None:
         try:
-            async for item in execution.get_async_generator(type="instant"):
+            async for stream_record in execution.get_async_generator(type="all"):
+                if isinstance(stream_record, tuple) and len(stream_record) == 2:
+                    _, item = stream_record
+                else:
+                    item = stream_record
                 await self._emit_step_execution_stream_item(iteration_index, execution, item)
         except asyncio.CancelledError:
             raise

@@ -487,6 +487,7 @@ class TriggerFlowActionFlow:
                     },
                     handler=str(policy.get("policy_approval_handler") or "") or None,
                     resume_to="self",
+                    settings=settings,
                 )
                 if isinstance(gate_result, TriggerFlowPauseSignal):
                     return gate_result
@@ -552,6 +553,19 @@ class TriggerFlowActionFlow:
                     run=action_run,
                 )
 
+            trusted_policy_overrides: dict[int, dict[str, Any]] = {}
+            for command_index, command in enumerate(action_calls):
+                command_action_id = str(command.get("action_id", command.get("tool_name", "")))
+                decision_key = f"{ round_index }:{ command_index }:{ command_action_id }"
+                decision = approval_decisions.get(decision_key)
+                if isinstance(decision, dict) and decision.get("status") == "approved":
+                    # Approval grants travel host-side: the dispatcher strips
+                    # policy_approval_granted from model-planned commands, so
+                    # the grant must never rely on the action_call payload.
+                    trusted_policy_overrides[command_index] = {
+                        "policy_approval_granted": True,
+                        "policy_approval_decision": dict(decision),
+                    }
             records = action._normalize_execution_records(
                 await resolved_execution_handler(
                     {
@@ -571,6 +585,7 @@ class TriggerFlowActionFlow:
                         "async_call_action": action.async_call_action,
                         "concurrency": concurrency,
                         "timeout": timeout,
+                        "trusted_policy_overrides": trusted_policy_overrides,
                     },
                 ),
                 action_calls,
@@ -666,24 +681,216 @@ class TriggerFlowActionFlow:
         flow.when("DONE").to(finalize_loop)
 
         execution = flow.create_execution(parent_run_context=action_loop_run, auto_close=False)
+        exchange_paused = False
         try:
             with bind_runtime_context(
                 parent_run_context=action_loop_run,
                 tool_phase_run_context=action_loop_run,
                 settings=settings,
             ):
+                async def build_exchange_paused_records():
+                    """End the run with typed paused records instead of raising.
+
+                    The execution stays open and registered as a live wait so a
+                    host can still respond in process; a snapshot is saved when
+                    a snapshot store is bound so a cold host can recover it.
+                    """
+                    from agently.base import execution_exchange
+
+                    pending = execution.get_pending_interrupts()
+                    pending_views = execution_exchange.project_pending_exchanges(execution)
+                    snapshot_ref = None
+                    if getattr(execution, "_snapshot_store", None) is not None:
+                        try:
+                            snapshot_ref = await execution.async_save(step_id="exchange-pending")
+                        except BaseException:
+                            snapshot_ref = None
+                    respond_keys: list[str] = []
+                    for pending_interrupt in pending.values():
+                        pending_envelope = pending_interrupt.get("external_wait_request")
+                        pending_envelope = pending_envelope if isinstance(pending_envelope, dict) else {}
+                        respond_keys.append(
+                            execution_exchange.register_live_wait(
+                                execution=execution,
+                                interrupt_id=str(pending_interrupt.get("id", "")),
+                                exchange_id=pending_envelope.get("exchange_id"),
+                            )
+                        )
+                    pending_action = execution.get_state("pending_policy_approval_action", {})
+                    if not isinstance(pending_action, dict):
+                        pending_action = {}
+                    action_id = str(pending_action.get("action_id", pending_action.get("tool_name", "")) or "")
+                    exchange_meta = {
+                        "pending": pending_views,
+                        "execution_id": execution.id,
+                        "flow_name": flow.name,
+                        "snapshot_ref": snapshot_ref,
+                        "respond_keys": respond_keys,
+                    }
+                    paused_record = {
+                        "ok": False,
+                        "status": "approval_required",
+                        "success": False,
+                        "purpose": str(pending_action.get("purpose", "Wait for human exchange response.")),
+                        "action_id": action_id or "execution_exchange",
+                        "tool_name": str(pending_action.get("tool_name", action_id) or "execution_exchange"),
+                        "kwargs": pending_action.get("action_input", {}),
+                        "result": None,
+                        "data": None,
+                        "error": "Waiting for a human exchange response.",
+                        "approval": {
+                            "required": True,
+                            "decision": {"status": "pending", "approved": False, "reason": "Waiting for a human exchange response."},
+                        },
+                        "meta": {"exchange": exchange_meta},
+                    }
+                    records = action._normalize_execution_records([paused_record], [pending_action])
+                    done_plans = execution.get_state("done_plans", [])
+                    if not isinstance(done_plans, list):
+                        done_plans = []
+                    await publish_runtime_observation(
+                        "exchange_paused",
+                        level="WARNING",
+                        message=f"Action loop paused on a pending human exchange for agent '{ agent_name }'.",
+                        payload={
+                            "agent_name": agent_name,
+                            "exchange": execution._to_serializable_value(exchange_meta),
+                        },
+                    )
+                    return [*done_plans, *records]
+
+                async def resolve_exchange_waits():
+                    """Drive pending HITL exchanges after the flow settles.
+
+                    Returns None when the loop can close normally, or the final
+                    record list when this run ends paused on a durable wait.
+                    """
+                    from agently.base import execution_exchange
+
+                    while True:
+                        pending = execution.get_pending_interrupts()
+                        if not pending:
+                            return None
+                        interrupt = next(iter(pending.values()))
+                        interrupt_id = str(interrupt.get("id", ""))
+                        envelope = interrupt.get("external_wait_request")
+                        envelope = envelope if isinstance(envelope, dict) else {}
+                        wait_mode = str(envelope.get("wait_mode") or "disconnected")
+                        cold_policy = str(envelope.get("cold_persistence_policy") or "persist")
+                        pending_exchange_views = execution._to_serializable_value(
+                            execution_exchange.project_pending_exchanges(execution)
+                        )
+                        await publish_runtime_observation(
+                            "exchange_pending",
+                            level="WARNING",
+                            message=f"Action loop is waiting on a human exchange for agent '{ agent_name }'.",
+                            payload={
+                                "agent_name": agent_name,
+                                "interrupt_id": interrupt_id,
+                                "wait_mode": wait_mode,
+                                "pending_exchanges": pending_exchange_views,
+                            },
+                        )
+                        await self._notify_agent_execution_exchange(
+                            "pending",
+                            pending_exchange_views if isinstance(pending_exchange_views, list) else [],
+                            interrupt_id=interrupt_id,
+                        )
+                        provider = execution_exchange._resolve_interrupt_provider(execution, interrupt)
+                        if provider is None and wait_mode != "disconnected":
+                            # Nobody was told about this exchange (publish went
+                            # nowhere), so waiting cannot resolve it. Resume
+                            # with a denial instead of hanging or raising.
+                            await execution.async_continue_with(
+                                interrupt_id,
+                                {
+                                    "status": "denied",
+                                    "approved": False,
+                                    "reason": "No ExecutionExchange provider is configured to deliver this exchange.",
+                                },
+                                resume_request_id=f"exchange:{ execution.id }:{ interrupt_id }:no-provider",
+                                actor="exchange_policy",
+                            )
+                            continue
+                        if wait_mode in ("connected", "connected_then_disconnected"):
+                            resolved = await execution_exchange.async_hot_wait(execution, interrupt)
+                            if resolved:
+                                await publish_runtime_observation(
+                                    "exchange_resolved",
+                                    message=f"Human exchange resolved for agent '{ agent_name }'.",
+                                    payload={
+                                        "agent_name": agent_name,
+                                        "interrupt_id": interrupt_id,
+                                    },
+                                )
+                                resolved_interrupt = execution.get_interrupt(interrupt_id)
+                                resolved_views = (
+                                    [
+                                        execution._to_serializable_value(
+                                            execution_exchange.project_exchange(execution.id, resolved_interrupt)
+                                        )
+                                    ]
+                                    if isinstance(resolved_interrupt, dict)
+                                    else []
+                                )
+                                await self._notify_agent_execution_exchange(
+                                    "resolved",
+                                    resolved_views,
+                                    interrupt_id=interrupt_id,
+                                )
+                                continue
+                            if wait_mode == "connected":
+                                # Deny-by-timeout keeps pure connected mode
+                                # deterministic: the gate resumes with a denial
+                                # and the model sees a blocked record.
+                                await execution.async_continue_with(
+                                    interrupt_id,
+                                    {
+                                        "status": "denied",
+                                        "approved": False,
+                                        "reason": "Exchange hot wait timed out before a human response arrived.",
+                                    },
+                                    resume_request_id=f"exchange:{ execution.id }:{ interrupt_id }:timeout",
+                                    actor="exchange_timeout",
+                                )
+                                continue
+                        if cold_policy != "persist":
+                            await execution.async_continue_with(
+                                interrupt_id,
+                                {
+                                    "status": "denied",
+                                    "approved": False,
+                                    "reason": f"Exchange wait was not persisted (cold_persistence_policy={ cold_policy }).",
+                                },
+                                resume_request_id=f"exchange:{ execution.id }:{ interrupt_id }:{ cold_policy }",
+                                actor="exchange_policy",
+                            )
+                            continue
+                        return await build_exchange_paused_records()
+
                 async def run_action_loop():
-                    await execution.async_start()
+                    nonlocal exchange_paused
+                    if timeout is None:
+                        await execution.async_start()
+                    else:
+                        await asyncio.wait_for(execution.async_start(), timeout=float(timeout))
+                    paused_records = await resolve_exchange_waits()
+                    if paused_records is not None:
+                        exchange_paused = True
+                        self._record_agent_execution_progress("action_loop_paused", "exchange_pending", planning_protocol)
+                        return {"action_loop_result": paused_records}
                     self._record_agent_execution_progress("action_loop_close", "started", planning_protocol)
-                    close_result = await execution.async_close(timeout=timeout)
+                    if timeout is None:
+                        close_result = await execution.async_close()
+                    else:
+                        close_result = await asyncio.wait_for(
+                            execution.async_close(timeout=timeout), timeout=float(timeout)
+                        )
                     self._record_agent_execution_progress("action_loop_close", "completed", planning_protocol)
                     return close_result
 
                 try:
-                    if timeout is None:
-                        result = await run_action_loop()
-                    else:
-                        result = await asyncio.wait_for(run_action_loop(), timeout=float(timeout))
+                    result = await run_action_loop()
                 except asyncio.TimeoutError as error:
                     try:
                         await execution.async_close(
@@ -725,15 +932,48 @@ class TriggerFlowActionFlow:
             settings=settings,
         ):
             await publish_runtime_observation(
-                "loop_completed",
-                message=f"Action loop completed for agent '{ agent_name }'.",
-                compat_message=f"Tool loop completed for agent '{ agent_name }'.",
+                "loop_paused" if exchange_paused else "loop_completed",
+                level="WARNING" if exchange_paused else "INFO",
+                message=(
+                    f"Action loop paused on a pending human exchange for agent '{ agent_name }'."
+                    if exchange_paused
+                    else f"Action loop completed for agent '{ agent_name }'."
+                ),
+                compat_message=(
+                    f"Tool loop paused for agent '{ agent_name }'."
+                    if exchange_paused
+                    else f"Tool loop completed for agent '{ agent_name }'."
+                ),
                 payload={
                     "agent_name": agent_name,
                     "record_count": len(normalized),
+                    "exchange_paused": exchange_paused,
                 },
             )
         return normalized
+
+    @staticmethod
+    async def _notify_agent_execution_exchange(
+        action: str,
+        exchanges: list[Any],
+        *,
+        interrupt_id: str | None = None,
+    ):
+        """Project an exchange lifecycle moment onto the owning AgentExecution.
+
+        No-op for plain agent requests: the contextvar only carries an
+        AgentExecutionContext when an AgentExecution owns this run.
+        """
+        context = get_current_agent_execution_context()
+        notify = getattr(context, "async_notify_exchange", None)
+        if callable(notify):
+            result = notify(
+                action,
+                [item for item in exchanges if isinstance(item, dict)],
+                meta={"interrupt_id": interrupt_id} if interrupt_id else None,
+            )
+            if inspect.isawaitable(result):
+                await result
 
     def _record_agent_execution_progress(
         self,

@@ -20,7 +20,10 @@ from collections.abc import AsyncGenerator, Generator, Mapping
 from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
-from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
+from agently.core.application.AgentExecution.Stream import (
+    AgentExecutionTextDeltaProjector,
+    project_agent_execution_text_delta,
+)
 from agently.types.data import AgentExecutionStreamData
 from agently.utils import DataFormatter, FunctionShifter
 
@@ -65,6 +68,9 @@ async def async_get_text(
     data = await owner.async_get_data(parent_run_context=parent_run_context, **kwargs)
     if isinstance(data, str):
         return data
+    final_response = _final_response_from_data(data)
+    if final_response:
+        return final_response
     return json.dumps(DataFormatter.sanitize(data), ensure_ascii=False)
 
 
@@ -83,9 +89,10 @@ async def get_async_generator(
 ) -> AsyncGenerator[Any, None]:
     if content is not None and type is None:
         type = content
+    text_projector = AgentExecutionTextDeltaProjector() if type in {"delta", "instant"} else None
     if owner._completed:
         for item in owner.stream.items:
-            for projected in _project_stream_items(item, type):
+            for projected in _project_stream_items(item, type, text_projector=text_projector):
                 yield projected
         return
     queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -99,7 +106,7 @@ async def get_async_generator(
             item = await queue.get()
             if item is None:
                 break
-            for projected in _project_stream_items(item, type):
+            for projected in _project_stream_items(item, type, text_projector=text_projector):
                 yield projected
         await start_task
     finally:
@@ -107,24 +114,63 @@ async def get_async_generator(
             owner.stream.queues.remove(queue)
 
 
-def _project_stream_items(item: Any, type: Any) -> Generator[Any, None, None]:
+def _project_stream_items(
+    item: Any,
+    type: Any,
+    *,
+    text_projector: AgentExecutionTextDeltaProjector | None = None,
+) -> Generator[Any, None, None]:
     if type == "all":
         yield ("agent_execution", item)
         return
     if type == "delta":
-        projected = project_agent_execution_text_delta(item)
+        projected = (
+            text_projector.project(item)
+            if text_projector is not None
+            else project_agent_execution_text_delta(item)
+        )
         if projected is not None:
             yield projected
         return
     yield item
     if type == "instant":
-        projected = _project_instant_delta_item(item)
+        projected = _project_instant_delta_item(item, text_projector=text_projector)
         if projected is not None:
             yield projected
 
 
-def _project_instant_delta_item(item: Any) -> AgentExecutionStreamData | None:
-    delta = project_agent_execution_text_delta(item)
+def _final_response_from_data(data: Any) -> str:
+    if not isinstance(data, Mapping):
+        return ""
+    if _looks_like_terminal_result(data):
+        final_response = str(data.get("final_response") or "").strip()
+        if final_response:
+            return final_response
+    result = data.get("result")
+    if isinstance(result, Mapping) and _looks_like_terminal_result(result):
+        return str(result.get("final_response") or "").strip()
+    return ""
+
+
+def _looks_like_terminal_result(data: Mapping[str, Any]) -> bool:
+    if "status" not in data:
+        return False
+    if "accepted" in data or "artifact_status" in data:
+        return True
+    final_response = str(data.get("final_response") or "").strip()
+    if final_response and data.get("task_id") not in (None, ""):
+        return True
+    if final_response and isinstance(data.get("taskboard"), Mapping):
+        return True
+    return False
+
+
+def _project_instant_delta_item(
+    item: Any,
+    *,
+    text_projector: AgentExecutionTextDeltaProjector | None = None,
+) -> AgentExecutionStreamData | None:
+    delta = text_projector.project(item) if text_projector is not None else project_agent_execution_text_delta(item)
     if delta is None:
         return None
     item_meta = getattr(item, "meta", None)

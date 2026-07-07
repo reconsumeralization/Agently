@@ -71,6 +71,12 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                         "accepted": False,
                         "artifact_status": "partial",
                         "reason": reason,
+                        "final_response": self._agent_task_user_final_response(
+                            accepted=False,
+                            artifact_status="partial",
+                            status=self.status,
+                            reason=reason,
+                        ),
                         "iterations": len(self.iterations),
                     }
                     await self._emit("agent_task.blocked", self.result)
@@ -131,6 +137,12 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             "artifact_status": "partial",
             "task_id": self.id,
             "reason": reason,
+            "final_response": self._agent_task_user_final_response(
+                accepted=False,
+                artifact_status="partial",
+                status="timed_out",
+                reason=reason,
+            ),
             "iterations": len(self.iterations),
         }
         self.diagnostics.setdefault("terminal_reason", "timed_out")
@@ -362,9 +374,13 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         try:
             while True:
                 await asyncio.sleep(interval)
-                quiet_for = time.monotonic() - self._last_stream_emit_monotonic
+                now = time.monotonic()
+                quiet_for = now - self._last_stream_emit_monotonic
                 if quiet_for < interval:
                     continue
+                if now - self._last_heartbeat_emit_monotonic < interval:
+                    continue
+                self._last_heartbeat_emit_monotonic = now
                 await self._emit(
                     "agent_task.heartbeat",
                     {

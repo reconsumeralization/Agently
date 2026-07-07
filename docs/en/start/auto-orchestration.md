@@ -160,11 +160,45 @@ consume data, text, stream, metadata, status, and task refs through
 `execution.get_result()` or the execution stream/meta facade instead of treating
 `AgentTask` as a second public lifecycle.
 
-`execution="auto"` is the default task execution strategy. In `auto`, AgentTask
-asks the model for a natural-language task-shape analysis plus a thin structured
-`execution_hint`, then the strategy policy resolves the actual shape to `flat`
-or `taskboard`. The hint is only strategy evidence; TaskBoard does not classify
-the task, and the verifier cannot accept the hint as completion evidence. Use
+While a task-strategy `AgentExecution` is still running, host code may add
+non-blocking operator context with `await execution.async_add_guidance(...)` or
+`execution.add_guidance(...)`. Guidance is recorded immediately, written to the
+retained AgentTask Workspace under `workspace_refs["guidance"]`, surfaced in
+`guidance_items` / `guidance_refs`, and applied at the next safe Flat or
+TaskBoard boundary. It does not pause execution, does not mutate non-task route
+prompts, and does not count as completion evidence.
+
+```python
+execution = agent.create_task(
+    goal="Prepare the incident summary.",
+    success_criteria=["The answer reflects the latest operator context."],
+    execution="flat",
+)
+
+run_task = asyncio.create_task(execution.async_get_data())
+
+await execution.async_add_guidance(
+    "Use the newly uploaded incident note as primary context.",
+    author="operator",
+)
+
+data = await run_task
+meta = await execution.async_get_meta()
+guidance_refs = meta["task_refs"]["workspace_refs"]["guidance"]
+```
+
+`AgentExecution.strategy("auto" | "direct" | "flat" | "taskboard")` is the
+top-level route/execution selector. `direct` forces the ordinary
+`model_request` route with the ActionLoop and does not create an AgentTask, even
+when goal-like fields are present; host code owns any completion validation on
+that route. `auto` is the default: ordinary prompt/action runs stay direct,
+while explicit goals, success criteria, task options, Skill selectors, or other
+task signals enter AgentTask. Once AgentTask is selected, `execution="auto"` is
+the default task execution strategy: AgentTask asks the model for a
+natural-language task-shape analysis plus a thin structured `execution_hint`,
+then the strategy policy resolves the actual shape to `flat` or `taskboard`.
+The hint is only strategy evidence; TaskBoard does not classify the task, and
+the verifier cannot accept the hint as completion evidence. Use
 `execution="flat"` or `.strategy("flat")` to force the linear loop, and
 `execution="taskboard"` or `.strategy("taskboard")` only when the host
 explicitly wants TaskBoard. Nested AgentExecution instances inherit the parent
@@ -231,10 +265,12 @@ turning Workspace into an autonomous planner.
 
 TaskBoard checkpoints also include bounded orientation projections for long
 runs: an acceptance index over declared criteria/card refs and a handoff
-projection with active/blocked/deferred cards, evidence refs, artifact refs, and
-explicit state facts. These projections help resume or inspect the board without
-replaying raw traces. They are not `EvidenceEnvelope` evidence and do not accept
-the task; semantic completion still belongs to the verifier plus host guards.
+projection with active/setback/blocked/deferred cards, evidence refs, artifact
+refs, and explicit state facts. `setback` means a recoverable execution setback
+such as readback, repair, patch, or continuation work; it is not a hard stop.
+These projections help resume or inspect the board without replaying raw traces.
+They are not `EvidenceEnvelope` evidence and do not accept the task; semantic
+completion still belongs to the verifier plus host guards.
 
 AgentTask verification remains model-owned, but completion acceptance is
 conservative. The loop normalizes verifier output and will not accept a task as
@@ -270,8 +306,23 @@ model input.
 
 For text consumers, `get_async_generator(type="delta")` remains the public text
 stream. In task-strategy executions it includes model-generated text increments
-and also projects selected process events into paragraph text: template progress,
-snapshots, heartbeat status, phase status, retry markers, and the terminal task result.
+and also projects selected process events into operator-readable paragraph
+text: template progress, snapshots, phase status, action observations,
+Flat plan/action summaries, TaskBoard status tables, retry markers, and the terminal task
+result. These public text projections intentionally summarize instead of
+dumping raw JSON payloads: action inputs/results are compact, recoverable
+failures are presented as setbacks, terminal results prefer `final_response`
+when available, and process
+paragraphs are separated from model body deltas so CLI-style consumers do not
+print glued-together text. Flat projections are linear display-only summaries:
+plan completion states the previous completed action and current action plan,
+and terminal output summarizes what was done and the result. TaskBoard tables
+remain display-only projections from structured AgentTask events: the first
+TaskBoard projection renders a compact table, and later ticks summarize
+card-state changes instead of reprinting the whole table. TaskBoard state is
+summarized as not started, in progress, completed, failed, or degraded;
+completion and quality still come from verifier and host-guard facts, not from
+the projected text.
 Use `type="instant"` when the UI needs the original structured event payloads
 with `path`, `value`, `delta`, `is_complete`, and `meta`. When a structured
 execution item can also be represented as natural-language stream text,
@@ -280,7 +331,14 @@ execution item can also be represented as natural-language stream text,
 `event_type="delta"`, `source="agent_execution"`, and
 `meta["stream_kind"] == "text_projection"` with source-path metadata. It is a
 consumer projection only: `type="all"` stays the raw audit stream and does not
-include synthetic `$delta` items.
+include synthetic `$delta` items. Heartbeat items are intentionally
+structured-only in `instant`: they do not append synthetic `$delta` text.
+For richer UI, consume `instant`: render source-addressed structured paths as
+state, render synthetic `$delta` as visible process text, and keep model body
+paths separate from process/status panels. AgentTask does not start a separate
+narrator request by default; process prose comes from bounded fields such as
+`progress_message`, `short_summary`, `verification_summary`, and
+`final_response` on the existing planner, verifier, card, or finalizer request.
 
 During long quiet waits, AgentTask may emit an `agent_task.heartbeat` stream item
 after `agent_task.heartbeat_interval_seconds` seconds without any other stream
@@ -289,13 +347,33 @@ only: they help UI and log consumers understand the current stage, but they do
 not satisfy evidence, hide a stall, or replace request/no-progress and
 task-deadline timeouts. Any normal progress, snapshot, child-execution, delta,
 or phase event resets the quiet timer, so active streams do not get heartbeat
-spam.
+spam. Public `delta` does not project heartbeat text; detailed timing and raw
+heartbeat payloads remain available through structured streams and logs.
 
-Terminal task status and artifact acceptance are separate. `completed` means
-the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`).
-`max_iterations` can still leave a useful Workspace file or checkpoint, but it
-is a partial artifact (`accepted=False`, `artifact_status="partial"`), not a
-completed business result.
+Terminal task status and artifact acceptance are separate. AgentTask terminal
+result dicts include a user-facing `final_response` for accepted, degraded,
+partial, and blocked outcomes. `completed` means the verifier accepted the
+result (`accepted=True`, `artifact_status="accepted"`). When a result is
+accepted only because unavailable or partial evidence was explicitly disclosed
+and still satisfies the user goal, TaskBoard reports `accepted=True` with
+`artifact_status="degraded"` and includes a `final_response` that explains the
+degradation. This is not a quality shortcut: semantic acceptance still comes
+from the verifier and host guards. `max_iterations` can still leave a useful
+Workspace file or checkpoint, but it is a partial artifact (`accepted=False`,
+`artifact_status="partial"`), not a completed business result. Partial and
+blocked results include `final_response` so callers can show what was produced,
+what stopped, and which requirements remain unmet. `get_text()` /
+`async_get_text()` prefer this field for task-strategy result dicts; `get_data()`
+still returns the structured result.
+TaskBoard terminal payloads may also include `taskboard.completion_notes`, a
+bounded process projection of card summaries, known gaps, verifier notes, and
+acceptance progress. It is useful for UI progress and final-response disclosure,
+but it is not evidence and does not replace verifier acceptance.
+For model-produced verifier or finalizer fields, prose such as `status`,
+`reason`, `progress_message`, or `final_response` is display context only;
+completion and repair decisions must come from structured booleans such as
+`is_complete`, `requires_block`, and `criterion_checks[].satisfied` plus host
+guards.
 
 When a bounded step or TaskBoard card returns a short `artifact_markdown` body
 or a sectioned `artifact_manifest`, AgentTask writes the deliverable through the
@@ -366,13 +444,14 @@ TaskBoard final verification receives board-level source refs with the same
 `content_state` boundary, so final synthesis cannot upgrade a discovered path
 into source-content evidence without a bounded preview/readback.
 
-Flat and TaskBoard work units also receive a task context contract with
-compact `current_time` facts: `utc`, plus `local` and `timezone` when the local
-timezone is recognizable. For current, latest, recent, or as-of
-tasks, use that time context unless the caller supplied a more specific date.
-The contract is context for model decisions, planning, evidence selection, and
-source-boundary handling; it does not set model-call, tool-call, node-count,
-iteration, or wall-clock caps.
+Flat and TaskBoard work units also receive a task context contract. Runtime
+metadata can record compact `current_time` facts for diagnostics, but default
+model-hot prompts receive only prompt-safe availability metadata and omit the
+concrete runtime timestamp. For current, latest, recent, or as-of tasks, pass
+the intended business date or source timestamp explicitly when it matters. The
+contract is context for model decisions, planning, evidence selection, and
+source-boundary handling; it must not be used as a business fact by itself and
+does not set model-call, tool-call, node-count, iteration, or wall-clock caps.
 
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 Workspace file refs with bounded cold readback previews. Framework-generated
@@ -381,7 +460,7 @@ cards, so a control-card readback can still inspect Action refs produced by
 earlier evidence-gathering cards. If a generated continuation card still
 reports that the same readback is insufficient, the framework does not
 recursively synthesize another readback/continuation chain; the card must
-propose different executable work or remain blocked with diagnostics.
+propose different executable work or remain in setback/blocked diagnostics.
 For scoped Workspace retrieval, `evidence_snippet` records include whether the
 bounded snippet was `truncated`. AgentTask now carries these retrieval facts
 through the canonical `EvidenceEnvelope.evidence_items` ledger and injects a
@@ -391,7 +470,7 @@ compatibility projections, not separate grounding authorities. Failed or empty
 search/readback items support unavailable or missing-data claims only;
 `ref_only` locator items prove only discovery until a bounded readback evidence
 item exists. If a TaskBoard card with scoped retrieval
-returns blocked/insufficient output without an explicit next action, AgentTask
+returns setback/blocked/insufficient output without an explicit next action, AgentTask
 turns that local insufficiency into an action-capable evidence card with an
 expanded bounded retrieval plan plus a continuation card. The search result is
 still only factual context; the continuation card decides whether it is enough.
@@ -408,9 +487,10 @@ writes it back, and returns trusted `file_refs` after readback. This is a
 materialization step only: final completion still belongs to terminal
 acceptance and host guards.
 For completed and sufficient control outputs, non-fatal `gaps` do not prevent
-Workspace artifact materialization; `remaining_work`, blocked status, repair,
-or readback still do. Writing the artifact only creates evidence for later
-readback and verification. It does not mean the final task has been accepted.
+Workspace artifact materialization; `remaining_work`, setback/blocked status,
+repair, or readback still do. Writing the artifact only creates evidence for
+later readback and verification. It does not mean the final task has been
+accepted.
 Flat and TaskBoard do not need an independent verifier after every intermediate
 work unit. In Flat, non-empty `remaining_work` defaults the current step to an
 intermediate result, so the next iteration consumes the new facts and decides
@@ -495,12 +575,14 @@ external-capability substrate probe rather than the recommended business entry
 point.
 
 `examples/agent_task/agently_architecture_diagram_task.py` is the longer
-design-document experiment for the same path. It uses
-`.goal(...).effort(...).strategy("task")` as the compatibility spelling for an
-AgentTask strategy draft, a repository-source Action, Workspace file Actions, and an
-independent Agently model judge to produce and review a readable Agently
-architecture diagram. The execution shape is still resolved by the task
-strategy layer unless the host explicitly selects `flat` or `taskboard`.
+design-document experiment for the same path. It keeps the legacy
+`.goal(...).effort(...).strategy("task")` spelling only as a compatibility
+probe, not as the recommended selector for new code. New code should use
+`.strategy("direct")` for the ordinary model_request/ActionLoop route, or
+`.strategy("flat")` / `.strategy("taskboard")` when the host explicitly wants
+AgentTask. The example also uses a repository-source Action, Workspace file
+Actions, and an independent Agently model judge to produce and review a readable
+Agently architecture diagram.
 
 `examples/agent_task_experiments/` contains compact developer examples based on
 the core AgentTask experiment scenarios: stock-risk briefing, Agent engineering
@@ -588,7 +670,8 @@ available, and only handle the marker at a plain-text consumption boundary. Use
 `is_complete` fields and adds route metadata for process-level events. For UI
 consumers that want one text slot plus structured state updates, `instant` also
 appends synthetic `path="$delta"` text-projection items after source events that
-can be projected to text; `all` does not include those derived items.
+can be projected to text. Heartbeat stays structured-only and does not append
+`$delta`; `all` does not include those derived items.
 
 `create_execution()` creates an AgentExecution draft. Ordinary prompt-only
 drafts run as direct model requests. DynamicTask/TaskDAG workflows run through

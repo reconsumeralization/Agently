@@ -1,6 +1,6 @@
 ---
 title: Runtime Intervention
-description: Adding supplemental context to an open TriggerFlow execution without pausing or mutating the graph.
+description: Adding guidance context to an open TriggerFlow execution without pausing or mutating the graph.
 keywords: Agently, TriggerFlow, runtime intervention, intervention_point, human context
 ---
 
@@ -8,7 +8,7 @@ keywords: Agently, TriggerFlow, runtime intervention, intervention_point, human 
 
 > Languages: **English** · [中文](../../cn/triggerflow/runtime-intervention.md)
 
-Runtime intervention lets outside code add supplemental context to an open execution. TriggerFlow records that context immediately, then makes it visible to chunks at a safe boundary.
+Runtime intervention lets outside code add guidance context to an open execution. TriggerFlow records that context immediately, then makes it visible to chunks at a safe boundary.
 
 Use runtime intervention when a user adds a note, correction, attachment summary, or other context while the workflow is already running. Use [Pause and Resume](pause-and-resume.md) when the workflow must stop and wait for a required external answer.
 
@@ -55,14 +55,14 @@ Chunks read inserted interventions from `data.interventions` or `data.get_interv
 
 ```python
 async def risk_assessment(data: TriggerFlowRuntimeData):
-    supplements = data.get_interventions(status="inserted", target="before_risk")
+    guidance_items = data.get_interventions(status="inserted", target="before_risk")
     result = await assess_with_model(
         {
             "terms": data.input,
-            "supplements": [item["payload"] for item in supplements],
+            "guidance": [item["payload"] for item in guidance_items],
         }
     )
-    for item in supplements:
+    for item in guidance_items:
         await data.async_mark_intervention_consumed(
             item["id"],
             status="applied",
