@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 from agently import Agently
 from agently.core import PluginManager, TaskBoardGraph, TaskBoardRevision, TaskBoardValidator, build_task_board_evidence_view
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, AgentExecutionResult
+from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
 from agently.core.application.AgentTask import AgentTask
 from agently.core.application.AgentTask.BlockCarrier import WorkUnitResult
 from agently.types.data import AgentExecutionStreamData, AgentlyRequestData, WorkspaceContextPackage
@@ -233,7 +235,7 @@ async def test_agent_execution_instant_adds_synthetic_delta_projection_without_p
     synthetic_delta = instant_items[1]
     assert isinstance(synthetic_delta, AgentExecutionStreamData)
     assert synthetic_delta.path == "$delta"
-    assert synthetic_delta.delta == "Iteration 1: phase planned.\n\n"
+    assert synthetic_delta.delta == "Iteration 1: plan accepted.\n\n"
     assert synthetic_delta.value == synthetic_delta.delta
     assert synthetic_delta.event_type == "delta"
     assert synthetic_delta.is_complete is False
@@ -249,8 +251,93 @@ async def test_agent_execution_instant_adds_synthetic_delta_projection_without_p
         "projection_source_event_type": "done",
         "projection_source": "agent_task",
     }
-    assert delta_chunks == ["Iteration 1: phase planned.\n\n"]
+    assert delta_chunks == ["Iteration 1: plan accepted.\n\n"]
     assert all_items == [("agent_execution", phase_item)]
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_instant_keeps_heartbeat_structured_without_synthetic_delta():
+    heartbeat_item = AgentExecutionStreamData(
+        path="agent_task.heartbeat",
+        value={"stage": "plan", "status": "running"},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        route="task",
+        task_id="task-1",
+        meta={
+            "stream_kind": "heartbeat",
+            "execution_id": "exec-1",
+            "lineage": {"task_id": "task-1"},
+        },
+    )
+    owner = SimpleNamespace(
+        _completed=True,
+        stream=SimpleNamespace(items=[heartbeat_item]),
+    )
+
+    instant_items = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="instant")
+    ]
+    delta_chunks = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="delta")
+    ]
+    all_items = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="all")
+    ]
+
+    assert instant_items == [heartbeat_item]
+    assert delta_chunks == []
+    assert all_items == [("agent_execution", heartbeat_item)]
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_instant_uses_stateful_flat_plan_projection():
+    context_item = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.context",
+        value={
+            "iteration": 1,
+            "stage": "context",
+            "snapshot": {"context_item_count": 2},
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        route="task",
+        task_id="task-1",
+        meta={"stream_kind": "snapshot", "stage": "context", "iteration": 1, "task_id": "task-1"},
+    )
+    plan_item = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.plan",
+        value={
+            "iteration": 1,
+            "stage": "plan",
+            "snapshot": {"step_instruction": "Read the source file and draft the final answer."},
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        route="task",
+        task_id="task-1",
+        meta={"stream_kind": "snapshot", "stage": "plan", "iteration": 1, "task_id": "task-1"},
+    )
+    owner = SimpleNamespace(
+        _completed=True,
+        stream=SimpleNamespace(items=[context_item, plan_item]),
+    )
+
+    instant_items = [
+        item async for item in agent_execution_get_async_generator(cast(Any, owner), type="instant")
+    ]
+
+    delta_items = [item for item in instant_items if isinstance(item, AgentExecutionStreamData) and item.path == "$delta"]
+    assert len(delta_items) == 2
+    assert str(delta_items[0].delta) == "Iteration 1: context is ready with 2 item(s).\n\n"
+    assert str(delta_items[1].delta).endswith("\n\n")
+    assert "Iteration 1: plan ready." in str(delta_items[1].delta)
+    assert "Previous completed action: prepared the working context with 2 item(s)." in str(delta_items[1].delta)
+    assert "Current action plan: Read the source file and draft the final answer." in str(delta_items[1].delta)
+    assert "| State | Step | Detail |" not in str(delta_items[1].delta)
 
 
 class MockAgentExecutionIsolationRequester(MockAgentExecutionRequester):
@@ -4427,6 +4514,219 @@ def test_create_task_execution_parameter_normalizes_and_rejects(tmp_path):
         )
 
 
+def test_guidance_delta_projects_readable_status_text():
+    received = AgentExecutionStreamData(
+        path="agent_task.guidance.received",
+        value={"guidance_id": "guidance-1", "status": "received", "target": "task"},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        meta={"stream_kind": "guidance", "guidance_status": "received"},
+    )
+    applied = AgentExecutionStreamData(
+        path="agent_task.guidance.applied",
+        value={"guidance_ids": ["guidance-1"], "status": "applied", "boundary": "flat_context"},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        meta={"stream_kind": "guidance", "guidance_status": "applied"},
+    )
+
+    assert project_agent_execution_text_delta(received) == (
+        "Guidance received; it will be applied at the next safe task boundary.\n\n"
+    )
+    assert project_agent_execution_text_delta(applied) == (
+        "Guidance applied at the next safe task boundary.\n\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_add_guidance_during_flat_task_does_not_wait_for_completion(tmp_path):
+    agent = _create_agent("execution-live-guidance").use_workspace(tmp_path / "workspace")
+    execution = agent.create_task(
+        goal="Prepare the incident response summary.",
+        success_criteria=["The final answer uses the operator's latest guidance."],
+        execution="flat",
+        max_iterations=2,
+    )
+    plan_started = asyncio.Event()
+    release_first_plan = asyncio.Event()
+    context_packs: list[dict[str, Any]] = []
+
+    async def request_plan(iteration_index, context_pack):
+        context_packs.append(dict(context_pack))
+        if iteration_index == 1:
+            plan_started.set()
+            await release_first_plan.wait()
+        return {
+            "execution_shape": "direct",
+            "step_instruction": f"Run bounded work iteration {iteration_index}.",
+            "expected_evidence": "operator guidance is considered",
+            "rationale": "The task should consume runtime guidance at a safe boundary.",
+        }
+
+    async def execute_step(iteration_index, _plan, _context_pack):
+        remaining = ["Use the new operator guidance."] if iteration_index == 1 else []
+        return (
+            {
+                "step_result": f"iteration {iteration_index} result",
+                "evidence": [f"iteration {iteration_index} evidence"],
+                "remaining_work": remaining,
+                "ready_for_final_verification": iteration_index == 2,
+            },
+            {
+                "execution_id": f"exec-guidance-{iteration_index}",
+                "status": "completed",
+                "route": {"selected_route": "model_request"},
+                "logs": {},
+            },
+        )
+
+    async def request_verification(iteration_index, **_kwargs):
+        if iteration_index == 1:
+            return {
+                "is_complete": False,
+                "requires_block": False,
+                "reason": "runtime guidance must be consumed by the next step",
+                "missing_criteria": ["operator guidance not consumed yet"],
+                "replan_instruction": "Use the latest runtime guidance.",
+                "final_result": "",
+            }
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "runtime guidance was considered",
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result": "Final answer that uses the runtime operator guidance.",
+        }
+
+    cast(Any, execution)._agent_task_step_overrides = {
+        "_request_plan": request_plan,
+        "_execute_step": execute_step,
+        "_request_verification": request_verification,
+    }
+
+    run_task = asyncio.create_task(execution.async_get_data())
+    await asyncio.wait_for(plan_started.wait(), timeout=3)
+
+    guidance = await asyncio.wait_for(
+        execution.async_add_guidance(
+            "Use the operator's newly uploaded incident note as the primary context.",
+            author="operator",
+            target="task",
+        ),
+        timeout=1,
+    )
+    assert guidance["kind"] == "guidance"
+    assert guidance["status"] == "received"
+    assert not run_task.done()
+
+    release_first_plan.set()
+    result = await asyncio.wait_for(run_task, timeout=5)
+    meta = await execution.async_get_meta()
+    meta_view = cast(dict[str, Any], meta)
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+
+    assert result["status"] == "completed"
+    assert len(context_packs) == 2
+    assert context_packs[1]["guidance"][0]["id"] == guidance["id"]
+    assert "operator's newly uploaded incident note" in context_packs[1]["guidance"][0]["content_preview"]
+    assert task_meta["guidance_items"][0]["status"] == "applied"
+    assert task_meta["guidance_refs"] == task_meta["workspace_refs"]["guidance"]
+    assert meta_view["workspace_refs"]["agent_task"]["guidance"] == task_meta["guidance_refs"]
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_add_guidance_before_task_creation_is_queued_then_applied(tmp_path):
+    agent = _create_agent("execution-queued-guidance").use_workspace(tmp_path / "workspace")
+    execution = agent.create_task(
+        goal="Prepare the queued guidance summary.",
+        success_criteria=["The queued guidance is reflected in the final answer."],
+        execution="flat",
+        max_iterations=1,
+    )
+    context_packs: list[dict[str, Any]] = []
+
+    async def request_plan(_iteration_index, context_pack):
+        context_packs.append(dict(context_pack))
+        return {
+            "execution_shape": "direct",
+            "step_instruction": "Use the queued guidance.",
+            "expected_evidence": "queued guidance was available",
+            "rationale": "Guidance arrived before the task record existed.",
+        }
+
+    async def execute_step(_iteration_index, _plan, _context_pack):
+        return (
+            {
+                "step_result": "queued guidance used",
+                "evidence": ["queued guidance was present"],
+                "remaining_work": [],
+                "ready_for_final_verification": True,
+            },
+            {
+                "execution_id": "exec-queued-guidance",
+                "status": "completed",
+                "route": {"selected_route": "model_request"},
+                "logs": {},
+            },
+        )
+
+    async def request_verification(_iteration_index, **_kwargs):
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "queued guidance was consumed",
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result": "Final answer with queued guidance.",
+        }
+
+    cast(Any, execution)._agent_task_step_overrides = {
+        "_request_plan": request_plan,
+        "_execute_step": execute_step,
+        "_request_verification": request_verification,
+    }
+
+    guidance = await execution.async_add_guidance(
+        "Use the queued operator context before planning the first step.",
+        author="operator",
+    )
+    assert guidance["status"] == "queued"
+
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    task_meta = meta["logs"]["route_logs"]["agent_task"]
+
+    assert result["status"] == "completed"
+    assert context_packs[0]["guidance"][0]["id"] == guidance["id"]
+    assert task_meta["guidance_items"][0]["status"] == "applied"
+    assert task_meta["guidance_items"][0]["workspace_ref"]["collection"] == "guidance"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_guidance_on_non_task_route_is_not_applied_or_prompt_injected():
+    agent = _create_agent("execution-guidance-non-task")
+    execution = (
+        agent.input("Return a compact answer.")
+        .output({"answer": (str, "answer", True)}, format="json")
+        .create_execution(limits={"max_model_requests": 1})
+    )
+
+    guidance = await execution.async_add_guidance("Do not inject this into a non-task prompt.")
+    result = await execution.async_get_data()
+    meta = await execution.async_get_meta()
+    meta_view = cast(dict[str, Any], meta)
+    request_text = "\n".join(MockAgentExecutionRequester.requests)
+
+    assert result["answer"]
+    assert guidance["status"] == "queued"
+    assert meta_view["guidance_items"][0]["status"] == "not_applied"
+    assert meta_view["guidance_items"][0]["not_applied_reason"] == "route:model_request:not_agent_task"
+    assert "Do not inject this into a non-task prompt." not in request_text
+
+
 def test_taskboard_final_normalization_preserves_complete_workspace_candidate():
     candidate = "# Complete Deliverable\n\n" + ("complete section body\n" * 120)
     final = {
@@ -5466,6 +5766,39 @@ async def test_agent_task_heartbeat_does_not_reset_progress_clock(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_agent_task_concurrent_heartbeat_loops_emit_once_per_interval(tmp_path):
+    agent = _create_agent("execution-heartbeat-concurrent-dedupe").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Track quiet progress.",
+        success_criteria=["Heartbeat remains observational."],
+        execution="flat",
+        options={"heartbeat_interval_seconds": 0.02},
+    )
+    task._last_stream_emit_monotonic = time.monotonic() - 1.0
+    first = task._start_heartbeat(stage="plan")
+    second = task._start_heartbeat(stage="plan")
+    try:
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            heartbeat_items = [
+                item for item in task._stream_items if getattr(item, "path", "") == "agent_task.heartbeat"
+            ]
+            if heartbeat_items:
+                await asyncio.sleep(0)
+                break
+            await asyncio.sleep(0.005)
+        heartbeat_items = [
+            item for item in task._stream_items if getattr(item, "path", "") == "agent_task.heartbeat"
+        ]
+        assert len(heartbeat_items) == 1
+        assert heartbeat_items[0].value["stage"] == "plan"
+    finally:
+        await task._stop_heartbeat(first)
+        await task._stop_heartbeat(second)
+
+
+@pytest.mark.asyncio
 async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(tmp_path):
     agent = _create_workspace_artifact_draft_stall_agent("execution-workspace-artifact-draft-timeout").use_workspace(
         tmp_path / "workspace"
@@ -5511,7 +5844,7 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
         for item in heartbeat_items
         if isinstance(getattr(item, "value", None), dict)
     )
-    assert "Still working on workspace_artifact_draft" in delta_text
+    assert "Still working" not in delta_text
     assert not (tmp_path / "workspace" / "final.md").exists()
 
 
@@ -6916,6 +7249,74 @@ def test_create_task_and_task_loop_return_strategy_execution_drafts(tmp_path):
     assert task_execution.task_options["task_id"] == "task-draft"
     assert type(loop_execution).__name__ == "AgentExecution"
     assert loop_execution.strategy_name == "task_loop"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_direct_strategy_forces_model_request_route(tmp_path):
+    agent = _create_action_agent("direct-strategy-route").use_workspace(tmp_path / "workspace")
+    agent.set_action_loop(max_rounds=1, timeout=5)
+    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli")
+
+    execution = (
+        agent.goal("Use the echo action without creating an AgentTask.", ["The echo action result is returned."])
+        .input("use echo action")
+        .output({"answer": (str, "answer", True)}, format="json")
+        .strategy("direct")
+    )
+
+    route, route_meta = await execution.select_route()
+
+    assert route == "model_request"
+    assert route_meta["selected_by"] == "execution_strategy"
+    assert route_meta["strategy"] == "direct"
+    assert route_meta["with_actions"] is True
+    assert execution.strategy_name == "direct"
+    assert execution.is_task_strategy() is False
+    assert "execution" not in execution.task_options
+
+    configured = (
+        agent.create_execution(options={"strategy": "direct"})
+        .input("answer directly")
+        .output({"answer": (str, "answer", True)}, format="json")
+    )
+    configured_route, configured_meta = await configured.select_route()
+    assert configured_route == "model_request"
+    assert configured_meta["strategy"] == "direct"
+    assert configured.strategy_name == "direct"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_auto_strategy_does_not_force_agent_task_without_task_signals():
+    agent = _create_agent("auto-strategy-direct-route")
+    execution = (
+        agent.input("answer directly")
+        .output({"answer": (str, "answer", True)}, format="json")
+        .strategy("auto")
+    )
+
+    route, _route_meta = await execution.select_route()
+
+    assert route == "model_request"
+    assert execution.strategy_name == "auto"
+    assert execution.is_task_strategy() is False
+    assert "execution" not in execution.task_options
+
+
+def test_agent_execution_flat_and_taskboard_strategies_force_agent_task_execution_shape():
+    agent = _create_agent("execution-shape-strategy")
+
+    for strategy_name in ("flat", "taskboard"):
+        execution = agent.create_execution().strategy(strategy_name)
+
+        assert execution.strategy_name == strategy_name
+        assert execution.is_task_strategy() is True
+        assert execution.task_options["execution"] == strategy_name
+        assert execution.task_strategy_options()["execution"] == strategy_name
+
+    auto_flat = agent.create_execution().strategy("auto", execution="flat")
+    assert auto_flat.strategy_name == "auto"
+    assert auto_flat.is_task_strategy() is True
+    assert auto_flat.task_options["execution"] == "flat"
 
 
 def test_removed_transitional_surfaces_are_not_available():

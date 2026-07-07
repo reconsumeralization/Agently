@@ -71,7 +71,7 @@ async def test_trigger_flow_planned_intervention_point_inserts_matching_pending_
             )
         return {
             "terms": data.value["terms"],
-            "supplements": [item["payload"] for item in interventions],
+            "guidance": [item["payload"] for item in interventions],
         }
 
     flow.to(extract).intervention_point(name="before_assess", target="before_assess").to(assess).end()
@@ -95,7 +95,7 @@ async def test_trigger_flow_planned_intervention_point_inserts_matching_pending_
     assert inserted[0]["consumers"]["assess"]["status"] == "applied"
     assert snapshot["$final_result"] == {
         "terms": "contract",
-        "supplements": [{"text": "Attachment A is latest."}],
+        "guidance": [{"text": "Attachment A is latest."}],
     }
 
 

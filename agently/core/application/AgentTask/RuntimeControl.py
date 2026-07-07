@@ -362,9 +362,13 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         try:
             while True:
                 await asyncio.sleep(interval)
-                quiet_for = time.monotonic() - self._last_stream_emit_monotonic
+                now = time.monotonic()
+                quiet_for = now - self._last_stream_emit_monotonic
                 if quiet_for < interval:
                     continue
+                if now - self._last_heartbeat_emit_monotonic < interval:
+                    continue
+                self._last_heartbeat_emit_monotonic = now
                 await self._emit(
                     "agent_task.heartbeat",
                     {

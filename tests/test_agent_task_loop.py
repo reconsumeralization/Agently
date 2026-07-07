@@ -21,7 +21,10 @@ from agently.core.application.AgentTask.BlockCarrier import (
     select_carrier_output_policy,
 )
 from agently.core.application.AgentTask import AgentTask
-from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
+from agently.core.application.AgentExecution.Stream import (
+    AgentExecutionTextDeltaProjector,
+    project_agent_execution_text_delta,
+)
 from agently.types.data import (
     AgentlyRequestData,
     AgentExecutionStreamData,
@@ -345,6 +348,243 @@ def test_taskboard_delta_projects_structured_status_table():
     assert "card_results" not in text
 
 
+def test_taskboard_delta_projector_compacts_repeated_tick_updates():
+    revision = {
+        "board_id": "demo-board",
+        "revision_id": "rev-2",
+        "graph": {
+            "cards": [
+                {"id": "collect", "objective": "Collect source facts.", "status": "pending"},
+                {"id": "draft", "objective": "Draft the answer.", "status": "pending"},
+            ]
+        },
+    }
+    planned = AgentExecutionStreamData(
+        path="agent_task.taskboard.plan",
+        value={"revision": revision},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+    )
+    tick = AgentExecutionStreamData(
+        path="agent_task.taskboard.tick.1.completed",
+        value={
+            "revision": revision,
+            "schedule": {
+                "revision_id": "rev-2",
+                "completed_card_ids": ["collect"],
+                "runnable_card_ids": ["draft"],
+            },
+            "card_results": {"collect": {"status": "completed"}},
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+    )
+    projector = AgentExecutionTextDeltaProjector()
+
+    planned_text = projector.project(planned)
+    tick_text = projector.project(tick)
+
+    assert planned_text is not None
+    assert "| State | Card | Task |" in planned_text
+    assert tick_text is not None
+    assert "Changes:" in tick_text
+    assert "| State | Card | Task |" not in tick_text
+    assert "✅ Completed `collect` Collect source facts. (was ⏳ Not started)" in tick_text
+    assert "🔄 In progress `draft` Draft the answer. (was ⏳ Not started)" in tick_text
+
+
+def test_flat_delta_projector_describes_plan_with_previous_completed_action():
+    context = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.context",
+        value={
+            "message": "Iteration 1: context pack ready with 2 item(s).",
+            "iteration": 1,
+            "stage": "context",
+            "snapshot": {"context_item_count": 2},
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "context", "iteration": 1, "task_id": "flat-task"},
+    )
+    item = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.plan",
+        value={
+            "message": "Iteration 1: plan ready; next bounded step is selected.",
+            "iteration": 1,
+            "stage": "plan",
+            "snapshot": {
+                "execution_shape": "direct",
+                "step_instruction": "Read the source file and draft the final answer.",
+                "expected_evidence": "Source facts are bounded and cited.",
+                "rationale": "The task needs one focused pass over the source.",
+            },
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "plan", "iteration": 1, "task_id": "flat-task"},
+    )
+    projector = AgentExecutionTextDeltaProjector()
+
+    context_text = projector.project(context)
+    text = projector.project(item)
+
+    assert context_text is not None
+    assert context_text == "Iteration 1: context is ready with 2 item(s).\n\n"
+    assert text is not None
+    assert text.startswith("Iteration 1: plan ready.")
+    assert text.endswith("\n\n")
+    assert "Previous completed action: prepared the working context with 2 item(s)." in text
+    assert "Current action plan: Read the source file and draft the final answer." in text
+    assert "Expected evidence: Source facts are bounded and cited." in text
+    assert "| State | Step | Detail |" not in text
+    assert "execution_result" not in text
+
+
+def test_flat_delta_projector_summarizes_completed_actions_and_terminal_result():
+    projector = AgentExecutionTextDeltaProjector()
+    context = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.context",
+        value={
+            "message": "Iteration 1: context pack ready with 2 item(s).",
+            "iteration": 1,
+            "stage": "context",
+            "snapshot": {"context_item_count": 2},
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "context", "iteration": 1, "task_id": "flat-task"},
+    )
+    execution = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.execution",
+        value={
+            "message": "Iteration 1: bounded step finished; execution evidence was captured.",
+            "iteration": 1,
+            "stage": "execution",
+            "snapshot": {
+                "execution_result": {
+                    "short_summary": "Drafted the answer from bounded source evidence.",
+                    "remaining_work": ["Verify final acceptance."],
+                }
+            },
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "execution", "iteration": 1, "task_id": "flat-task"},
+    )
+    verification = AgentExecutionStreamData(
+        path="agent_task.iteration.1.snapshot.verification",
+        value={
+            "message": "Iteration 1: verification passed.",
+            "iteration": 1,
+            "stage": "verification",
+            "snapshot": {
+                "is_complete": True,
+                "reason": "All requested facts are covered.",
+            },
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+        meta={"stream_kind": "snapshot", "stage": "verification", "iteration": 1, "task_id": "flat-task"},
+    )
+    result_item = AgentExecutionStreamData(
+        path="result",
+        value={
+            "status": "completed",
+            "accepted": True,
+            "artifact_status": "accepted",
+            "final_result": "Final answer prepared from bounded source evidence.",
+        },
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        task_id="flat-task",
+    )
+
+    context_text = projector.project(context)
+    execution_text = projector.project(execution)
+    verification_text = projector.project(verification)
+    result_text = projector.project(result_item)
+
+    assert context_text is not None
+    assert context_text == "Iteration 1: context is ready with 2 item(s).\n\n"
+    assert execution_text is not None
+    assert execution_text.endswith("\n\n")
+    assert "Iteration 1: completed action: Drafted the answer from bounded source evidence." in execution_text
+    assert "| State | Step | Detail |" not in execution_text
+    assert verification_text is not None
+    assert verification_text.endswith("\n\n")
+    assert "Iteration 1: verification passed: All requested facts are covered." in verification_text
+    assert result_text is not None
+    assert result_text.endswith("\n\n")
+    assert result_text.startswith("Task summary:")
+    assert "What was done:" in result_text
+    assert "- Drafted the answer from bounded source evidence." in result_text
+    assert "- verified the final result." in result_text
+    assert "Result:" in result_text
+    assert "Final answer prepared from bounded source evidence." in result_text
+
+
+def test_text_delta_projector_separates_model_delta_from_process_projection_and_retry_marker():
+    projector = AgentExecutionTextDeltaProjector()
+    body = AgentExecutionStreamData(
+        path="model.delta",
+        value=None,
+        delta="Drafting first attempt...",
+        event_type="delta",
+        is_complete=False,
+        source="model_request",
+    )
+    retry = AgentExecutionStreamData(
+        path="$status",
+        value={"status": "failed", "retry": True, "reason": "provider stream reset"},
+        event_type="done",
+        is_complete=True,
+        source="model_request",
+    )
+    replacement = AgentExecutionStreamData(
+        path="model.delta",
+        value=None,
+        delta="Drafting replacement...",
+        event_type="delta",
+        is_complete=False,
+        source="model_request",
+    )
+    verification = AgentExecutionStreamData(
+        path="agent_task.iteration.2.snapshot",
+        value={"stage": "verification", "snapshot": {"is_complete": True}},
+        event_type="done",
+        is_complete=True,
+        source="agent_task",
+        meta={"stream_kind": "snapshot", "stage": "verification", "iteration": 2},
+    )
+
+    rendered = "".join(
+        text
+        for text in (
+            projector.project(body),
+            projector.project(retry),
+            projector.project(replacement),
+            projector.project(verification),
+        )
+        if text is not None
+    )
+
+    assert "Drafting first attempt...\n\n<$retry>provider stream reset</$retry>\n\nDrafting replacement..." in rendered
+    assert "Drafting replacement...\n\nIteration 2: verification passed." in rendered
+
+
 def test_taskboard_stream_revision_keeps_objective_for_delta_status_table():
     revision = TaskBoardRevision.create(
         board_id="stream-objective",
@@ -509,16 +749,15 @@ def test_agent_task_action_observation_delta_projects_safe_progress_text():
     )
 
     assert project_agent_execution_text_delta(started) == (
-        'Action started: grep_workspace (shell_search). Input: {"query": "deadline", "scope": "workspace"}\n\n'
+        "Action started: grep_workspace (shell_search). Input: query=deadline\n\n"
     )
     completed_text = project_agent_execution_text_delta(completed)
     assert completed_text is not None
     assert completed_text.endswith("\n\n")
     assert "Action completed: grep_workspace (shell_search)." in completed_text
-    assert "Result:" in completed_text
-    assert "deadline is 2026-07-01" in completed_text
+    assert "Result: path notes.md" in completed_text
     assert "Refs: notes.md" in completed_text
-    assert project_agent_execution_text_delta(failed) == "Action failed: read_file. Error: file not found\n\n"
+    assert project_agent_execution_text_delta(failed) == "Action setback: read_file failed. Error: file not found\n\n"
 
 
 def test_evidence_ledger_guard_rejects_structurally_invalid_support():
@@ -2849,6 +3088,93 @@ def _create_agent(name: str = "agent-task-loop-test"):
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{name}-plugins")
     plugin_manager.register("ModelRequester", MockAgentTaskRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_guidance_records_workspace_refs_without_evidence_items(tmp_path):
+    agent = _create_agent("agent-task-guidance-record").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="guidance-record-task",
+        goal="Prepare the incident summary.",
+        success_criteria=["The summary uses the operator's latest context."],
+        execution="flat",
+        max_iterations=1,
+    )
+
+    guidance = await task.async_add_guidance(
+        "Use the operator's newly uploaded incident note as the primary context.",
+        author="operator",
+        target="task",
+        meta={"source": "test"},
+    )
+
+    assert guidance["kind"] == "guidance"
+    assert guidance["status"] == "received"
+    assert guidance["workspace_ref"]["collection"] == "guidance"
+    assert task.workspace_refs["guidance"] == [guidance["workspace_ref"]["id"]]
+    assert task.guidance_items[0]["id"] == guidance["id"]
+
+    record_body = await task.workspace.get_data(guidance["workspace_ref"])
+    assert record_body["schema_version"] == "agent_task_guidance/v1"
+    assert record_body["guidance_id"] == guidance["id"]
+    assert record_body["content"] == "Use the operator's newly uploaded incident note as the primary context."
+    assert "evidence_items" not in record_body
+
+    guidance_events = [item for item in task._stream_items if item.path == "agent_task.guidance.received"]
+    assert guidance_events
+    assert isinstance(guidance_events[0].meta, dict)
+    assert guidance_events[0].meta["stream_kind"] == "guidance"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_guidance_safe_boundary_records_checkpoint_projection(tmp_path):
+    agent = _create_agent("agent-taskboard-guidance-boundary").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-guidance-boundary",
+        goal="Draft the board-backed response.",
+        success_criteria=["The board-backed response uses operator context."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft the response.",
+            "done_when": ["The response reflects the latest operator context."],
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-guidance-boundary",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "taskboard-guidance-boundary-graph",
+                "cards": [card.to_dict()],
+            }
+        ),
+        revision_id="rev-0",
+    )
+
+    guidance = await task.async_add_guidance(
+        "Use the operator's late clarification when drafting the response.",
+        author="operator",
+        target={"card_id": "draft"},
+    )
+    applied = await task._apply_guidance_boundary(iteration_index=1, boundary="taskboard_tick")
+    record_ref, _checkpoint_ref = await task._record_taskboard_checkpoint(
+        stage="tick",
+        tick_index=1,
+        revision=revision,
+    )
+
+    assert applied[0]["id"] == guidance["id"]
+    assert task.guidance_items[0]["status"] == "applied"
+    assert len(revision.graph.cards) == 1
+    assert record_ref is not None
+    checkpoint_body = await task.workspace.get_data(record_ref)
+    assert checkpoint_body["guidance"][0]["id"] == guidance["id"]
+    assert checkpoint_body["guidance"][0]["status"] == "applied"
+    assert checkpoint_body["guidance"][0]["target"] == {"card_id": "draft"}
 
 
 @pytest.mark.asyncio
@@ -6329,7 +6655,7 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert any(item.path == "result" for item in stream_items)
     assert "building a Workspace context pack" in delta_text
     assert "plan ready" in delta_text
-    assert "bounded step finished" in delta_text
+    assert "execution evidence was captured" in delta_text
     assert "all success criteria are satisfied" in delta_text
     assert "Final result:" in delta_text
     assert "Operator summary for INC-4242." in delta_text
@@ -7230,6 +7556,152 @@ def test_framework_action_loop_guard_diagnostic_does_not_force_execution_risk_gu
     assert "execution_risk_actions_present" not in verification.get("guard_reasons", [])
     assert verification["non_blocking_failed_actions"] == ["action_loop"]
     assert "Unresolved execution risk actions" not in " ".join(verification.get("missing_criteria", []))
+
+
+def test_blocked_step_with_only_nonblocking_read_failures_can_accept_completed_artifact(tmp_path):
+    agent = _create_agent("agent-task-blocked-read-failure-completed-artifact").use_workspace(
+        tmp_path / "task-workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Produce a source-grounded brief.",
+        success_criteria=["The brief is complete and cites available evidence."],
+        execution="flat",
+        options={
+            "planner_capabilities": [
+                {"id": "browse", "kind": "action", "side_effect_level": "read", "replay_safe": True}
+            ]
+        },
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The final brief is complete; a source page was unavailable and disclosed.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result_required": True,
+            "final_result": "final.md",
+            "criterion_checks": [
+                {"criterion": "The brief is complete and cites available evidence.", "satisfied": True}
+            ],
+        },
+        execution_evidence_summary={
+            "status": "blocked",
+            "action_ids": ["browse", "action_loop"],
+            "failed_actions": ["browse"],
+            "blocked_actions": ["action_loop"],
+            "approval_required_actions": [],
+            "required_actions": [],
+            "artifact_refs": [
+                {
+                    "path": "final.md",
+                    "role": "workspace_artifact",
+                    "sha256": "abc123",
+                    "readback": {"content": "Complete brief with disclosed source limitation."},
+                }
+            ],
+        },
+        grounding_guard={"valid": True, "blocking_count": 0, "diagnostics": []},
+    )
+
+    assert verification["is_complete"] is True
+    assert "execution_status_failed" not in verification.get("guard_reasons", [])
+    assert "execution_risk_actions_present" not in verification.get("guard_reasons", [])
+    assert verification["non_blocking_failed_actions"] == ["browse", "action_loop"]
+    assert verification["non_blocking_execution_status"]["status"] == "blocked"
+
+
+def test_step_local_required_read_action_is_scoped_without_task_required_guard(tmp_path):
+    agent = _create_agent("agent-task-step-local-required-action").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a source-grounded brief.",
+        success_criteria=["The brief is complete and cites available evidence."],
+        execution="flat",
+        options={
+            "planner_capabilities": [
+                {"id": "browse", "kind": "action", "side_effect_level": "read", "replay_safe": True}
+            ]
+        },
+    )
+
+    class FakeExecution:
+        def __init__(self):
+            self.used_actions: list[list[str]] = []
+            self.required_actions: list[list[str]] = []
+            self.route_policies: list[dict[str, object]] = []
+
+        def use_actions(self, action_ids):
+            self.used_actions.append(list(action_ids))
+
+        def require_actions(self, action_ids):
+            self.required_actions.append(list(action_ids))
+
+        def route_policy(self, value):
+            self.route_policies.append(dict(value))
+
+    execution = FakeExecution()
+    plan = {
+        "execution_shape": "actions",
+        "step_scope": {"allowed_capability_ids": ["browse"]},
+        "required_action_ids": ["browse"],
+    }
+
+    step_execution = task._configure_step_execution(execution, plan)
+
+    assert execution.used_actions == [["browse"]]
+    assert execution.required_actions == []
+    assert step_execution["step_required_action_ids"] == ["browse"]
+    assert step_execution["task_required_action_ids"] == []
+    assert step_execution["action_scope_source"] == "step_required_action_ids"
+
+
+def test_task_contract_required_read_action_still_uses_required_guard(tmp_path):
+    agent = _create_agent("agent-task-contract-required-action").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce a source-grounded brief.",
+        success_criteria=["The required source action succeeds."],
+        execution="flat",
+        options={
+            "planner_capabilities": [
+                {"id": "browse", "kind": "action", "side_effect_level": "read", "replay_safe": True}
+            ],
+            "capability_constraints": {"actions": {"required": ["browse"]}},
+        },
+    )
+
+    class FakeExecution:
+        def __init__(self):
+            self.used_actions: list[list[str]] = []
+            self.required_actions: list[list[str]] = []
+            self.route_policies: list[dict[str, object]] = []
+
+        def use_actions(self, action_ids):
+            self.used_actions.append(list(action_ids))
+
+        def require_actions(self, action_ids):
+            self.required_actions.append(list(action_ids))
+
+        def route_policy(self, value):
+            self.route_policies.append(dict(value))
+
+    execution = FakeExecution()
+    plan = {
+        "execution_shape": "actions",
+        "step_scope": {"allowed_capability_ids": ["browse"]},
+        "required_action_ids": ["browse"],
+    }
+
+    step_execution = task._configure_step_execution(execution, plan)
+
+    assert execution.required_actions == [["browse"]]
+    assert step_execution["task_required_action_ids"] == ["browse"]
+    assert step_execution["step_required_action_ids"] == []
 
 
 def test_unknown_failed_action_still_blocks_execution_risk_guard(tmp_path):
@@ -8494,7 +8966,7 @@ def test_step_scope_uses_agent_execution_use_actions_when_available(tmp_path):
     assert step_execution["action_scope_source"] == "step_scope"
 
 
-def test_step_required_action_ids_use_agent_execution_require_actions(tmp_path):
+def test_step_required_action_ids_scope_actions_without_contract_guard(tmp_path):
     from agently.core.application import AgentTask
 
     agent = _capability_gate_agent("agent-task-step-required-actions")
@@ -8509,7 +8981,11 @@ def test_step_required_action_ids_use_agent_execution_require_actions(tmp_path):
     class _FakeExecution:
         def __init__(self):
             self.required_actions: list[list[str]] = []
+            self.used_actions: list[list[str]] = []
             self.applied_route_policy: dict[str, Any] | None = None
+
+        def use_actions(self, action_ids):
+            self.used_actions.append(list(action_ids))
 
         def require_actions(self, action_ids):
             self.required_actions.append(list(action_ids))
@@ -8532,9 +9008,12 @@ def test_step_required_action_ids_use_agent_execution_require_actions(tmp_path):
     )
     step_execution = cast(Any, task)._configure_step_execution(execution, plan)
 
-    assert execution.required_actions == [["probe_action"]]
+    assert execution.used_actions == [["probe_action"]]
+    assert execution.required_actions == []
     assert step_execution["required_action_ids"] == ["probe_action"]
-    assert step_execution["action_scope_source"] == "required_action_ids"
+    assert step_execution["step_required_action_ids"] == ["probe_action"]
+    assert step_execution["task_required_action_ids"] == []
+    assert step_execution["action_scope_source"] == "step_required_action_ids"
 
 
 def test_auto_step_plan_suppresses_dag_after_prior_dag_failure(tmp_path):

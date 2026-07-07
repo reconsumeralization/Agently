@@ -119,7 +119,11 @@ attempt 的事实作为结构化 stream item 保留下来：`$status` 表达 ret
 `type="instant"` 会保留每条原始结构化 item；当该 item 还能投影成自然语言文本时，
 会紧跟着追加一个 synthetic `AgentExecutionStreamData`，其 `path="$delta"`、
 `event_type="delta"`、`source="agent_execution"`，并带有
-`meta["stream_kind"] == "text_projection"`。`type="all"` 仍是 raw audit stream，
+`meta["stream_kind"] == "text_projection"`。AgentTask Flat snapshot 可以投影为线性
+plan/action 摘要；TaskBoard plan/tick event 可以先投影为紧凑 Markdown 状态表，
+再在后续投影为 card 状态变化摘要。
+heartbeat item 保持 structured-only，
+不会追加 synthetic `$delta` 文本。`type="all"` 仍是 raw audit stream，
 不包含这些 synthetic projection item。
 
 ```python

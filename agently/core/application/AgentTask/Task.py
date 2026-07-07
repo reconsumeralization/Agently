@@ -23,6 +23,7 @@ from .FlatStrategy import AgentTaskFlatStrategyMixin
 from .Carrier import AgentTaskCarrierMixin
 from .AcpRecovery import AgentTaskAcpRecoveryMixin
 from .Verification import AgentTaskVerificationMixin
+from .Guidance import AgentTaskGuidanceMixin
 from .RuntimeControl import AgentTaskRuntimeMixin
 from .Resume import AgentTaskResumeMixin
 from .Observation import AgentTaskObservationMixin
@@ -36,6 +37,7 @@ class AgentTask(
     AgentTaskCarrierMixin,
     AgentTaskAcpRecoveryMixin,
     AgentTaskVerificationMixin,
+    AgentTaskGuidanceMixin,
     AgentTaskRuntimeMixin,
     AgentTaskResumeMixin,
     AgentTaskObservationMixin,
@@ -117,7 +119,11 @@ class AgentTask(
             "strategy": [],
             "reflections": [],
             "acp_recovery": [],
+            "guidance": [],
         }
+        self.guidance_items: list[dict[str, Any]] = []
+        self._guidance_sequence = 0
+        self._guidance_lock = asyncio.Lock()
         self.reflections: list[dict[str, Any]] = []
         self.created_at = time.time()
         self.started_at: float | None = None
@@ -152,11 +158,13 @@ class AgentTask(
         self._background_stream_tasks: set[asyncio.Task[Any]] = set()
         self._emitted_action_event_keys: set[tuple[str, str, str, str, str]] = set()
         self._last_stream_emit_monotonic = time.monotonic()
+        self._last_heartbeat_emit_monotonic = 0.0
         self._flow = self._build_flow()
 
         self.run: Any = self._run
         self.meta: Any = self._meta
         self.get_meta: Any = self.meta
+        self.add_guidance: Any = FunctionShifter.syncify(self.async_add_guidance)
         self.stream: Any = self.get_async_generator
         self.get_generator: Any = self._get_generator
 

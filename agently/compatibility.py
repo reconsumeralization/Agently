@@ -429,8 +429,19 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                        'text. get_async_generator(type="delta") is the public '
                                                        'text-increment stream and projects selected process events '
                                                        '(template progress, structured progress_message, action '
-                                                       'observations, snapshots, heartbeats, phases, retry markers, '
-                                                       'and terminal task results) into paragraph text; '
+                                                       'observations, Flat plan/action summaries, TaskBoard status '
+                                                       'tables, snapshots, phases, retry markers, and terminal task '
+                                                       'results) into paragraph text; heartbeat items remain '
+                                                       'structured-only and do not project into public delta or '
+                                                       'synthetic $delta text; action '
+                                                       'projection summarizes structured inputs/results and '
+                                                       'keeps raw JSON, long arrays, and evidence bodies in '
+                                                       'instant/all streams instead of public delta text; '
+                                                       'stateful public-delta rendering keeps process paragraphs '
+                                                       'separated from model body deltas, renders Flat snapshots '
+                                                       'as linear plan/action and terminal summaries, and renders '
+                                                       'repeated TaskBoard ticks as card-state changes after the '
+                                                       'first board table; '
                                                        'get_async_generator(type="instant") yields the original '
                                                        'structured event payloads and, when the same item can be '
                                                        'projected to natural-language text, appends a synthetic '
@@ -986,12 +997,18 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'AgentExecution.goals',
                                                              'Agent.create_task',
                                                              'Agent.create_task_loop',
+                                                             'AgentExecution.strategy("auto")',
+                                                             'AgentExecution.strategy("direct")',
+                                                             'AgentExecution.strategy("flat")',
+                                                             'AgentExecution.strategy("taskboard")',
                                                              'AgentExecution.strategy("task")',
                                                              'AgentExecution.strategy("task_loop")',
                                                              'Agent.resume',
                                                              'Agent.async_resume',
                                                              'Agent.resume_task',
                                                              'Agent.async_resume_task',
+                                                             'AgentExecution.async_add_guidance',
+                                                             'AgentExecution.add_guidance',
                                                              'AgentExecutionResult.task_refs',
                                                              'AgentExecutionResult.get_async_generator',
                                                              'AgentExecutionResult.async_get_meta',
@@ -1047,19 +1064,33 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'these fields are added manually only where a downstream '
                                                              'consumer exists, are stored as process_summary, are not '
                                                              'a public runtime mode, and are not grounding or '
-                                                             'completion evidence. Task execution_strategy defaults to '
-                                                             'auto. In auto, AgentTask runs one task_shape_analysis '
-                                                             'ModelRequest that first gives natural-language '
-                                                             'task-shape analysis and then a thin structured '
-                                                             'execution_hint with an optional minimal '
+                                                             'completion evidence. '
+                                                             'AgentExecution.strategy("auto"|"direct"|"flat"|"taskboard") '
+                                                             'is the recommended route/execution selector. direct '
+                                                             'forces the model_request route with the ordinary '
+                                                             'ActionLoop and does not create an AgentTask, even when '
+                                                             'goal or success-criteria fields are present; host code '
+                                                             'owns any completion validation on that direct route. auto '
+                                                             'is the AgentExecution default: ordinary prompt/action '
+                                                             'runs stay on direct model_request unless explicit goals, '
+                                                             'success criteria, task options, Skill selectors, or other '
+                                                             'task signals enter AgentTask. Once AgentTask is selected, '
+                                                             'task execution_strategy defaults to auto. In auto, '
+                                                             'AgentTask runs one task_shape_analysis ModelRequest that '
+                                                             'first gives natural-language task-shape analysis and then '
+                                                             'a thin structured execution_hint with an optional minimal '
                                                              'initial_taskboard_plan; strategy policy resolves '
                                                              'effective_execution_strategy to flat or taskboard, and '
                                                              'small linear auto-selected boards can fall back to flat '
-                                                             'before TaskBoard lifecycle execution. Explicit execution '
-                                                             'flat/taskboard or '
+                                                             'before TaskBoard lifecycle execution. Explicit AgentTask '
+                                                             'execution flat/taskboard or '
                                                              'AgentExecution.strategy("flat"|"taskboard") beats the '
-                                                             'hint, and nested AgentExecution instances inherit parent '
-                                                             'strategy context unless explicitly overridden. TaskBoard '
+                                                             'hint. Legacy '
+                                                             'AgentExecution.strategy("task"|"task_loop"|"long_task") '
+                                                             'remains compatibility-only and should not be promoted as '
+                                                             'the recommended selector. Nested AgentExecution instances '
+                                                             'inherit parent strategy context unless explicitly '
+                                                             'overridden. TaskBoard '
                                                              'remains an execution substrate after strategy selection '
                                                              'and does not classify task complexity. Scoped retrieval '
                                                              'returns factual locator_ref/evidence_snippet records '
@@ -1132,8 +1163,19 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'text-increment stream, including model-generated text '
                                                              'increments plus projected process paragraphs for '
                                                              'progress, structured progress_message, action '
-                                                             'observations, snapshots, heartbeats, phases, retry '
-                                                             'markers, and terminal task results; '
+                                                             'observations, Flat plan/action summaries, TaskBoard '
+                                                             'status tables, snapshots, phases, retry markers, and '
+                                                             'terminal task results; heartbeat items remain '
+                                                             'structured-only and do not project into public delta or '
+                                                             'synthetic $delta text; action projection '
+                                                             'summarizes structured inputs/results and keeps raw '
+                                                             'JSON, long arrays, and evidence bodies in instant/all '
+                                                             'streams instead of public delta text; '
+                                                             'stateful public-delta rendering keeps process paragraphs '
+                                                             'separated from model body deltas, renders Flat snapshots '
+                                                             'as linear plan/action and terminal summaries, and renders '
+                                                             'repeated TaskBoard ticks as card-state changes after the '
+                                                             'first board table; '
                                                              'get_async_generator(type="instant") returns structured '
                                                              'stream items and, when an item can be projected to '
                                                              'natural-language text, appends a synthetic '

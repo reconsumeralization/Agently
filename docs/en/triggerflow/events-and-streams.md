@@ -183,6 +183,6 @@ Agently also emits **observation events** through the Event Center, for example 
 
 - [Patterns](patterns.md) — `when` is one of several flow-control primitives
 - [Pause and Resume](pause-and-resume.md) — `continue_with(interrupt_id, payload)` is the resume path, separate from `emit`
-- [Runtime Intervention](runtime-intervention.md) — supplemental context inserted at safe boundaries
+- [Runtime Intervention](runtime-intervention.md) — guidance context inserted at safe boundaries
 - [Lifecycle](lifecycle.md) — what `close()` does to the runtime stream
 - [Event Center](../observability/event-center.md) — framework-level observation events

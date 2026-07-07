@@ -174,6 +174,6 @@ Agently 还会通过 Event Center 发出 **observation event**（观测事件）
 
 - [模式](patterns.md) —— `when` 是几个流控原语之一
 - [Pause 与 Resume](pause-and-resume.md) —— `continue_with(interrupt_id, payload)` 是恢复路径，与 `emit` 分开
-- [Runtime Intervention](runtime-intervention.md) —— 在安全边界插入补充上下文
+- [Runtime Intervention](runtime-intervention.md) —— 在安全边界插入运行时引导上下文
 - [Lifecycle](lifecycle.md) —— `close()` 对 runtime stream 做了什么
 - [Event Center](../observability/event-center.md) —— 框架级 observation event

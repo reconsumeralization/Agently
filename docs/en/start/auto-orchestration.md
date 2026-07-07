@@ -160,11 +160,45 @@ consume data, text, stream, metadata, status, and task refs through
 `execution.get_result()` or the execution stream/meta facade instead of treating
 `AgentTask` as a second public lifecycle.
 
-`execution="auto"` is the default task execution strategy. In `auto`, AgentTask
-asks the model for a natural-language task-shape analysis plus a thin structured
-`execution_hint`, then the strategy policy resolves the actual shape to `flat`
-or `taskboard`. The hint is only strategy evidence; TaskBoard does not classify
-the task, and the verifier cannot accept the hint as completion evidence. Use
+While a task-strategy `AgentExecution` is still running, host code may add
+non-blocking operator context with `await execution.async_add_guidance(...)` or
+`execution.add_guidance(...)`. Guidance is recorded immediately, written to the
+retained AgentTask Workspace under `workspace_refs["guidance"]`, surfaced in
+`guidance_items` / `guidance_refs`, and applied at the next safe Flat or
+TaskBoard boundary. It does not pause execution, does not mutate non-task route
+prompts, and does not count as completion evidence.
+
+```python
+execution = agent.create_task(
+    goal="Prepare the incident summary.",
+    success_criteria=["The answer reflects the latest operator context."],
+    execution="flat",
+)
+
+run_task = asyncio.create_task(execution.async_get_data())
+
+await execution.async_add_guidance(
+    "Use the newly uploaded incident note as primary context.",
+    author="operator",
+)
+
+data = await run_task
+meta = await execution.async_get_meta()
+guidance_refs = meta["task_refs"]["workspace_refs"]["guidance"]
+```
+
+`AgentExecution.strategy("auto" | "direct" | "flat" | "taskboard")` is the
+top-level route/execution selector. `direct` forces the ordinary
+`model_request` route with the ActionLoop and does not create an AgentTask, even
+when goal-like fields are present; host code owns any completion validation on
+that route. `auto` is the default: ordinary prompt/action runs stay direct,
+while explicit goals, success criteria, task options, Skill selectors, or other
+task signals enter AgentTask. Once AgentTask is selected, `execution="auto"` is
+the default task execution strategy: AgentTask asks the model for a
+natural-language task-shape analysis plus a thin structured `execution_hint`,
+then the strategy policy resolves the actual shape to `flat` or `taskboard`.
+The hint is only strategy evidence; TaskBoard does not classify the task, and
+the verifier cannot accept the hint as completion evidence. Use
 `execution="flat"` or `.strategy("flat")` to force the linear loop, and
 `execution="taskboard"` or `.strategy("taskboard")` only when the host
 explicitly wants TaskBoard. Nested AgentExecution instances inherit the parent
@@ -272,13 +306,23 @@ model input.
 
 For text consumers, `get_async_generator(type="delta")` remains the public text
 stream. In task-strategy executions it includes model-generated text increments
-and also projects selected process events into paragraph text: template progress,
-snapshots, heartbeat status, phase status, action observations, TaskBoard status
-tables, retry markers, and the terminal task result. TaskBoard tables are
-display-only projections from structured board events. They summarize card
-state as not started, in progress, completed, failed, or degraded; completion
-and quality still come from verifier and host-guard facts, not from the table
-text.
+and also projects selected process events into operator-readable paragraph
+text: template progress, snapshots, phase status, action observations,
+Flat plan/action summaries, TaskBoard status tables, retry markers, and the terminal task
+result. These public text projections intentionally summarize instead of
+dumping raw JSON payloads: action inputs/results are compact, recoverable
+failures are presented as setbacks, terminal results prefer `final_response`
+when available, and process
+paragraphs are separated from model body deltas so CLI-style consumers do not
+print glued-together text. Flat projections are linear display-only summaries:
+plan completion states the previous completed action and current action plan,
+and terminal output summarizes what was done and the result. TaskBoard tables
+remain display-only projections from structured AgentTask events: the first
+TaskBoard projection renders a compact table, and later ticks summarize
+card-state changes instead of reprinting the whole table. TaskBoard state is
+summarized as not started, in progress, completed, failed, or degraded;
+completion and quality still come from verifier and host-guard facts, not from
+the projected text.
 Use `type="instant"` when the UI needs the original structured event payloads
 with `path`, `value`, `delta`, `is_complete`, and `meta`. When a structured
 execution item can also be represented as natural-language stream text,
@@ -287,7 +331,14 @@ execution item can also be represented as natural-language stream text,
 `event_type="delta"`, `source="agent_execution"`, and
 `meta["stream_kind"] == "text_projection"` with source-path metadata. It is a
 consumer projection only: `type="all"` stays the raw audit stream and does not
-include synthetic `$delta` items.
+include synthetic `$delta` items. Heartbeat items are intentionally
+structured-only in `instant`: they do not append synthetic `$delta` text.
+For richer UI, consume `instant`: render source-addressed structured paths as
+state, render synthetic `$delta` as visible process text, and keep model body
+paths separate from process/status panels. AgentTask does not start a separate
+narrator request by default; process prose comes from bounded fields such as
+`progress_message`, `short_summary`, `verification_summary`, and
+`final_response` on the existing planner, verifier, card, or finalizer request.
 
 During long quiet waits, AgentTask may emit an `agent_task.heartbeat` stream item
 after `agent_task.heartbeat_interval_seconds` seconds without any other stream
@@ -296,7 +347,8 @@ only: they help UI and log consumers understand the current stage, but they do
 not satisfy evidence, hide a stall, or replace request/no-progress and
 task-deadline timeouts. Any normal progress, snapshot, child-execution, delta,
 or phase event resets the quiet timer, so active streams do not get heartbeat
-spam.
+spam. Public `delta` does not project heartbeat text; detailed timing and raw
+heartbeat payloads remain available through structured streams and logs.
 
 Terminal task status and artifact acceptance are separate. `completed` means
 the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`).
@@ -518,12 +570,14 @@ external-capability substrate probe rather than the recommended business entry
 point.
 
 `examples/agent_task/agently_architecture_diagram_task.py` is the longer
-design-document experiment for the same path. It uses
-`.goal(...).effort(...).strategy("task")` as the compatibility spelling for an
-AgentTask strategy draft, a repository-source Action, Workspace file Actions, and an
-independent Agently model judge to produce and review a readable Agently
-architecture diagram. The execution shape is still resolved by the task
-strategy layer unless the host explicitly selects `flat` or `taskboard`.
+design-document experiment for the same path. It keeps the legacy
+`.goal(...).effort(...).strategy("task")` spelling only as a compatibility
+probe, not as the recommended selector for new code. New code should use
+`.strategy("direct")` for the ordinary model_request/ActionLoop route, or
+`.strategy("flat")` / `.strategy("taskboard")` when the host explicitly wants
+AgentTask. The example also uses a repository-source Action, Workspace file
+Actions, and an independent Agently model judge to produce and review a readable
+Agently architecture diagram.
 
 `examples/agent_task_experiments/` contains compact developer examples based on
 the core AgentTask experiment scenarios: stock-risk briefing, Agent engineering
@@ -611,7 +665,8 @@ available, and only handle the marker at a plain-text consumption boundary. Use
 `is_complete` fields and adds route metadata for process-level events. For UI
 consumers that want one text slot plus structured state updates, `instant` also
 appends synthetic `path="$delta"` text-projection items after source events that
-can be projected to text; `all` does not include those derived items.
+can be projected to text. Heartbeat stays structured-only and does not append
+`$delta`; `all` does not include those derived items.
 
 `create_execution()` creates an AgentExecution draft. Ordinary prompt-only
 drafts run as direct model requests. DynamicTask/TaskDAG workflows run through

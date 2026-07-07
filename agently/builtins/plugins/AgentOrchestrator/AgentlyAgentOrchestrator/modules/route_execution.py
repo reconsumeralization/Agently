@@ -23,6 +23,7 @@ from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import DataFormatter
 
 from .routes import run_model_request_route, run_skills_route
+from .runtime_guidance import mark_pending_guidance_not_applied
 from .task_strategy import run_agent_task_route
 
 if TYPE_CHECKING:
@@ -89,6 +90,8 @@ async def async_execute_route(
                 max_retries=max_retries,
                 raise_ensure_failure=raise_ensure_failure,
             )
+        if route != "agent_task":
+            await mark_pending_guidance_not_applied(owner, reason=f"route:{route}:not_agent_task")
         return route, result
 
 

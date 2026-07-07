@@ -42,6 +42,7 @@ def initial_workspace_refs() -> dict[str, Any]:
         "decisions": [],
         "checkpoints": [],
         "verification_evidence": [],
+        "guidance": [],
     }
 
 
@@ -157,4 +158,5 @@ def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
         "logs": DataFormatter.sanitize(owner.logs),
         "diagnostics": DataFormatter.sanitize(owner.diagnostics),
         "workspace_refs": DataFormatter.sanitize(owner.workspace_refs),
+        "guidance_items": DataFormatter.sanitize(getattr(owner, "guidance_items", [])),
     }

@@ -41,7 +41,10 @@ from agently.core.orchestration import (
     task_board_planning_output_schema,
 )
 from agently.core.orchestration.TaskBoard.TaskBoardValidation import task_board_card_required
-from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
+from agently.core.application.AgentExecution.Stream import (
+    AgentExecutionTextDeltaProjector,
+    project_agent_execution_text_delta,
+)
 from agently.core.model.StructuredOutputParser import parse_output_contract_dict
 from agently.types.data import AgentExecutionStreamData, ReplanSignal, TaskBoardCardResult, TaskBoardRevision
 from agently.types.trigger_flow import TriggerFlowRuntimeData
@@ -655,6 +658,7 @@ __all__ = [
     "time",
     "uuid",
     "AgentExecutionStreamData",
+    "AgentExecutionTextDeltaProjector",
     "AgentTaskEffectiveExecutionStrategy",
     "AgentTaskExecutionStrategy",
     "AgentTaskMixinBase",

@@ -39,6 +39,7 @@ class ExecutionOptions(AgentlyConfigModel):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
     __options_namespace__ = "execution"
 
+    strategy: str | None = None
     execution: AgentExecutionLifecycleOptions | None = None
     routes: AgentExecutionRouteOptions | None = None
     meta: dict[str, Any] | None = None
