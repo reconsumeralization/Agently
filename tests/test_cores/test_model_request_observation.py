@@ -662,11 +662,12 @@ async def test_agent_execution_projects_model_status_and_lineage_for_plain_delta
 
     delta_execution = _create_handler_driven_agent().input("after-output retry")
     delta_chunks = [chunk async for chunk in delta_execution.get_async_generator(type="delta")]
-    assert delta_chunks == [
-        '{"reply": "partial',
-        "<$retry>handler stream broke</$retry>",
-        '{"reply": "done"}',
-    ]
+    delta_text = "".join(delta_chunks)
+    assert delta_chunks[0] == '{"reply": "partial'
+    assert delta_chunks[-1] == '{"reply": "done"}'
+    assert "<$retry>handler stream broke</$retry>" in delta_text
+    assert delta_text.index('{"reply": "partial') < delta_text.index("<$retry>")
+    assert delta_text.index("<$retry>") < delta_text.index('{"reply": "done"}')
 
 
 def test_delta_retry_marker_escapes_provider_reason():

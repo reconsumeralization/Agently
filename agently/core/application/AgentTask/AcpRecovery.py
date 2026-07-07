@@ -215,7 +215,7 @@ class AgentTaskAcpRecoveryMixin(AgentTaskMixinBase):
         acp_result: Any,
     ) -> "WorkspaceRecordRef | None":
         try:
-            record_ref = await self.workspace.ingest(
+            record_ref = await self.workspace.put(
                 content={
                     "task_id": self.id,
                     "iteration": iteration_index,

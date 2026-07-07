@@ -453,7 +453,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
                 "context_pack": DataFormatter.sanitize(context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "planning_policy": policy.to_prompt_payload(),
@@ -484,8 +484,9 @@ class AgentTaskTaskBoardStrategyMixin(
         request.instruct(
             "Plan a card board for this submitted task. "
             "Do not discuss route selection. "
-            "Use task_context_contract for run-date facts, current/latest/as-of source boundaries, and ref-backed "
-            "intermediate-resource handling. It is not a resource cap. "
+            "Use task_context_contract for prompt-safe temporal policy and ref-backed intermediate-resource handling. "
+            "Concrete runtime current_time values may be omitted from the model hot path; do not infer or write a "
+            "current date/time as a business fact unless it appears in task facts or source evidence. It is not a resource cap. "
             "Use the planning_policy as vocabulary guidance for orchestration complexity, evidence depth, "
             "reflection density, and repair tendency. Do not create hard budgets, fixed card counts, "
             "or action allowlists from the effort profile. "

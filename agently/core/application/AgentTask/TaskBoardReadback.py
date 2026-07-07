@@ -54,7 +54,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
                 "card": context.card.to_dict(),
                 "artifact_refs": hot_artifact_refs,
                 "file_refs": hot_file_refs,
@@ -791,7 +791,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             input_payload={
                 "task_id": self.id,
                 "goal": self.goal,
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
                 "card_id": card_id,
                 "artifact_refs": hot_artifact_refs,
                 "bounded": dict(payload["bounded"]),

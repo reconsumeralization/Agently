@@ -42,7 +42,7 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
             )
             terminal = bool(getattr(self, "_completed", False))
             guidance_ref["status"] = "received_after_terminal" if terminal else "received"
-            record_ref = await self.workspace.ingest(
+            record_ref = await self.workspace.put(
                 content={
                     "schema_version": "agent_task_guidance/v1",
                     "task_id": self.id,

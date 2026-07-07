@@ -48,6 +48,10 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             "accepted": False,
             "artifact_status": "blocked",
             "reason": reason,
+            "final_response": (
+                "Task encountered a blocking condition. "
+                f"No complete final deliverable was accepted. Reason: {reason}"
+            ),
         }
 
     task_options = execution.task_strategy_options()

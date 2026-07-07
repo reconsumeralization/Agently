@@ -439,7 +439,7 @@ async def test_blocks_compile_skill_activation_before_model_action_dag_segment()
 
 
 @pytest.mark.asyncio
-async def test_blocks_workspace_operation_ingests_through_workspace_resource(tmp_path):
+async def test_blocks_workspace_operation_puts_through_workspace_resource_with_ingest_alias(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace")
     graph = Agently.blocks.compile(
         {
@@ -467,7 +467,8 @@ async def test_blocks_workspace_operation_ingests_through_workspace_resource(tmp
     evidence = Agently.blocks.map_evidence(graph, snapshot)
     block_output = evidence.execution_block_results[0]["output"]
     ref = block_output["ref"]
-    assert block_output["operation"] == "ingest"
+    assert block_output["operation"] == "put"
+    assert block_output["compat_operation"] == "ingest"
     assert evidence.workspace_refs == (ref["id"],)
     assert await workspace.get_data(ref) == {"answer": "ok"}
 
@@ -475,14 +476,14 @@ async def test_blocks_workspace_operation_ingests_through_workspace_resource(tmp
 @pytest.mark.asyncio
 async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace-search")
-    expected_ref = await workspace.ingest(
+    expected_ref = await workspace.put(
         content="Alpha deadline is 2026-07-01. Keep this scoped evidence short.",
         collection="observations",
         kind="note",
         summary="alpha deadline note",
         scope={"task_id": "alpha"},
     )
-    await workspace.ingest(
+    await workspace.put(
         content="Beta deadline is unrelated and must stay outside the scoped result.",
         collection="observations",
         kind="note",
@@ -602,7 +603,7 @@ async def test_blocks_workspace_operation_search_preserves_record_representation
 @pytest.mark.asyncio
 async def test_blocks_workspace_operation_search_calls_workspace_retrieve(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace-retrieve-options")
-    expected_ref = await workspace.ingest(
+    expected_ref = await workspace.put(
         content="Alpha deadline is 2026-07-01.",
         collection="observations",
         kind="note",
@@ -697,7 +698,7 @@ async def test_blocks_workspace_operation_search_empty_result_enters_ledger(tmp_
 async def test_blocks_workspace_operation_search_can_use_workspace_files_surface(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "blocks-workspace-file-search")
     await workspace.write_file("notes/todo.md", "alpha\nrelease deadline is 2026-07-01\n")
-    await workspace.ingest(
+    await workspace.put(
         content="Indexed record is unrelated to the file-only query.",
         collection="observations",
         kind="note",

@@ -57,7 +57,7 @@ async def record_workspace(
     record_content = content if content is not None else default_workspace_content(owner)
     record_summary = summary or default_workspace_summary(owner, collection)
 
-    record_ref = await owner.workspace.ingest(
+    record_ref = await owner.workspace.put(
         content=record_content,
         collection=collection,
         kind=kind,

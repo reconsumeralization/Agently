@@ -68,6 +68,9 @@ async def async_get_text(
     data = await owner.async_get_data(parent_run_context=parent_run_context, **kwargs)
     if isinstance(data, str):
         return data
+    final_response = _final_response_from_data(data)
+    if final_response:
+        return final_response
     return json.dumps(DataFormatter.sanitize(data), ensure_ascii=False)
 
 
@@ -134,6 +137,32 @@ def _project_stream_items(
         projected = _project_instant_delta_item(item, text_projector=text_projector)
         if projected is not None:
             yield projected
+
+
+def _final_response_from_data(data: Any) -> str:
+    if not isinstance(data, Mapping):
+        return ""
+    if _looks_like_terminal_result(data):
+        final_response = str(data.get("final_response") or "").strip()
+        if final_response:
+            return final_response
+    result = data.get("result")
+    if isinstance(result, Mapping) and _looks_like_terminal_result(result):
+        return str(result.get("final_response") or "").strip()
+    return ""
+
+
+def _looks_like_terminal_result(data: Mapping[str, Any]) -> bool:
+    if "status" not in data:
+        return False
+    if "accepted" in data or "artifact_status" in data:
+        return True
+    final_response = str(data.get("final_response") or "").strip()
+    if final_response and data.get("task_id") not in (None, ""):
+        return True
+    if final_response and isinstance(data.get("taskboard"), Mapping):
+        return True
+    return False
 
 
 def _project_instant_delta_item(

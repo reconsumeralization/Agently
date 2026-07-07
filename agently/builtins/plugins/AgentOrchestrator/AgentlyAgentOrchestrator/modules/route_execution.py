@@ -73,6 +73,10 @@ async def async_execute_route(
                 "accepted": False,
                 "artifact_status": "blocked",
                 "reason": reason,
+                "final_response": (
+                    "Task encountered a blocking condition. "
+                    f"No complete final deliverable was accepted. Reason: {reason}"
+                ),
                 "route_policy": route_meta.get("route_policy"),
             }
         if route == "skills":

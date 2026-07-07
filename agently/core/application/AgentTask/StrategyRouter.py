@@ -241,7 +241,7 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
         if not self.task_shape_analysis:
             return
         try:
-            record_ref = await self.workspace.ingest(
+            record_ref = await self.workspace.put(
                 content={
                     "task_id": self.id,
                     "execution_strategy": self.execution_strategy,

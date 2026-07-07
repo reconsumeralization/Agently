@@ -71,6 +71,12 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                         "accepted": False,
                         "artifact_status": "partial",
                         "reason": reason,
+                        "final_response": self._agent_task_user_final_response(
+                            accepted=False,
+                            artifact_status="partial",
+                            status=self.status,
+                            reason=reason,
+                        ),
                         "iterations": len(self.iterations),
                     }
                     await self._emit("agent_task.blocked", self.result)
@@ -131,6 +137,12 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             "artifact_status": "partial",
             "task_id": self.id,
             "reason": reason,
+            "final_response": self._agent_task_user_final_response(
+                accepted=False,
+                artifact_status="partial",
+                status="timed_out",
+                reason=reason,
+            ),
             "iterations": len(self.iterations),
         }
         self.diagnostics.setdefault("terminal_reason", "timed_out")

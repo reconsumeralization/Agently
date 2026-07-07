@@ -470,6 +470,13 @@ def test_task_context_contract_is_ref_backed_and_cap_free(tmp_path):
     assert "max_iterations" not in json.dumps(contract, ensure_ascii=False)
     assert work_unit.input_payload["task_context_contract"]["schema_version"] == contract["schema_version"]
     assert work_unit.delivery_contract["task_context_contract"]["schema_version"] == contract["schema_version"]
+    prompt_contract = task._task_context_contract_for_model_prompt()
+    assert prompt_contract["current_time"]["visibility"] == "omitted_from_default_model_hot_path"
+    assert "utc" not in prompt_contract["current_time"]
+    assert "current_time.utc" not in json.dumps(prompt_contract, ensure_ascii=False)
+    assert work_unit.input_payload["task_context_contract"]["current_time"]["visibility"] == (
+        "omitted_from_default_model_hot_path"
+    )
 
 
 @pytest.mark.asyncio
@@ -549,6 +556,8 @@ async def test_taskboard_work_units_receive_task_context_contract(tmp_path):
     for work_unit in captured_work_units:
         payload_contract = work_unit["input_payload"]["task_context_contract"]
         assert payload_contract["schema_version"] == "agent_task_context_contract/v1"
+        assert payload_contract["current_time"]["visibility"] == "omitted_from_default_model_hot_path"
+        assert "utc" not in payload_contract["current_time"]
         assert payload_contract["intermediate_resource_policy"]["default_state"] == "ref_only"
         assert work_unit["delivery_contract"]["task_context_contract"]["schema_version"] == (
             "agent_task_context_contract/v1"
@@ -4805,6 +4814,155 @@ def test_taskboard_final_response_augments_overstrong_model_response_with_comple
     assert "Known limitations/notes" in final_response
 
 
+def test_agent_task_final_response_ignores_overstrong_unaccepted_model_response():
+    final_response = AgentTask._agent_task_user_final_response(
+        final={"final_response": "Completed. All success criteria are satisfied."},
+        accepted=False,
+        artifact_status="partial",
+        reason="Official source evidence is still missing.",
+        missing_criteria=["Ground every official-source claim."],
+        final_refs=[{"path": "final.md", "role": "workspace_artifact"}],
+    )
+
+    assert "All success criteria are satisfied" not in final_response
+    assert "Partial result available" in final_response
+    assert "final.md" in final_response
+    assert "Official source evidence is still missing" in final_response
+    assert "Ground every official-source claim" in final_response
+
+
+def test_taskboard_final_response_omits_process_notes_for_plain_acceptance():
+    final_response = AgentTask._taskboard_user_final_response(
+        final={"final_response": "Completed. Deliverable artifact: final.md."},
+        accepted=True,
+        artifact_status="accepted",
+        reason="All criteria are satisfied.",
+        missing_criteria=[],
+        final_refs=[{"path": "final.md"}],
+        board_status="completed",
+        degraded_finalization_attempted=False,
+        completion_notes={
+            "known_limits": [],
+            "quality_notes": ["Earlier repair note was resolved."],
+            "process_notes": ["Readback happened before final verification."],
+        },
+    )
+
+    assert final_response == "Completed. Deliverable artifact: final.md."
+    assert "Process notes" not in final_response
+    assert "Earlier repair note" not in final_response
+
+
+def test_taskboard_completion_notes_do_not_degrade_resolved_repair_history():
+    revision = TaskBoardRevision.create(
+        board_id="resolved-repair-history",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "resolved-repair-history-graph",
+                "cards": [
+                    {"id": "draft", "objective": "Write the report."},
+                    {"id": "final-verification-repair", "objective": "Repair verifier evidence."},
+                    {"id": "final-verification-repair-2", "objective": "Repair final artifact path."},
+                    {"id": "final-verification-repair.readback", "objective": "Read back the artifact."},
+                    {"id": "final-verification-repair.continue", "objective": "Continue after readback."},
+                ],
+            }
+        ),
+    )
+    revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": "rev-0",
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "draft",
+                        "status": "completed",
+                        "preview": {"final_result": "Report body."},
+                    },
+                },
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final-verification-repair",
+                        "status": "setback",
+                        "preview": {
+                            "remaining_work": ["Need artifact readback before final verification."],
+                            "self_check": "Readback is needed, not a final quality failure.",
+                        },
+                    },
+                },
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final-verification-repair.readback",
+                        "status": "completed",
+                        "preview": {"short_summary": "Artifact readback completed."},
+                    },
+                },
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final-verification-repair-2",
+                        "status": "completed",
+                        "preview": {
+                            "remaining_work": ["Write the confirmed content to the required artifact path."],
+                            "self_check": "The content is verified; only materialization was pending.",
+                        },
+                    },
+                },
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final-verification-repair.continue",
+                        "status": "completed",
+                        "preview": {"short_summary": "Verifier evidence repaired."},
+                    },
+                },
+            ],
+        },
+    )
+    notes = AgentTask._taskboard_completion_notes(
+        revision,
+        final={"accepted": True, "reason": "All criteria are satisfied."},
+        final_verification={
+            "is_complete": True,
+            "reason": "All criteria are satisfied.",
+            "failure_analysis": "All criteria are satisfied.",
+            "acceptance_delta": ["All criteria are satisfied after readback."],
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion": "The report is delivered.",
+                    "satisfied": True,
+                    "summary": "The artifact readback confirms delivery.",
+                }
+            ],
+        },
+        acceptance_verification_plan={
+            "all_satisfied": True,
+            "status_counts": {"satisfied": 1},
+            "metadata": {"dirty_count": 0, "green_count": 1, "total_items": 1},
+        },
+    )
+
+    assert not notes["known_limits"]
+    assert any("resolved earlier setback" in note for note in notes["process_notes"])
+    assert any("Write the confirmed content" in note for note in notes["process_notes"])
+    assert any("All criteria are satisfied." in note for note in notes["quality_notes"])
+    assert any("All criteria are satisfied after readback" in note for note in notes["quality_notes"])
+    assert (
+        AgentTask._taskboard_final_is_degraded(
+            {"accepted": True},
+            board_status="completed",
+            degraded_finalization_attempted=False,
+            completion_notes=notes,
+        )
+        is False
+    )
+
+
 @pytest.mark.asyncio
 async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_path, monkeypatch):
     agent = _create_agent("execution-taskboard-finalizer-rejection-verifier").use_workspace(
@@ -7121,6 +7279,9 @@ async def test_allow_create_task_false_blocks_goal_pursuit(tmp_path):
 
     assert result["status"] in {"blocked", "max_iterations"}
     assert result["accepted"] is False
+    assert "final_response" in result
+    assert "No complete final deliverable was accepted" in result["final_response"]
+    assert await execution.async_get_text() == result["final_response"]
     assert meta["route"]["selected_route"] == "agent_task"
 
 

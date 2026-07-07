@@ -391,12 +391,22 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
         if bool(verification.get("is_complete")):
             self.status = "completed"
+            final_result = verification.get("final_result") or execution_result
             self.result = {
                 "status": "completed",
                 "accepted": True,
                 "artifact_status": "accepted",
                 "task_id": self.id,
-                "final_result": verification.get("final_result") or execution_result,
+                "final_result": final_result,
+                "final_response": self._agent_task_user_final_response(
+                    final=verification,
+                    accepted=True,
+                    artifact_status="accepted",
+                    status="completed",
+                    reason=str(verification.get("reason") or ""),
+                    missing_criteria=verification.get("missing_criteria", []),
+                    final_result=final_result,
+                ),
                 "iterations": iteration_index,
                 "verification": verification,
             }
@@ -415,15 +425,30 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
         if verification.get("requires_block"):
             self.status = "blocked"
+            reason = verification.get("reason") or "Verifier blocked the task."
+            blocked_final_result = verification.get("final_result") or ""
+            blocked_final_refs = execution_result.get("file_refs", []) if isinstance(execution_result, Mapping) else []
             self.result = {
                 "status": "blocked",
                 "accepted": False,
                 "artifact_status": "blocked",
                 "task_id": self.id,
-                "reason": verification.get("reason") or "Verifier blocked the task.",
+                "reason": reason,
+                "final_response": self._agent_task_user_final_response(
+                    final=verification,
+                    accepted=False,
+                    artifact_status="blocked",
+                    status="blocked",
+                    reason=str(reason),
+                    missing_criteria=verification.get("missing_criteria", []),
+                    final_refs=blocked_final_refs,
+                    final_result=blocked_final_result,
+                ),
                 "iterations": iteration_index,
                 "verification": verification,
             }
+            if blocked_final_result not in (None, ""):
+                self.result["final_result"] = blocked_final_result
             await self._emit_progress(
                 iteration_index,
                 "blocked",
@@ -448,15 +473,29 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             else:
                 self.status = "max_iterations"
                 reason = verification.get("reason") or "Task did not pass verification before max_iterations."
+            partial_final_result = verification.get("final_result") or ""
+            partial_final_refs = execution_result.get("file_refs", []) if isinstance(execution_result, Mapping) else []
             self.result = {
                 "status": self.status,
                 "accepted": False,
                 "artifact_status": "partial",
                 "task_id": self.id,
                 "reason": reason,
+                "final_response": self._agent_task_user_final_response(
+                    final=verification,
+                    accepted=False,
+                    artifact_status="partial",
+                    status=self.status,
+                    reason=str(reason),
+                    missing_criteria=verification.get("missing_criteria", []),
+                    final_refs=partial_final_refs,
+                    final_result=partial_final_result,
+                ),
                 "iterations": iteration_index,
                 "verification": verification,
             }
+            if partial_final_result not in (None, ""):
+                self.result["final_result"] = partial_final_result
             if missing_capabilities:
                 self.result["missing_required_capabilities"] = missing_capabilities
             await self._emit_progress(
@@ -1471,7 +1510,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
-                "task_context_contract": self._task_context_contract(),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
                 "iteration": iteration_index,
                 "previous_iterations": previous_iterations,
                 "repair_context": repair_context,
@@ -1508,9 +1547,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "Before choosing the execution shape, provide short turn_intent and decision_basis fields to frame this "
             "single-step decision; do not include raw chain-of-thought, hidden reasoning, or completion claims there. "
             "Treat execution_prompt as caller-provided task context, including any input, instructions, and output contract. "
-            "Use task_context_contract.current_time for current-time facts and current/latest/as-of source boundaries, "
-            "and use task_context_contract for ref-backed "
-            "intermediate-resource handling. It is not a resource cap. "
+            "Use task_context_contract for prompt-safe temporal policy and ref-backed intermediate-resource handling. "
+            "Concrete runtime current_time values may be omitted from the model hot path; do not infer or write a "
+            "current date/time as a business fact unless it appears in task facts or source evidence. It is not a resource cap. "
             "Use prior verification evidence when present. Do not finalize unless all success criteria can be verified. "
             "When repair_context is present, use it as verification feedback: understand why prior work was incomplete, "
             "compare the acceptance delta, and then choose the next bounded step. The verifier does not choose tools, "
@@ -1714,7 +1753,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "task_id": self.id,
             "goal": self.goal,
             "success_criteria": self.success_criteria,
-            "task_context_contract": self._task_context_contract(),
+            "task_context_contract": self._task_context_contract_for_model_prompt(),
             "iteration": iteration_index,
             "plan": DataFormatter.sanitize(plan),
             "step_execution": step_execution,
@@ -1741,9 +1780,15 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     f"The AgentTask requested execution_strategy is {self.execution_strategy}; "
                     f"the effective execution_strategy is {self.effective_execution_strategy or self.execution_strategy}. "
                     "Respect the caller-provided execution_prompt context and output contract when present. "
-                    "Use task_context_contract.current_time when the task asks for current/latest/as-of evidence, and "
+                    "Use task_context_contract for prompt-safe temporal policy; do not infer or write a current "
+                    "date/time as a business fact unless it appears in task facts or source evidence. "
                     "keep downloads, web snapshots, notes, generated code, and large extracted text as refs until scoped "
                     "readback is needed. "
+                    "Unless the user explicitly requests a fill-in template, do not leave unresolved placeholders such as "
+                    "[date], [time], [name], [Your Name], [Title], TODO, or TBD in a final deliverable; omit unknown "
+                    "details or write a role-generic sentence grounded in available facts. "
+                    "When evidence says no data loss is known and an audit is still running, do not state or imply that data "
+                    "is intact, complete, safe, fully verified, or that no data was lost. "
                     "Return concrete evidence for the verifier. If this step produces the requested final answer, report, "
                     "file body, or artifact body, put the complete candidate deliverable in candidate_final_result instead "
                     "of burying the only copy inside evidence when it fits the bounded output. If the plan deliverable_mode "
