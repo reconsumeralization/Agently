@@ -188,7 +188,7 @@ async def main() -> None:
         }
 
     agent.use_actions(fetch_agently_architecture_sources)
-    await workspace.ingest(
+    await workspace.put(
         content={
             "task": TASK_ID,
             "output_file": OUTPUT_FILE,

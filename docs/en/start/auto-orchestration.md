@@ -350,17 +350,21 @@ or phase event resets the quiet timer, so active streams do not get heartbeat
 spam. Public `delta` does not project heartbeat text; detailed timing and raw
 heartbeat payloads remain available through structured streams and logs.
 
-Terminal task status and artifact acceptance are separate. `completed` means
-the verifier accepted the result (`accepted=True`, `artifact_status="accepted"`).
-When a result is accepted only because unavailable or partial evidence was
-explicitly disclosed and still satisfies the user goal, TaskBoard reports
-`accepted=True` with `artifact_status="degraded"` and includes a user-facing
-`final_response` that explains the degradation. This is not a quality shortcut:
-semantic acceptance still comes from the verifier and host guards.
-`max_iterations` can still leave a useful Workspace file or checkpoint, but it
-is a partial artifact (`accepted=False`, `artifact_status="partial"`), not a
-completed business result. Partial results may still include `final_response`
-so callers can show what was produced and which requirements remain unmet.
+Terminal task status and artifact acceptance are separate. AgentTask terminal
+result dicts include a user-facing `final_response` for accepted, degraded,
+partial, and blocked outcomes. `completed` means the verifier accepted the
+result (`accepted=True`, `artifact_status="accepted"`). When a result is
+accepted only because unavailable or partial evidence was explicitly disclosed
+and still satisfies the user goal, TaskBoard reports `accepted=True` with
+`artifact_status="degraded"` and includes a `final_response` that explains the
+degradation. This is not a quality shortcut: semantic acceptance still comes
+from the verifier and host guards. `max_iterations` can still leave a useful
+Workspace file or checkpoint, but it is a partial artifact (`accepted=False`,
+`artifact_status="partial"`), not a completed business result. Partial and
+blocked results include `final_response` so callers can show what was produced,
+what stopped, and which requirements remain unmet. `get_text()` /
+`async_get_text()` prefer this field for task-strategy result dicts; `get_data()`
+still returns the structured result.
 TaskBoard terminal payloads may also include `taskboard.completion_notes`, a
 bounded process projection of card summaries, known gaps, verifier notes, and
 acceptance progress. It is useful for UI progress and final-response disclosure,
@@ -440,13 +444,14 @@ TaskBoard final verification receives board-level source refs with the same
 `content_state` boundary, so final synthesis cannot upgrade a discovered path
 into source-content evidence without a bounded preview/readback.
 
-Flat and TaskBoard work units also receive a task context contract with
-compact `current_time` facts: `utc`, plus `local` and `timezone` when the local
-timezone is recognizable. For current, latest, recent, or as-of
-tasks, use that time context unless the caller supplied a more specific date.
-The contract is context for model decisions, planning, evidence selection, and
-source-boundary handling; it does not set model-call, tool-call, node-count,
-iteration, or wall-clock caps.
+Flat and TaskBoard work units also receive a task context contract. Runtime
+metadata can record compact `current_time` facts for diagnostics, but default
+model-hot prompts receive only prompt-safe availability metadata and omit the
+concrete runtime timestamp. For current, latest, recent, or as-of tasks, pass
+the intended business date or source timestamp explicitly when it matters. The
+contract is context for model decisions, planning, evidence selection, and
+source-boundary handling; it must not be used as a business fact by itself and
+does not set model-call, tool-call, node-count, iteration, or wall-clock caps.
 
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 Workspace file refs with bounded cold readback previews. Framework-generated

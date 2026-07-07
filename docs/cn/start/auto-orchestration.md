@@ -312,14 +312,17 @@ progress、snapshot、child-execution、delta 或 phase 事件都会重置静默
 因此活跃流不会被 heartbeat 污染。公开 `delta` 不投影 heartbeat 文案；
 详细时间和原始 heartbeat payload 仍保留在结构化 stream 和日志中。
 
-任务终态和 artifact 验收是两件事。`completed` 表示 verifier 已验收结果
-（`accepted=True`、`artifact_status="accepted"`）。当不可用或部分证据已明确披露、
-并且降级后仍满足用户目标时，TaskBoard 会返回 `accepted=True` 和
-`artifact_status="degraded"`，同时提供面向用户的 `final_response` 说明降级边界。
-这不是质量捷径：语义验收仍由 verifier 和 host guards 决定。`max_iterations` 仍可能留下
-有用的 Workspace 文件或 checkpoint，但它只是 partial artifact
-（`accepted=False`、`artifact_status="partial"`），不是已完成的业务结果。
-partial result 也可以包含 `final_response`，让调用方说明产出了什么、哪些要求仍未满足。
+任务终态和 artifact 验收是两件事。AgentTask 终局 result dict 会为 accepted、
+degraded、partial 和 blocked outcome 都提供面向用户的 `final_response`。`completed`
+表示 verifier 已验收结果（`accepted=True`、`artifact_status="accepted"`）。当不可用或
+部分证据已明确披露、并且降级后仍满足用户目标时，TaskBoard 会返回
+`accepted=True` 和 `artifact_status="degraded"`，同时提供 `final_response`
+说明降级边界。这不是质量捷径：语义验收仍由 verifier 和 host guards 决定。
+`max_iterations` 仍可能留下有用的 Workspace 文件或 checkpoint，但它只是 partial
+artifact（`accepted=False`、`artifact_status="partial"`），不是已完成的业务结果。
+partial 和 blocked result 会包含 `final_response`，让调用方说明产出了什么、在哪里受阻、
+哪些要求仍未满足。`get_text()` / `async_get_text()` 对 task-strategy result dict
+会优先返回这个字段；`get_data()` 仍返回结构化结果。
 TaskBoard 终态 payload 还可能包含 `taskboard.completion_notes`：这是对 card
 完成摘要、已知缺口、verifier 备注和 acceptance progress 的有界过程投影。它适合 UI
 进度和最终答复的降级/不足披露，但不是证据，也不能替代 verifier 验收。
@@ -377,12 +380,13 @@ TaskBoard final verification 也会接收 board-level source refs，并保留同
 `content_state` 边界；final synthesis 不能把 discovered path 升级为 source-content
 evidence，除非已经有有界 preview/readback。
 
-Flat 和 TaskBoard 的 work unit 也会收到同一份 task context contract，其中包含
-紧凑的 `current_time` 事实：`utc`，以及本地时区可识别时的 `local` 和
-`timezone`。对于 current、latest、recent 或 as-of 任务，除非调用方明确给了更具体
-日期，否则应使用这些时间上下文。该 contract 只是 model decision、planning、evidence
-selection 和 source-boundary handling 的上下文，不会设置模型调用、工具调用、节点数、
-迭代数或 wall-clock 硬上限。
+Flat 和 TaskBoard 的 work unit 也会收到同一份 task context contract。运行时
+metadata 可以为诊断记录紧凑的 `current_time` 事实，但默认 model-hot prompt 只会收到
+prompt-safe 的可用性元信息，不携带具体运行时 timestamp。对于 current、latest、recent
+或 as-of 任务，如果业务上需要具体日期或来源时间，应由 caller 或 source 明确提供。该
+contract 只是 model decision、planning、evidence selection 和 source-boundary handling
+的上下文，不能被模型直接当作业务事实，也不会设置模型调用、工具调用、节点数、迭代数或
+wall-clock 硬上限。
 
 TaskBoard readback card 可以用有界冷读回读取 Action artifact refs 和可信的
 Workspace file refs。框架生成的 readback card 会把 evidence scope 扩展到直接依赖和

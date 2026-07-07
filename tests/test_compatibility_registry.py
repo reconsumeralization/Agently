@@ -67,12 +67,13 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.3.10"
-    assert in_development["release_train"] == "2026-07-4.1.3.10-dev"
-    assert "4.1.3.10 work" in in_development["notes"]
+    assert in_development["target_version"] == "4.1.4"
+    assert in_development["release_train"] == "2026-07-4.1.4-dev"
+    assert "4.1.4 work" in in_development["notes"]
     assert "4.1.3.9 Workspace retrieval and Session memory release" in in_development["notes"]
-    assert "Human-in-the-loop capabilities" in in_development["notes"]
-    assert "long-task task-execution memory" in in_development["notes"]
+    assert "AgentExecution strategy selection" in in_development["notes"]
+    assert "TaskBoard incremental acceptance" in in_development["notes"]
+    assert "long-task artifact hardening" in in_development["notes"]
     assert "4.1.3.9 Workspace retrieval, SessionMemory" in in_development["notes"]
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
@@ -216,6 +217,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "not a separate recommended AgentTask execution owner" in task_loop_contract["contract"]
     assert "accepted=true" in task_loop_contract["contract"]
     assert "final_response" in task_loop_contract["contract"]
+    assert "get_text()/async_get_text() prefer final_response" in task_loop_contract["contract"]
+    assert "without an extra narrator request" in task_loop_contract["contract"]
     assert "artifact_status=degraded" in task_loop_contract["contract"]
     assert "artifact_status=partial" in task_loop_contract["contract"]
     assert "agent.resume(task_id)" in task_loop_contract["contract"]

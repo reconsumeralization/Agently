@@ -95,9 +95,9 @@ chunks = collection.query(
 )
 ```
 
-### 后置 ingest
+### 后置写回
 
-agent 输出应当成为未来上下文（如自更新 KB）时，请求后加一步把回答 ingest 回集合：
+agent 输出应当成为未来上下文（如自更新 KB）时，请求后加一步把回答写回集合：
 
 ```python
 result = agent.input(user_question).start()
@@ -108,7 +108,7 @@ collection.add([{
 }])
 ```
 
-慎用 —— 不审核就自动 ingest 模型输出是 KB 自我污染的方式。
+慎用 —— 不审核就自动写回模型输出是 KB 自我污染的方式。
 
 ### TriggerFlow 内
 

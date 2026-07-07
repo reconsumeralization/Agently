@@ -104,7 +104,7 @@ async def run_task_strategy(agent: Any) -> tuple[dict[str, Any], AgentExecutionM
     workspace = getattr(agent, "workspace", None)
     if workspace is None:
         raise RuntimeError("Workspace is required for task-loop strategy examples.")
-    await workspace.ingest(
+    await workspace.put(
         content=ACCOUNT_SIGNAL,
         collection="observations",
         kind="account_signal",

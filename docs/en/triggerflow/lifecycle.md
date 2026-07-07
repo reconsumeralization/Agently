@@ -262,8 +262,8 @@ the same explicit information scope, bind that Agent or the single
 AgentExecution to the same Workspace in application code. If a flow needs to
 move data between two isolated Workspaces, do it explicitly in the flow's
 business logic with
-Workspace `search(...)`, `get(...)`, `get_data(...)`, `put(...)`, `ingest(...)`,
-and `link(...)`. Workspace itself does not provide a cross-space communication
+Workspace `search(...)`, `get(...)`, `get_data(...)`, `put(...)`, and
+`link(...)`. Workspace itself does not provide a cross-space communication
 or replication protocol.
 
 You can also pass a store through existing execution resources when a service

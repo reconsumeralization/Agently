@@ -57,7 +57,7 @@ folder inside `files_root`.
 ```python
 agent = Agently.create_agent("repo-worker")
 
-ref = await agent.workspace.ingest(
+ref = await agent.workspace.put(
     content=pytest_output,
     collection="observations",
     kind="test_output",
@@ -209,8 +209,8 @@ backend when the execution should use an explicitly selected Workspace.
 Do not rely on separate explicitly isolated Workspaces to communicate with each
 other. If a TriggerFlow execution needs to move information between isolated
 Workspaces, make that transfer explicit in application logic: search or read
-from the source Workspace, write or ingest into the destination Workspace, then
-link the resulting refs. Workspace does not provide a cross-space messaging or
+from the source Workspace, write into the destination Workspace, then link the
+resulting refs. Workspace does not provide a cross-space messaging or
 replication protocol.
 
 ## What It Stores
@@ -607,5 +607,9 @@ share one physical `workspace.db` while execution file roots stay isolated.
 
 See `examples/workspace/workspace_with_action_output.py` for the Action
 boundary: a file action writes into `workspace.files_root`, a shell action reads
-that file, application code explicitly ingests the action output as a Workspace
+that file, application code explicitly writes the action output as a Workspace
 observation, and ContextBuilder packages it into a ContextPackage.
+
+`workspace.ingest(...)` remains as a compatibility alias for older code. New
+code should use `workspace.put(...)`; when an older profile path is needed, pass
+`profile=...` to `put`.

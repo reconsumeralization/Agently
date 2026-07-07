@@ -89,7 +89,7 @@ async def main() -> None:
         return SUPPORT_TICKET_CONTEXT
 
     agent.use_actions(lookup_ticket_context)
-    await workspace.ingest(
+    await workspace.put(
         content=SUPPORT_TICKET_CONTEXT,
         collection="observations",
         kind="support_ticket_business_context",

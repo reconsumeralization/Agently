@@ -249,8 +249,8 @@ backend 时，execution 会使用显式选择的 Workspace。
 它是 live resource，不会被序列化进 execution state。如果某个 chunk 需要 Agent
 使用同一个显式信息范围，应在业务代码里把该 Agent 或单次 AgentExecution 绑定到同一个
 Workspace。如果 flow 需要在两个隔离 Workspace 之间移动数据，应在业务逻辑里显式用
-Workspace `search(...)`、`get(...)`、`get_data(...)`、`put(...)`、`ingest(...)` 和
-`link(...)` 完成。Workspace 本身不提供跨空间 communication 或 replication 协议。
+Workspace `search(...)`、`get(...)`、`get_data(...)`、`put(...)` 和 `link(...)`
+完成。Workspace 本身不提供跨空间 communication 或 replication 协议。
 
 如果服务没有使用 `workspace=...`，也可以通过已有 execution resources 传入 store：
 
