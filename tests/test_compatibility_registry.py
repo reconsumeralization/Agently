@@ -67,14 +67,15 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.4"
-    assert in_development["release_train"] == "2026-07-4.1.4-dev"
-    assert "4.1.4 work" in in_development["notes"]
-    assert "4.1.3.9 Workspace retrieval and Session memory release" in in_development["notes"]
+    assert in_development["target_version"] == "4.1.4.1"
+    assert in_development["release_train"] == "2026-07-4.1.4.1-dev"
+    assert "4.1.4.1 work after the 4.1.4 AgentExecution and TaskBoard release" in in_development["notes"]
+    assert "AgentExecutionResult reader compatibility" in in_development["notes"]
+    assert "get_data() consistently returns business data" in in_development["notes"]
+    assert "get_full_data() exposes full route/task envelopes" in in_development["notes"]
     assert "AgentExecution strategy selection" in in_development["notes"]
     assert "TaskBoard incremental acceptance" in in_development["notes"]
     assert "long-task artifact hardening" in in_development["notes"]
-    assert "4.1.3.9 Workspace retrieval, SessionMemory" in in_development["notes"]
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",

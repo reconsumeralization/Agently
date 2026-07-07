@@ -133,7 +133,7 @@ async def run_task_strategy(agent: Any) -> tuple[dict[str, Any], AgentExecutionM
 
     stream_paths = await collect_stream_paths(execution)
     result = execution.get_result()
-    data = await result.async_get_data()
+    data = await result.async_get_full_data()
     meta = await result.async_get_meta()
     return data if isinstance(data, dict) else {"raw": data}, meta, stream_paths
 

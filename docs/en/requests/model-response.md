@@ -36,11 +36,20 @@ Style B is the default for non-trivial code. The actual model call runs lazily w
 | Method | Returns |
 |---|---|
 | `result.get_text()` | full plain text |
-| `result.get_data()` | parsed structured dict (when `output()` was used) |
+| `result.get_data()` | final business data; parsed structured dict when `output()` was used |
 | `result.get_data_object()` | Pydantic instance (when `output()` was given a `BaseModel`) |
 | `result.get_meta()` | dict of usage / model info / timing |
 
-Each has an async sibling: `async_get_text()`, `async_get_data()`, `async_get_data_object()`, `async_get_meta()`.
+Each common reader has an async sibling: `async_get_text()`,
+`async_get_data()`, `async_get_data_object()`, `async_get_meta()`.
+
+For `AgentExecutionResult`, `get_data()` is the business-result view across
+direct, flat, and TaskBoard routes. If a task-strategy run returns a terminal
+envelope with `final_result`, `get_data()` returns that `final_result` parsed
+against the declared `output(...)` contract when possible.
+`AgentExecutionResult` also provides `get_full_data()` /
+`async_get_full_data()` for route/task internals such as `status`, `accepted`,
+`artifact_status`, `taskboard`, `completion_notes`, or diagnostics.
 
 Mixing readers is fine — they all consume from the same cached result:
 

@@ -116,6 +116,19 @@ class AgentExecution(Protocol):
         parent_run_context: Any = None,
     ) -> Any: ...
 
+    async def async_get_full_data(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: Any = None,
+    ) -> Any: ...
+
     async def async_get_text(self, **kwargs: Any) -> str: ...
 
     async def async_get_meta(self) -> AgentExecutionMeta: ...
@@ -166,6 +179,8 @@ class AgentExecution(Protocol):
     def get_async_generator(self, *args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]: ...
 
     def get_data(self, **kwargs: Any) -> Any: ...
+
+    def get_full_data(self, **kwargs: Any) -> Any: ...
 
     def get_text(self, **kwargs: Any) -> str: ...
 

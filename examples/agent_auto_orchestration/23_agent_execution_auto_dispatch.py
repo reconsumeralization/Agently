@@ -274,6 +274,8 @@ def final_result_text(data: dict[str, Any]) -> str:
     final_result = data.get("final_result")
     if final_result is None and isinstance(data.get("verification"), dict):
         final_result = data["verification"].get("final_result")
+    if final_result is None and "raw" in data:
+        final_result = data["raw"]
     return str(final_result or "").strip()
 
 

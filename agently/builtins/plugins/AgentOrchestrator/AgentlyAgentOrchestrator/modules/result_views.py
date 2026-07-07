@@ -20,6 +20,10 @@ from collections.abc import AsyncGenerator, Generator, Mapping
 from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
+from agently.core.model.StructuredOutputParser import (
+    STRUCTURED_OUTPUT_FORMATS,
+    parse_output_contract_dict,
+)
 from agently.core.application.AgentExecution.Stream import (
     AgentExecutionTextDeltaProjector,
     project_agent_execution_text_delta,
@@ -36,6 +40,32 @@ if TYPE_CHECKING:
 
 
 async def async_get_data(
+    owner: "AgentExecution",
+    *,
+    type: Literal["original", "parsed", "all"] = "parsed",
+    ensure_keys: list[str] | None = None,
+    ensure_all_keys: bool | None = None,
+    validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+    key_style: Literal["dot", "slash"] = "dot",
+    max_retries: int = 3,
+    raise_ensure_failure: bool = True,
+    parent_run_context: "RunContext | None" = None,
+) -> Any:
+    data = await async_get_full_data(
+        owner,
+        type=type,
+        ensure_keys=ensure_keys,
+        ensure_all_keys=ensure_all_keys,
+        validate_handler=validate_handler,
+        key_style=key_style,
+        max_retries=max_retries,
+        raise_ensure_failure=raise_ensure_failure,
+        parent_run_context=parent_run_context,
+    )
+    return _business_data_from_full_data(owner, data)
+
+
+async def async_get_full_data(
     owner: "AgentExecution",
     *,
     type: Literal["original", "parsed", "all"] = "parsed",
@@ -65,7 +95,7 @@ async def async_get_text(
     parent_run_context: "RunContext | None" = None,
     **kwargs: Any,
 ) -> str:
-    data = await owner.async_get_data(parent_run_context=parent_run_context, **kwargs)
+    data = await owner.async_get_full_data(parent_run_context=parent_run_context, **kwargs)
     if isinstance(data, str):
         return data
     final_response = _final_response_from_data(data)
@@ -150,6 +180,61 @@ def _final_response_from_data(data: Any) -> str:
     if isinstance(result, Mapping) and _looks_like_terminal_result(result):
         return str(result.get("final_response") or "").strip()
     return ""
+
+
+def _business_data_from_full_data(owner: "AgentExecution", data: Any) -> Any:
+    terminal = _terminal_result_mapping(data)
+    if terminal is None:
+        return data
+    if "final_result" not in terminal:
+        return data
+    final_result = terminal.get("final_result")
+    if final_result in (None, "", [], {}):
+        return data
+    parsed = _parse_business_final_result(owner, final_result)
+    if parsed is not _NO_BUSINESS_PARSE:
+        return parsed
+    return final_result
+
+
+def _terminal_result_mapping(data: Any) -> Mapping[str, Any] | None:
+    if isinstance(data, Mapping) and _looks_like_terminal_result(data):
+        return data
+    if isinstance(data, Mapping):
+        result = data.get("result")
+        if isinstance(result, Mapping) and _looks_like_terminal_result(result):
+            return result
+    return None
+
+
+_NO_BUSINESS_PARSE = object()
+
+
+def _parse_business_final_result(owner: "AgentExecution", value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return _NO_BUSINESS_PARSE
+    prompt_snapshot = getattr(owner, "prompt_snapshot", None)
+    prompt_data = prompt_snapshot if isinstance(prompt_snapshot, Mapping) else {}
+    output_schema = prompt_data.get("output")
+    if not isinstance(output_schema, Mapping) or not output_schema:
+        return _NO_BUSINESS_PARSE
+    output_format = str(prompt_data.get("output_format") or "").strip().lower()
+    if output_format in {"", "json_object", "application/json", "auto"}:
+        output_format = "json"
+    if output_format not in STRUCTURED_OUTPUT_FORMATS:
+        return _NO_BUSINESS_PARSE
+    for format_name in [output_format, *([] if output_format == "json" else ["json"])]:
+        parsed, _error = parse_output_contract_dict(
+            text,
+            output_schema=dict(output_schema),
+            output_format=format_name,
+        )
+        if parsed is not None:
+            return parsed
+    return _NO_BUSINESS_PARSE
 
 
 def _looks_like_terminal_result(data: Mapping[str, Any]) -> bool:

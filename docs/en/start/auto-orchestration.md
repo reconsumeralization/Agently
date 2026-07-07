@@ -363,8 +363,9 @@ Workspace file or checkpoint, but it is a partial artifact (`accepted=False`,
 `artifact_status="partial"`), not a completed business result. Partial and
 blocked results include `final_response` so callers can show what was produced,
 what stopped, and which requirements remain unmet. `get_text()` /
-`async_get_text()` prefer this field for task-strategy result dicts; `get_data()`
-still returns the structured result.
+`async_get_text()` prefer this field for task-strategy result dicts. `get_data()`
+returns the final business result, parsed against `output(...)` when possible;
+use `get_full_data()` when you need the complete task terminal payload.
 TaskBoard terminal payloads may also include `taskboard.completion_notes`, a
 bounded process projection of card summaries, known gaps, verifier notes, and
 acceptance progress. It is useful for UI progress and final-response disclosure,
@@ -659,7 +660,8 @@ meta = await execution.async_get_meta()
 ```
 
 The execution object follows the same consumption style as model responses:
-`get_data`, `get_text`, `get_meta`, `get_generator`, and async equivalents.
+`get_data`, `get_full_data`, `get_text`, `get_meta`, `get_generator`, and async
+equivalents.
 The default stream is `type="delta"` and yields plain text strings, including
 the reserved `"<$retry>{reason}</$retry>"` boundary when a model stream is
 replayed. The marker is for public text replay consumers only; internal

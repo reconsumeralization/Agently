@@ -56,6 +56,7 @@ from .limits import (
 )
 from .result_views import (
     async_get_data as async_get_data_entry,
+    async_get_full_data as async_get_full_data_entry,
     async_get_meta as async_get_meta_entry,
     async_get_text as async_get_text_entry,
     get_async_generator as get_async_generator_entry,
@@ -215,6 +216,7 @@ class AgentExecution:
 
         self.start = FunctionShifter.syncify(self.async_start)
         self.get_data = FunctionShifter.syncify(self.async_get_data)
+        self.get_full_data = FunctionShifter.syncify(self.async_get_full_data)
         self.get_text = FunctionShifter.syncify(self.async_get_text)
         self.get_meta = FunctionShifter.syncify(self.async_get_meta)
         self.record_workspace = FunctionShifter.syncify(self.async_record_workspace)
@@ -1066,6 +1068,30 @@ class AgentExecution:
         parent_run_context: "RunContext | None" = None,
     ) -> Any:
         return await async_get_data_entry(
+            self,
+            type=type,
+            ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            parent_run_context=parent_run_context,
+        )
+
+    async def async_get_full_data(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Any:
+        return await async_get_full_data_entry(
             self,
             type=type,
             ensure_keys=ensure_keys,

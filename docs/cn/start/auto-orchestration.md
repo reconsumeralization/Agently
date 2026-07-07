@@ -322,7 +322,8 @@ degraded、partial 和 blocked outcome 都提供面向用户的 `final_response`
 artifact（`accepted=False`、`artifact_status="partial"`），不是已完成的业务结果。
 partial 和 blocked result 会包含 `final_response`，让调用方说明产出了什么、在哪里受阻、
 哪些要求仍未满足。`get_text()` / `async_get_text()` 对 task-strategy result dict
-会优先返回这个字段；`get_data()` 仍返回结构化结果。
+会优先返回这个字段。`get_data()` 返回最终业务结果，并在可能时按 `output(...)`
+解析；需要完整 task 终态 payload 时使用 `get_full_data()`。
 TaskBoard 终态 payload 还可能包含 `taskboard.completion_notes`：这是对 card
 完成摘要、已知缺口、verifier 备注和 acceptance progress 的有界过程投影。它适合 UI
 进度和最终答复的降级/不足披露，但不是证据，也不能替代 verifier 验收。
@@ -540,8 +541,8 @@ data = await execution.async_get_data()
 meta = await execution.async_get_meta()
 ```
 
-execution 对象沿用模型 response 的消费风格：`get_data`、`get_text`、
-`get_meta`、`get_generator` 以及对应 async 方法。
+execution 对象沿用模型 response 的消费风格：`get_data`、`get_full_data`、
+`get_text`、`get_meta`、`get_generator` 以及对应 async 方法。
 默认 stream 是 `type="delta"`，产出纯文本字符串；模型流式请求重放时会产出保留的
 `"<$retry>{reason}</$retry>"` 边界标记。该 marker 只服务 public 文本 replay consumer；
 内部 artifact writer 和结构化 UI 应优先消费结构化 status 事件；只有在明确选择纯文本

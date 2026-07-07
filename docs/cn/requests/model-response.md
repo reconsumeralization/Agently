@@ -35,11 +35,19 @@ meta = result.get_meta()
 | 方法 | 返回 |
 |---|---|
 | `result.get_text()` | 完整纯文本 |
-| `result.get_data()` | 解析后的结构化 dict（用了 `output()` 时） |
+| `result.get_data()` | 最终业务数据；用了 `output()` 时返回解析后的结构化 dict |
 | `result.get_data_object()` | Pydantic 实例（`output()` 接受 `BaseModel` 时） |
 | `result.get_meta()` | usage / model 信息 / 时间等 |
 
-每个都有 async 版本：`async_get_text()`、`async_get_data()`、`async_get_data_object()`、`async_get_meta()`。
+这些通用 reader 都有 async 版本：`async_get_text()`、`async_get_data()`、
+`async_get_data_object()`、`async_get_meta()`。
+
+对 `AgentExecutionResult` 来说，`get_data()` 在 direct、flat、TaskBoard
+route 上都表示业务结果视图。task-strategy 如果返回带 `final_result` 的终态
+envelope，`get_data()` 会返回该 `final_result`，并在可能时按声明的
+`output(...)` contract 解析。`AgentExecutionResult` 还提供
+`get_full_data()` / `async_get_full_data()`，用于读取 `status`、`accepted`、
+`artifact_status`、`taskboard`、`completion_notes` 或 diagnostics 等执行内部信息。
 
 混用没问题——它们都从同一份缓存里读：
 
