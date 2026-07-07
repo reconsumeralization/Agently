@@ -7,6 +7,7 @@ from pathlib import Path
 from agently.builtins.plugins.ActionExecutor import (
     BashSandboxActionExecutor,
     BrowseActionExecutor,
+    CodeRuntimeActionExecutor,
     DockerActionExecutor,
     LocalFunctionActionExecutor,
     MCPActionExecutor,
@@ -119,6 +120,7 @@ def test_builtin_action_executors_match_protocol():
         SearchActionExecutor(search=FakeSearch(), method_name="search"),
         BrowseActionExecutor(browse=FakeBrowse()),
         NodeJSActionExecutor(timeout=1),
+        CodeRuntimeActionExecutor(language="python", timeout=1),
         DockerActionExecutor(timeout=1),
         SQLiteActionExecutor(),
     ]

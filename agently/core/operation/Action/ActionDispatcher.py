@@ -698,6 +698,16 @@ class ActionDispatcher:
         except ExecutionResourceError as error:
             for handle in ensured_handles:
                 await execution_resource.async_release(handle)
+            action_call.setdefault("diagnostics", [])
+            diagnostics = action_call.get("diagnostics")
+            if isinstance(diagnostics, list):
+                diagnostics.append(
+                    self._exception_diagnostic(
+                        code=error.code,
+                        message=str(error),
+                        meta=error.payload,
+                    )
+                )
             return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,

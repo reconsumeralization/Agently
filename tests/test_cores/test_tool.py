@@ -239,7 +239,7 @@ def test_model_sourced_bash_action_input_strips_allow_unsafe(tmp_path):
     target = tmp_path / "unsafe_probe.txt"
     command = "python -c \"open('unsafe_probe.txt','w').write('bypassed')\""
 
-    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id=action_id)
+    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id=action_id, sandbox="trusted_local")
     spec = agent.action.action_registry.get_spec(action_id)
     assert spec is not None
     kwargs = spec.get("kwargs")

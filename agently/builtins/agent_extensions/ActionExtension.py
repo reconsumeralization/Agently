@@ -38,6 +38,10 @@ from agently.base import action as global_action
 P = ParamSpec("P")
 R = TypeVar("R")
 CapabilityDescMode: TypeAlias = Literal["append", "override", "default"]
+CodeSandboxMode: TypeAlias = Literal["auto", "docker", "trusted_local"]
+DependencyPolicyMode: TypeAlias = Literal["deny", "request", "install"]
+ProvisioningProfileMode: TypeAlias = Literal["strict", "developer", "ci"]
+ImagePullPolicyMode: TypeAlias = Literal["never", "request", "if_missing", "always"]
 _WORKSPACE_ROOT_UNSET = object()
 
 
@@ -55,6 +59,7 @@ class ActionExtension(BaseAgent):
         self.use_python = self.enable_python
         self.use_shell = self.enable_shell
         self.use_nodejs = self.enable_nodejs
+        self.use_code_runtime = self.enable_code_runtime
         self.use_sqlite = self.enable_sqlite
         self.use_docker = self.enable_docker
         self.use_workspace_file_actions = self.enable_workspace_file_actions
@@ -334,11 +339,13 @@ class ActionExtension(BaseAgent):
         *,
         action_id: str | None = None,
         expose_to_model: bool = True,
+        sandbox_mode: CodeSandboxMode | None = None,
         **kwargs: Any,
     ) -> Self:
         sandbox_name = sandbox.strip().lower() if isinstance(sandbox, str) else ""
         if sandbox_name in {"python", "python_sandbox"}:
             resolved_action_id = action_id or "python_sandbox"
+            kwargs.setdefault("sandbox", sandbox_mode or "auto")
             self.action.register_python_sandbox_action(
                 action_id=resolved_action_id,
                 tags=[f"agent-{ self.name }"],
@@ -348,6 +355,7 @@ class ActionExtension(BaseAgent):
             return self
         if sandbox_name in {"bash", "shell", "bash_sandbox"}:
             resolved_action_id = action_id or "bash_sandbox"
+            kwargs.setdefault("sandbox", sandbox_mode or "auto")
             self.action.register_bash_sandbox_action(
                 action_id=resolved_action_id,
                 tags=[f"agent-{ self.name }"],
@@ -367,20 +375,45 @@ class ActionExtension(BaseAgent):
         preset_objects: dict[str, object] | None = None,
         base_vars: dict[str, Any] | None = None,
         allowed_return_types: list[type] | None = None,
+        sandbox: CodeSandboxMode = "auto",
+        docker_image: str = "python:3.12-slim",
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: DependencyPolicyMode | dict[str, Any] | None = None,
+        provisioning_profile: ProvisioningProfileMode = "strict",
+        image_pull_policy: ImagePullPolicyMode | None = None,
+        timeout: int = 60,
     ) -> Self:
-        default_desc = (
-            "Run Python code in a managed safe sandbox for deterministic calculation "
-            "or small data shaping. Assign the final value to `result`."
-        )
-        return self.use_action_sandbox(
-            "python",
+        if sandbox == "trusted_local":
+            default_desc = (
+                "Run Python code through an explicitly trusted local in-process execution resource for "
+                "deterministic calculation or small data shaping. Assign the final value to `result`."
+            )
+        else:
+            default_desc = (
+                "Run Python code in a Docker-backed sandbox when a local Docker service is available. "
+                "Use this for deterministic calculation or small data shaping and assign the final value "
+                "to `result`. Dependency installation is controlled by the host resource policy, not by "
+                "model-visible action inputs; if Docker is unavailable this action fails closed."
+            )
+        self.action.register_python_sandbox_action(
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
+            tags=[f"agent-{ self.name }"],
             expose_to_model=expose_to_model,
             preset_objects=preset_objects,
             base_vars=base_vars,
             allowed_return_types=allowed_return_types,
+            sandbox=sandbox,
+            docker_image=docker_image,
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
+            timeout=timeout,
         )
+        return self
 
     def enable_shell(
         self,
@@ -394,25 +427,38 @@ class ActionExtension(BaseAgent):
         timeout: int = 20,
         env: dict[str, str] | None = None,
         max_output_chars: int = 20000,
+        sandbox: CodeSandboxMode = "auto",
+        docker_image: str = "python:3.12-slim",
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: DependencyPolicyMode | dict[str, Any] | None = None,
+        provisioning_profile: ProvisioningProfileMode = "strict",
+        image_pull_policy: ImagePullPolicyMode | None = None,
     ) -> Self:
         workspace = getattr(self, "workspace", None)
         if root is None and workspace is not None:
             root = getattr(workspace, "files_root", getattr(workspace, "content_root", None))
         root_path = Path(root).expanduser().resolve() if root is not None else None
-        roots = [str(root_path)] if root_path is not None else None
+        roots: list[str | Path] | None = [str(root_path)] if root_path is not None else None
         resolved_commands = list(commands) if commands is not None else list(DEFAULT_SAFE_CMD_PREFIXES)
         output_artifact_dir = str(root_path / "artifacts" / "shell") if root_path is not None else None
+        boundary_text = (
+            "Docker-backed workspace boundary"
+            if sandbox != "trusted_local"
+            else "explicitly trusted local workspace boundary"
+        )
         default_desc = (
-            "Run an allowlisted shell command inside a managed workspace boundary for tests, builds, "
+            f"Run an allowlisted shell command inside a { boundary_text } for tests, builds, "
             "git status inspection, and read-only diagnostics. Prefer dedicated Workspace actions "
             "`read_file`, `glob_files`, `grep_files`, `edit_file`, `apply_patch`, and `write_file` for "
             "file reading, searching, editing, and writing. Do not start background long-running "
-            "commands; each command is bounded by timeout and output preview limits."
+            "commands; each command is bounded by timeout and output preview limits. Dependency installation "
+            "is controlled by the host resource policy, not by model-visible action inputs."
         )
-        return self.use_action_sandbox(
-            "bash",
+        self.action.register_bash_sandbox_action(
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
+            tags=[f"agent-{ self.name }"],
             expose_to_model=expose_to_model,
             allowed_cmd_prefixes=resolved_commands,
             allowed_workdir_roots=roots,
@@ -420,7 +466,15 @@ class ActionExtension(BaseAgent):
             env=env,
             max_output_chars=max_output_chars,
             output_artifact_dir=output_artifact_dir,
+            sandbox=sandbox,
+            docker_image=docker_image,
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
         )
+        return self
 
     def enable_nodejs(
         self,
@@ -433,11 +487,25 @@ class ActionExtension(BaseAgent):
         cwd: str | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        sandbox: CodeSandboxMode = "auto",
+        docker_image: str = "node:22-slim",
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: DependencyPolicyMode | dict[str, Any] | None = None,
+        provisioning_profile: ProvisioningProfileMode = "strict",
+        image_pull_policy: ImagePullPolicyMode | None = None,
     ) -> Self:
         workspace = getattr(self, "workspace", None)
         if cwd is None and workspace is not None:
             cwd = str(getattr(workspace, "files_root", getattr(workspace, "content_root")))
-        default_desc = "Run JavaScript with Node.js inside a managed execution resource."
+        if sandbox == "trusted_local":
+            default_desc = "Run JavaScript with Node.js inside an explicitly trusted local execution resource."
+        else:
+            default_desc = (
+                "Run JavaScript with Node.js inside a Docker-backed execution resource when a local Docker "
+                "service is available. Dependency installation is controlled by the host resource policy, "
+                "not by model-visible action inputs; if Docker is unavailable this action fails closed."
+            )
         self.action.register_nodejs_action(
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
@@ -447,6 +515,63 @@ class ActionExtension(BaseAgent):
             cwd=cwd,
             timeout=timeout,
             env=env,
+            sandbox=sandbox,
+            docker_image=docker_image,
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
+        )
+        return self
+
+    def enable_code_runtime(
+        self,
+        *,
+        language: str,
+        action_id: str | None = None,
+        desc: str | None = None,
+        desc_mode: CapabilityDescMode = "append",
+        expose_to_model: bool = True,
+        docker_image: str | None = None,
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: DependencyPolicyMode | dict[str, Any] | None = None,
+        provisioning_profile: ProvisioningProfileMode = "strict",
+        image_pull_policy: ImagePullPolicyMode | None = None,
+        timeout: int = 60,
+    ) -> Self:
+        from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
+            get_code_runtime_profile,
+        )
+
+        profile = get_code_runtime_profile(language, image=docker_image)
+        display_names = {
+            "nodejs": "JavaScript/Node.js",
+            "typescript": "TypeScript",
+            "cpp": "C++",
+            "csharp": "C#/.NET",
+            "r": "R",
+        }
+        language_name = display_names.get(profile["language"], str(profile["language"]).capitalize())
+        default_desc = (
+            f"Run { language_name } code inside a Docker-backed code runtime sandbox. "
+            "The host-selected runtime profile owns image pull and dependency preparation; "
+            "the model can provide source files and arguments but not arbitrary compiler or package-manager commands."
+        )
+        self.action.register_code_runtime_action(
+            language=profile["language"],
+            action_id=action_id,
+            desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
+            tags=[f"agent-{ self.name }"],
+            expose_to_model=expose_to_model,
+            docker_image=str(profile["image"]),
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
+            timeout=timeout,
         )
         return self
 

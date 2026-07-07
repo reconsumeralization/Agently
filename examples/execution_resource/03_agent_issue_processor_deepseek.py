@@ -59,7 +59,7 @@ if __name__ == "__main__":
     print("[ACTION_CALL_HANDLES_AFTER_RELEASE]")
     print(Agently.execution_resource.list(scope="action_call"))
 
-# Expected key output after configuring DeepSeek:
+# Expected key output after configuring DeepSeek and local Docker:
 # [ACTION_RECORDS] includes a successful run_python call with deterministic issue metrics.
 # The metrics include label_count=3, comment_count=3, triggerflow_involved=True,
 # devtools_involved=True, and severity_score=6.
@@ -78,8 +78,8 @@ if __name__ == "__main__":
 # model plans: run_python(python_code="issue=...\nresult={label_count:3,...,severity_score:6}")
 #   |
 #   v
-# ManagedPythonEnvironment -> {label_count:3, comment_count:3, triggerflow_involved:True,
-#                               devtools_involved:True, severity_score:6}
+# Docker-backed Python profile -> {label_count:3, comment_count:3, triggerflow_involved:True,
+#                                  devtools_involved:True, severity_score:6}
 #   |
 #   v
 # model reply: triage summary with suggested owner and next debugging step

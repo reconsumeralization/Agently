@@ -7416,7 +7416,7 @@ def test_create_task_and_task_loop_return_strategy_execution_drafts(tmp_path):
 async def test_agent_execution_direct_strategy_forces_model_request_route(tmp_path):
     agent = _create_action_agent("direct-strategy-route").use_workspace(tmp_path / "workspace")
     agent.set_action_loop(max_rounds=1, timeout=5)
-    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli")
+    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli", sandbox="trusted_local")
 
     execution = (
         agent.goal("Use the echo action without creating an AgentTask.", ["The echo action result is returned."])
@@ -7595,7 +7595,7 @@ async def test_agent_execution_select_route_is_reused_by_start():
 async def test_agent_execution_model_request_exposes_action_logs_and_artifacts():
     agent = _create_action_agent("action-log-exposure")
     agent.set_action_loop(max_rounds=2, timeout=5)
-    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli")
+    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli", sandbox="trusted_local")
     execution = (
         agent.input("use echo action")
         .output({"answer": (str, "answer", True)}, format="json")
@@ -7633,7 +7633,7 @@ async def test_required_skill_create_execution_routes_to_agent_task(tmp_path):
 
     agent = _create_action_agent("required-skill-with-actions").use_workspace(tmp_path / "workspace")
     agent.set_action_loop(max_rounds=2, timeout=5)
-    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli")
+    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli", sandbox="trusted_local")
     agent.require_skills([skill_id], always=True)
     execution = (
         agent.input("Use the required Skill guidance and the echo action.")

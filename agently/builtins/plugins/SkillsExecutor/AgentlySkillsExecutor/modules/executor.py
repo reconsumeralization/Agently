@@ -1099,7 +1099,7 @@ class SkillExecutor:
             action_id = str(_ensure_dict(policy.get("python")).get("action_id") or "run_python")
             if self._agent_has_action(agent, action_id):
                 return [action_id]
-            agent.enable_python(action_id=action_id)
+            agent.enable_python(action_id=action_id, provisioning_profile="developer")
             return self._new_action_ids(agent, before) or [action_id]
         if need_name in {"shell", "script_run"}:
             before = self._agent_action_ids(agent)
@@ -1108,7 +1108,7 @@ class SkillExecutor:
             action_id = self._script_action_id(need, selection)
             if self._agent_has_action(agent, action_id):
                 return [action_id]
-            agent.enable_shell(root=root, commands=commands or None, action_id=action_id)
+            agent.enable_shell(root=root, commands=commands or None, action_id=action_id, provisioning_profile="developer")
             return self._new_action_ids(agent, before) or [action_id]
         if need_name == "http_request":
             return self._mount_http_request(agent, _ensure_dict(policy.get("http_request")))

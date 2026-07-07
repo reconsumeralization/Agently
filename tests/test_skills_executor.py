@@ -491,6 +491,7 @@ async def test_agent_build_skills_context_pack_actionizes_scripts_only_when_allo
     assert agent.action.action_registry.has("run_script_skill_script")
     assert enable_calls[0]["root"] == Path(Agently.skills_executor.inspect_skills("script-skill")["source"]["installed_path"])
     assert "scripts/helper.sh" in enable_calls[0]["commands"]
+    assert enable_calls[0]["provisioning_profile"] == "developer"
     assert executed is False
 
 
@@ -686,6 +687,13 @@ and write the final Markdown deliverable to a workspace file.
     assert agent.action.action_registry.has("browse")
     assert agent.action.action_registry.has("write_file")
     assert agent.action.action_registry.has("run_python")
+    python_spec = agent.action.action_registry.get_spec("run_python")
+    assert python_spec is not None
+    python_requirement = cast(dict[str, Any], python_spec.get("execution_resources", [])[0])
+    python_profile = python_requirement["config"]["runtime_profile"]
+    assert python_profile["provisioning_profile"] == "developer"
+    assert python_profile["image_pull_policy"] == "if_missing"
+    assert python_profile["dependency_policy"] == {"mode": "install"}
     mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
     assert {item["need"] for item in mounted} >= {"web_search", "web_browse", "workspace_write", "python"}
 

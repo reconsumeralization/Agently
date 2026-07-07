@@ -445,7 +445,7 @@ class AgentlyToolManager(ToolManager):
         self,
         *,
         action_id: str = "python_sandbox",
-        desc: str = "Execute Python code inside a restricted sandbox.",
+        desc: str = "Execute Python code through an explicitly trusted local Python execution resource.",
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,

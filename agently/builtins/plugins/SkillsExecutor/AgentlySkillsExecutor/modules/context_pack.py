@@ -460,7 +460,7 @@ class SkillContextPackBuilder:
         action_id = f"run_{ _sanitize_id(skill_id).replace('-', '_').replace('.', '_') }_script"
         root = Path(str(_ensure_dict(contract.get("source")).get("installed_path") or ".")).expanduser().resolve()
         commands = self._script_commands(script_resources)
-        agent.enable_shell(root=root, commands=commands or None, action_id=action_id)
+        agent.enable_shell(root=root, commands=commands or None, action_id=action_id, provisioning_profile="developer")
         for resource in script_resources:
             path = str(resource.get("path") or "")
             candidates.append({

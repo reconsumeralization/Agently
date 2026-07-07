@@ -15,14 +15,15 @@
 from typing import Any
 
 
-class NodeJSActionExecutor:
-    name = "NodeJSActionExecutor"
+class CodeRuntimeActionExecutor:
+    name = "CodeRuntimeActionExecutor"
     DEFAULT_SETTINGS = {}
 
-    kind = "nodejs"
+    kind = "code_runtime"
     sandboxed = True
 
-    def __init__(self, *, timeout: int = 20):
+    def __init__(self, *, language: str, timeout: int = 60):
+        self.language = language
         self.timeout = timeout
 
     @staticmethod
@@ -38,25 +39,27 @@ class NodeJSActionExecutor:
         action_input = action_call.get("action_input", {})
         if not isinstance(action_input, dict):
             action_input = {}
-        raw_code = action_input.get("js_code", action_input.get("code", ""))
-        js_code = "\n".join(str(line) for line in raw_code) if isinstance(raw_code, list) else str(raw_code)
+        raw_code = action_input.get("source_code", action_input.get("code", ""))
+        source_code = "\n".join(str(line) for line in raw_code) if isinstance(raw_code, list) else str(raw_code)
+        raw_files = action_input.get("files", None)
+        files = {str(key): str(value) for key, value in raw_files.items()} if isinstance(raw_files, dict) else None
         args = action_input.get("args", [])
         if not isinstance(args, list):
             args = [str(args)]
-        action_id = str(spec.get("action_id", "run_nodejs"))
+        action_id = str(spec.get("action_id", "run_code"))
         timeout = int(policy.get("timeout_seconds", self.timeout))
         environment_resources = action_call.get("execution_resource_resources", {})
         if isinstance(environment_resources, dict):
-            node_resource = environment_resources.get(action_id) or environment_resources.get("node")
-            if node_resource is not None and hasattr(node_resource, "run_nodejs_code"):
-                return await node_resource.run_nodejs_code(
-                    js_code=js_code,
+            code_resource = environment_resources.get(action_id)
+            if code_resource is not None and hasattr(code_resource, "run_code"):
+                return await code_resource.run_code(
+                    language=self.language,
+                    source_code=source_code,
+                    files=files,
                     args=[str(arg) for arg in args],
                     timeout=timeout,
                 )
-            if node_resource is not None and hasattr(node_resource, "run"):
-                return await node_resource.run(js_code=js_code, args=[str(arg) for arg in args], timeout=timeout)
         return {
             "ok": False,
-            "error": "Node.js execution environment resource is not available.",
+            "error": "Code runtime execution resource is not available.",
         }

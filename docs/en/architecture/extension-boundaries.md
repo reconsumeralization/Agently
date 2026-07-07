@@ -65,8 +65,8 @@ Plugins implement replaceable backend behavior behind core contracts.
 
 Examples:
 
-- `ExecutionResourceProvider` for Python, Bash, Node.js, Docker, MCP, SQLite,
-  vector stores, browsers, or remote runners.
+- `ExecutionResourceProvider` for Python, Bash, Node.js, Docker-backed common
+  language profiles, MCP, SQLite, vector stores, browsers, or remote runners.
 - `ActionExecutor` for one atomic action call.
 - `ActionRuntime` for action planning and loop behavior.
 - `ActionFlow` for execution strategy.
@@ -88,8 +88,9 @@ model-callable operations as Actions and may depend on ExecutionResource.
 Good built-in candidates:
 
 - run Bash commands inside a policy-bound workspace
-- run Python code in a safe sandbox
-- run Node.js code through a managed runner
+- run Python code through a Docker-backed runtime profile
+- run Node.js code through a Docker-backed runtime profile
+- run common-language code through Docker-backed runtime profiles
 - search, read, and write files
 - search the web and browse pages
 - read and write SQLite data
@@ -119,6 +120,7 @@ agent.enable_python(...)
 agent.enable_shell(...)
 agent.enable_workspace_file_actions(...)
 agent.enable_nodejs(...)
+agent.enable_code_runtime(...)
 agent.enable_sqlite(...)
 agent.enable_vector_store(...)
 agent.enable_coding_workspace(...)

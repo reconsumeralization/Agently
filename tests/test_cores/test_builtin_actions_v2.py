@@ -1162,7 +1162,7 @@ def test_agent_enable_sqlite_registers_managed_sqlite_action(tmp_path):
 
 def test_instruction_heavy_action_records_digest_and_artifact_recall(tmp_path):
     agent = Agently.create_agent()
-    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="test_recall_bash")
+    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="test_recall_bash", sandbox="trusted_local")
 
     result = agent.action.execute_action(
         "test_recall_bash",

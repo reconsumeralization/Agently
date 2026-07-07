@@ -39,7 +39,7 @@ keywords: Agently, 能力地图, 学习路径, request, TaskDAG, Dynamic Task, T
 | 多轮任务需要持久 observations、artifacts、decisions 或 checkpoints | [Workspace](../requests/workspace.md) |
 | 显式 workflow loop 需要持久结构化状态、record links、execution snapshot 查询和 recall | [TriggerFlow 概览](../triggerflow/overview.md) + [Workspace](../requests/workspace.md)；见 `examples/workspace/workspace_loop_foundation.py` |
 | 模型要调工具 / MCP | [Action Runtime](../actions/action-runtime.md) |
-| 需要常见 Python / shell / workspace / Node.js / SQLite 能力 | [Action Runtime](../actions/action-runtime.md)，优先从 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)`、`agent.enable_nodejs(...)` 或 `agent.enable_sqlite(...)` 开始 |
+| 需要常见 Python / shell / workspace / Node.js / 常用语言代码 / SQLite 能力 | [Action Runtime](../actions/action-runtime.md)，优先从 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)`、`agent.enable_nodejs(...)`、`agent.enable_code_runtime(...)` 或 `agent.enable_sqlite(...)` 开始 |
 | 需要 web search 或页面 browse | [Action Runtime](../actions/action-runtime.md)，使用 `from agently.builtins.actions import Search, Browse` 和 `agent.use_actions(...)` |
 | 执行前需要托管 MCP/sandbox/process/browser/SQLite 生命周期 | [ExecutionResource](../actions/execution-environment.md)，通常面向 action/plugin 开发者 |
 | 判断新扩展应该放在哪一层 | [扩展边界](../architecture/extension-boundaries.md) |

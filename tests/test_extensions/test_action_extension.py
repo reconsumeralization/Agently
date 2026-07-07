@@ -11,7 +11,7 @@ import sys
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from agently import Agently
 from agently.core import PluginManager, RuntimeStageStallError
 from agently.types.data import AgentlyRequestData
@@ -279,6 +279,7 @@ def test_action_extension_use_sandbox_registers_agent_scoped_bash_action(tmp_pat
         action_id=action_id,
         allowed_cmd_prefixes=["pwd"],
         allowed_workdir_roots=[str(tmp_path)],
+        sandbox_mode="trusted_local",
     )
 
     action_list = agent.action.get_action_list(tags=[f"agent-{ agent.name }"])
@@ -294,14 +295,18 @@ def test_action_extension_use_sandbox_registers_agent_scoped_bash_action(tmp_pat
 
 def test_action_extension_enable_python_registers_run_python_action():
     agent = Agently.create_agent()
-    agent.enable_python(action_id="test_run_python", desc="Use this only for arithmetic tests.")
+    agent.enable_python(
+        action_id="test_run_python",
+        desc="Use this only for arithmetic tests.",
+        sandbox="trusted_local",
+    )
 
     action_list = agent.action.get_action_list(tags=[f"agent-{ agent.name }"])
     assert any(action.get("action_id") == "test_run_python" for action in action_list)
     spec = agent.action.action_registry.get_spec("test_run_python")
     assert spec is not None
     spec_desc = str(spec.get("desc", ""))
-    assert "Run Python code in a managed safe sandbox" in spec_desc
+    assert "explicitly trusted local in-process execution resource" in spec_desc
     assert "Use this only for arithmetic tests." in spec_desc
 
     result = agent.action.execute_action(
@@ -311,6 +316,74 @@ def test_action_extension_enable_python_registers_run_python_action():
     assert result.get("status") == "success"
     assert result.get("data", {}).get("result") == 6
     assert Agently.execution_resource.list(scope="action_call") == []
+
+
+def test_action_extension_enable_python_defaults_to_docker_profile():
+    agent = Agently.create_agent()
+    agent.enable_python(action_id="docker_default_python", desc="Use this only for arithmetic tests.")
+
+    spec = agent.action.action_registry.get_spec("docker_default_python")
+    assert spec is not None
+    assert set(spec.get("kwargs", {}).keys()) == {"python_code"}
+    assert "packages" not in spec.get("kwargs", {})
+    spec_desc = str(spec.get("desc", ""))
+    assert "Docker-backed" in spec_desc
+    assert "Dependency installation" in spec_desc
+
+    requirements = spec.get("execution_resources", [])
+    assert len(requirements) == 1
+    requirement = cast(dict[str, Any], requirements[0])
+    assert requirement["kind"] == "docker"
+    assert requirement["resource_key"] == "docker_default_python"
+    profile = requirement["config"]["runtime_profile"]
+    assert profile["language"] == "python"
+    assert profile["image"] == "python:3.12-slim"
+    assert profile["dependency_policy"] == {"mode": "deny"}
+    assert requirement["policy"]["network_mode"] == "disabled"
+
+
+def test_action_extension_use_action_sandbox_defaults_to_docker_profile():
+    agent = Agently.create_agent()
+    agent.use_action_sandbox("python", action_id="alias_default_python")
+
+    spec = agent.action.action_registry.get_spec("alias_default_python")
+    assert spec is not None
+    requirement = cast(dict[str, Any], spec.get("execution_resources", [])[0])
+    assert requirement["kind"] == "docker"
+    assert requirement["config"]["runtime_profile"]["language"] == "python"
+
+
+def test_action_extension_enable_python_dependency_request_requires_resource_approval():
+    agent = Agently.create_agent()
+    agent.enable_python(
+        action_id="dependency_request_python",
+        dependency_policy="request",
+    )
+
+    spec = agent.action.action_registry.get_spec("dependency_request_python")
+    assert spec is not None
+    assert set(spec.get("kwargs", {}).keys()) == {"python_code"}
+    requirement = cast(dict[str, Any], spec.get("execution_resources", [])[0])
+    assert requirement["kind"] == "docker"
+    assert requirement["approval_required"] is True
+    assert requirement["config"]["runtime_profile"]["dependency_policy"] == {"mode": "request"}
+
+
+def test_action_extension_enable_python_trusted_local_keeps_legacy_resource():
+    agent = Agently.create_agent()
+    agent.enable_python(action_id="trusted_local_python", sandbox="trusted_local")
+
+    spec = agent.action.action_registry.get_spec("trusted_local_python")
+    assert spec is not None
+    requirement = cast(dict[str, Any], spec.get("execution_resources", [])[0])
+    assert requirement["kind"] == "python"
+
+    result = agent.action.execute_action(
+        "trusted_local_python",
+        {"python_code": ["numbers = [1, 2, 3]", "result = sum(numbers)"]},
+    )
+    assert result.get("status") == "success"
+    assert result.get("data", {}).get("result") == 6
 
 
 def test_action_extension_default_introspection_includes_agent_scoped_actions():
@@ -334,7 +407,13 @@ def test_action_extension_default_introspection_includes_agent_scoped_actions():
 
 def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     agent = Agently.create_agent()
-    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="test_run_bash", desc="Only inspect the cwd.")
+    agent.enable_shell(
+        root=tmp_path,
+        commands=["pwd"],
+        action_id="test_run_bash",
+        desc="Only inspect the cwd.",
+        sandbox="trusted_local",
+    )
 
     spec = agent.action.action_registry.get_spec("test_run_bash")
     assert spec is not None
@@ -356,9 +435,30 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     assert Agently.execution_resource.list(scope="action_call") == []
 
 
+def test_action_extension_enable_shell_defaults_to_docker_profile(tmp_path):
+    agent = Agently.create_agent()
+    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="docker_default_bash")
+
+    spec = agent.action.action_registry.get_spec("docker_default_bash")
+    assert spec is not None
+    assert set(spec.get("kwargs", {}).keys()) == {"cmd", "workdir"}
+    spec_desc = str(spec.get("desc", ""))
+    assert "Docker-backed" in spec_desc
+    assert "Allowed command prefixes: pwd." in spec_desc
+
+    requirement = cast(dict[str, Any], spec.get("execution_resources", [])[0])
+    assert requirement["kind"] == "docker"
+    assert requirement["resource_key"] == "docker_default_bash"
+    profile = requirement["config"]["runtime_profile"]
+    assert profile["language"] == "shell"
+    assert profile["allowed_cmd_prefixes"] == ["pwd"]
+    assert profile["allowed_workdir_roots"] == [str(tmp_path.resolve())]
+    assert requirement["policy"]["network_mode"] == "disabled"
+
+
 def test_action_extension_enable_shell_defaults_to_safe_profile(tmp_path):
     agent = Agently.create_agent()
-    agent.enable_shell(root=tmp_path, action_id="default_safe_bash")
+    agent.enable_shell(root=tmp_path, action_id="default_safe_bash", sandbox="trusted_local")
 
     allowed = agent.action.execute_action(
         "default_safe_bash",
@@ -382,6 +482,7 @@ def test_action_extension_enable_shell_redacts_env_in_action_info(tmp_path):
         root=tmp_path,
         commands=["pwd"],
         action_id="redacted_env_bash",
+        sandbox="trusted_local",
         env={
             "PUBLIC_FLAG": "1",
             "SECRET_TOKEN": "should-not-be-model-visible",
@@ -413,7 +514,12 @@ def test_action_extension_enable_shell_redacts_env_in_action_info(tmp_path):
 
 def test_action_extension_enable_shell_supports_multi_token_command_prefixes(tmp_path):
     agent = Agently.create_agent()
-    agent.enable_shell(root=tmp_path, commands=["echo allowed"], action_id="test_prefix_bash")
+    agent.enable_shell(
+        root=tmp_path,
+        commands=["echo allowed"],
+        action_id="test_prefix_bash",
+        sandbox="trusted_local",
+    )
 
     allowed = agent.action.execute_action(
         "test_prefix_bash",
@@ -432,7 +538,12 @@ def test_action_extension_enable_shell_supports_multi_token_command_prefixes(tmp
 
 def test_action_extension_enable_shell_uses_root_as_default_workdir(tmp_path):
     agent = Agently.create_agent()
-    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="default_workdir_bash")
+    agent.enable_shell(
+        root=tmp_path,
+        commands=["pwd"],
+        action_id="default_workdir_bash",
+        sandbox="trusted_local",
+    )
 
     result = agent.action.execute_action(
         "default_workdir_bash",
@@ -453,6 +564,7 @@ def test_action_extension_enable_shell_persists_large_output_artifacts(tmp_path)
         commands=["cat"],
         action_id="bounded_output_bash",
         max_output_chars=12,
+        sandbox="trusted_local",
     )
 
     result = agent.action.execute_action(
@@ -482,6 +594,7 @@ def test_action_extension_enable_shell_reports_timeout(tmp_path):
         commands=[python_prefix],
         action_id="timeout_bash",
         timeout=1,
+        sandbox="trusted_local",
     )
 
     result = agent.action.execute_action(
@@ -504,7 +617,7 @@ def test_action_extension_enable_helper_desc_modes():
     append_spec = agent.action.action_registry.get_spec("append_python")
     assert append_spec is not None
     append_desc = str(append_spec.get("desc", ""))
-    assert "Run Python code in a managed safe sandbox" in append_desc
+    assert "Docker-backed sandbox" in append_desc
     assert "Only use for sums." in append_desc
 
     agent.enable_python(action_id="override_python", desc="Custom calculator only.", desc_mode="override")
@@ -517,12 +630,104 @@ def test_action_extension_enable_helper_desc_modes():
     default_spec = agent.action.action_registry.get_spec("default_python")
     assert default_spec is not None
     default_desc = str(default_spec.get("desc", ""))
-    assert "Run Python code in a managed safe sandbox" in default_desc
+    assert "Docker-backed sandbox" in default_desc
     assert "Ignored guidance." not in default_desc
 
     bad_mode: Any = "replace"
     with pytest.raises(ValueError, match="desc_mode"):
         agent.enable_python(action_id="bad_desc_mode", desc="x", desc_mode=bad_mode)
+
+
+def test_action_extension_enable_nodejs_defaults_to_docker_profile():
+    agent = Agently.create_agent()
+    agent.enable_nodejs(action_id="docker_default_node")
+
+    spec = agent.action.action_registry.get_spec("docker_default_node")
+    assert spec is not None
+    assert set(spec.get("kwargs", {}).keys()) == {"js_code", "args"}
+    assert "packages" not in spec.get("kwargs", {})
+    spec_desc = str(spec.get("desc", ""))
+    assert "Docker-backed" in spec_desc
+
+    requirement = cast(dict[str, Any], spec.get("execution_resources", [])[0])
+    assert requirement["kind"] == "docker"
+    assert requirement["resource_key"] == "docker_default_node"
+    profile = requirement["config"]["runtime_profile"]
+    assert profile["language"] == "nodejs"
+    assert profile["image"] == "node:22-slim"
+    assert profile["dependency_policy"] == {"mode": "deny"}
+    assert requirement["policy"]["network_mode"] == "disabled"
+
+
+def test_action_extension_enable_code_runtime_go_uses_developer_docker_profile():
+    agent = Agently.create_agent()
+    agent.enable_code_runtime(
+        language="go",
+        action_id="run_go_code",
+        provisioning_profile="developer",
+    )
+
+    spec = agent.action.action_registry.get_spec("run_go_code")
+    assert spec is not None
+    assert set(spec.get("kwargs", {}).keys()) == {"source_code", "files", "args"}
+    assert "build_cmd" not in spec.get("kwargs", {})
+    spec_desc = str(spec.get("desc", ""))
+    assert "Docker-backed" in spec_desc
+    assert "Go" in spec_desc
+
+    requirement = cast(dict[str, Any], spec.get("execution_resources", [])[0])
+    assert requirement["kind"] == "docker"
+    assert requirement["resource_key"] == "run_go_code"
+    profile = requirement["config"]["runtime_profile"]
+    assert profile["language"] == "go"
+    assert profile["image"] == "golang:1"
+    assert profile["provisioning_profile"] == "developer"
+    assert profile["image_pull_policy"] == "if_missing"
+    assert profile["dependency_policy"] == {"mode": "install"}
+
+
+def test_action_extension_enable_code_runtime_common_language_catalog():
+    expected = {
+        "python": ("python", "python:3.12-slim", "main.py"),
+        "javascript": ("nodejs", "node:22-slim", "main.js"),
+        "typescript": ("typescript", "denoland/deno:alpine", "main.ts"),
+        "c": ("c", "gcc:14", "main.c"),
+        "cpp": ("cpp", "gcc:14", "main.cpp"),
+        "go": ("go", "golang:1", "main.go"),
+        "rust": ("rust", "rust:1", "main.rs"),
+        "java": ("java", "maven:3-eclipse-temurin-21", "Main.java"),
+        "csharp": ("csharp", "mcr.microsoft.com/dotnet/sdk:8.0", "Program.cs"),
+        "php": ("php", "php:8.3-cli", "main.php"),
+        "ruby": ("ruby", "ruby:3.3", "main.rb"),
+        "perl": ("perl", "perl:5.40", "main.pl"),
+        "r": ("r", "r-base:4.4", "main.R"),
+        "lua": ("lua", "nickblah/lua:5.4", "main.lua"),
+        "bash": ("bash", "bash:5", "main.sh"),
+    }
+    agent = Agently.create_agent()
+
+    for requested, (canonical, image, source_file) in expected.items():
+        action_id = f"run_{ canonical }_catalog"
+        agent.enable_code_runtime(language=requested, action_id=action_id)
+        spec = agent.action.action_registry.get_spec(action_id)
+        assert spec is not None
+        requirement = cast(dict[str, Any], spec.get("execution_resources", [])[0])
+        profile = requirement["config"]["runtime_profile"]
+        assert profile["language"] == canonical
+        assert profile["image"] == image
+        assert profile["source_file"] == source_file
+        assert "entrypoint" in profile
+
+
+def test_action_extension_enable_nodejs_trusted_local_keeps_legacy_resource(tmp_path):
+    agent = Agently.create_agent()
+    agent.enable_nodejs(action_id="trusted_local_node", sandbox="trusted_local", cwd=str(tmp_path))
+
+    spec = agent.action.action_registry.get_spec("trusted_local_node")
+    assert spec is not None
+    requirement = cast(dict[str, Any], spec.get("execution_resources", [])[0])
+    assert requirement["kind"] == "node"
+    assert requirement["config"]["cwd"] == str(tmp_path)
 
 
 def test_action_extension_enable_workspace_file_actions_registers_file_actions(tmp_path):
@@ -731,12 +936,14 @@ def test_action_extension_shell_and_nodejs_inherit_foundation_workspace(tmp_path
     shell_spec = agent.action.action_registry.get_spec("workspace_shell")
     assert shell_spec is not None
     shell_req = shell_spec.get("execution_resources", [])[0]
-    assert shell_req.get("config", {}).get("allowed_workdir_roots") == [str(workspace.files_root)]
+    shell_profile = shell_req.get("config", {}).get("runtime_profile", {})
+    assert shell_profile.get("allowed_workdir_roots") == [str(workspace.files_root)]
 
     node_spec = agent.action.action_registry.get_spec("workspace_node")
     assert node_spec is not None
     node_req = node_spec.get("execution_resources", [])[0]
-    assert node_req.get("config", {}).get("cwd") == str(workspace.files_root)
+    node_profile = node_req.get("config", {}).get("runtime_profile", {})
+    assert node_profile.get("cwd") == str(workspace.files_root)
 
 
 @pytest.mark.asyncio
