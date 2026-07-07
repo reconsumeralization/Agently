@@ -29,6 +29,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 f"Iteration {iteration_index}: building a Workspace context pack for the task goal.",
             )
             await self._emit(f"agent_task.iteration.{iteration_index}.started", {"iteration": iteration_index})
+            await self._apply_guidance_boundary(iteration_index=iteration_index, boundary="flat_context")
             context_pack = await self._await_task_deadline(
                 self._build_context(),
                 stage="context",
@@ -579,12 +580,13 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
     async def _build_context(self) -> "WorkspaceContextPackage":
         try:
-            return await self.workspace.build_context(
+            context_pack = await self.workspace.build_context(
                 goal=self.goal,
                 scope={"task_id": self.id},
                 budget=self.context_budget,
                 profile=self.context_profile,
             )
+            return self._context_pack_with_guidance(context_pack)
         except Exception as error:
             fallback_reason: dict[str, Any] = {
                 "type": error.__class__.__name__,
@@ -608,19 +610,21 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                         fallback_error, fallback=fallback_error.__class__.__name__
                     ),
                 }
-                return cast(
-                    "WorkspaceContextPackage",
-                    {
-                        "goal": self.goal,
-                        "profile": self.context_profile,
-                        "items": [],
-                        "omitted": [],
-                        "diagnostics": {"fallback_reason": fallback_reason},
-                    },
+                return self._context_pack_with_guidance(
+                    cast(
+                        "WorkspaceContextPackage",
+                        {
+                            "goal": self.goal,
+                            "profile": self.context_profile,
+                            "items": [],
+                            "omitted": [],
+                            "diagnostics": {"fallback_reason": fallback_reason},
+                        },
+                    )
                 )
             diagnostics = fallback.setdefault("diagnostics", {})
             diagnostics["fallback_reason"] = fallback_reason
-            return fallback
+            return self._context_pack_with_guidance(fallback)
 
     def _step_execution_policy(self) -> dict[str, Any]:
         agent_task_options = self.options.get("agent_task")
@@ -1073,34 +1077,46 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         if not isinstance(step_scope, dict):
             step_scope = {}
         allowed_capability_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
-        if allowed_capability_ids and effective_shape in {"direct", "actions"}:
+        raw_required_action_ids = self._normalize_string_list(plan.get("required_action_ids"))
+        task_contract_required_action_ids = self._task_contract_required_action_ids()
+        task_required_action_ids = [
+            action_id for action_id in raw_required_action_ids if action_id in task_contract_required_action_ids
+        ]
+        step_required_action_ids = [
+            action_id for action_id in raw_required_action_ids if action_id not in task_contract_required_action_ids
+        ]
+        scoped_action_ids = self._merge_string_lists(allowed_capability_ids, step_required_action_ids)
+        if scoped_action_ids and effective_shape in {"direct", "actions"}:
             use_actions = getattr(execution, "use_actions", None)
             if callable(use_actions):
-                use_actions(allowed_capability_ids)
+                use_actions(scoped_action_ids)
             else:
                 local_action_ids = getattr(execution, "local_action_ids", None)
                 if isinstance(local_action_ids, list):
-                    for capability_id in allowed_capability_ids:
+                    for capability_id in scoped_action_ids:
                         if capability_id not in local_action_ids:
                             local_action_ids.append(capability_id)
                 sync_action_scope = getattr(execution, "_sync_action_scope", None)
                 if callable(sync_action_scope):
                     sync_action_scope(source="AgentTask.step_scope")
-        action_scope_source = "step_scope" if allowed_capability_ids else ""
-        required_action_ids = self._normalize_string_list(plan.get("required_action_ids"))
-        if required_action_ids and effective_shape in {"direct", "actions"}:
+        action_scope_source = (
+            "step_required_action_ids"
+            if step_required_action_ids
+            else ("step_scope" if allowed_capability_ids else "")
+        )
+        if task_required_action_ids and effective_shape in {"direct", "actions"}:
             require_actions = getattr(execution, "require_actions", None)
             if callable(require_actions):
-                require_actions(required_action_ids)
+                require_actions(task_required_action_ids)
             else:
                 local_action_ids = getattr(execution, "local_action_ids", None)
                 if isinstance(local_action_ids, list):
-                    for action_id in required_action_ids:
+                    for action_id in task_required_action_ids:
                         if action_id not in local_action_ids:
                             local_action_ids.append(action_id)
                 local_required_action_ids = getattr(execution, "local_required_action_ids", None)
                 if isinstance(local_required_action_ids, list):
-                    for action_id in required_action_ids:
+                    for action_id in task_required_action_ids:
                         if action_id not in local_required_action_ids:
                             local_required_action_ids.append(action_id)
                 sync_action_scope = getattr(execution, "_sync_action_scope", None)
@@ -1126,7 +1142,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "dag_allowed": dag_allowed,
             "dag_shape_degraded": dag_shape_degraded,
             "step_scope": DataFormatter.sanitize(step_scope),
-            "required_action_ids": DataFormatter.sanitize(required_action_ids),
+            "required_action_ids": DataFormatter.sanitize(raw_required_action_ids),
+            "task_required_action_ids": DataFormatter.sanitize(task_required_action_ids),
+            "step_required_action_ids": DataFormatter.sanitize(step_required_action_ids),
             "action_scope_source": action_scope_source,
             "policy": DataFormatter.sanitize(policy),
         }
@@ -1315,6 +1333,30 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             if capability_id and capability_id not in self._satisfied_succeeded_actions and capability_id not in pending:
                 pending.append(capability_id)
         return pending
+
+    def _task_contract_required_action_ids(self) -> set[str]:
+        required: set[str] = set()
+        option_sources: list[Any] = [self.options]
+        agent_task_options = self.options.get("agent_task") if isinstance(self.options, Mapping) else None
+        if isinstance(agent_task_options, Mapping):
+            option_sources.append(agent_task_options)
+        for source in option_sources:
+            if not isinstance(source, Mapping):
+                continue
+            constraints = source.get("capability_constraints")
+            if isinstance(constraints, Mapping):
+                actions = constraints.get("actions")
+                raw_required = actions.get("required", []) if isinstance(actions, Mapping) else constraints.get("required_actions", [])
+                required.update(self._normalize_string_list(raw_required))
+        for requirement in self._capability_evidence_requirements():
+            if not requirement.get("required", True):
+                continue
+            if str(requirement.get("kind") or "capability_used") != "action_succeeded":
+                continue
+            capability_id = str(requirement.get("capability_id") or "").strip()
+            if capability_id:
+                required.add(capability_id)
+        return required
 
     def _untried_read_action_continuation(
         self,

@@ -32,21 +32,21 @@ def build_ticket_triage_flow() -> TriggerFlow:
 
     async def classify_ticket(data: TriggerFlowRuntimeData):
         interventions = data.get_interventions(status="inserted", target="classify_ticket")
-        supplements = [item["payload"] for item in interventions]
+        guidance_items = [item["payload"] for item in interventions]
         enterprise_urgent = any(
             isinstance(item, dict)
             and item.get("customer_tier") == "enterprise"
             and item.get("severity_hint") == "urgent"
-            for item in supplements
+            for item in guidance_items
         )
         classification = {
             "topic": data.input["topic"],
             "priority": "p1" if enterprise_urgent else data.input["default_priority"],
-            "supplement_count": len(supplements),
+            "guidance_count": len(guidance_items),
             "sla_hours": next(
                 (
                     item.get("contract_sla_hours")
-                    for item in supplements
+                    for item in guidance_items
                     if isinstance(item, dict) and item.get("contract_sla_hours")
                 ),
                 24,
@@ -71,7 +71,7 @@ def build_ticket_triage_flow() -> TriggerFlow:
                 else "standard-support"
             ),
             "sla_hours": data.input["sla_hours"],
-            "supplement_count": data.input["supplement_count"],
+            "guidance_count": data.input["guidance_count"],
         }
         await data.async_set_state("route", route)
 
@@ -122,7 +122,7 @@ async def main():
         "priority": "p1",
         "queue": "enterprise-support",
         "sla_hours": 4,
-        "supplement_count": 1,
+        "guidance_count": 1,
     }
 
 
@@ -136,10 +136,10 @@ if __name__ == "__main__":
 #  'status': 'inserted',
 #  'target': 'classify_ticket'}
 # [ROUTE]
-# {'priority': 'p1',
+# {'guidance_count': 1,
+#  'priority': 'p1',
 #  'queue': 'enterprise-support',
 #  'sla_hours': 4,
-#  'supplement_count': 1,
 #  'ticket_id': 'ticket-2026-05-18-117'}
 #
 # How it works:

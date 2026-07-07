@@ -48,6 +48,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 "context",
                 "TaskBoard: building a Workspace context pack for board planning.",
             )
+            await self._apply_guidance_boundary(iteration_index=iteration_index, boundary="taskboard_context")
             context_pack = await self._await_task_deadline(
                 self._build_context(),
                 stage="context",
@@ -248,6 +249,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 tick_index = int(payload.get("tick_index") or data.get_state("tick_index", 1, inherit=False) or 1)
             except (TypeError, ValueError):
                 tick_index = 1
+            await self._apply_guidance_boundary(iteration_index=tick_index, boundary="taskboard_tick")
             max_ticks = data.get_state("max_ticks", None, inherit=False)
             max_ticks_int: int | None
             try:
@@ -359,6 +361,10 @@ class AgentTaskTaskBoardStrategyMixin(
                 return data.get_state("terminal_result", inherit=False)
             if data.get_state("final_result", None, inherit=False) is not None:
                 return data.get_state("final_result", inherit=False)
+            await self._apply_guidance_boundary(
+                iteration_index=max(int(data.get_state("tick_index", 1, inherit=False) or 1) - 1, 1),
+                boundary="taskboard_finalize",
+            )
             revision = _unpack_revision_state(data)
             previous_acceptance_index = data.get_state("taskboard_acceptance_index", None, inherit=False)
             if not isinstance(previous_acceptance_index, Mapping):

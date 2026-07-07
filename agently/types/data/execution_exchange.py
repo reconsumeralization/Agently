@@ -21,7 +21,7 @@ ExecutionExchangeKind: TypeAlias = Literal[
     "decision",
     "control",
     "clarification",
-    "supplement",
+    "guidance",
     "ack",
 ]
 ExecutionExchangeStatus: TypeAlias = Literal[

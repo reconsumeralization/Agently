@@ -123,6 +123,10 @@ streams preserve model attempt facts as structured stream items. In particular,
 also be projected to natural-language text, immediately appends a synthetic
 `AgentExecutionStreamData` item with `path="$delta"`, `event_type="delta"`,
 `source="agent_execution"`, and `meta["stream_kind"] == "text_projection"`.
+AgentTask Flat snapshots may project to linear plan/action summaries, while
+TaskBoard plan/tick events may project to compact Markdown status tables first
+and later card-state summaries.
+Heartbeat items are structured-only and do not append synthetic `$delta` text.
 `type="all"` remains the raw audit stream and does not include those synthetic
 projection items.
 

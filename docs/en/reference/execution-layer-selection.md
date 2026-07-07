@@ -172,6 +172,12 @@ sequenceDiagram
 - Start at `AgentExecution` unless the problem clearly needs lower-level
   ownership.
 - Use `ModelRequest` when the task is only one model call.
+- Use `AgentExecution.strategy("direct")` when an Agent run should stay on the
+  direct `model_request`/ActionLoop route. Use `.strategy("flat")` or
+  `.strategy("taskboard")` only when the host explicitly wants AgentTask. The
+  default `.strategy("auto")` keeps ordinary prompt/action runs direct and
+  enters AgentTask only from structural task signals such as goals, success
+  criteria, task options, or Skill selectors.
 - Use `TaskDAG` when the plan is data and needs validation, dependency
   execution, handlers, and result collection.
 - Use [Blocks Lifecycle](blocks-lifecycle.md) when you need to understand how a

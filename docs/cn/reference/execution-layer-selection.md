@@ -167,6 +167,11 @@ sequenceDiagram
 
 - 除非问题明显需要更低层 owner，否则从 `AgentExecution` 开始。
 - 只有一次模型调用时，用 `ModelRequest`。
+- 当一次 Agent run 应该保持在 direct `model_request`/ActionLoop route 上时，用
+  `AgentExecution.strategy("direct")`。只有 host 明确想要 AgentTask 时，才使用
+  `.strategy("flat")` 或 `.strategy("taskboard")`。默认 `.strategy("auto")` 会让
+  普通 prompt/action run 保持 direct；只有 goals、success criteria、task options
+  或 Skill selectors 等结构化 task signals 才进入 AgentTask。
 - 当计划本身是数据，需要校验、依赖执行、handler 和结果收集时，用 `TaskDAG`。
 - 需要理解 bounded AgentTask step、Skill activation 或 TaskDAG segment 如何降低到
   TriggerFlow 并映射回 evidence 时，看 [Blocks 生命周期](blocks-lifecycle.md)。

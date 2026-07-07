@@ -2097,9 +2097,32 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         trusted_workspace_artifact_refs: Sequence[Mapping[str, Any]],
         grounding_guard: Mapping[str, Any] | None,
         final_result_required: bool,
+        non_blocking_action_ids: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
         if execution_status not in {"failed", "error", "timed_out", "blocked"}:
             return None
+        non_blocking_actions = set(cls._normalize_string_list(non_blocking_action_ids))
+
+        def action_id_from_record(action: Mapping[str, Any]) -> str:
+            return str(action.get("action_id") or action.get("id") or action.get("name") or "").strip()
+
+        def status_is_terminal_issue(status_value: Any) -> bool:
+            return str(status_value or "").strip().lower() in {
+                "failed",
+                "failure",
+                "error",
+                "timed_out",
+                "timeout",
+                "blocked",
+            }
+
+        def error_record_is_nonblocking(error: Mapping[str, Any]) -> bool:
+            action_id = str(error.get("action_id") or error.get("id") or error.get("name") or "").strip()
+            if action_id and action_id in non_blocking_actions:
+                return True
+            diagnostic_code = str(error.get("code") or "").strip()
+            return diagnostic_code == "action_loop.max_rounds_reached" and "action_loop" in non_blocking_actions
+
         if not final_result_required or not trusted_workspace_artifact_refs:
             return None
         if not cls._trusted_workspace_artifact_refs_have_readback(trusted_workspace_artifact_refs):
@@ -2114,30 +2137,52 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             return None
         if not cls._verification_criteria_are_satisfied(verification.get("criterion_checks")):
             return None
-        if cls._normalize_string_list(execution_evidence_summary.get("failed_actions")):
+        if [
+            action_id
+            for action_id in cls._normalize_string_list(execution_evidence_summary.get("failed_actions"))
+            if action_id not in non_blocking_actions
+        ]:
             return None
-        if cls._normalize_string_list(execution_evidence_summary.get("blocked_actions")):
+        if [
+            action_id
+            for action_id in cls._normalize_string_list(execution_evidence_summary.get("blocked_actions"))
+            if action_id not in non_blocking_actions
+        ]:
             return None
         if cls._normalize_string_list(execution_evidence_summary.get("approval_required_actions")):
             return None
         action_statuses = execution_evidence_summary.get("action_statuses")
         if isinstance(action_statuses, Mapping):
-            for value in action_statuses.values():
-                if str(value or "").strip().lower() in {"failed", "failure", "error", "timed_out", "timeout", "blocked"}:
+            for action_id, value in action_statuses.items():
+                if status_is_terminal_issue(value) and str(action_id or "").strip() not in non_blocking_actions:
                     return None
         for action in execution_evidence_summary.get("actions", []) or []:
             if not isinstance(action, Mapping):
                 continue
             status = str(action.get("status") or "").strip().lower()
-            if status in {"failed", "failure", "error", "timed_out", "timeout", "blocked"}:
+            if status_is_terminal_issue(status) and action_id_from_record(action) not in non_blocking_actions:
                 return None
 
         errors = execution_evidence_summary.get("errors")
         error_records = [dict(error) for error in errors if isinstance(error, Mapping)] if isinstance(errors, list) else []
         if not error_records:
-            return None
+            if not non_blocking_actions:
+                return None
+            return {
+                "status": execution_status,
+                "error_type": "",
+                "stage": "",
+                "message": "Execution status came only from non-blocking action diagnostics.",
+                "last_progress_event": None,
+                "idle_seconds": None,
+                "elapsed_seconds": None,
+                "non_blocking_action_ids": sorted(non_blocking_actions),
+                "diagnostic_only": True,
+            }
         first_error = error_records[0]
-        if not cls._is_liveness_stall_error(first_error):
+        if not cls._is_liveness_stall_error(first_error) and not all(
+            error_record_is_nonblocking(error) for error in error_records
+        ):
             return None
         return {
             "status": execution_status,
@@ -2147,6 +2192,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "last_progress_event": first_error.get("last_progress_event"),
             "idle_seconds": first_error.get("idle_seconds"),
             "elapsed_seconds": first_error.get("elapsed_seconds"),
+            "non_blocking_action_ids": sorted(non_blocking_actions),
             "diagnostic_only": True,
         }
 
@@ -2190,8 +2236,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             return
         missing = cls._normalize_string_list(normalized.get("missing_criteria"))
         guard_label = ", ".join(str(reason) for reason in guard_reasons if str(reason).strip()) or "verification_guard"
-        summary = missing[0] if missing else f"Verification is blocked by {guard_label}."
-        guarded_reason = f"Verification is not complete: {summary}"
+        summary = missing[0] if missing else f"Verification needs more evidence for {guard_label}."
+        guarded_reason = f"Verification needs another step: {summary}"
         normalized["reason"] = guarded_reason
         normalized["failure_analysis"] = guarded_reason
         if normalized.get("progress_message") not in (None, "", [], {}) or raw_verification.get("progress_message") not in (None, "", [], {}):
@@ -3219,6 +3265,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             guard_reasons.append("missing_criteria_present")
         final_result_required = self._normalize_bool(verification.get("final_result_required"), default=False)
         trusted_workspace_artifact_refs = self._trusted_workspace_artifact_refs_from_summary(execution_evidence_summary)
+        risky_actions, non_blocking_failed_actions = self._execution_risk_actions(execution_evidence_summary)
+        if non_blocking_failed_actions:
+            normalized["non_blocking_failed_actions"] = non_blocking_failed_actions
         execution_status = str(execution_evidence_summary.get("status") or "").strip().lower()
         if execution_status in {"failed", "error", "timed_out", "blocked"}:
             execution_errors = execution_evidence_summary.get("errors", [])
@@ -3238,6 +3287,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 trusted_workspace_artifact_refs=trusted_workspace_artifact_refs,
                 grounding_guard=grounding_guard,
                 final_result_required=final_result_required,
+                non_blocking_action_ids=non_blocking_failed_actions,
             )
             if liveness_diagnostic is not None:
                 normalized["non_blocking_execution_status"] = liveness_diagnostic
@@ -3297,9 +3347,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 normalized["replan_instruction"] = "Handle structured ReplanSignal before accepting completion" + (
                     f": {'; '.join(reasons)}." if reasons else "."
                 )
-        risky_actions, non_blocking_failed_actions = self._execution_risk_actions(execution_evidence_summary)
-        if non_blocking_failed_actions:
-            normalized["non_blocking_failed_actions"] = non_blocking_failed_actions
         if risky_actions:
             normalized["is_complete"] = False
             guard_reasons.append("execution_risk_actions_present")

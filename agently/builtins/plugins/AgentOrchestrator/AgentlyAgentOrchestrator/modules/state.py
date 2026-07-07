@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from .execution import AgentExecution
 
 _TASK_ROUTE_STRATEGIES = {"task", "task_loop", "long_task"}
+_AGENT_EXECUTION_AUTO_STRATEGY = "auto"
+_AGENT_EXECUTION_DIRECT_STRATEGY = "direct"
 
 
 class ExecutionOptionsState(dict):
@@ -138,10 +140,35 @@ def is_task_execution_strategy_value(value: Any) -> bool:
     return True
 
 
+def _clear_task_execution_selection(owner: "AgentExecution") -> None:
+    owner.task_options.pop("execution", None)
+    owner.task_options.pop("_execution_strategy_source", None)
+
+
 def apply_strategy_selection(owner: "AgentExecution", value: Any, *, source: str) -> bool:
     text = str(value if value is not None else "").strip()
     if not text:
         return False
+    normalized_text = text.lower().replace("-", "_")
+
+    if normalized_text == _AGENT_EXECUTION_DIRECT_STRATEGY:
+        owner.strategy_name = _AGENT_EXECUTION_DIRECT_STRATEGY
+        owner.options["strategy"] = _AGENT_EXECUTION_DIRECT_STRATEGY
+        _clear_task_execution_selection(owner)
+        return True
+
+    if normalized_text == _AGENT_EXECUTION_AUTO_STRATEGY:
+        owner.strategy_name = _AGENT_EXECUTION_AUTO_STRATEGY
+        owner.options["strategy"] = _AGENT_EXECUTION_AUTO_STRATEGY
+        _clear_task_execution_selection(owner)
+        return True
+
+    if normalized_text in _TASK_ROUTE_STRATEGIES:
+        owner.strategy_name = normalized_text
+        owner.options["strategy"] = normalized_text
+        _clear_task_execution_selection(owner)
+        return True
+
     try:
         execution_strategy = normalize_task_execution_strategy(text)
     except (TypeError, ValueError):
@@ -425,11 +452,19 @@ def task_success_criteria(owner: "AgentExecution") -> list[str]:
 
 
 def is_task_strategy(owner: "AgentExecution") -> bool:
+    if owner.strategy_name == _AGENT_EXECUTION_DIRECT_STRATEGY:
+        return False
     if owner.strategy_name in _TASK_ROUTE_STRATEGIES:
         return True
-    if owner.strategy_name is not None and is_task_execution_strategy_value(owner.strategy_name):
+    if (
+        owner.strategy_name is not None
+        and owner.strategy_name != _AGENT_EXECUTION_AUTO_STRATEGY
+        and is_task_execution_strategy_value(owner.strategy_name)
+    ):
         return True
     if owner.goal_items or owner.success_criteria_items:
+        return True
+    if owner.task_options:
         return True
     task_options = owner.options.get("task")
     if isinstance(task_options, dict) and bool(task_options):

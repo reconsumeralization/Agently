@@ -62,6 +62,7 @@ from .result_views import (
     sync_generator as sync_generator_entry,
 )
 from .route_execution import async_execute_route, start_execution
+from .runtime_guidance import add_guidance as add_guidance_entry
 from .routing import HybridRoutePlanner
 from .state import (
     ExecutionOptionsState,
@@ -136,6 +137,10 @@ class AgentExecution:
         self.local_skill_selectors: list[dict[str, Any]] = []
         self.local_skills_pack_selectors: list[dict[str, Any]] = []
         self._agent_task_step_overrides: dict[str, Any] = {}
+        self.guidance_items: list[dict[str, Any]] = []
+        self._pending_guidance: list[dict[str, Any]] = []
+        self._guidance_sequence = 0
+        self._guidance_lock = asyncio.Lock()
         self.task_options: dict[str, Any] = {}
         self.strategy_name: str | None = None
         self.inherited_task_execution_strategy: str | None = None
@@ -213,6 +218,7 @@ class AgentExecution:
         self.get_text = FunctionShifter.syncify(self.async_get_text)
         self.get_meta = FunctionShifter.syncify(self.async_get_meta)
         self.record_workspace = FunctionShifter.syncify(self.async_record_workspace)
+        self.add_guidance = FunctionShifter.syncify(self.async_add_guidance)
         self.get_generator = self._get_generator
         self.run = self._compat_run
         self.async_run = self.async_start
@@ -460,6 +466,16 @@ class AgentExecution:
         if task_record is not None:
             return await task_record.async_meta()
         return await self.async_get_meta()
+
+    async def async_add_guidance(
+        self,
+        content: Any,
+        *,
+        author: str | None = None,
+        target: Any = "task",
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await add_guidance_entry(self, content, author=author, target=target, meta=meta)
 
     def set_execution_prompt(self, key: Any, value: Any, *, mappings: dict[str, Any] | None = None) -> "AgentExecution":
         self._draft.set_execution_prompt(key, value, mappings=mappings)
@@ -883,7 +899,22 @@ class AgentExecution:
         if self._selected_route is not None:
             return self._selected_route
         self._refresh_prompt_snapshot()
-        if self.is_task_strategy():
+        route: str
+        route_meta: dict[str, Any]
+        if self.strategy_name == "direct":
+            required_actions = self.required_action_ids()
+            required_skills = self.required_skill_ids()
+            route, route_meta = "model_request", {
+                "strategy": "direct",
+                "selected_by": "execution_strategy",
+            }
+            if self.action_candidates() or required_actions:
+                route_meta["with_actions"] = True
+            if required_actions:
+                route_meta["required_actions"] = required_actions
+            if required_skills:
+                route_meta["required_skills"] = required_skills
+        elif self.is_task_strategy():
             strategy = self.strategy_name or "task"
             route, route_meta = "agent_task", {
                 "strategy": strategy,
