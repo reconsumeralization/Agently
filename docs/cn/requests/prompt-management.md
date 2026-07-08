@@ -109,12 +109,12 @@ config alias 已移除；旧 prompt 文件应改成 `.execution`。
 可以把代码里组装的 prompt 转成 YAML/JSON 用于 review 或存储：
 
 ```python
-agent.role("你是 Agently 助手。", always=True).input("打个招呼。").output({
+execution = agent.role("你是 Agently 助手。", always=True).input("打个招呼。").output({
     "reply": (str, "reply", True),
 })
-print(agent.get_yaml_prompt())
-print(agent.get_json_prompt())
-print(agent.get_prompt_text())  # 模型实际看到的渲染文本
+print(execution.get_yaml_prompt())
+print(execution.get_json_prompt())
+print(execution.get_prompt_text())  # 模型实际看到的渲染文本
 ```
 
 这种往返是把「我以为我在发」与「框架实际发的」对上的标准方式。
@@ -145,7 +145,9 @@ agent.load_yaml_prompt(yaml_text, mappings={"product_name": "Agently"})
 2. Request 级槽位（不带 `always=True`）
 3. 框架扩展或应用代码填入的槽位（Session 注入 chat history；检索代码通常把片段放进本次请求的 `info(...)`）
 
-发送前用 `agent.get_prompt_text()` 看合并结果。
+一次性链式调用后，用 `execution.get_prompt_text()` 看发送前的合并结果，例如
+`execution = agent.input(...).output(...)`。`agent.get_prompt_text()` 只查看保留在
+Agent 自身上的 prompt，例如通过 `always=True` 设置的持久槽位。
 
 ## 另见
 

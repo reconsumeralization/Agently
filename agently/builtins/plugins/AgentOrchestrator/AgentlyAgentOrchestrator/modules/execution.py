@@ -56,6 +56,7 @@ from .limits import (
 )
 from .result_views import (
     async_get_data as async_get_data_entry,
+    async_get_data_object as async_get_data_object_entry,
     async_get_full_data as async_get_full_data_entry,
     async_get_meta as async_get_meta_entry,
     async_get_text as async_get_text_entry,
@@ -193,6 +194,7 @@ class AgentExecution:
         self.diagnostics: dict[str, Any] = initial_diagnostics()
         self.workspace_refs: dict[str, Any] = initial_workspace_refs()
         self.result: Any = None
+        self._model_request_result: Any = None
         self.status = "created"
         self._started = False
         self._completed = False
@@ -214,14 +216,20 @@ class AgentExecution:
         self.execution_context.set_progress_callback(self._publish_runtime_progress)
         self.execution_context.set_exchange_callback(self._publish_exchange_stream_item)
         self._seen_action_log_keys: set[str] = set()
+        self._key_waiter_handlers: dict[str, list[Any]] = {}
 
         self.start = FunctionShifter.syncify(self.async_start)
         self.get_data = FunctionShifter.syncify(self.async_get_data)
+        self.get_data_object = FunctionShifter.syncify(self.async_get_data_object)
         self.get_full_data = FunctionShifter.syncify(self.async_get_full_data)
         self.get_text = FunctionShifter.syncify(self.async_get_text)
         self.get_meta = FunctionShifter.syncify(self.async_get_meta)
         self.record_workspace = FunctionShifter.syncify(self.async_record_workspace)
         self.add_guidance = FunctionShifter.syncify(self.async_add_guidance)
+        self.get_key_result = FunctionShifter.syncify(self.async_get_key_result)
+        self.start_waiter = FunctionShifter.syncify(self.async_start_waiter)
+        self.streaming_print = FunctionShifter.syncify(self.async_streaming_print)
+        self.when_key = self.on_key
         self.get_generator = self._get_generator
         self.run = self._compat_run
         self.async_run = self.async_start
@@ -243,7 +251,11 @@ class AgentExecution:
     def _reconfiguration_target(self) -> "AgentExecution":
         if not self._started:
             return self
-        return self._fork_for_reconfiguration()
+        raise RuntimeError(
+            "AgentExecution represents one independent run and has already started. "
+            "Create a fresh execution for the next run with `agent.input(...)`, "
+            "`agent.create_execution(...)`, or `execution.create_execution(...)`."
+        )
 
     def _fork_for_reconfiguration(self) -> "AgentExecution":
         fork = cast(
@@ -359,6 +371,7 @@ class AgentExecution:
         self._selected_route = None
         self.route_info = {}
         self.route_plan = {}
+        self._model_request_result = None
         self.effective_options = self._build_effective_options()
 
     def _build_effective_options(self) -> dict[str, Any]:
@@ -464,12 +477,14 @@ class AgentExecution:
         parent_run_context: "RunContext | None" = None,
     ) -> "AgentExecution":
         if self._started:
-            target = self._fork_for_reconfiguration()
-            return target.create_execution(
-                lineage=lineage,
-                limits=limits,
-                options=options,
-                parent_run_context=parent_run_context,
+            return cast(
+                AgentExecution,
+                self.agent.create_execution(
+                    lineage=lineage,
+                    limits=limits,
+                    options=options,
+                    parent_run_context=parent_run_context,
+                ),
             )
         if lineage is not None:
             self.lineage = normalize_execution_lineage(lineage)
@@ -481,11 +496,55 @@ class AgentExecution:
         self._replace_runtime_context()
         return self
 
+    def new_execution(
+        self,
+        *,
+        lineage: "AgentExecutionLineage | dict[str, Any] | None" = None,
+        limits: "AgentExecutionLimits | dict[str, Any] | None" = None,
+        options: Any = None,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "AgentExecution":
+        return cast(
+            AgentExecution,
+            self.agent.create_execution(
+                lineage=lineage,
+                limits=limits,
+                options=options,
+                parent_run_context=parent_run_context,
+            ),
+        )
+
     def get_result(self) -> AgentExecutionResult:
         return AgentExecutionResult(self)
 
     def get_response(self) -> AgentExecutionResult:
         return self.get_result()
+
+    async def async_streaming_print(self) -> None:
+        print()
+        async for delta in self.get_async_generator(type="delta"):
+            print(delta, end="", flush=True)
+        print()
+
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> Any:
+        return await async_get_data_object_entry(
+            self,
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            parent_run_context=parent_run_context,
+        )
 
     def _compat_run(self, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -655,6 +714,11 @@ class AgentExecution:
         return self._draft.create_dynamic_task(*args, **kwargs)
 
     def get_prompt_text(self) -> str:
+        if not self._started:
+            return self._draft.get_prompt_text()
+        prompt_text = self._prompt_text_from_snapshot(self.prompt_snapshot)
+        if prompt_text:
+            return prompt_text
         return self._draft.get_prompt_text()
 
     def get_json_prompt(
@@ -699,6 +763,116 @@ class AgentExecution:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding=encoding)
         return content
+
+    def _prompt_text_from_snapshot(self, prompt_snapshot: dict[str, Any]) -> str:
+        if not prompt_snapshot:
+            return ""
+        request = self.agent.create_request()
+        try:
+            request.prompt.update(prompt_snapshot)
+            return request.prompt.to_text()[6:][:-11]
+        finally:
+            request.prompt.clear()
+
+    def _output_prompt_snapshot(self) -> dict[str, Any]:
+        if not self._started:
+            prompt_snapshot = self._snapshot_prompt()
+        else:
+            prompt_snapshot = self.prompt_snapshot
+        return dict(prompt_snapshot) if isinstance(prompt_snapshot, dict) else {}
+
+    def _check_keys_in_output(
+        self,
+        keys: list[str],
+        *,
+        must_in_prompt: bool = False,
+    ) -> None:
+        prompt_snapshot = self._output_prompt_snapshot()
+        output_prompt = prompt_snapshot.get("output")
+        if not output_prompt:
+            raise NotImplementedError(
+                "Cannot wait for structured output keys before defining `.output(...)` "
+                "on this AgentExecution."
+            )
+        if must_in_prompt and isinstance(output_prompt, dict):
+            missing = [key for key in keys if key not in output_prompt]
+            if missing:
+                raise NotImplementedError(
+                    f"Cannot wait for key/keys { missing } because they are not defined "
+                    "in this AgentExecution `.output(...)` prompt."
+                )
+
+    async def async_get_key_result(
+        self,
+        key: str,
+        *,
+        must_in_prompt: bool = False,
+    ) -> Any:
+        self._check_keys_in_output([key], must_in_prompt=must_in_prompt)
+        async for data in self.get_async_generator(type="instant"):
+            if self._is_output_key_stream_item(data, key):
+                return getattr(data, "value", None)
+        return None
+
+    async def async_wait_keys(
+        self,
+        keys: list[str],
+        *,
+        must_in_prompt: bool = False,
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        self._check_keys_in_output(keys, must_in_prompt=must_in_prompt)
+        expected = set(keys)
+        async for data in self.get_async_generator(type="instant"):
+            path = getattr(data, "path", None)
+            if path in expected and self._is_output_key_stream_item(data, str(path)):
+                yield str(path), getattr(data, "value", None)
+
+    def wait_keys(
+        self,
+        keys: list[str],
+        *,
+        must_in_prompt: bool = False,
+    ) -> Generator[tuple[str, Any], None, None]:
+        return FunctionShifter.syncify_async_generator(
+            self.async_wait_keys(keys, must_in_prompt=must_in_prompt)
+        )
+
+    def on_key(self, key: str, handler: Any) -> "AgentExecution":
+        self._key_waiter_handlers.setdefault(key, []).append(handler)
+        return self
+
+    async def async_start_waiter(self, *, must_in_prompt: bool = False) -> list[tuple[str, Any, Any]]:
+        if not self._key_waiter_handlers:
+            raise NotImplementedError(
+                "Use `.when_key(<key>, <handler>)` to provide at least one key handler "
+                "before `.start_waiter()`."
+            )
+        keys = list(self._key_waiter_handlers)
+        self._check_keys_in_output(keys, must_in_prompt=must_in_prompt)
+        tasks: list[asyncio.Task[tuple[str, Any, Any]]] = []
+
+        async def handler_wrapper(path: str, value: Any, handler: Any) -> tuple[str, Any, Any]:
+            return path, value, await FunctionShifter.asyncify(handler)(value)
+
+        async for path, value in self.async_wait_keys(keys, must_in_prompt=False):
+            for handler in self._key_waiter_handlers.get(path, []):
+                tasks.append(asyncio.create_task(handler_wrapper(path, value, handler)))
+        if not tasks:
+            return []
+        return await asyncio.gather(*tasks)
+
+    def _is_output_key_stream_item(self, data: Any, key: str) -> bool:
+        if getattr(data, "path", None) != key:
+            return False
+        if not getattr(data, "is_complete", False):
+            return False
+        source = str(getattr(data, "source", "") or "")
+        if source and source != "model_request":
+            return False
+        meta = getattr(data, "meta", None)
+        meta_map = meta if isinstance(meta, dict) else {}
+        stream_kind = str(meta_map.get("stream_kind") or "")
+        return stream_kind != "text_projection"
 
     def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution":
         target = self._reconfiguration_target()

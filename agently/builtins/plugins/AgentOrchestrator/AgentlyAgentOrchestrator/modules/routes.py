@@ -64,6 +64,7 @@ async def run_model_request_route(
     if ensure_all_keys is not None:
         execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
     result = execution.request.get_result(parent_run_context=agent_execution_run_context)
+    execution._model_request_result = result
     execution.record_model_response_id(result.id)
     stream_meta = {
         "response_id": result.response_id,
@@ -108,7 +109,26 @@ async def run_model_request_route(
                     delta=str(data),
                     event_type="delta",
                     is_complete=False,
-                    meta=stream_meta,
+                    meta={**stream_meta, "specific_event": "delta"},
+                )
+            elif event in {"reasoning_delta", "original_delta"}:
+                await execution.emit_stream(
+                    f"model.{event}",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                    delta=str(data),
+                    event_type="delta",
+                    is_complete=False,
+                    meta={**stream_meta, "specific_event": event},
+                )
+            elif event in {"tool_calls", "reasoning_done", "original_done"}:
+                await execution.emit_stream(
+                    f"model.{event}",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                    meta={**stream_meta, "specific_event": event},
                 )
             elif event == "status":
                 await execution.emit_stream(
@@ -116,7 +136,7 @@ async def run_model_request_route(
                     data,
                     route="model_request",
                     source="model_request",
-                    meta={**stream_meta, "field_path": "$status"},
+                    meta={**stream_meta, "field_path": "$status", "specific_event": "status"},
                 )
             elif event == "done":
                 await execution.emit_stream(
@@ -124,7 +144,15 @@ async def run_model_request_route(
                     data,
                     route="model_request",
                     source="model_request",
-                    meta=stream_meta,
+                    meta={**stream_meta, "specific_event": "done"},
+                )
+            elif event in {"meta", "extra", "error"}:
+                await execution.emit_stream(
+                    f"model.{event}",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                    meta={**stream_meta, "specific_event": event},
                 )
     data = await result.async_get_data(
         type=type,

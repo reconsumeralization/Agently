@@ -9,12 +9,20 @@ from agently import Agently
 
 Agently.set_settings(
     "OpenAICompatible",
-    {
-        "base_url": os.environ["QIANFAN_BASE_URL"],
-        "model": "ernie-lite-8k",
-        "model_type": "chat",
-        "auth": os.environ["QIANFAN_API_KEY"],
-    },
+    (
+        {
+            "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            "model": os.environ.get("DEEPSEEK_DEFAULT_MODEL", "deepseek-chat"),
+            "model_type": "chat",
+            "auth": os.environ["DEEPSEEK_API_KEY"],
+        }
+        if os.getenv("DEEPSEEK_API_KEY")
+        else {
+            "base_url": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            "model": os.environ.get("OLLAMA_DEFAULT_MODEL", "qwen2.5:7b"),
+            "model_type": "chat",
+        }
+    ),
 )
 
 user_input = "How are you today?"
@@ -40,7 +48,7 @@ async def main():
 
 asyncio.run(main())
 
-# Expected output shape (content is variable — requires QianFan API key):
+# Expected output shape (content is variable — requires DeepSeek or local Ollama):
 # <reply in the style of a teacher addressing a 3-year-old about "How are you today?">
 #
 # How it works:

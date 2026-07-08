@@ -719,28 +719,6 @@
       "expires": "review-before-4.2"
     },
     {
-      "symbol": "agently.core.application.AgentExecution.Result.AgentExecutionResult.async_get_data_object",
-      "positions": [
-        "return",
-        "param:kwargs"
-      ],
-      "owner": "AgentExecutionResult",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.core.application.AgentExecution.Result.AgentExecutionResult.get_data_object",
-      "positions": [
-        "return",
-        "param:kwargs"
-      ],
-      "owner": "AgentExecutionResult",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
       "symbol": "agently.core.application.AgentExecution.Result.AgentExecutionResult.async_get_text",
       "positions": [
         "param:parent_run_context"

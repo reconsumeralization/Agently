@@ -14,13 +14,14 @@ need and set the matching variables (e.g. in a .env file loaded by dotenv).
 """
 
 import asyncio
+import os
 
 from dotenv import find_dotenv, load_dotenv
 
 from agently import Agently
 
 # Pick which provider style to run: "chat" | "responses" | "anthropic"
-PROVIDER = "chat"
+PROVIDER = os.getenv("AGENTLY_EXAMPLE_PROVIDER", "chat")
 
 # Load a local .env so the ${ENV.*} placeholders below can resolve.
 load_dotenv(find_dotenv())
@@ -33,16 +34,27 @@ def setup_chat_completions() -> None:
 
     Settings aliases: "OpenAICompatible" / "OpenAI" / "OAIClient".
     """
+    if os.getenv("AGENTLY_EXAMPLE_CHAT_BASE_URL"):
+        base_url = os.getenv("AGENTLY_EXAMPLE_CHAT_BASE_URL", "")
+        model = os.getenv("AGENTLY_EXAMPLE_CHAT_MODEL", "")
+        auth = os.getenv("AGENTLY_EXAMPLE_CHAT_API_KEY", "")
+    elif os.getenv("DEEPSEEK_API_KEY"):
+        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        model = os.getenv("DEEPSEEK_DEFAULT_MODEL", "deepseek-chat")
+        auth = os.getenv("DEEPSEEK_API_KEY", "")
+    else:
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+        model = os.getenv("OLLAMA_DEFAULT_MODEL", "qwen2.5:7b")
+        auth = ""
     Agently.set_settings("plugins.ModelRequester.activate", "OpenAICompatible")
     Agently.set_settings(
         "OpenAICompatible",
         {
-            "base_url": "${ENV.OPENAI_BASE_URL}",  # e.g. https://api.openai.com/v1
-            "model": "${ENV.OPENAI_MODEL}",        # e.g. gpt-4.1
+            "base_url": base_url,
+            "model": model,
             "model_type": "chat",
-            "auth": "${ENV.OPENAI_API_KEY}",
+            "auth": auth,
         },
-        auto_load_env=True,
     )
 
 
@@ -96,13 +108,17 @@ agent.request.set_prompt("input", "Hi~")
 
 
 async def run():
-    streaming_parse_generator = agent.output(
-        {
-            "thinking": ("str",),
-            "actions": [("str",)],
-            "say": ("str",),
-        }
-    ).get_async_generator("instant")
+    streaming_parse_generator = (
+        agent.instruct("Return all output fields. Include at least one short cat-like action.")
+        .output(
+            {
+                "thinking": ("str",),
+                "actions": [("str",)],
+                "say": ("str",),
+            }
+        )
+        .get_async_generator("instant")
+    )
 
     thinking_status = False
     actions_status = False
@@ -140,8 +156,9 @@ async def run():
 
 asyncio.run(run())
 
-# Expected key output (PROVIDER="chat", one real DeepSeek run; the section keys
-# [Think]/[Actions]/[Say] and the list shape are stable, the wording varies):
+# Expected key output (PROVIDER="chat", one real DeepSeek or local Ollama run;
+# the section keys [Think]/[Actions]/[Say] and the list shape are stable, the
+# wording varies):
 # [Think]:
 # A human greeted me! I should respond in a cute cat way. ...
 # [Actions]:

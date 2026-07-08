@@ -24,6 +24,7 @@ from agently.core.model.StructuredOutputParser import (
     STRUCTURED_OUTPUT_FORMATS,
     parse_output_contract_dict,
 )
+from agently.core.model.ModelRequestResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.application.AgentExecution.Stream import (
     AgentExecutionTextDeltaProjector,
     project_agent_execution_text_delta,
@@ -89,6 +90,36 @@ async def async_get_full_data(
     )
 
 
+async def async_get_data_object(
+    owner: "AgentExecution",
+    *,
+    ensure_keys: list[str] | None = None,
+    validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+    key_style: Literal["dot", "slash"] = "dot",
+    max_retries: int = 3,
+    raise_ensure_failure: bool = True,
+    parent_run_context: "RunContext | None" = None,
+) -> Any:
+    await owner.async_start(
+        ensure_keys=ensure_keys,
+        validate_handler=validate_handler,
+        key_style=key_style,
+        max_retries=max_retries,
+        raise_ensure_failure=raise_ensure_failure,
+        parent_run_context=parent_run_context,
+    )
+    model_result = getattr(owner, "_model_request_result", None)
+    if model_result is None:
+        return None
+    return await model_result.async_get_data_object(
+        ensure_keys=ensure_keys,
+        validate_handler=validate_handler,
+        key_style=key_style,
+        max_retries=max_retries,
+        raise_ensure_failure=raise_ensure_failure,
+    )
+
+
 async def async_get_text(
     owner: "AgentExecution",
     *,
@@ -113,16 +144,22 @@ async def async_get_meta(owner: "AgentExecution") -> dict[str, Any]:
 
 async def get_async_generator(
     owner: "AgentExecution",
-    type: Literal["delta", "instant", "streaming_parse", "all"] | str | None = "delta",
+    type: Literal["delta", "instant", "streaming_parse", "all", "specific"] | str | None = "delta",
     content: Any = None,
-    **_: Any,
+    **kwargs: Any,
 ) -> AsyncGenerator[Any, None]:
     if content is not None and type is None:
         type = content
     text_projector = AgentExecutionTextDeltaProjector() if type in {"delta", "instant"} else None
+    specific_events = _normalize_specific_events(kwargs.get("specific", DEFAULT_SPECIFIC_EVENTS))
     if owner._completed:
         for item in owner.stream.items:
-            for projected in _project_stream_items(item, type, text_projector=text_projector):
+            for projected in _project_stream_items(
+                item,
+                type,
+                text_projector=text_projector,
+                specific_events=specific_events,
+            ):
                 yield projected
         return
     queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -136,7 +173,12 @@ async def get_async_generator(
             item = await queue.get()
             if item is None:
                 break
-            for projected in _project_stream_items(item, type, text_projector=text_projector):
+            for projected in _project_stream_items(
+                item,
+                type,
+                text_projector=text_projector,
+                specific_events=specific_events,
+            ):
                 yield projected
         await start_task
     finally:
@@ -149,9 +191,15 @@ def _project_stream_items(
     type: Any,
     *,
     text_projector: AgentExecutionTextDeltaProjector | None = None,
+    specific_events: set[str] | None = None,
 ) -> Generator[Any, None, None]:
     if type == "all":
         yield ("agent_execution", item)
+        return
+    if type == "specific":
+        projected = _project_specific_item(item, specific_events=specific_events)
+        if projected is not None:
+            yield projected
         return
     if type == "delta":
         projected = (
@@ -167,6 +215,50 @@ def _project_stream_items(
         projected = _project_instant_delta_item(item, text_projector=text_projector)
         if projected is not None:
             yield projected
+
+
+def _normalize_specific_events(specific: Any) -> set[str] | None:
+    if specific is None:
+        return None
+    if isinstance(specific, str):
+        return {specific}
+    if isinstance(specific, (list, tuple, set)):
+        return {str(item) for item in specific if item not in (None, "")}
+    default_specific = DEFAULT_SPECIFIC_EVENTS
+    if default_specific is None:
+        return None
+    if isinstance(default_specific, str):
+        return {default_specific}
+    return {str(item) for item in default_specific if item not in (None, "")}
+
+
+def _project_specific_item(
+    item: Any,
+    *,
+    specific_events: set[str] | None,
+) -> tuple[str, Any] | None:
+    meta = getattr(item, "meta", None)
+    meta_map = meta if isinstance(meta, Mapping) else {}
+    event = str(meta_map.get("specific_event") or "").strip()
+    path = str(getattr(item, "path", "") or "")
+    if not event:
+        if getattr(item, "event_type", None) == "delta":
+            event = "delta"
+        elif path == "model.text":
+            event = "done"
+        elif path == "$status":
+            event = "status"
+    if not event:
+        return None
+    if specific_events is not None and event not in specific_events:
+        return None
+    if event.endswith("_delta") or event == "delta":
+        value = getattr(item, "delta", None)
+        if value is None:
+            value = getattr(item, "value", None)
+    else:
+        value = getattr(item, "value", None)
+    return event, value
 
 
 def _final_response_from_data(data: Any) -> str:
@@ -281,6 +373,7 @@ def _project_instant_delta_item(
         delta=delta,
         event_type="delta",
         is_complete=False,
+        full_data=getattr(item, "full_data", None),
         source="agent_execution",
         route=getattr(item, "route", None),
         stage_id=getattr(item, "stage_id", None),

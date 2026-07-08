@@ -14,19 +14,23 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from typing import Any, Literal, Protocol, TYPE_CHECKING, overload, runtime_checkable
 
 from agently.types.data import (
+    AgentlySpecificResultMessage,
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
     AgentExecutionStreamData,
     AgentExecutionWorkspaceRecord,
     OutputValidateHandler,
+    RunContext,
 )
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
+
     from agently.core.application.AgentExecution import AgentExecutionResult
 
 
@@ -133,6 +137,8 @@ class AgentExecution(Protocol):
 
     async def async_get_meta(self) -> AgentExecutionMeta: ...
 
+    async def async_streaming_print(self) -> None: ...
+
     async def async_record_workspace(
         self,
         *,
@@ -168,7 +174,15 @@ class AgentExecution(Protocol):
     @overload
     def get_async_generator(
         self,
-        type: Literal["instant", "streaming_parse", "specific", "original"],
+        type: Literal["specific"],
+        content: Any = None,
+        **kwargs: Any,
+    ) -> AsyncGenerator[AgentlySpecificResultMessage, None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["instant", "streaming_parse", "original"],
         content: Any = None,
         **kwargs: Any,
     ) -> AsyncGenerator[AgentExecutionStreamData, None]: ...
@@ -182,9 +196,60 @@ class AgentExecution(Protocol):
 
     def get_full_data(self, **kwargs: Any) -> Any: ...
 
+    @overload
+    def get_data_object(self) -> "BaseModel | None": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str],
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: RunContext | None = None,
+    ) -> "BaseModel": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: RunContext | None = None,
+    ) -> "BaseModel | None": ...
+
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: RunContext | None = None,
+    ) -> "BaseModel | None": ...
+
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: OutputValidateHandler | list[OutputValidateHandler] | None = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: RunContext | None = None,
+    ) -> "BaseModel | None": ...
+
     def get_text(self, **kwargs: Any) -> str: ...
 
     def get_meta(self) -> AgentExecutionMeta: ...
+
+    def streaming_print(self) -> None: ...
 
     def record_workspace(self, **kwargs: Any) -> AgentExecutionWorkspaceRecord: ...
 
@@ -207,7 +272,15 @@ class AgentExecution(Protocol):
     @overload
     def get_generator(
         self,
-        type: Literal["instant", "streaming_parse", "specific", "original"],
+        type: Literal["specific"],
+        content: Any = None,
+        **kwargs: Any,
+    ) -> Generator[AgentlySpecificResultMessage, None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["instant", "streaming_parse", "original"],
         content: Any = None,
         **kwargs: Any,
     ) -> Generator[AgentExecutionStreamData, None, None]: ...
@@ -216,6 +289,32 @@ class AgentExecution(Protocol):
     def get_generator(self, *args: Any, **kwargs: Any) -> Generator[str, None, None]: ...
 
     def get_generator(self, *args: Any, **kwargs: Any) -> Generator[Any, None, None]: ...
+
+    async def async_get_key_result(self, key: str, *, must_in_prompt: bool = False) -> object | None: ...
+
+    def get_key_result(self, key: str, *, must_in_prompt: bool = False) -> object | None: ...
+
+    async def async_wait_keys(
+        self,
+        keys: list[str],
+        *,
+        must_in_prompt: bool = False,
+    ) -> AsyncGenerator[tuple[str, object], None]: ...
+
+    def wait_keys(
+        self,
+        keys: list[str],
+        *,
+        must_in_prompt: bool = False,
+    ) -> Generator[tuple[str, object], None, None]: ...
+
+    def on_key(self, key: str, handler: Callable[[object], object | Awaitable[object]]) -> "AgentExecution": ...
+
+    def when_key(self, key: str, handler: Callable[[object], object | Awaitable[object]]) -> "AgentExecution": ...
+
+    async def async_start_waiter(self, *, must_in_prompt: bool = False) -> list[tuple[str, object, object]]: ...
+
+    def start_waiter(self, *, must_in_prompt: bool = False) -> list[tuple[str, object, object]]: ...
 
 
 @runtime_checkable

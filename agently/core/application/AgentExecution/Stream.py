@@ -30,6 +30,10 @@ def project_agent_execution_text_delta(item: Any) -> str | None:
     path = str(getattr(item, "path", "") or "")
     value = getattr(item, "value", None)
     source = str(getattr(item, "source", "") or "")
+    meta = getattr(item, "meta", None)
+    item_meta = meta if isinstance(meta, Mapping) else {}
+    if str(item_meta.get("specific_event") or "") == "original_delta":
+        return None
     if _is_retry_status_marker_source(path, value):
         return _format_retry_marker(value)
     if getattr(item, "event_type", None) == "delta":
@@ -37,7 +41,7 @@ def project_agent_execution_text_delta(item: Any) -> str | None:
         if delta is None:
             return None
         return str(delta)
-    return _project_done_item_text(path, value, getattr(item, "meta", None), source=source)
+    return _project_done_item_text(path, value, item_meta, source=source)
 
 
 def _project_done_item_text(path: str, value: Any, meta: Any, *, source: str) -> str | None:
@@ -1056,6 +1060,7 @@ class AgentExecutionStream:
         value: Any,
         *,
         delta: str | None = None,
+        full_data: Any = None,
         route: str | None = None,
         source: str | None = "agent_execution",
         stage_id: str | None = None,
@@ -1078,6 +1083,7 @@ class AgentExecutionStream:
             path=path,
             value=DataFormatter.sanitize(value),
             delta=delta,
+            full_data=DataFormatter.sanitize(full_data),
             is_complete=completed,
             event_type=event_type,
             source=source,
@@ -1153,6 +1159,7 @@ class AgentExecutionStream:
             path,
             getattr(item, "value", None),
             delta=getattr(item, "delta", None),
+            full_data=getattr(item, "full_data", None),
             route=route,
             source=source,
             stage_id=stage_id,

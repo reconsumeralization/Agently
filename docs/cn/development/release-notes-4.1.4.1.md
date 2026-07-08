@@ -27,15 +27,24 @@ Agently 4.1.4.1 是 4.1.4 发布后的开发线。本页记录已经落地的 in
 这修复了之前 AgentTask-backed execution 可能让 `get_data()` 返回内部终态
 envelope，而 direct execution 返回业务对象的不一致。
 
-## AgentExecution 链式复用兼容
+## AgentExecution Facade 与生命周期
 
-在已经完成的 `AgentExecution` 上继续链式调用 prompt/config 方法时，现在会返回一个新的
-execution draft，而不是复用已经完成的 run result。这保留
-`execution.input(...).start()` 在循环里的旧式 fluent 写法，同时让已完成 execution
-保持不可变 run record。
+Agent quick-prompt 链，例如 `agent.input(...).output(...).start()`，会为当前表达式
+创建新的 `AgentExecution`，循环里不会再复用已完成执行的旧结果。
 
-推荐的服务代码仍然应该按每个请求边界创建或持有一个 `AgentExecution`。这个兼容行为用于让旧链式表达
-继续沿返回的新 draft 运行，并读取当前 Agent 级状态，例如 chat history。
+显式拿到的 `AgentExecution` 仍然只表示一次独立执行。它开始之后，再调用
+`input(...)` 或 `output(...)` 等 prompt/config mutator 会抛出生命周期错误，而不是从
+已完成 run record 静默创建第二次执行。下一轮请求应通过 `agent.input(...)`、
+`agent.create_execution(...)` 或 `execution.create_execution(...)` 创建新的 execution。
+
+execution facade 现在补齐早期基础示例依赖的 reader：
+`get_data_object()`、`get_key_result()`、`wait_keys(...)` 以及
+`when_key(...).start_waiter()`、`streaming_print()`。
+`get_generator(type="specific")` 与 `ModelRequestResult` 保持一致，返回
+`(event, data)` 元组；`get_generator(type="instant")` 保留结构化
+`full_data` 快照；public delta stream 不再打印 provider 原始
+`original_delta` chunk；`execution.get_prompt_text()` 在执行前后都可用于
+prompt inspection。
 
 ## Public Typing Gate
 
@@ -50,6 +59,6 @@ narrowing plan 和 expiry 的 allowlist 记录。
 - Release manifest: `compatibility/in-development.json`。
 - 既有 task 终态 envelope 字段不变；依赖这些字段的调用方应从 `get_data()`
   切到 `get_full_data()`。
-- 已完成 execution 上的 prompt/config 链式调用作为兼容桥保留；新的服务代码仍应按请求创建新的
+- 已完成 execution 上的 prompt/config 链式调用现在 fail fast；新的服务代码与示例都应按请求创建新的
   execution。
 - public typing allowlist 是例外记录，不是允许公开方法清单。

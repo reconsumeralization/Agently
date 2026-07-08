@@ -30,9 +30,12 @@ meta = result.get_meta()
 
 非琐碎代码默认走方式 B。模型调用在你第一次从 `result` 消费时**懒触发**，结果**缓存**，后续读不会重发请求。`get_response()` 作为旧代码兼容别名保留，并返回同一个 result facade。
 
-已完成的 `AgentExecution` 是不可变 run record。为了兼容旧式 fluent 链，在已完成
-execution 上继续调用 `input(...)`、`output(...)`、`set_chat_history(...)` 等
-prompt/config 方法会返回一个新的 execution draft。继续沿返回对象链式调用；服务代码仍应优先按每个请求边界创建一个 execution。
+已完成的 `AgentExecution` 是不可变 run record。Agent quick-prompt 写法
+`agent.input(...).start()` 每个表达式都会创建新的 execution。只要你显式拿到了
+`AgentExecution`，就应该把它当成一次独立执行；它开始后再调用 `input(...)` 或
+`output(...)` 等 prompt/config 方法会抛出生命周期错误。下一轮请求应从
+`agent.input(...)`、`agent.create_execution(...)` 或
+`execution.create_execution(...)` 创建新的 execution。
 
 ## 读取方法
 

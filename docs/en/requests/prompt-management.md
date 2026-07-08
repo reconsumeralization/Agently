@@ -111,12 +111,12 @@ explicit key.
 You can convert a Python-built prompt back to YAML/JSON for review or storage:
 
 ```python
-agent.role("You are an Agently agent.", always=True).input("Say hello.").output({
+execution = agent.role("You are an Agently agent.", always=True).input("Say hello.").output({
     "reply": (str, "reply", True),
 })
-print(agent.get_yaml_prompt())
-print(agent.get_json_prompt())
-print(agent.get_prompt_text())  # the rendered text the model will see
+print(execution.get_yaml_prompt())
+print(execution.get_json_prompt())
+print(execution.get_prompt_text())  # the rendered text the model will see
 ```
 
 This round-trip is the canonical way to compare "what I think I'm sending" against "what the framework actually sends".
@@ -148,7 +148,10 @@ When a request runs, Agently composes the final prompt by stacking:
 2. Request-level slots (set without `always=True`)
 3. Slots populated by framework extensions or application code (Session injects chat history; retrieval code usually puts snippets into per-request `info(...)`)
 
-Use `agent.get_prompt_text()` to see the merged result before sending.
+Use `execution.get_prompt_text()` after one-run chaining, for example
+`execution = agent.input(...).output(...)`, to see the merged result before
+sending. `agent.get_prompt_text()` only inspects prompt data kept on the Agent
+itself, such as slots set with `always=True`.
 
 ## See also
 

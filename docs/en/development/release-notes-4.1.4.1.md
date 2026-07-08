@@ -29,16 +29,27 @@ This fixes the previous mismatch where AgentTask-backed executions could make
 `get_data()` return the internal terminal envelope while direct executions
 returned the business object.
 
-## AgentExecution Chain Reuse Compatibility
+## AgentExecution Facade and Lifecycle
 
-Prompt/config methods chained on a completed `AgentExecution` now return a fresh
-execution draft instead of reusing the completed run result. This preserves
-legacy fluent code such as `execution.input(...).start()` inside a loop while
-keeping completed executions as immutable run records.
+Agent quick-prompt chains such as `agent.input(...).output(...).start()` create
+a fresh `AgentExecution` for that expression and no longer reuse stale completed
+results in loops.
 
-Recommended service code should still create or capture one `AgentExecution` per
-request boundary. The compatibility behavior exists so older chains continue
-from the returned draft with current Agent-level state such as chat history.
+An explicitly captured `AgentExecution` remains one independent run. Once it has
+started, prompt/config mutators such as `input(...)` or `output(...)` now raise
+a lifecycle error instead of silently creating a second run from a completed
+record. For the next request boundary, create a new execution from
+`agent.input(...)`, `agent.create_execution(...)`, or
+`execution.create_execution(...)`.
+
+The execution facade now also exposes the basic readers used by early examples:
+`get_data_object()`, `get_key_result()`, `wait_keys(...)`,
+`when_key(...).start_waiter()`, and `streaming_print()`.
+`get_generator(type="specific")` yields the same `(event, data)` tuples as
+`ModelRequestResult`, `get_generator(type="instant")` preserves structured
+`full_data` snapshots, public delta streams no longer print raw provider
+`original_delta` chunks, and `execution.get_prompt_text()` remains available
+before and after execution for prompt inspection.
 
 ## Public Typing Gate
 
@@ -54,7 +65,7 @@ plan, and expiry.
 - Release manifest: `compatibility/in-development.json`.
 - Existing task terminal envelope fields are unchanged; callers that depended
   on them should switch from `get_data()` to `get_full_data()`.
-- Completed-execution prompt/config chaining is supported as a compatibility
-  bridge, but new service code should treat each request as a new execution.
+- Completed-execution prompt/config chaining now fails fast; new service code
+  and examples should treat each request as a new execution.
 - Public typing allowlist entries are exception records, not a list of allowed
   public methods.
