@@ -5268,7 +5268,7 @@ async def test_agent_execution_runtime_observes_flat_agent_task_stream(tmp_path)
             ],
         ).strategy("flat", max_iterations=2)
 
-        result = await execution.async_get_data()
+        result = await execution.async_get_full_data()
 
         assert result["status"] == "completed"
         execution_events = [
@@ -6780,7 +6780,7 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
 
     result_facade = task.get_result()
     stream_items = [item async for item in result_facade.get_async_generator(type="instant")]
-    result = await result_facade.async_get_data()
+    result = await result_facade.async_get_full_data()
     execution_meta = await result_facade.async_get_meta()
     meta = await task.meta()
     delta_text = "".join([chunk async for chunk in task.get_async_generator(type="delta")])

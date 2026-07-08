@@ -26,6 +26,7 @@ ActionSideEffectLevel = Literal["read", "write", "exec"]
 
 
 class ActionPolicy(TypedDict, total=False):
+    auto_allow: bool
     approval_mode: Literal["auto", "always", "never"]
     policy_approval_granted: bool
     policy_approval_handler: str

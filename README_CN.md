@@ -606,6 +606,7 @@ Prompt 文件可以承载 Prompt 槽位和输出契约：
 | `examples/builtin_actions/` | Search/Browse package 示例 |
 | `examples/fastapi/` | 服务暴露示例 |
 | `examples/devtools/` | 可选 DevTools 观测示例 |
+| `examples/release_pinned_usage/` | release 锁定的开发者用法检查；入选脚本的用法形态变更需要维护者确认 |
 
 `examples/archived/` 是兼容参考，不是新应用默认起点。
 

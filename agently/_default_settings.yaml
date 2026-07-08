@@ -59,6 +59,9 @@ runtime:
   httpx_log_level: "WARNING"
 skills:
   action_resolution:
+    enabled: True
+    model_assisted: False
+    min_confidence: 0.75
     auto_enable_bash: True
     bash_action_aliases:
       - bash

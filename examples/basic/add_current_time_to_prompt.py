@@ -1,19 +1,21 @@
 from agently import Agently
 
-# By default, version > 4.0.7.1 will add current time to prompt automatically
 agent = Agently.create_agent()
 
-agent.input("hello")
+# Current-time prompt injection is controlled by prompt.add_current_time.
+# The default is False; enable it explicitly when the model needs wall-clock context.
+agent.set_settings("prompt.add_current_time", True)
+with_time_execution = agent.input("hello")
 
-print("Default:\n", agent.get_prompt_text())
+print("Turn on:\n", with_time_execution.get_prompt_text())
 
 
-# You can turn off this feature by change settings
 agent.set_settings("prompt.add_current_time", False)
+without_time_execution = agent.input("hello")
 
-print("Turn off:\n", agent.get_prompt_text())
+print("Turn off:\n", without_time_execution.get_prompt_text())
 # <Console Logs>
-# Default:
+# Turn on:
 #  [current time]: 2026-02-02 23:24:37 Monday
 
 # [INPUT]:
@@ -27,8 +29,8 @@ print("Turn off:\n", agent.get_prompt_text())
 # [OUTPUT]:
 
 # Expected output (deterministic — no model call, only prompt inspection):
-# Default:
-#  [current time]: 2026-02-02 23:24:37 Monday
+# Turn on:
+#  [current time]: <current timestamp>
 #
 #  [INPUT]:
 #  hello
@@ -41,8 +43,9 @@ print("Turn off:\n", agent.get_prompt_text())
 #  [OUTPUT]:
 #
 # How it works:
-# Agently automatically prepends a "[current time]: <timestamp>" line to every
-# prompt by default (v > 4.0.7.1).  get_prompt_text() serializes the assembled
-# prompt without sending it to a model, so the output is deterministic.
-# set_settings("prompt.add_current_time", False) removes the timestamp line;
-# subsequent get_prompt_text() calls return the prompt without it.
+# Agently prepends a "[current time]: <timestamp>" line only when
+# prompt.add_current_time is True. agent.input(...) returns an AgentExecution;
+# execution.get_prompt_text() serializes that one-run prompt without sending it
+# to a model, so the output is deterministic.
+# set_settings("prompt.add_current_time", False) removes the timestamp line for
+# subsequent executions.

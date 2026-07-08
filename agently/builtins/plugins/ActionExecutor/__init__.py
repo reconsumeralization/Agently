@@ -5,5 +5,6 @@ from .BashSandboxActionExecutor import BashSandboxActionExecutor
 from .SearchActionExecutor import SearchActionExecutor
 from .BrowseActionExecutor import BrowseActionExecutor
 from .NodeJSActionExecutor import NodeJSActionExecutor
+from .CodeRuntimeActionExecutor import CodeRuntimeActionExecutor
 from .DockerActionExecutor import DockerActionExecutor
 from .SQLiteActionExecutor import SQLiteActionExecutor

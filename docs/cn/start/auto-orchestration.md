@@ -2,7 +2,7 @@
 
 Agently 4.1.3 将 `agent.start()` 作为 Agent turn 的默认用户层入口。它仍然返回
 业务结果，但 Agent 可以在显式注入候选能力后，路由到普通模型响应、Actions 或
-Skills Executor。
+SkillsManager-backed Skills execution。
 
 ```python
 result = (
@@ -322,7 +322,8 @@ degraded、partial 和 blocked outcome 都提供面向用户的 `final_response`
 artifact（`accepted=False`、`artifact_status="partial"`），不是已完成的业务结果。
 partial 和 blocked result 会包含 `final_response`，让调用方说明产出了什么、在哪里受阻、
 哪些要求仍未满足。`get_text()` / `async_get_text()` 对 task-strategy result dict
-会优先返回这个字段；`get_data()` 仍返回结构化结果。
+会优先返回这个字段。`get_data()` 返回最终业务结果，并在可能时按 `output(...)`
+解析；需要完整 task 终态 payload 时使用 `get_full_data()`。
 TaskBoard 终态 payload 还可能包含 `taskboard.completion_notes`：这是对 card
 完成摘要、已知缺口、verifier 备注和 acceptance progress 的有界过程投影。它适合 UI
 进度和最终答复的降级/不足披露，但不是证据，也不能替代 verifier 验收。
@@ -540,8 +541,8 @@ data = await execution.async_get_data()
 meta = await execution.async_get_meta()
 ```
 
-execution 对象沿用模型 response 的消费风格：`get_data`、`get_text`、
-`get_meta`、`get_generator` 以及对应 async 方法。
+execution 对象沿用模型 response 的消费风格：`get_data`、`get_full_data`、
+`get_text`、`get_meta`、`get_generator` 以及对应 async 方法。
 默认 stream 是 `type="delta"`，产出纯文本字符串；模型流式请求重放时会产出保留的
 `"<$retry>{reason}</$retry>"` 边界标记。该 marker 只服务 public 文本 replay consumer；
 内部 artifact writer 和结构化 UI 应优先消费结构化 status 事件；只有在明确选择纯文本
@@ -712,9 +713,9 @@ snapshot = await task.async_run(graph_input={"ticket": "TICKET-OK"})
 `mode="required"` 表示必须应用该 Skill guidance：如果执行选择普通
 `model_request` route 并使用 Actions，Agently 会把 required SKILL.md guidance 注入
 该 AgentExecution，并为 AgentTask capability 检查记录 prompt-bound Skill evidence。
-选中的 Skills route 或 `run_skills_task(...)` 仍然走 Skills Executor 路径。
+选中的 Skills route 或 `run_skills_task(...)` 仍然走 Skills 兼容执行路径。
 
-如果调用方必须强制使用独立 Skills Executor route，使用
+如果调用方必须强制使用独立 Skills 兼容 route，使用
 `agent.run_skills_task(...)` 或显式 route policy。
 
 ## 过程流

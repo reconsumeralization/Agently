@@ -564,6 +564,98 @@ async def test_taskboard_work_units_receive_task_context_contract(tmp_path):
         )
 
 
+@pytest.mark.asyncio
+async def test_taskboard_readback_card_consumes_skill_context_pack_refs(tmp_path):
+    agent = _create_agent("execution-taskboard-skill-context-readback").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Summarize agently-request setup guidance.",
+        success_criteria=["The summary uses the required Skill context."],
+        execution="taskboard",
+    )
+    captured_work_units: list[dict[str, Any]] = []
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any) -> tuple[Any, dict[str, Any], WorkUnitResult]:
+        work_unit = cast(Any, kwargs["work_unit"])
+        captured_work_units.append(work_unit.to_dict())
+        raw = await kwargs["handler"]({})
+        return (
+            raw["execution_result"],
+            raw["execution_meta"],
+            WorkUnitResult(id=str(work_unit.id), status=str(raw["execution_result"]["status"])),
+        )
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    context_pack: WorkspaceContextPackage = {
+        "goal": task.goal,
+        "items": [],
+        "profile": "test",
+        "omitted": [],
+        "diagnostics": {},
+        "skills_context_pack": {
+            "schema_version": "agently.skills.context_pack.v1",
+            "skills": [
+                {
+                    "skill_id": "agently-request",
+                    "guidance": {
+                        "path": "SKILL.md",
+                        "excerpt": "Use Agently model settings and output control for request setup.",
+                        "citation": "skills/agently-request/SKILL.md",
+                    },
+                    "selected_resources": [
+                        {
+                            "path": "references/model-setup.md",
+                            "kind": "reference",
+                            "content": "Configure a provider model key before creating a request.",
+                            "citation": "skills/agently-request/references/model-setup.md",
+                            "truncated": False,
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-skill-context-readback",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "taskboard-skill-context-readback-graph",
+                "cards": [
+                    {
+                        "id": "read-skill",
+                        "objective": "Read the required Skill references.",
+                        "allowed_execution_shape": "readback",
+                        "input_refs": [
+                            "skills/agently-request/SKILL.md",
+                            "skills/agently-request/references/model-setup.md",
+                        ],
+                        "evidence_contract": {
+                            "evidence_to_use": [
+                                "skills/agently-request/SKILL.md",
+                                "skills/agently-request/references/model-setup.md",
+                            ]
+                        },
+                    }
+                ],
+            }
+        ),
+    )
+    card = revision.graph.card_by_id()["read-skill"]
+
+    result = await task._run_taskboard_readback_card(
+        SimpleNamespace(revision=revision, card=card, dependency_results={}, planning_policy=None),
+        context_pack,
+    )
+
+    assert result.status == "completed"
+    assert result.preview["skill_context_readbacks"][0]["skill_id"] == "agently-request"
+    assert result.preview["remaining_work"] == []
+    evidence_items = result.metadata["evidence_ledger"]["items"]
+    assert {item["kind"] for item in evidence_items} == {"skill_context.readback"}
+    assert any("model settings" in item.get("body", "") for item in evidence_items)
+    assert captured_work_units[0]["input_refs"][0]["kind"] == "skill_context"
+
+
 def _write_skill(root: Path):
     root.mkdir(parents=True, exist_ok=True)
     (root / "SKILL.md").write_text(
@@ -4616,7 +4708,7 @@ async def test_agent_execution_add_guidance_during_flat_task_does_not_wait_for_c
         "_request_verification": request_verification,
     }
 
-    run_task = asyncio.create_task(execution.async_get_data())
+    run_task = asyncio.create_task(execution.async_get_full_data())
     await asyncio.wait_for(plan_started.wait(), timeout=3)
 
     guidance = await asyncio.wait_for(
@@ -4704,7 +4796,7 @@ async def test_agent_execution_add_guidance_before_task_creation_is_queued_then_
     )
     assert guidance["status"] == "queued"
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
 
@@ -4712,6 +4804,123 @@ async def test_agent_execution_add_guidance_before_task_creation_is_queued_then_
     assert context_packs[0]["guidance"][0]["id"] == guidance["id"]
     assert task_meta["guidance_items"][0]["status"] == "applied"
     assert task_meta["guidance_items"][0]["workspace_ref"]["collection"] == "guidance"
+
+
+@pytest.mark.asyncio
+async def test_agent_task_context_pack_loads_required_skill_context(tmp_path, monkeypatch):
+    agent = _create_agent("execution-required-skill-context-pack").use_workspace(tmp_path / "workspace")
+    calls: list[dict[str, Any]] = []
+
+    async def fake_build_skills_context_pack(**kwargs: Any) -> dict[str, Any]:
+        calls.append(DataFormatter.sanitize(kwargs))
+        return {
+            "schema_version": "agently.skills.context_pack.v1",
+            "task": kwargs.get("task", ""),
+            "used_chars": 128,
+            "skills": [
+                {
+                    "skill_id": "agently-request",
+                    "source": {"installed_path": "/tmp/registry/agently-request"},
+                    "guidance": {
+                        "path": "SKILL.md",
+                        "excerpt": "Use Agently request output control.",
+                        "citation": "skills/agently-request/SKILL.md",
+                    },
+                    "selected_resources": [],
+                }
+            ],
+            "citations": ["skills/agently-request/SKILL.md"],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(agent, "async_build_skills_context_pack", fake_build_skills_context_pack, raising=False)
+    task = AgentTask(
+        agent,
+        goal="Build a structured Agently request.",
+        success_criteria=["The answer follows Agently request guidance."],
+        execution="flat",
+        options={"capability_constraints": {"skills": {"required": ["agently-request"]}}},
+    )
+
+    context_pack = await task._build_context()
+
+    assert calls
+    assert calls[0]["skill_ids"] == ["agently-request"]
+    assert calls[0]["actionize_scripts"] is True
+    skills_context_pack = context_pack.get("skills_context_pack")
+    assert isinstance(skills_context_pack, dict)
+    skills = skills_context_pack.get("skills")
+    assert isinstance(skills, list)
+    assert skills[0]["skill_id"] == "agently-request"
+    assert "source" not in skills[0]
+    assert "/tmp/registry" not in json.dumps(skills_context_pack, ensure_ascii=False)
+    assert context_pack["diagnostics"]["skills_context_pack"]["status"] == "loaded"
+    assert context_pack["diagnostics"]["skills_context_pack"]["loaded_skill_ids"] == ["agently-request"]
+
+
+def test_flat_context_pack_skill_binding_satisfies_required_skill_evidence(tmp_path):
+    agent = _create_agent("execution-flat-required-skill-binding").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Build a structured Agently request.",
+        success_criteria=["The answer follows Agently request guidance."],
+        execution="flat",
+        options={"capability_constraints": {"skills": {"required": ["agently-request"]}}},
+    )
+    context_pack: WorkspaceContextPackage = {
+        "goal": task.goal,
+        "items": [],
+        "profile": "test",
+        "omitted": [],
+        "diagnostics": {},
+        "skills_context_pack": {
+            "schema_version": "agently.skills.context_pack.v1",
+            "skills": [{"skill_id": "agently-request"}],
+        },
+    }
+    execution_meta = {
+        "status": "success",
+        "logs": {},
+        "effective_options": {
+            "capability_constraints": {"skills": {"required": ["agently-request"]}},
+        },
+    }
+
+    enriched_meta = task._flat_execution_meta_with_context_capability_logs(
+        execution_meta,
+        context_pack=context_pack,
+    )
+    summary = task._execution_log_summary(enriched_meta)
+
+    assert summary["selected_skill_ids"] == ["agently-request"]
+    assert summary["missing_required_skills"] == []
+    assert "agently-request" in summary["capabilities_used"]
+    assert summary["capability_evidence"]["skills"]["selected"] == ["agently-request"]
+    assert summary["capability_evidence_requirements"] == [
+        {
+            "capability_id": "agently-request",
+            "capability_kind": "skill",
+            "kind": "capability_used",
+            "required": True,
+            "source": "flat_required_skill_context",
+        }
+    ]
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "done",
+            "missing_criteria": [],
+            "final_result": "done",
+        },
+        execution_evidence_summary=summary,
+        candidate_final_result="done",
+    )
+
+    assert verification["is_complete"] is True
+    assert verification["missing_required_capabilities"] == []
+    assert verification["missing_capability_evidence"] == []
 
 
 @pytest.mark.asyncio
@@ -5051,6 +5260,216 @@ async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_pa
     assert task.result["taskboard"]["final_verification"]["is_complete"] is True
     assert task.result["taskboard"]["taskboard_acceptance_index"]["metadata"]["green_count"] == 1
     assert task.result["taskboard"]["acceptance_verification_plan"]["all_satisfied"] is True
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_requires_required_skill_context_evidence(tmp_path, monkeypatch):
+    agent = _create_agent("execution-taskboard-required-skill-missing").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce an Agently request checklist.",
+        success_criteria=["The checklist uses required Agently request guidance."],
+        execution="taskboard",
+        options={
+            "capability_constraints": {"skills": {"required": ["agently-request"]}},
+            "planner_capabilities": [
+                {
+                    "id": "agently-request",
+                    "kind": "skill",
+                    "route": "model_request",
+                    "guidance_access": "context_pack",
+                    "mode": "required",
+                }
+            ],
+        },
+    )
+    revision = TaskBoardRevision.create(
+        board_id="required-skill-missing",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "required-skill-missing-graph",
+                "cards": [{"id": "final", "objective": "Produce the checklist."}],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": "rev-0",
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final",
+                        "status": "completed",
+                        "preview": {"final_result": "Checklist without Skill context evidence."},
+                    },
+                }
+            ],
+        },
+    )
+
+    async def fake_taskboard_final(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "accepted": True,
+            "reason": "Finalizer accepted the candidate.",
+            "final_result": "Checklist without Skill context evidence.",
+            "missing_criteria": [],
+        }
+
+    async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Verifier accepted the candidate.",
+            "final_result": "Checklist without Skill context evidence.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion": "The checklist uses required Agently request guidance.",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "The candidate looks complete.",
+                }
+            ],
+        }
+
+    async def no_missing_deliverables() -> list[dict[str, Any]]:
+        return []
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
+    monkeypatch.setattr(task, "_request_verification", fake_request_verification)
+    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+
+    assert terminal["terminal"] is False
+    assert terminal["status"] == "repair_requested"
+    assert "agently-request" in terminal["final_verification"]["missing_required_capabilities"]
+    assert any(
+        "agently-request" in item
+        for item in terminal["final_verification"]["missing_criteria"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_accepts_manager_loaded_required_skill_context(tmp_path, monkeypatch):
+    agent = _create_agent("execution-taskboard-required-skill-loaded").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce an Agently request checklist.",
+        success_criteria=["The checklist uses required Agently request guidance."],
+        execution="taskboard",
+        options={
+            "capability_constraints": {"skills": {"required": ["agently-request"]}},
+            "planner_capabilities": [
+                {
+                    "id": "agently-request",
+                    "kind": "skill",
+                    "route": "model_request",
+                    "guidance_access": "context_pack",
+                    "mode": "required",
+                }
+            ],
+        },
+    )
+    revision = TaskBoardRevision.create(
+        board_id="required-skill-loaded",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "required-skill-loaded-graph",
+                "cards": [{"id": "final", "objective": "Produce the checklist."}],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": "rev-0",
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final",
+                        "status": "completed",
+                        "preview": {"final_result": "Checklist grounded in agently-request guidance."},
+                    },
+                }
+            ],
+        },
+    )
+    verification_calls: list[dict[str, Any]] = []
+
+    async def fake_taskboard_final(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "accepted": True,
+            "reason": "Finalizer accepted the candidate.",
+            "final_result": "Checklist grounded in agently-request guidance.",
+            "missing_criteria": [],
+        }
+
+    async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        verification_calls.append(DataFormatter.sanitize(kwargs))
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Verifier accepted the candidate.",
+            "final_result": "Checklist grounded in agently-request guidance.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion": "The checklist uses required Agently request guidance.",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "The required Skill context is visible.",
+                }
+            ],
+        }
+
+    async def no_missing_deliverables() -> list[dict[str, Any]]:
+        return []
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
+    monkeypatch.setattr(task, "_request_verification", fake_request_verification)
+    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    terminal = await task._finalize_taskboard(
+        completed_revision,
+        context_pack=cast(
+            WorkspaceContextPackage,
+            {
+                "skills_context_pack": {
+                    "schema_version": "agently.skills.context_pack.v1",
+                    "skills": [{"skill_id": "agently-request"}],
+                }
+            },
+        ),
+    )
+
+    assert terminal == {"terminal": True, "status": "completed"}
+    assert task.result["accepted"] is True
+    assert task.result["taskboard"]["final_verification"]["missing_required_capabilities"] == []
+    prompt_bound_skills = verification_calls[0]["execution_meta"]["logs"]["route_logs"]["prompt_bound_skills"]
+    assert prompt_bound_skills == [
+        {
+            "skill_id": "agently-request",
+            "mode": "required",
+            "binding": "context_pack",
+            "source": "skills_manager",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -5608,7 +6027,7 @@ async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
 
@@ -5638,7 +6057,7 @@ async def test_flat_strategy_does_not_receive_taskboard_harness_state(tmp_path):
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     request_text = "\n".join(MockAgentExecutionRequester.requests)
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -5669,7 +6088,7 @@ async def test_structured_deliverable_contract_requires_workspace_readback(tmp_p
         }
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     verification = task_meta["iterations"][0]["verification"]
@@ -5694,7 +6113,7 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     first_verification = task_meta["iterations"][0]["verification"]
@@ -5741,7 +6160,7 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
         max_iterations=1,
     ).use_actions(["probe_action"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     delta_text = "".join([chunk async for chunk in execution.get_async_generator(type="delta")])
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -5788,7 +6207,7 @@ async def test_flat_request_timeout_does_not_cancel_progressing_child_execution(
         },
     ).use_actions(["probe_action"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
 
@@ -5817,7 +6236,7 @@ async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_p
     ).use_actions(["probe_action"])
 
     started_at = asyncio.get_running_loop().time()
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     elapsed = asyncio.get_running_loop().time() - started_at
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -5850,7 +6269,7 @@ async def test_flat_plan_no_progress_timeout_is_reported_as_idle_guard(tmp_path)
         limits={"max_no_progress_seconds": 0.05},
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     terminal_phase = task_meta["diagnostics"]["phases"][-1]
@@ -5880,7 +6299,7 @@ async def test_flat_action_planning_stall_preserves_completed_action_logs(tmp_pa
         limits={"max_no_progress_seconds": 1.5},
     ).use_actions(["probe_action"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     iteration = task_meta["iterations"][0]
@@ -5981,7 +6400,7 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
 
     started_at = asyncio.get_running_loop().time()
     stream_task = asyncio.create_task(collect_stream())
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     stream_items = await stream_task
     meta = await execution.async_get_meta()
     delta_text = "".join([chunk async for chunk in execution.get_async_generator(type="delta")])
@@ -6019,7 +6438,7 @@ async def test_workspace_artifact_draft_retry_status_resets_partial_without_publ
         max_iterations=1,
     )
 
-    await execution.async_get_data()
+    await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
@@ -6056,7 +6475,7 @@ async def test_workspace_artifact_draft_writes_natural_text_without_output_contr
         max_iterations=1,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
@@ -6104,7 +6523,7 @@ async def test_flat_actions_shape_fans_out_multiple_commands_in_one_step(tmp_pat
         max_iterations=1,
     ).use_actions(["slow_a", "slow_b"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     action_logs = task_meta["iterations"][0]["execution_meta"]["logs"]["action_logs"]
@@ -6139,7 +6558,7 @@ async def test_flat_verifier_uses_bounded_action_evidence_prompt(tmp_path):
         max_iterations=1,
     ).use_actions(["probe_action"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     verify_requests = [
         request
         for request in MockAgentExecutionRequester.requests
@@ -6168,7 +6587,7 @@ async def test_flat_promotes_report_like_evidence_to_candidate_final_result(tmp_
         max_iterations=1,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     verify_requests = [
         request
         for request in MockAgentExecutionRequester.requests
@@ -6195,7 +6614,7 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6245,7 +6664,7 @@ async def test_taskboard_checkpoint_and_resume_snapshot_include_handoff_projecti
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
 
@@ -6288,7 +6707,7 @@ async def test_taskboard_resume_terminal_snapshot_without_reexecuting_cards(tmp_
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     assert result["status"] == "completed"
     assert result["final_result"] == "taskboard accepted result"
 
@@ -6417,7 +6836,7 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6570,7 +6989,7 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6628,7 +7047,7 @@ async def test_taskboard_final_preserves_complete_candidate_from_terminal_card(t
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
@@ -6684,7 +7103,7 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
     ).use_actions(["produce_large_evidence"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6737,7 +7156,7 @@ async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(t
     ).use_actions(["produce_large_evidence"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6790,7 +7209,7 @@ async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs
     ).use_actions(["produce_large_evidence"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6841,7 +7260,7 @@ async def test_taskboard_request_timeout_does_not_cancel_progressing_card_by_def
         },
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     assert "taskboard" in task_meta["result"], task_meta["result"]
@@ -6870,7 +7289,7 @@ async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
         },
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6911,7 +7330,7 @@ async def test_taskboard_tick_timeout_does_not_cancel_running_cards(tmp_path):
         },
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     revision = task_meta["result"]["taskboard"]["revision"]
@@ -6943,7 +7362,7 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
     )
 
     started_at = asyncio.get_running_loop().time()
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     elapsed = asyncio.get_running_loop().time() - started_at
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -7008,7 +7427,7 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -7044,7 +7463,7 @@ async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp
     ).use_actions(["probe_action"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -7205,7 +7624,7 @@ async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task(tmp_path):
 
     cast(Any, execution)._agent_task_step_overrides = {"_request_plan": slow_request_plan}
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
 
     assert result["status"] == "timed_out"
@@ -7256,7 +7675,7 @@ async def test_execution_first_chain_allows_goal_after_prompt_output(tmp_path):
         .goal("Write the final summary.", success_criteria=["The final summary is returned."])
     )
 
-    data = await execution.async_get_data()
+    data = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
 
     assert data["accepted"] is True
@@ -7274,7 +7693,7 @@ async def test_allow_create_task_false_blocks_goal_pursuit(tmp_path):
         limits={"allow_create_task": False}
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
 
     assert result["status"] in {"blocked", "max_iterations"}
@@ -7416,7 +7835,7 @@ def test_create_task_and_task_loop_return_strategy_execution_drafts(tmp_path):
 async def test_agent_execution_direct_strategy_forces_model_request_route(tmp_path):
     agent = _create_action_agent("direct-strategy-route").use_workspace(tmp_path / "workspace")
     agent.set_action_loop(max_rounds=1, timeout=5)
-    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli")
+    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli", sandbox="trusted_local")
 
     execution = (
         agent.goal("Use the echo action without creating an AgentTask.", ["The echo action result is returned."])
@@ -7595,7 +8014,7 @@ async def test_agent_execution_select_route_is_reused_by_start():
 async def test_agent_execution_model_request_exposes_action_logs_and_artifacts():
     agent = _create_action_agent("action-log-exposure")
     agent.set_action_loop(max_rounds=2, timeout=5)
-    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli")
+    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli", sandbox="trusted_local")
     execution = (
         agent.input("use echo action")
         .output({"answer": (str, "answer", True)}, format="json")
@@ -7606,7 +8025,7 @@ async def test_agent_execution_model_request_exposes_action_logs_and_artifacts()
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    data = await execution.async_get_data()
+    data = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
 
     action_items = [item for item in stream_items if item.path == "actions.echo_cli"]
@@ -7633,7 +8052,7 @@ async def test_required_skill_create_execution_routes_to_agent_task(tmp_path):
 
     agent = _create_action_agent("required-skill-with-actions").use_workspace(tmp_path / "workspace")
     agent.set_action_loop(max_rounds=2, timeout=5)
-    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli")
+    agent.enable_shell(commands=["echo allowed"], action_id="echo_cli", sandbox="trusted_local")
     agent.require_skills([skill_id], always=True)
     execution = (
         agent.input("Use the required Skill guidance and the echo action.")
@@ -7888,11 +8307,11 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
     assert meta["effective_options"]["execution"]["limits"]["max_model_requests"] == 0
     assert meta["consumed_options"]["routes.skills.effort"] == {
         "value": "fast",
-        "owner": "AgentlySkillsExecutor",
+        "owner": "AgentlySkillsManager",
     }
     assert meta["consumed_options"]["routes.skills.output_format"] == {
         "value": "flat_markdown",
-        "owner": "AgentlySkillsExecutor",
+        "owner": "AgentlySkillsManager",
     }
 
 

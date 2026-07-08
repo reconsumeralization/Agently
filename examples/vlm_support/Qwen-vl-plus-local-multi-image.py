@@ -29,34 +29,46 @@ def write_solid_png(path: Path, color: tuple[int, int, int], *, width: int = 48,
     path.write_bytes(png)
 
 
-load_dotenv(find_dotenv())
+def configure_vlm():
+    load_dotenv(find_dotenv())
+    api_key = os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing QWEN_API_KEY or DASHSCOPE_API_KEY. Put one in your environment or .env.")
 
-Agently.set_settings(
-    "OpenAICompatible",
-    {
-        "base_url": os.environ.get("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        "model": os.environ.get("QWEN_VLM_MODEL", "qwen-vl-plus"),
-        "auth": os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY"),
-        "request_options": {"temperature": 0.1},
-    },
-)
+    Agently.set_settings(
+        "OpenAICompatible",
+        {
+            "base_url": os.environ.get("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            "model": os.environ.get("QWEN_VLM_MODEL", "qwen-vl-plus"),
+            "auth": api_key,
+            "request_options": {"temperature": 0.1},
+        },
+    )
 
-agent = Agently.create_agent()
 
-with tempfile.TemporaryDirectory() as temp_dir:
-    red_path = Path(temp_dir) / "red.png"
-    green_path = Path(temp_dir) / "green.png"
-    write_solid_png(red_path, (220, 20, 20))
-    write_solid_png(green_path, (20, 170, 70))
+def main():
+    configure_vlm()
+    agent = Agently.create_agent()
 
-    result = agent.image(
-        question="These two generated PNG files are solid color swatches. Name the dominant color of each image in order.",
-        files=[red_path, green_path],
-    ).start()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        red_path = Path(temp_dir) / "red.png"
+        green_path = Path(temp_dir) / "green.png"
+        write_solid_png(red_path, (220, 20, 20))
+        write_solid_png(green_path, (20, 170, 70))
 
-print(result)
+        result = agent.image(
+            question="These two generated PNG files are solid color swatches. Name the dominant color of each image in order.",
+            files=[red_path, green_path],
+        ).start()
 
-# Runs on import - requires QWEN_API_KEY or DASHSCOPE_API_KEY.
+    print(result)
+
+
+if __name__ == "__main__":
+    main()
+
+
+# Requires QWEN_API_KEY or DASHSCOPE_API_KEY.
 # Expected key output (real run with qwen-vl-plus on 2026-06-02):
 # first image is red; second image is green.
 #

@@ -15,7 +15,7 @@ agent.set_action_loop(max_rounds=4)
 ## Python sandbox action — let the model write and execute Python code
 #
 # Instead of registering a fixed function, a sandbox action lets the model
-# generate arbitrary Python code that Agently runs in an isolated interpreter.
+# generate arbitrary Python code that Agently runs through a Docker-backed profile.
 # The model must store its final answer in a variable named `result`.
 # This is useful for one-off computations, data transformations, or any task
 # where the exact code needed depends on the input.
@@ -23,10 +23,11 @@ agent.set_action_loop(max_rounds=4)
 agent.action.register_python_sandbox_action(
     action_id="run_python",
     desc=(
-        "Execute a Python code snippet inside an isolated sandbox environment. "
+        "Execute a Python code snippet inside a Docker-backed sandbox environment. "
         "Always assign the final answer to the variable `result` before the code ends."
     ),
     expose_to_model=True,
+    sandbox="auto",
 )
 
 
@@ -70,9 +71,9 @@ def demo_python_sandbox_sorting():
 #
 # How it works:
 # register_python_sandbox_action() creates a special action that accepts a Python code
-# string from the model. The code is executed inside an isolated Python interpreter
-# with no network or filesystem access. The value of the `result` variable at the end
-# of execution becomes the action's return value.
+# string from the model. The code is executed through a Docker-backed runtime profile
+# with network disabled by default. The value of the `result` variable at the end of
+# execution becomes the action's return value.
 # The model writes computation as Python code instead of calling a fixed function —
 # useful when the exact logic depends on the specific question asked.
 # The ActionResult contains model_digest (a summary the model can read) and
@@ -87,7 +88,7 @@ def demo_python_sandbox_sorting():
 #       result = {'total': sum(prices), 'average': sum(prices)/len(prices),
 #                 'range': max(prices) - min(prices)}
 #   """)
-#   PythonSandboxExecutor runs the code
+#   Docker-backed Python profile runs the code
 #   result = {'total': 188.49, 'average': 37.698, 'range': 83.75}
 #   |
 #   v

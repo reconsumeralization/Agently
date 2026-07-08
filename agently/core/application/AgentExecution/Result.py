@@ -18,7 +18,15 @@ from collections.abc import AsyncGenerator, Generator
 from typing import Any, Literal, TYPE_CHECKING, overload
 
 if TYPE_CHECKING:
-    from agently.types.data import AgentExecutionMeta, AgentExecutionStreamData, OutputValidateHandler
+    from pydantic import BaseModel
+
+    from agently.types.data import (
+        AgentlySpecificResultMessage,
+        AgentExecutionMeta,
+        AgentExecutionStreamData,
+        OutputValidateHandler,
+        RunContext,
+    )
 
 
 class AgentExecutionResult:
@@ -156,11 +164,143 @@ class AgentExecutionResult:
             parent_run_context=parent_run_context,
         )
 
-    async def async_get_data_object(self, **kwargs: Any) -> Any:
-        return await self.async_get_data(**kwargs)
+    async def async_get_full_data(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: Any = None,
+    ) -> Any:
+        return await self.execution.async_get_full_data(
+            type=type,
+            ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            parent_run_context=parent_run_context,
+        )
 
-    def get_data_object(self, **kwargs: Any) -> Any:
-        return self.get_data(**kwargs)
+    def get_full_data(
+        self,
+        *,
+        type: Literal["original", "parsed", "all"] = "parsed",
+        ensure_keys: list[str] | None = None,
+        ensure_all_keys: bool | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: Any = None,
+    ) -> Any:
+        return self.execution.get_full_data(
+            type=type,
+            ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            parent_run_context=parent_run_context,
+        )
+
+    @overload
+    async def async_get_data_object(self) -> "BaseModel | None": ...
+
+    @overload
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "BaseModel": ...
+
+    @overload
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "BaseModel | None": ...
+
+    async def async_get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "BaseModel | None":
+        return await self.execution.async_get_data_object(
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            parent_run_context=parent_run_context,
+        )
+
+    @overload
+    def get_data_object(self) -> "BaseModel | None": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str],
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "BaseModel": ...
+
+    @overload
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "BaseModel | None": ...
+
+    def get_data_object(
+        self,
+        *,
+        ensure_keys: list[str] | None = None,
+        validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
+        key_style: Literal["dot", "slash"] = "dot",
+        max_retries: int = 3,
+        raise_ensure_failure: bool = True,
+        parent_run_context: "RunContext | None" = None,
+    ) -> "BaseModel | None":
+        return self.execution.get_data_object(
+            ensure_keys=ensure_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+            parent_run_context=parent_run_context,
+        )
 
     async def async_get_text(self, *, parent_run_context: Any = None) -> str:
         return await self.execution.async_get_text(parent_run_context=parent_run_context)
@@ -193,7 +333,15 @@ class AgentExecutionResult:
     @overload
     def get_async_generator(
         self,
-        type: Literal["instant", "streaming_parse", "specific", "original"],
+        type: Literal["specific"],
+        content: Any = None,
+        **kwargs: Any,
+    ) -> AsyncGenerator["AgentlySpecificResultMessage", None]: ...
+
+    @overload
+    def get_async_generator(
+        self,
+        type: Literal["instant", "streaming_parse", "original"],
         content: Any = None,
         **kwargs: Any,
     ) -> AsyncGenerator["AgentExecutionStreamData", None]: ...
@@ -223,7 +371,15 @@ class AgentExecutionResult:
     @overload
     def get_generator(
         self,
-        type: Literal["instant", "streaming_parse", "specific", "original"],
+        type: Literal["specific"],
+        content: Any = None,
+        **kwargs: Any,
+    ) -> Generator["AgentlySpecificResultMessage", None, None]: ...
+
+    @overload
+    def get_generator(
+        self,
+        type: Literal["instant", "streaming_parse", "original"],
         content: Any = None,
         **kwargs: Any,
     ) -> Generator["AgentExecutionStreamData", None, None]: ...

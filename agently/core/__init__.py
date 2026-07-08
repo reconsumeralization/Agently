@@ -25,6 +25,7 @@ from .application import (
     DynamicTask,
     RuntimeStageStallError,
     SkillsExecutor,
+    SkillsManager,
 )
 from .operation import (
     Action,
@@ -143,6 +144,7 @@ __all__ = [
     "RuntimeStageStallError",
     "Session",
     "SkillsExecutor",
+    "SkillsManager",
     "TaskDAG",
     "TaskDAGExecutor",
     "TaskDAGNode",

@@ -303,6 +303,7 @@ class WorkspaceContextPackage(TypedDict):
     items: list[WorkspaceContextItem]
     omitted: list[WorkspaceContextOmission]
     diagnostics: dict[str, Any]
+    skills_context_pack: NotRequired[dict[str, Any]]
 
 
 WorkspaceRetrievalSource = Literal["record", "file"]

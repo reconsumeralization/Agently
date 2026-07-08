@@ -10,7 +10,7 @@ keywords: Agently, coding agents, Codex, Claude Code, Cursor, Skills
 
 If you're building Agently apps with the help of an external coding agent (Codex, Claude Code, Cursor, etc.), the canonical way to give that agent good Agently context is the **official Agently Skills** packages, distributed in the `Agently-Skills` companion repo.
 
-This page is about the **companion repo** path, not the framework-side runtime skill consumer. If you want Agently itself to install and apply external skills while serving real tasks, read [Skills Executor](skills-executor.md).
+This page is about the **companion repo** path, not the framework-side runtime skill consumer. If you want Agently itself to install and apply external skills while serving real tasks, read [Skills Compatibility](skills-executor.md).
 
 ## What are Agently Skills
 
@@ -28,7 +28,8 @@ Skills are **not** just documentation. They're structured for coding agents: eac
 Keep these separate:
 
 - `Agently-Skills` companion repo: skill bundles for external coding agents
-- Agently `Skills Executor`: runtime capability inside the Agently framework
+- Agently runtime Skills: framework capability owned internally by SkillsManager,
+  with `SkillsExecutor` retained as a compatibility facade
 
 The companion repo does not become a runtime dependency of your Agently app. It remains a guidance package for coding agents.
 

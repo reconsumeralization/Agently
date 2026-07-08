@@ -58,12 +58,13 @@ async def run_model_request_route(
             "skills.prompt_bound",
             {"selected_skills": prompt_bound_required_skills},
             route="model_request",
-            source="skills_executor",
+            source="skills_manager",
             meta={"binding": "prompt_guidance"},
         )
     if ensure_all_keys is not None:
         execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
     result = execution.request.get_result(parent_run_context=agent_execution_run_context)
+    execution._model_request_result = result
     execution.record_model_response_id(result.id)
     stream_meta = {
         "response_id": result.response_id,
@@ -108,7 +109,26 @@ async def run_model_request_route(
                     delta=str(data),
                     event_type="delta",
                     is_complete=False,
-                    meta=stream_meta,
+                    meta={**stream_meta, "specific_event": "delta"},
+                )
+            elif event in {"reasoning_delta", "original_delta"}:
+                await execution.emit_stream(
+                    f"model.{event}",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                    delta=str(data),
+                    event_type="delta",
+                    is_complete=False,
+                    meta={**stream_meta, "specific_event": event},
+                )
+            elif event in {"tool_calls", "reasoning_done", "original_done"}:
+                await execution.emit_stream(
+                    f"model.{event}",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                    meta={**stream_meta, "specific_event": event},
                 )
             elif event == "status":
                 await execution.emit_stream(
@@ -116,7 +136,7 @@ async def run_model_request_route(
                     data,
                     route="model_request",
                     source="model_request",
-                    meta={**stream_meta, "field_path": "$status"},
+                    meta={**stream_meta, "field_path": "$status", "specific_event": "status"},
                 )
             elif event == "done":
                 await execution.emit_stream(
@@ -124,7 +144,15 @@ async def run_model_request_route(
                     data,
                     route="model_request",
                     source="model_request",
-                    meta=stream_meta,
+                    meta={**stream_meta, "specific_event": "done"},
+                )
+            elif event in {"meta", "extra", "error"}:
+                await execution.emit_stream(
+                    f"model.{event}",
+                    data,
+                    route="model_request",
+                    source="model_request",
+                    meta={**stream_meta, "specific_event": event},
                 )
     data = await result.async_get_data(
         type=type,
@@ -304,6 +332,12 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     mode = cast(Any, route_meta.get("mode", "model_decision"))
     task = execution.task_target()
     agent = cast(Any, execution.agent)
+    execution_access_policy = execution.effective_options.get("access_control_policy", {})
+    settings_overrides = (
+        {"access_control_policy": dict(execution_access_policy)}
+        if isinstance(execution_access_policy, Mapping)
+        else {}
+    )
     output = execution.prompt_snapshot.get("output")
     route_options = execution.route_options("skills")
     route_output_format = route_options.get("output_format")
@@ -313,11 +347,11 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
         else execution.prompt_snapshot.get("output_format")
     )
     if route_output_format is not None:
-        execution.record_consumed_option("routes.skills.output_format", output_format, owner="AgentlySkillsExecutor")
+        execution.record_consumed_option("routes.skills.output_format", output_format, owner="AgentlySkillsManager")
     effort = route_options.get("effort")
     if effort is not None:
         effort = str(effort)
-        execution.record_consumed_option("routes.skills.effort", effort, owner="AgentlySkillsExecutor")
+        execution.record_consumed_option("routes.skills.effort", effort, owner="AgentlySkillsManager")
     plan = await agent.async_resolve_skills_plan(
         task,
         skills=route_meta.get("skills"),
@@ -325,12 +359,13 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
         mode=mode,
         output=output,
         output_format=output_format,
+        _settings_overrides=settings_overrides,
     )
     await execution.emit_stream(
         "route.skills.plan",
         plan,
         route="skills",
-        source="skills_executor",
+        source="skills_manager",
         meta={"status": plan.get("status")},
     )
     if not plan.get("selected_skills"):
@@ -344,6 +379,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
                 output_format=output_format,
                 stream_handler=bridge_runtime_stream,
                 effort=effort,
+                _settings_overrides=settings_overrides,
             )
             execution.raise_if_limit_exceeded()
             execution.close_snapshot = skills_execution.close_snapshot
@@ -375,6 +411,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
         output_format=output_format,
         stream_handler=bridge_runtime_stream,
         effort=effort,
+        _settings_overrides=settings_overrides,
     )
     execution.raise_if_limit_exceeded()
     for log in skills_execution.skill_logs:
@@ -382,7 +419,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
             f"skills.{ log.get('skill_id', 'skill') }",
             log,
             route="skills",
-            source="skills_executor",
+            source="skills_manager",
             stage_id=None,
         )
     for log in skills_execution.action_logs:

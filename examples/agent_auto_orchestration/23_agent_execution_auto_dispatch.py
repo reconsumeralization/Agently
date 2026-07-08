@@ -24,20 +24,16 @@ GitHub system. The task intentionally covers the first visible issue page rather
 than a full repository audit so it remains a focused AgentExecution dispatch
 example.
 
-Expected key output from one real DeepSeek run on 2026-06-08:
+Expected key output from one real DeepSeek run on 2026-07-08:
     GitHub issue triage for AgentEra/Agently
     ========================================
-    ## AgentEra/Agently Open Issues Summary (First Page)
-    ### Overview
-    Fetched 7 open issues from the first page of AgentEra/Agently issues.
-    ### Fetched Issues (in order)
-    - [#289](https://github.com/AgentEra/Agently/issues/289) Non-streaming 模式下 DevTools 显示为空...
-    - [#288](https://github.com/AgentEra/Agently/issues/288) DevTools 显示为空...
-    - [#287](https://github.com/AgentEra/Agently/issues/287) IndexError: list index out of range...
-    - [#284](https://github.com/AgentEra/Agently/issues/284) Agent quick-prompt turns should be request-scoped...
+    ## Overview
+    The first page of open issues for AgentEra/Agently contains 8 issues...
+    ## Still-Pending Issues
+    All 8 fetched issues are open and require maintainer follow-up:
     ...
-    ### Recommended Maintainer Actions
-    - Prioritise bug fixes for #289, #288, and #287...
+    ## Recommended Maintainer Actions
+    - #312 - Immediate security review and patch...
     Execution evidence
     ------------------
     Provider: deepseek
@@ -46,6 +42,7 @@ Expected key output from one real DeepSeek run on 2026-06-08:
     Task status: completed
     GitHub fetch action called: yes
     Workspace observations recorded: yes
+    Workspace artifact readback: yes
     Task refs include task id: yes
 """
 
@@ -274,7 +271,59 @@ def final_result_text(data: dict[str, Any]) -> str:
     final_result = data.get("final_result")
     if final_result is None and isinstance(data.get("verification"), dict):
         final_result = data["verification"].get("final_result")
+    if final_result is None and "raw" in data:
+        final_result = data["raw"]
     return str(final_result or "").strip()
+
+
+def artifact_preview_from_task_envelope(data: Any) -> str:
+    """Return the first full text artifact preview carried by a task envelope."""
+    if isinstance(data, dict):
+        for key in ("artifact_preview", "artifact_markdown", "preview", "body"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for key in ("file_refs",):
+            refs = data.get(key)
+            if isinstance(refs, list):
+                for ref in refs:
+                    preview = artifact_preview_from_task_envelope(ref)
+                    if preview:
+                        return preview
+        for key in (
+            "final_result",
+            "verification",
+            "artifact_manifest",
+            "workspace_artifact_delivery",
+            "result",
+            "execution_result",
+        ):
+            preview = artifact_preview_from_task_envelope(data.get(key))
+            if preview:
+                return preview
+    elif isinstance(data, list):
+        for item in data:
+            preview = artifact_preview_from_task_envelope(item)
+            if preview:
+                return preview
+    return ""
+
+
+def task_artifact_text(data: dict[str, Any], runtime_root: Path, task_id: str, pointer: str) -> str:
+    preview = artifact_preview_from_task_envelope(data)
+    if preview:
+        return preview
+    artifact_paths: list[str] = []
+    match = re.search(r"Workspace artifact delivered at ([^;]+)", pointer)
+    if match:
+        artifact_paths.append(match.group(1).strip())
+    artifact_paths.append("final.md")
+    task_files_root = runtime_root / "files" / "lineage" / "tasks" / task_id / "files"
+    for relative_path in artifact_paths:
+        candidate = task_files_root / relative_path
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8").strip()
+    return ""
 
 
 async def run_direct_model_request(agent: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -301,7 +350,7 @@ async def run_direct_model_request(agent: Any) -> tuple[dict[str, Any], dict[str
     return data if isinstance(data, dict) else {"raw": data}, meta
 
 
-async def run_auto_task_dispatch(agent: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+async def run_auto_task_dispatch(agent: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     execution = (
         agent
         .create_execution(
@@ -339,8 +388,13 @@ async def run_auto_task_dispatch(agent: Any) -> tuple[dict[str, Any], dict[str, 
     )
     result = execution.get_result()
     data = await result.async_get_data()
+    full_data = await result.async_get_full_data()
     meta = await result.async_get_meta()
-    return data if isinstance(data, dict) else {"raw": data}, meta
+    return (
+        data if isinstance(data, dict) else {"raw": data},
+        full_data if isinstance(full_data, dict) else {"raw": full_data},
+        meta,
+    )
 
 
 async def main() -> None:
@@ -361,14 +415,16 @@ async def main() -> None:
 
     direct_data, direct_meta = await run_direct_model_request(agent)
     register_github_issue_action(agent)
-    auto_data, auto_meta = await run_auto_task_dispatch(agent)
+    auto_data, auto_full_data, auto_meta = await run_auto_task_dispatch(agent)
 
     auto_route = auto_meta.get("route", {})
     auto_route_options = auto_route.get("options", {}) if isinstance(auto_route, dict) else {}
     auto_task_refs = auto_meta.get("task_refs", {})
     auto_action_ids = task_action_ids(auto_meta)
     auto_workspace_refs = task_workspace_refs(auto_meta)
-    summary = final_result_text(auto_data)
+    pointer_text = final_result_text(auto_data)
+    artifact_text = task_artifact_text(auto_full_data, RUNTIME_ROOT, AUTO_TASK_ID, pointer_text)
+    summary = artifact_text or pointer_text
     selected_route = auto_route.get("selected_route") if isinstance(auto_route, dict) else None
     selected_by = auto_route.get("selected_by") if isinstance(auto_route, dict) else None
     task_strategy = auto_route_options.get("strategy") if isinstance(auto_route_options, dict) else None
@@ -392,9 +448,10 @@ async def main() -> None:
         "Auto-dispatched route: "
         f"{selected_route} (selected by {selected_by}, strategy: {task_strategy})"
     )
-    print(f"Task status: {auto_data.get('status')}")
+    print(f"Task status: {auto_full_data.get('status')}")
     print(f"GitHub fetch action called: {'yes' if fetch_called else 'no'}")
     print(f"Workspace observations recorded: {'yes' if observations_recorded else 'no'}")
+    print(f"Workspace artifact readback: {'yes' if artifact_text else 'no'}")
     print(f"Task refs include task id: {'yes' if refs_include_task_id else 'no'}")
 
 

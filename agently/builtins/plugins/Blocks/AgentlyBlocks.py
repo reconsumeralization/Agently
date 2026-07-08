@@ -2159,6 +2159,12 @@ async def _execute_approval_wait_block(block: ExecutionBlock, data: TriggerFlowR
     request_payload.setdefault("capability", str(bound_inputs.get("capability") or "approval"))
     request_payload.setdefault("subject", str(bound_inputs.get("subject") or block.source_plan_block_id or block.id))
     request_payload.setdefault("payload", dict(bound_inputs.get("payload") or {}))
+    from agently.core.operation.PolicyApproval import merge_access_control_policy
+
+    request_payload["policy"] = merge_access_control_policy(
+        request_payload.get("policy", {}),
+        getattr(data, "settings", None),
+    )
     request_payload.setdefault(
         "lineage",
         {
@@ -2173,6 +2179,7 @@ async def _execute_approval_wait_block(block: ExecutionBlock, data: TriggerFlowR
         handler=bound_inputs.get("handler"),
         interrupt_id=bound_inputs.get("interrupt_id"),
         resume_to="self",
+        settings=getattr(data, "settings", None),
         **exchange_kwargs,
     )
     if data.execution.is_waiting():
@@ -2236,18 +2243,19 @@ async def _execute_skill_activation_block(block: ExecutionBlock, data: TriggerFl
         data.get_resource("skills.capability_adapter", None)
         or data.get_resource("skills.adapter", None)
     )
-    skills_executor = (
-        data.get_resource("skills.executor", None)
+    skills_manager = (
+        data.get_resource("skills.manager", None)
+        or data.get_resource("skills.executor", None)
         or data.get_resource("skills_executor", None)
     )
-    if adapter is None and skills_executor is not None:
-        factory = getattr(skills_executor, "capability_adapter", None)
-        adapter = factory() if callable(factory) else skills_executor
+    if adapter is None and skills_manager is not None:
+        factory = getattr(skills_manager, "capability_adapter", None)
+        adapter = factory() if callable(factory) else skills_manager
     activate = getattr(adapter, "activate", None)
     if adapter is None or not callable(activate):
         raise RuntimeError(
             f"ExecutionBlock '{ block.id }' kind 'skill_activation' requires "
-            "runtime resource 'skills.capability_adapter' or 'skills.executor'."
+            "runtime resource 'skills.capability_adapter' or 'skills.manager'."
         )
 
     bound_inputs = block.input_bindings.get("bound_inputs", {})

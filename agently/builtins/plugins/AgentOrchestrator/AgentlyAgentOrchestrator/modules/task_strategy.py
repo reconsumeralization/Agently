@@ -313,8 +313,8 @@ def _capability_id_from_selector(selector: Any) -> str:
 
 
 def _installed_skill_descriptions(execution: "AgentExecution") -> dict[str, str]:
-    skills_executor = getattr(getattr(execution, "agent", None), "skills_executor", None)
-    list_skills = getattr(skills_executor, "list_skills", None)
+    skills_manager = getattr(getattr(execution, "agent", None), "skills_manager", None)
+    list_skills = getattr(skills_manager, "list_skills", None)
     if not callable(list_skills):
         return {}
     try:

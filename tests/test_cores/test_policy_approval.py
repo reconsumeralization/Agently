@@ -1,7 +1,25 @@
 import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
+from agently.core.operation.PolicyApproval import (
+    merge_access_control_policy,
+    resolve_access_control_policy,
+)
 from agently.core.orchestration.TriggerFlow.Control import TriggerFlowPauseSignal
+from agently.utils import Settings
+
+
+def test_access_control_policy_precedence_keeps_closer_host_override():
+    global_settings = Settings()
+    global_settings.set_settings("access_control_policy.auto_allow", True)
+    agent_settings = Settings(parent=global_settings)
+    agent_settings.set_settings("access_control_policy.auto_allow", False)
+
+    assert resolve_access_control_policy(global_settings)["auto_allow"] is True
+    assert resolve_access_control_policy(agent_settings)["auto_allow"] is False
+    assert merge_access_control_policy({}, agent_settings)["auto_allow"] is False
+    assert merge_access_control_policy({}, global_settings, {"auto_allow": False})["auto_allow"] is False
+    assert merge_access_control_policy({"auto_allow": False}, global_settings)["auto_allow"] is False
 
 
 @pytest.mark.asyncio
@@ -37,6 +55,27 @@ async def test_policy_approval_auto_approve_handler():
 
     assert decision.get("status") == "approved"
     assert decision.get("approved") is True
+
+
+@pytest.mark.asyncio
+async def test_policy_approval_global_access_control_auto_allow_overrides_fail_closed():
+    Agently.configure_policy_approval(handler="fail_closed")
+    Agently.set_settings("access_control_policy.auto_allow", True)
+    try:
+        decision = await Agently.policy_approval.async_resolve(
+            {
+                "source": "skills_capability",
+                "capability": "script_run",
+                "subject": "script_run",
+            }
+        )
+    finally:
+        Agently.set_settings("access_control_policy.auto_allow", False)
+        Agently.configure_policy_approval(handler="input_timeout_fail")
+
+    assert decision.get("status") == "approved"
+    assert decision.get("approved") is True
+    assert decision.get("handler") == "access_control_policy.auto_allow"
 
 
 @pytest.mark.asyncio

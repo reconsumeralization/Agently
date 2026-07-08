@@ -27,7 +27,7 @@ Agently's action stack has three replaceable plugin layers below the orchestrati
 | `TriggerFlow` | high-level orchestration above actions (loops, branches, pause/resume, sub-flow) — see [TriggerFlow](../triggerflow/overview.md) | the `TriggerFlow` core |
 | `ActionRuntime` | planning protocol, action call normalization, default execution orchestration | `AgentlyActionRuntime` |
 | `ActionFlow` | bridge between an `ActionRuntime` and a flow representation | `TriggerFlowActionFlow` |
-| `ActionExecutor` | how one action actually runs | local function, MCP, Python/Bash sandbox, Search/Browse, Node.js, Docker, SQLite executors |
+| `ActionExecutor` | how one action actually runs | local function, MCP, Python/Bash sandbox, Search/Browse, Node.js, common code runtime, Docker, SQLite executors |
 | `ExecutionResource` | managed execution dependencies required before an executor call | MCP, Bash, Python, Node, Docker, Browser, SQLite providers |
 
 `Action` in `agently.core` is a façade that wires:
@@ -104,9 +104,10 @@ print(calculate("3333+6666=?"))
 | `agent.use_actions(["name1", "name2"])` | register pre-registered actions by name |
 | `agent.use_actions(Search(...))` | mount the built-in Search package from `agently.builtins.actions` |
 | `agent.use_actions(Browse(...))` | mount the built-in Browse package from `agently.builtins.actions` |
-| `agent.enable_python(...)` | mount a managed `run_python` action for deterministic code execution |
-| `agent.enable_shell(...)` | mount a managed `run_bash` action with workspace roots, command allowlists, timeouts, and bounded output previews |
-| `agent.enable_nodejs(...)` | mount a managed `run_nodejs` action |
+| `agent.enable_python(...)` | mount a Docker-backed `run_python` action for deterministic code execution |
+| `agent.enable_shell(...)` | mount a Docker-backed `run_bash` action with workspace roots, command allowlists, timeouts, and bounded output previews |
+| `agent.enable_nodejs(...)` | mount a Docker-backed `run_nodejs` action |
+| `agent.enable_code_runtime(...)` | mount a Docker-backed common-language code runtime action for Python, JavaScript/Node.js, TypeScript, C, C++, Go, Rust, Java, C#/.NET, PHP, Ruby, Perl, R, Lua, or Bash |
 | `agent.enable_sqlite(...)` | mount a managed `query_sqlite` action |
 | `agent.enable_workspace_file_actions(...)` | expose the current Workspace file area as handler-backed list/search/read/write actions, plus `export_file` when `export=True` and `write=True` |
 | `agent.enable_coding_agent_actions(...)` | expose coding-agent Workspace actions for file readback, glob/grep search, targeted edit, unified-diff patch, and guarded full-file writes |
@@ -126,6 +127,24 @@ For application code, prefer `enable_*` helpers when the goal is to give the
 model a common capability such as Python, shell, or workspace access. Use
 `register_action(..., executor=..., execution_resources=[...])` when you are
 building a custom Action backend.
+
+`agent.enable_python(...)`, `agent.enable_shell(...)`, and
+`agent.enable_nodejs(...)` default to `sandbox="auto"` and
+`provisioning_profile="strict"`, which uses a Docker-backed ExecutionResource
+profile after checking both the local Docker CLI and daemon. Missing images use
+`image_pull_policy="never"` by default and fail closed with structured
+diagnostics such as `execution_resource.docker_image_missing`; they do not
+silently fall back to host execution. Use `sandbox="trusted_local"` only for
+trusted compatibility paths that intentionally use the legacy in-process Python
+sandbox, local shell runner, or local Node.js runner.
+
+For Coding Agent, Agently Skills, examples, and framework tests, use
+`provisioning_profile="developer"` or `"ci"`. These profiles default to
+`image_pull_policy="if_missing"` and `dependency_policy="install"`, so the
+provider may pull missing Docker images and prepare dependencies from standard
+manifest files before running the fixed entrypoint. Dependency installation is
+not a model-visible action input; do not ask the model to run `pip`, `npm`,
+`cargo`, or other package-manager commands through code action schemas.
 
 For coding-agent style local file work, prefer
 `agent.enable_coding_agent_actions(...)`. It exposes `read_file`,
@@ -342,7 +361,7 @@ agent.set_settings("action.planning_model_key", "task-main")
 
 This applies to the default structured-plan and native tool-call planning
 paths. It is especially important when a higher-level runtime such as
-SkillsExecutor or AgentTask delegates a bounded action round to
+SkillsManager-backed Skills execution or AgentTask delegates a bounded action round to
 ActionRuntime.
 
 `agent.get_action_result(..., timeout=N)` bounds the full action loop,

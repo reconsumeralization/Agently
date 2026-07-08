@@ -28,11 +28,14 @@ A real task driven by the default single_shot compatibility route:
 The task: draw a real architecture diagram for the current Agently development line. The
 architecture brief below is grounded in this repository (agently/core +
 agently/builtins), so the diagram describes the actual framework, not a guess.
+Release example tests run with explicit all-allowed Skills capability policy so
+the test proves the Skill execution path rather than the default fail-closed
+permission posture.
 
-Expected key output (shape; exact bytes vary by model):
+Expected key output from one real DeepSeek run on 2026-07-08:
     selected skill: architecture-diagram (required)
     skill status: success
-    html bytes: ~6,000-20,000
+    html bytes: 19,513
     diagram saved: .../agently_architecture_generated.html
 """
 
@@ -55,6 +58,17 @@ ARTIFACTS_DIR = Path(__file__).resolve().parent / "_artifacts"
 
 # ── The skill: a standard SKILL.md, guidance only ───────────────────────────
 SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "architecture-diagram"
+
+RELEASE_EXAMPLE_CAPABILITIES: dict[str, str] = {
+    "web_search": "allow",
+    "web_browse": "allow",
+    "workspace_read": "allow",
+    "workspace_write": "allow",
+    "script_run": "allow",
+    "python": "allow",
+    "http_request": "allow",
+    "mcp": "allow",
+}
 
 
 # ── The task: a repo-grounded brief of the current Agently architecture ──────
@@ -107,7 +121,10 @@ async def main() -> None:
     runtime_dir = Path(tempfile.mkdtemp(prefix="agently_archdiagram_"))
     skill_id = install_skill(runtime_dir)
 
-    agent = Agently.create_agent("architecture-diagrammer")
+    agent = Agently.create_agent("architecture-diagrammer").configure_skill_capabilities(
+        auto_load=RELEASE_EXAMPLE_CAPABILITIES,
+        workspace_root=str(runtime_dir / "workspace"),
+    )
 
     execution = await agent.async_run_skills_task(
         AGENTLY_ARCHITECTURE_BRIEF,

@@ -28,6 +28,7 @@ from agently.types.data import (
 from agently.types.plugins import SkillsPlanningContext
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list, _ensure_string_list, _sanitize_id
 
+from agently.core.operation.PolicyApproval import merge_access_control_policy
 from .planner import _matches_selector, _matches_skills_pack_selector
 from .registry import SkillRegistry
 
@@ -430,7 +431,11 @@ class SkillContextPackBuilder:
                 "code": "skill_context_pack.script_actionization_context_missing",
                 "skill_id": skill_id,
             }]
-        policy = _ensure_dict(context.get_setting("skills.capability_policy", {}))
+        policy = merge_access_control_policy(
+            _ensure_dict(context.get_setting("skills.capability_policy", {})),
+            None,
+            _ensure_dict(context.get_setting("access_control_policy", {})),
+        )
         mode = self._policy_mode(policy, "script_run")
         if mode == "approval":
             decision = await self._approval_decision(context, contract, "script_run")
@@ -460,7 +465,7 @@ class SkillContextPackBuilder:
         action_id = f"run_{ _sanitize_id(skill_id).replace('-', '_').replace('.', '_') }_script"
         root = Path(str(_ensure_dict(contract.get("source")).get("installed_path") or ".")).expanduser().resolve()
         commands = self._script_commands(script_resources)
-        agent.enable_shell(root=root, commands=commands or None, action_id=action_id)
+        agent.enable_shell(root=root, commands=commands or None, action_id=action_id, provisioning_profile="developer")
         for resource in script_resources:
             path = str(resource.get("path") or "")
             candidates.append({
@@ -485,7 +490,11 @@ class SkillContextPackBuilder:
                 "level": "error",
                 "code": "skill_context_pack.public_lookup_context_missing",
             }]
-        policy = _ensure_dict(context.get_setting("skills.capability_policy", {}))
+        policy = merge_access_control_policy(
+            _ensure_dict(context.get_setting("skills.capability_policy", {})),
+            None,
+            _ensure_dict(context.get_setting("access_control_policy", {})),
+        )
         mode = self._policy_mode(policy, "web_search")
         if mode != "allow":
             return [], [{
@@ -543,13 +552,19 @@ class SkillContextPackBuilder:
                 "subject": str(contract.get("skill_id") or capability),
                 "risk": "capability_mount",
                 "payload": {"skill_id": str(contract.get("skill_id") or "")},
-                "policy": _copy_public(_ensure_dict(context.get_setting("skills.capability_policy", {}))),
+                "policy": _copy_public(merge_access_control_policy(
+                    _ensure_dict(context.get_setting("skills.capability_policy", {})),
+                    None,
+                    _ensure_dict(context.get_setting("access_control_policy", {})),
+                )),
                 "lineage": {"skill_id": str(contract.get("skill_id") or "")},
             },
             handler=str(context.get_setting("policy_approval.handler", "") or "") or None,
         ))
 
     def _policy_mode(self, policy: dict[str, Any], need_name: str) -> str:
+        if bool(policy.get("auto_allow", False)):
+            return "allow"
         auto_load = _ensure_dict(policy.get("auto_load"))
         raw = auto_load.get(need_name, policy.get(need_name, "off"))
         if isinstance(raw, dict):

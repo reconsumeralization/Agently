@@ -222,6 +222,7 @@ class SkillPlanner:
             selections=selections,
             current_needs=capability_needs,
         )
+        auto_allow_skill_ids = self._auto_allow_skill_ids(selected, selectors)
 
         return SkillExecutionPlan({
             "plan_id": uuid.uuid4().hex,
@@ -239,13 +240,29 @@ class SkillPlanner:
             "expected_result_shape": _ensure_dict(semantic_outputs),
             "expected_result_format": output_format or context.get_setting("prompt.default_output_format", "json"),
             "capability_policy": {
-                "auto_allow": any(bool(_ensure_dict(selector).get("auto_allow")) for selector in selectors if isinstance(selector, dict)),
+                "auto_allow_skill_ids": sorted(auto_allow_skill_ids),
             },
             "stage_model_keys": self._stage_model_keys(context),
             "execution_strategy": execution_strategy,
             "execution_stages": execution_stages,
             "diagnostics": diagnostics,
         })
+
+    def _auto_allow_skill_ids(self, selected: list[SkillContract], selectors: list[Any]) -> set[str]:
+        auto_allow_selectors = [
+            selector
+            for selector in selectors
+            if isinstance(selector, dict) and bool(selector.get("auto_allow", False))
+        ]
+        if not auto_allow_selectors:
+            return set()
+        allowed: set[str] = set()
+        for contract in selected:
+            if any(_matches_selector(contract, selector) for selector in auto_allow_selectors):
+                skill_id = str(contract.get("skill_id") or "").strip()
+                if skill_id:
+                    allowed.add(skill_id)
+        return allowed
 
     def _discover_source_selectors(self, selectors: list[Any]) -> tuple[list[SkillContract], list[dict[str, Any]]]:
         discovered: list[SkillContract] = []

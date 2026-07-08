@@ -9,7 +9,7 @@ ACTION_ID = "run_nodejs_example"
 
 def build_agent():
     agent = Agently.create_agent()
-    agent.enable_nodejs(action_id=ACTION_ID, expose_to_model=False)
+    agent.enable_nodejs(action_id=ACTION_ID, expose_to_model=False, sandbox="trusted_local")
     return agent
 
 
@@ -46,8 +46,8 @@ if __name__ == "__main__":
 # Action-call execution environment handles are released after the call.
 
 # How it works:
-# agent.enable_nodejs(action_id=ACTION_ID, expose_to_model=False) registers a managed
-# Node.js sandbox action (direct execution only, no model planning).
+# agent.enable_nodejs(..., sandbox="trusted_local") registers the trusted-local
+# Node.js action (direct execution only, no model planning).
 # The action accepts js_code as a list of JS lines, runs them in a Node.js subprocess,
 # and captures stdout.  The test asserts sum=108 for [4,8,15,16,23,42].
 # If node is not on PATH, the example prints [SKIP] and exits early.
@@ -56,7 +56,7 @@ if __name__ == "__main__":
 # shutil.which("node") check -> skip if None
 #   |
 #   v
-# agent.enable_nodejs(action_id=ACTION_ID, expose_to_model=False)
+# agent.enable_nodejs(action_id=ACTION_ID, expose_to_model=False, sandbox="trusted_local")
 # execute_action(ACTION_ID, {"js_code": [...]})
 #   |
 #   v

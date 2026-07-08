@@ -129,7 +129,8 @@ name: {name}
 
 @pytest.fixture(autouse=True)
 def isolated_skills(tmp_path):
-    Agently.skills_executor.configure(
+    Agently.set_settings("access_control_policy.auto_allow", False)
+    Agently.skills_manager.configure(
         registry_root=tmp_path / "skills-registry",
         allowed_trust_levels=["local"],
     )
@@ -348,7 +349,7 @@ def test_use_skills_source_selector_installs_only_when_planning_hits(tmp_path):
     diagnostics = cast(list[dict[str, Any]], plan.get("diagnostics", []))
     assert any(item["code"] == "source_discovered" for item in diagnostics)
     assert any(item["code"] == "source_installed" for item in diagnostics)
-    assert plan.get("capability_policy", {}).get("auto_allow") is True
+    assert plan.get("capability_policy", {}).get("auto_allow_skill_ids") == ["docx-skill"]
     assert plan.get("stage_model_keys", {}).get("planner") == "planner"
     assert plan.get("stage_model_keys", {}).get("verifier") == "verifier"
     assert plan.get("stage_model_keys", {}).get("finalizer") == "finalizer"
@@ -491,6 +492,7 @@ async def test_agent_build_skills_context_pack_actionizes_scripts_only_when_allo
     assert agent.action.action_registry.has("run_script_skill_script")
     assert enable_calls[0]["root"] == Path(Agently.skills_executor.inspect_skills("script-skill")["source"]["installed_path"])
     assert "scripts/helper.sh" in enable_calls[0]["commands"]
+    assert enable_calls[0]["provisioning_profile"] == "developer"
     assert executed is False
 
 
@@ -686,6 +688,13 @@ and write the final Markdown deliverable to a workspace file.
     assert agent.action.action_registry.has("browse")
     assert agent.action.action_registry.has("write_file")
     assert agent.action.action_registry.has("run_python")
+    python_spec = agent.action.action_registry.get_spec("run_python")
+    assert python_spec is not None
+    python_requirement = cast(dict[str, Any], python_spec.get("execution_resources", [])[0])
+    python_profile = python_requirement["config"]["runtime_profile"]
+    assert python_profile["provisioning_profile"] == "developer"
+    assert python_profile["image_pull_policy"] == "if_missing"
+    assert python_profile["dependency_policy"] == {"mode": "install"}
     mounted = [item for item in execution.runtime_stream if item.get("type") == "skills.capability.mounted"]
     assert {item["need"] for item in mounted} >= {"web_search", "web_browse", "workspace_write", "python"}
 
@@ -887,6 +896,118 @@ Run scripts/helper.sh when the host permits script execution.
         and item.get("policy") == "approval"
         for item in execution.runtime_stream
     )
+
+
+@pytest.mark.asyncio
+async def test_skill_capability_global_access_control_auto_allow_mounts_requested_capability(tmp_path):
+    source = tmp_path / "script-skill"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Script Skill
+description: Uses a bundled helper.
+---
+
+# Script Skill
+
+Run scripts/helper.sh when the host permits script execution.
+""",
+    )
+    _write(source / "scripts" / "helper.sh", "#!/usr/bin/env bash\necho helper\n")
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(auto_load={"script_run": "approval"})
+
+    Agently.configure_policy_approval(handler="fail_closed")
+    Agently.set_settings("access_control_policy.auto_allow", True)
+    try:
+        execution = await agent.async_run_skills_task(
+            "run helper",
+            skills=["script-skill"],
+            mode="required",
+        )
+    finally:
+        Agently.set_settings("access_control_policy.auto_allow", False)
+        Agently.configure_policy_approval(handler="input_timeout_fail")
+
+    assert execution.status == "success"
+    assert agent.action.action_registry.has("run_script_skill_script")
+
+
+@pytest.mark.asyncio
+async def test_skill_capability_execution_access_control_auto_allow_is_run_local(tmp_path):
+    source = tmp_path / "script-skill"
+    _write(
+        source / "SKILL.md",
+        """---
+name: Script Skill
+description: Uses a bundled helper.
+---
+
+# Script Skill
+
+Run scripts/helper.sh when the host permits script execution.
+""",
+    )
+    _write(source / "scripts" / "helper.sh", "#!/usr/bin/env bash\necho helper\n")
+    Agently.skills_executor.install_skills(source)
+    agent = _create_agent().configure_skill_capabilities(auto_load={"script_run": "approval"})
+
+    allowed = await (
+        agent.create_execution()
+        .access_control_policy({"auto_allow": True})
+        .async_run_skills_task(
+            "run helper",
+            skills=["script-skill"],
+            mode="required",
+        )
+    )
+    blocked = await agent.async_run_skills_task(
+        "run helper",
+        skills=["script-skill"],
+        mode="required",
+    )
+
+    assert allowed.status == "success"
+    assert blocked.status == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_skill_selector_auto_allow_is_scoped_to_matching_skill(tmp_path):
+    trusted = tmp_path / "trusted-script"
+    untrusted = tmp_path / "untrusted-script"
+    for root, name in ((trusted, "Trusted Script"), (untrusted, "Untrusted Script")):
+        _write(
+            root / "SKILL.md",
+            f"""---
+name: {name}
+description: Uses a bundled helper.
+---
+
+# {name}
+
+Run scripts/helper.sh when the host permits script execution.
+""",
+        )
+        _write(root / "scripts" / "helper.sh", "#!/usr/bin/env bash\necho helper\n")
+        Agently.skills_executor.install_skills(root)
+    agent = _create_agent()
+
+    execution = await agent.async_run_skills_task(
+        "run both helpers",
+        skills=[
+            {"id": "trusted-script", "auto_allow": True},
+            "untrusted-script",
+        ],
+        mode="required",
+    )
+
+    diagnostics = cast(dict[str, Any], execution.output).get("diagnostics", [])
+    mounted = [item for item in diagnostics if item.get("code") == "capability_mounted"]
+    disabled = [item for item in diagnostics if item.get("code") == "capability_disabled"]
+
+    assert execution.status == "blocked"
+    assert list(dict.fromkeys(item.get("skill_id") for item in mounted)) == ["trusted-script"]
+    assert list(dict.fromkeys(item.get("skill_id") for item in disabled)) == ["untrusted-script"]
 
 
 @pytest.mark.asyncio

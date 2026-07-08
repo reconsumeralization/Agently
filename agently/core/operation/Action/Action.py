@@ -790,13 +790,21 @@ class Action:
         self,
         *,
         action_id: str = "python_sandbox",
-        desc: str = "Execute Python code inside a restricted sandbox.",
+        desc: str = "Execute Python code through an explicitly trusted local Python execution resource.",
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
         preset_objects: dict[str, object] | None = None,
         base_vars: dict[str, Any] | None = None,
         allowed_return_types: list[type] | None = None,
+        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
+        docker_image: str = "python:3.12-slim",
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: Literal["deny", "request", "install"] | dict[str, Any] | str | None = None,
+        provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
+        image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
+        timeout: int = 60,
     ):
         return self._resource_registrar.register_python_sandbox_action(
             action_id=action_id,
@@ -807,6 +815,14 @@ class Action:
             preset_objects=preset_objects,
             base_vars=base_vars,
             allowed_return_types=allowed_return_types,
+            sandbox=sandbox,
+            docker_image=docker_image,
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
+            timeout=timeout,
         )
 
     def register_bash_sandbox_action(
@@ -823,6 +839,13 @@ class Action:
         env: dict[str, str] | None = None,
         max_output_chars: int = 20000,
         output_artifact_dir: str | Path | None = None,
+        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
+        docker_image: str = "python:3.12-slim",
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: Literal["deny", "request", "install"] | dict[str, Any] | str | None = None,
+        provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
+        image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
     ):
         return self._resource_registrar.register_bash_sandbox_action(
             action_id=action_id,
@@ -836,6 +859,13 @@ class Action:
             env=env,
             max_output_chars=max_output_chars,
             output_artifact_dir=output_artifact_dir,
+            sandbox=sandbox,
+            docker_image=docker_image,
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
         )
 
     def register_nodejs_action(
@@ -850,6 +880,13 @@ class Action:
         cwd: str | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
+        docker_image: str = "node:22-slim",
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: Literal["deny", "request", "install"] | dict[str, Any] | str | None = None,
+        provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
+        image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
     ):
         return self._resource_registrar.register_nodejs_action(
             action_id=action_id,
@@ -861,6 +898,46 @@ class Action:
             cwd=cwd,
             timeout=timeout,
             env=env,
+            sandbox=sandbox,
+            docker_image=docker_image,
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
+        )
+
+    def register_code_runtime_action(
+        self,
+        *,
+        language: str,
+        action_id: str | None = None,
+        desc: str | None = None,
+        tags: str | list[str] | None = None,
+        default_policy: "ActionPolicy | None" = None,
+        expose_to_model: bool = False,
+        docker_image: str | None = None,
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: Literal["deny", "request", "install"] | dict[str, Any] | str | None = None,
+        provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
+        image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
+        timeout: int = 60,
+    ):
+        return self._resource_registrar.register_code_runtime_action(
+            language=language,
+            action_id=action_id,
+            desc=desc,
+            tags=tags,
+            default_policy=default_policy,
+            expose_to_model=expose_to_model,
+            docker_image=docker_image,
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
+            timeout=timeout,
         )
 
     def register_docker_action(

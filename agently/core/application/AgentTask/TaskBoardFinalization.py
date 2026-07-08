@@ -25,6 +25,83 @@ TASK_BOARD_COMPLETION_NOTES_SCHEMA_VERSION = "task_board_completion_notes/v1"
 class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
     """TaskBoard final synthesis, terminal verification, and final repair routing."""
 
+    def _taskboard_final_capability_logs(
+        self,
+        revision: Any,
+        *,
+        context_pack: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        effective_revision = TaskBoardRevision.from_value(revision)
+        action_logs: list[dict[str, Any]] = []
+        selected_skill_ids: list[str] = []
+
+        def add_skill_ids(values: Any) -> None:
+            for skill_id in self._normalize_string_list(values):
+                if skill_id and skill_id not in selected_skill_ids:
+                    selected_skill_ids.append(skill_id)
+
+        if isinstance(context_pack, Mapping):
+            skill_context_pack = context_pack.get("skills_context_pack")
+            skill_ids_from_pack = self._skills_context_pack_skill_ids(skill_context_pack)
+            add_skill_ids(skill_ids_from_pack)
+
+        for result in effective_revision.card_results.values():
+            if not isinstance(getattr(result, "diagnostics", None), Sequence):
+                continue
+            for diagnostic in result.diagnostics:
+                if not isinstance(diagnostic, Mapping):
+                    continue
+                summary = diagnostic.get("evidence_summary")
+                if not isinstance(summary, Mapping):
+                    continue
+                raw_actions = summary.get("actions")
+                if isinstance(raw_actions, Sequence) and not isinstance(raw_actions, str | bytes | bytearray):
+                    action_logs.extend(dict(item) for item in raw_actions if isinstance(item, Mapping))
+                add_skill_ids(summary.get("selected_skill_ids"))
+                capability_evidence = summary.get("capability_evidence")
+                if isinstance(capability_evidence, Mapping):
+                    skills = capability_evidence.get("skills")
+                    if isinstance(skills, Mapping):
+                        add_skill_ids(skills.get("selected"))
+
+        prompt_bound_skills = [
+            {
+                "skill_id": skill_id,
+                "mode": "required",
+                "binding": "context_pack",
+                "source": "skills_manager",
+            }
+            for skill_id in selected_skill_ids
+        ]
+        return {
+            "action_logs": self._dedupe_action_records(action_logs),
+            "route_logs": {
+                "prompt_bound_skills": prompt_bound_skills,
+            },
+            "selected_skill_ids": selected_skill_ids,
+        }
+
+    def _taskboard_verification_options(self) -> dict[str, Any]:
+        options = dict(DataFormatter.sanitize(self.options))
+        if "capability_evidence_requirements" not in options:
+            requirements = [
+                {
+                    "capability_id": str(item.get("id") or ""),
+                    "capability_kind": str(item.get("kind") or "capability"),
+                    "kind": "capability_used",
+                    "required": True,
+                    "source": "taskboard_required_capability",
+                }
+                for item in self._planner_capabilities()
+                if isinstance(item, Mapping)
+                and str(item.get("mode") or "").strip() == "required"
+                and str(item.get("kind") or "").strip() in {"skill", "skill_pack"}
+                and str(item.get("id") or "").strip()
+            ]
+            if requirements:
+                options["capability_evidence_requirements"] = requirements
+        return options
+
     @classmethod
     def _taskboard_final_refs_from_evidence_view(cls, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []
@@ -621,6 +698,66 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 verifier_final_result = self._workspace_artifact_final_result_from_refs(trusted_final_refs)
             if not verifier_final_result:
                 verifier_final_result = str(candidate_final_result or "").strip()
+            taskboard_capability_logs = self._taskboard_final_capability_logs(
+                revision,
+                context_pack=context_pack if isinstance(context_pack, Mapping) else None,
+            )
+            verification_options = self._taskboard_verification_options()
+            final_source_refs = self._taskboard_final_source_refs_from_evidence_view(evidence_view)
+            final_execution_result = {
+                "status": "completed",
+                "accepted": accepted,
+                "final_result": verifier_final_result,
+                "reason": final.get("reason", ""),
+                "missing_criteria": final.get("missing_criteria", []),
+                "evidence_use": DataFormatter.sanitize(final.get("evidence_use", [])),
+                "file_refs": final_refs,
+                "artifact_refs": final_refs,
+                "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_stream(evidence_view),
+                "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
+                "evidence_ledger": evidence_ledger,
+            }
+            final_execution_meta = {
+                "status": "completed",
+                "route": {
+                    "selected_route": "agent_task",
+                    "execution_strategy": self.execution_strategy,
+                    "effective_execution_strategy": self.effective_execution_strategy,
+                },
+                "options": DataFormatter.sanitize(verification_options),
+                "effective_options": DataFormatter.sanitize(verification_options),
+                "logs": {
+                    "artifact_refs": final_refs,
+                    "source_refs": final_source_refs,
+                    **DataFormatter.sanitize(taskboard_capability_logs),
+                },
+                "workspace_refs": {"agent_task_artifacts": final_refs},
+                "blocks": {
+                    "evidence": {
+                        # Readback-state reuse: the dirty-acceptance projection
+                        # alone drops the source evidence the final artifact
+                        # cites (an already-read PDF preview then re-judges as
+                        # unread in final verification), so the cited/pinned
+                        # ledger items travel with the final candidate.
+                        "evidence_items": self._taskboard_final_verification_evidence_items(
+                            scoped_evidence_view,
+                            pinned_evidence_ids=pinned_evidence_ids,
+                            evidence_view=evidence_view,
+                        ),
+                        "pinned_evidence_ids": pinned_evidence_ids,
+                        "diagnostics": [],
+                    }
+                },
+                "diagnostics": {
+                    "taskboard_terminal_status": result_status,
+                    "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+                    "taskboard_acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+                    "taskboard_explicit_state_facts": explicit_state_facts,
+                    "taskboard_blocking_state_facts": blocking_state_facts,
+                    "taskboard_capability_logs": DataFormatter.sanitize(taskboard_capability_logs),
+                },
+            }
+            final_execution_evidence_summary = self._cumulative_execution_evidence_summary(final_execution_meta)
             cache_can_satisfy_final_gate = (
                 isinstance(previous_acceptance_index, Mapping)
                 and acceptance_verification_plan.get("all_satisfied") is True
@@ -652,53 +789,6 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     },
                 )
             else:
-                final_source_refs = self._taskboard_final_source_refs_from_evidence_view(evidence_view)
-                final_execution_result = {
-                    "status": "completed",
-                    "accepted": accepted,
-                    "final_result": verifier_final_result,
-                    "reason": final.get("reason", ""),
-                    "missing_criteria": final.get("missing_criteria", []),
-                    "evidence_use": DataFormatter.sanitize(final.get("evidence_use", [])),
-                    "file_refs": final_refs,
-                    "artifact_refs": final_refs,
-                    "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_stream(evidence_view),
-                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
-                    "evidence_ledger": evidence_ledger,
-                }
-                final_execution_meta = {
-                    "status": "completed",
-                    "route": {
-                        "selected_route": "agent_task",
-                        "execution_strategy": self.execution_strategy,
-                        "effective_execution_strategy": self.effective_execution_strategy,
-                    },
-                    "logs": {"artifact_refs": final_refs, "source_refs": final_source_refs},
-                    "workspace_refs": {"agent_task_artifacts": final_refs},
-                    "blocks": {
-                        "evidence": {
-                            # Readback-state reuse: the dirty-acceptance projection
-                            # alone drops the source evidence the final artifact
-                            # cites (an already-read PDF preview then re-judges as
-                            # unread in final verification), so the cited/pinned
-                            # ledger items travel with the final candidate.
-                            "evidence_items": self._taskboard_final_verification_evidence_items(
-                                scoped_evidence_view,
-                                pinned_evidence_ids=pinned_evidence_ids,
-                                evidence_view=evidence_view,
-                            ),
-                            "pinned_evidence_ids": pinned_evidence_ids,
-                            "diagnostics": [],
-                        }
-                    },
-                    "diagnostics": {
-                        "taskboard_terminal_status": result_status,
-                        "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
-                        "taskboard_acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
-                        "taskboard_explicit_state_facts": explicit_state_facts,
-                        "taskboard_blocking_state_facts": blocking_state_facts,
-                    },
-                }
                 try:
                     final_verification = await self._request_verification(
                         max(len(self.iterations) + 1, 1),
@@ -729,6 +819,12 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                         "guard_reasons": ["taskboard_final_verification_error"],
                         "error": {"type": error.__class__.__name__, "message": message},
                     }
+            if final_verification is not None:
+                final_verification = self._normalize_verification(
+                    final_verification,
+                    execution_evidence_summary=final_execution_evidence_summary,
+                    candidate_final_result=verifier_final_result,
+                )
             if missing_deliverables:
                 self._guard_missing_required_deliverables(final_verification, missing_deliverables)
             if blocking_state_facts and final_verification is not None:

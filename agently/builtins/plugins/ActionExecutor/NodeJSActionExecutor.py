@@ -48,6 +48,12 @@ class NodeJSActionExecutor:
         environment_resources = action_call.get("execution_resource_resources", {})
         if isinstance(environment_resources, dict):
             node_resource = environment_resources.get(action_id) or environment_resources.get("node")
+            if node_resource is not None and hasattr(node_resource, "run_nodejs_code"):
+                return await node_resource.run_nodejs_code(
+                    js_code=js_code,
+                    args=[str(arg) for arg in args],
+                    timeout=timeout,
+                )
             if node_resource is not None and hasattr(node_resource, "run"):
                 return await node_resource.run(js_code=js_code, args=[str(arg) for arg in args], timeout=timeout)
         return {

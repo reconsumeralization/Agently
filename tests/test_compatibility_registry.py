@@ -67,14 +67,20 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.4"
-    assert in_development["release_train"] == "2026-07-4.1.4-dev"
-    assert "4.1.4 work" in in_development["notes"]
-    assert "4.1.3.9 Workspace retrieval and Session memory release" in in_development["notes"]
+    assert in_development["target_version"] == "4.1.4.1"
+    assert in_development["release_train"] == "2026-07-4.1.4.1-dev"
+    assert "4.1.4.1 work after the 4.1.4 AgentExecution and TaskBoard release" in in_development["notes"]
+    assert "AgentExecutionResult reader compatibility" in in_development["notes"]
+    assert "get_data() consistently returns business data" in in_development["notes"]
+    assert "get_full_data() exposes full route/task envelopes" in in_development["notes"]
+    assert "basic AgentExecution facade compatibility" in in_development["notes"]
+    assert "streaming_print" in in_development["notes"]
+    assert "instant-stream full_data snapshots" in in_development["notes"]
+    assert "completed-execution prompt/config chaining fail fast" in in_development["notes"]
+    assert "public typing allowlist gate" in in_development["notes"]
     assert "AgentExecution strategy selection" in in_development["notes"]
     assert "TaskBoard incremental acceptance" in in_development["notes"]
     assert "long-task artifact hardening" in in_development["notes"]
-    assert "4.1.3.9 Workspace retrieval, SessionMemory" in in_development["notes"]
     assert in_development["companions"]["devtools"]["runtime_protocol"] == current["companions"]["devtools"]["runtime_protocol"]
     assert in_development["companions"]["devtools"]["event_naming"] == {
         "preferred_event_type": "RuntimeEvent",
@@ -141,6 +147,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     runtime_capability_contract = in_development["companions"]["skills"]["runtime_capability_contract"]
     assert "agent.configure_skill_capabilities" in runtime_capability_contract["host_policy_surface"]
     assert "agent.configure_policy_approval" in runtime_capability_contract["host_policy_surface"]
+    assert "access_control_policy.auto_allow" in runtime_capability_contract["host_policy_surface"]
+    assert "access_control_policy.auto_allow" in runtime_capability_contract["policy_approval_surface"]
     assert runtime_capability_contract["policy_modes"] == ["allow", "approval", "off"]
     assert "capability_needs" in runtime_capability_contract["skill_capability_needs"]
     assert "script_run" in runtime_capability_contract["auto_loadable_needs"]
@@ -163,7 +171,15 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "AgentExecutionResult" in execution_contract["surface"]
     assert "AgentTurn" not in execution_contract["surface"]
     assert "isolated AgentExecution draft" in execution_contract["contract"]
+    assert "Completed AgentExecution instances are immutable run records" in execution_contract["contract"]
+    assert "prompt/config mutators called after start raise a lifecycle error" in execution_contract["contract"]
+    assert "agent.input(...).start() continue to create fresh isolated executions" in execution_contract["contract"]
+    assert "Completed-execution reconfiguration is not a compatibility surface" in execution_contract["compatibility_policy"]
     assert "are removed from the 4.1.3.7 development line" in execution_contract["contract"]
+    public_typing = in_development["public_typing"]
+    assert "compatibility/public-typing-allowlist.json" in public_typing["surface"]
+    assert "New public methods default to fully typed parameters and returns" in public_typing["contract"]
+    assert "it is not a public-method allowlist" in public_typing["compatibility_policy"]
     task_loop_contract = in_development["request_input"]["agent_execution_task_loop"]
     assert "Agent.goal" in task_loop_contract["surface"]
     assert "Agent.goals" in task_loop_contract["surface"]

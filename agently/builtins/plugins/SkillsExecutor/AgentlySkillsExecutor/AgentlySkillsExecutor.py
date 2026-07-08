@@ -19,9 +19,9 @@ from typing import Any, Literal
 
 from agently.types.data import SkillContextPack, SkillContextPackIncludeMode, SkillContract, SkillExecutionPlan, SkillMode, SkillsPackRecord
 from agently.types.options import SkillsRouteOptions
-from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext, SkillsExecutor, SkillsPlanningContext
+from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext, SkillsManager, SkillsPlanningContext
 from agently.utils import DeprecationWarnings, Settings
-from agently.core.application.SkillsExecutor.adapter import RegistrySkillSource, SkillCapabilityAdapter
+from agently.core.application.SkillsManager.adapter import RegistrySkillSource, SkillCapabilityAdapter
 
 from .modules.effort_strategies import BUILTIN_EFFORT_STRATEGY_NAMES
 from .modules.context_pack import SkillContextPackBuilder
@@ -30,7 +30,7 @@ from .modules.planner import SkillPlanner
 from .modules.registry import SkillRegistry
 
 
-class AgentlySkillsExecutor(SkillsExecutor):
+class AgentlySkillsExecutor(SkillsManager):
     name = "AgentlySkillsExecutor"
     DEFAULT_SETTINGS: dict[str, Any] = {}
     OPTIONS_SCHEMAS = {

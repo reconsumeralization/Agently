@@ -15,12 +15,22 @@
 
 import inspect
 
-from typing import Callable
+from typing import Any, Callable
 
 from agently.core import BaseAgent
 
 
 class AutoFuncExtension(BaseAgent):
+    @staticmethod
+    def _resolve_output_contract(return_annotation: Any) -> tuple[Any, str | None]:
+        if return_annotation is inspect.Signature.empty:
+            return str, None
+        if isinstance(return_annotation, dict):
+            return return_annotation, None
+        if return_annotation in (dict, list, tuple):
+            return return_annotation, None
+        return {"return_value": (return_annotation,)}, "return_value"
+
     def auto_func(self, func: Callable):
         if inspect.iscoroutinefunction(func):
 
@@ -34,8 +44,11 @@ class AutoFuncExtension(BaseAgent):
                 # generate instruction
                 instruction = inspect.getdoc(func)
                 # generate output dict
-                output_dict = signature.return_annotation
-                return await self.input(input_dict).instruct(instruction).output(output_dict).async_start()
+                output_dict, unwrap_key = self._resolve_output_contract(signature.return_annotation)
+                result = await self.input(input_dict).instruct(instruction).output(output_dict).async_start()
+                if unwrap_key is not None and isinstance(result, dict):
+                    return result.get(unwrap_key)
+                return result
 
             return async_wrapper
         elif (
@@ -52,8 +65,11 @@ class AutoFuncExtension(BaseAgent):
                 # generate instruction
                 instruction = inspect.getdoc(func)
                 # generate output dict
-                output_dict = signature.return_annotation
-                return self.input(input_dict).instruct(instruction).output(output_dict).start()
+                output_dict, unwrap_key = self._resolve_output_contract(signature.return_annotation)
+                result = self.input(input_dict).instruct(instruction).output(output_dict).start()
+                if unwrap_key is not None and isinstance(result, dict):
+                    return result.get(unwrap_key)
+                return result
 
             return wrapper
         else:

@@ -146,8 +146,8 @@ def prompt_slots():
     # "options"
     # "chat_history", ! Notice: chat_history is a special prompt slot which allows message list only
     execution = agent.create_execution()
-    execution.set_execution_prompt("input", "Is v3 or v4 is Agently's latest version?")
-    execution.set_execution_prompt("agently_latest_version", "4.0.6.11")
+    execution.set_execution_prompt("input", "Which Agently major line should new examples use?")
+    execution.set_execution_prompt("agently_current_major_line", "4.x")
     print(execution.start())
 
 

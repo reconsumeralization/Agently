@@ -34,6 +34,7 @@ from agently.core import (
     ModelRequest,
     BaseAgent,
     Blocks,
+    SkillsManager,
     SkillsExecutor,
     WorkspaceManager,
 )
@@ -95,7 +96,8 @@ _load_default_actions(action_registry)
 action_dispatcher: Any = action.action_dispatcher
 action_runtime: Any = action.action_runtime
 action_flow: Any = action.action_flow
-skills_executor: SkillsExecutor = SkillsExecutor(plugin_manager, settings)
+skills_manager: SkillsManager = SkillsManager(plugin_manager, settings)
+skills_executor: SkillsExecutor = SkillsExecutor(plugin_manager, settings, manager=skills_manager)
 blocks: Blocks = Blocks(plugin_manager, settings)
 workspace: WorkspaceManager = WorkspaceManager()
 _agently_emitter: Any = event_center.create_emitter("Agently")
@@ -265,6 +267,7 @@ class AgentlyMain(Generic[A]):
         self.action_dispatcher = action_dispatcher
         self.action_runtime = action_runtime
         self.action_flow = action_flow
+        self.skills_manager = skills_manager
         self.skills_executor = skills_executor
         self.blocks = blocks
         self.workspace = workspace

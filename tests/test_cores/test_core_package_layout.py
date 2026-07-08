@@ -23,6 +23,7 @@ def test_core_root_exports_remain_stable():
         Prompt,
         RuntimeEvent,
         Session,
+        SkillsManager,
         SkillsExecutor,
         TaskBoard,
         TaskBoardValidator,
@@ -49,6 +50,7 @@ def test_core_root_exports_remain_stable():
     assert Prompt.__name__ == "Prompt"
     assert RuntimeEvent.__name__ == "RuntimeEvent"
     assert Session.__name__ == "Session"
+    assert SkillsManager.__name__ == "SkillsManager"
     assert SkillsExecutor.__name__ == "SkillsExecutor"
     assert TaskBoard.__name__ == "TaskBoard"
     assert TaskBoardValidator.__name__ == "TaskBoardValidator"
@@ -79,6 +81,7 @@ def test_execution_exchange_types_are_publicly_importable():
 
 def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.application.AgentExecution import AgentExecutionStream
+    from agently.core.application.SkillsManager import SkillsManager
     from agently.core.application.SkillsExecutor import SkillsExecutor
     from agently.core.Agent import BaseAgent
     from agently.core.operation.Action import Action, Tool
@@ -115,6 +118,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.orchestration.TriggerFlow.TriggerFlow").TriggerFlow is TriggerFlow
     assert importlib.import_module("agently.core.operation.Action.Action").Action is Action
     assert importlib.import_module("agently.core.operation.Action").Tool is Tool
+    assert importlib.import_module("agently.core.application.SkillsManager.SkillsManager").SkillsManager is SkillsManager
     assert importlib.import_module("agently.core.application.SkillsExecutor.SkillsExecutor").SkillsExecutor is SkillsExecutor
     assert importlib.import_module("agently.core.workspace.Workspace").Workspace is Workspace
     assert importlib.import_module("agently.core.workspace.ContextBuilder").ContextProfile is ContextProfile
@@ -138,6 +142,7 @@ def test_core_layout_keeps_only_classified_root_packages():
         "workspace",
     ]
     assert (core_root / "application" / "AgentExecution").is_dir()
+    assert (core_root / "application" / "SkillsManager").is_dir()
     assert (core_root / "application" / "SkillsExecutor").is_dir()
     assert (core_root / "operation" / "Action").is_dir()
     assert (core_root / "operation" / "ExecutionResource").is_dir()

@@ -37,7 +37,7 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Multi-turn task needs durable observations, artifacts, decisions, or checkpoints | [Workspace](../requests/workspace.md) |
 | Explicit workflow loop needs durable structured state, record links, execution snapshot lookup, and recall | [TriggerFlow Overview](../triggerflow/overview.md) + [Workspace](../requests/workspace.md); see `examples/workspace/workspace_loop_foundation.py` |
 | Need the model to call tools / MCP servers | [Action Runtime](../actions/action-runtime.md) |
-| Need common Python / shell / workspace / Node.js / SQLite ability | [Action Runtime](../actions/action-runtime.md), start with `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_workspace_file_actions(...)`, `agent.enable_nodejs(...)`, or `agent.enable_sqlite(...)` |
+| Need common Python / shell / workspace / Node.js / common-language code / SQLite ability | [Action Runtime](../actions/action-runtime.md), start with `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_workspace_file_actions(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, or `agent.enable_sqlite(...)` |
 | Need web search or page browse | [Action Runtime](../actions/action-runtime.md), use `from agently.builtins.actions import Search, Browse` and `agent.use_actions(...)` |
 | Need managed MCP/sandbox/process/browser/SQLite lifecycle before execution | [ExecutionResource](../actions/execution-environment.md), usually for action/plugin authors |
 | Deciding where a new extension belongs | [Extension Boundaries](../architecture/extension-boundaries.md) |

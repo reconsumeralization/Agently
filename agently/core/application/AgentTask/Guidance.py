@@ -20,6 +20,203 @@ _GUIDANCE_PREVIEW_CHARS = 800
 
 
 class AgentTaskGuidanceMixin(AgentTaskMixinBase):
+    async def _context_pack_with_task_context(self, context_pack: Any) -> "WorkspaceContextPackage":
+        context_with_skills = await self._context_pack_with_required_skill_context(context_pack)
+        return self._context_pack_with_guidance(context_with_skills)
+
+    async def _context_pack_with_required_skill_context(self, context_pack: Any) -> "WorkspaceContextPackage":
+        if not isinstance(context_pack, Mapping):
+            return cast("WorkspaceContextPackage", context_pack)
+        skill_ids, skill_pack_ids = self._required_skill_context_selectors()
+        if not skill_ids and not skill_pack_ids:
+            return cast("WorkspaceContextPackage", context_pack)
+
+        context = dict(context_pack)
+        diagnostics = context.get("diagnostics")
+        diagnostics = dict(diagnostics) if isinstance(diagnostics, Mapping) else {}
+        build_pack = getattr(self.agent, "async_build_skills_context_pack", None)
+        if not callable(build_pack):
+            diagnostics.setdefault("skills_context_pack", {})
+            diagnostics["skills_context_pack"] = {
+                "status": "unavailable",
+                "reason": "agent_skills_context_pack_builder_missing",
+                "required_skill_ids": skill_ids,
+                "required_skill_pack_ids": skill_pack_ids,
+            }
+            context["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            return cast("WorkspaceContextPackage", DataFormatter.sanitize(context))
+
+        typed_build_pack = cast("Callable[..., Awaitable[Any]]", build_pack)
+        try:
+            skill_context_pack = await typed_build_pack(
+                task=self.goal,
+                skill_ids=skill_ids or None,
+                skills_packs=skill_pack_ids or None,
+                include_guidance=True,
+                include_examples="auto",
+                include_references="auto",
+                include_assets=False,
+                include_public_lookup=False,
+                actionize_scripts=True,
+                budget_chars=self._skills_context_budget_chars(),
+                max_resource_chars=self._skills_context_max_resource_chars(),
+            )
+        except Exception as error:
+            diagnostics["skills_context_pack"] = {
+                "status": "failed",
+                "reason": "skills_context_pack_build_failed",
+                "required_skill_ids": skill_ids,
+                "required_skill_pack_ids": skill_pack_ids,
+                "error": {
+                    "type": error.__class__.__name__,
+                    "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                },
+            }
+            context["diagnostics"] = DataFormatter.sanitize(diagnostics)
+            return cast("WorkspaceContextPackage", DataFormatter.sanitize(context))
+
+        loaded_skill_ids = self._skills_context_pack_skill_ids(skill_context_pack)
+        context["skills_context_pack"] = self._compact_skills_context_pack_for_agent_task(skill_context_pack)
+        diagnostics["skills_context_pack"] = {
+            "status": "loaded" if loaded_skill_ids else "empty",
+            "required_skill_ids": skill_ids,
+            "required_skill_pack_ids": skill_pack_ids,
+            "loaded_skill_ids": loaded_skill_ids,
+            "used_chars": (
+                skill_context_pack.get("used_chars")
+                if isinstance(skill_context_pack, Mapping)
+                else None
+            ),
+            "citation_count": (
+                len(skill_context_pack.get("citations", []))
+                if isinstance(skill_context_pack, Mapping)
+                and isinstance(skill_context_pack.get("citations", []), Sequence)
+                and not isinstance(skill_context_pack.get("citations", []), str | bytes | bytearray)
+                else 0
+            ),
+        }
+        context["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        return cast("WorkspaceContextPackage", DataFormatter.sanitize(context))
+
+    @classmethod
+    def _compact_skills_context_pack_for_agent_task(cls, skill_context_pack: Any) -> dict[str, Any]:
+        if not isinstance(skill_context_pack, Mapping):
+            return {}
+        compact: dict[str, Any] = {}
+        for key in (
+            "schema_version",
+            "task",
+            "intent",
+            "budget_chars",
+            "used_chars",
+            "truncated",
+            "citations",
+            "public_sources",
+            "diagnostics",
+        ):
+            if key in skill_context_pack:
+                compact[key] = DataFormatter.sanitize(skill_context_pack.get(key))
+        raw_skills = skill_context_pack.get("skills")
+        skills: list[dict[str, Any]] = []
+        if isinstance(raw_skills, Sequence) and not isinstance(raw_skills, str | bytes | bytearray):
+            for item in raw_skills:
+                if not isinstance(item, Mapping):
+                    continue
+                skill_item: dict[str, Any] = {}
+                for key in (
+                    "skill_id",
+                    "display_name",
+                    "guidance",
+                    "selected_resources",
+                    "action_candidates",
+                ):
+                    if key in item:
+                        skill_item[key] = DataFormatter.sanitize(item.get(key))
+                if skill_item:
+                    skills.append(skill_item)
+        compact["skills"] = skills
+        compact["resource_policy"] = {
+            "skills_citations_are_already_loaded": True,
+            "do_not_use_citations_as_workspace_paths": True,
+            "cold_source_paths_hidden": True,
+        }
+        return DataFormatter.sanitize(compact)
+
+    def _required_skill_context_selectors(self) -> tuple[list[str], list[str]]:
+        skill_ids: list[str] = []
+        skill_pack_ids: list[str] = []
+
+        constraints = self.options.get("capability_constraints") if isinstance(self.options, Mapping) else None
+        if isinstance(constraints, Mapping):
+            skills = constraints.get("skills")
+            if isinstance(skills, Mapping):
+                for skill_id in self._normalize_string_list(skills.get("required")):
+                    if skill_id not in skill_ids:
+                        skill_ids.append(skill_id)
+            packs = constraints.get("skill_packs")
+            if isinstance(packs, Mapping):
+                for pack_id in self._normalize_string_list(packs.get("required")):
+                    if pack_id not in skill_pack_ids:
+                        skill_pack_ids.append(pack_id)
+
+        planner_capabilities = getattr(self, "_planner_capabilities", None)
+        capabilities = planner_capabilities() if callable(planner_capabilities) else []
+        if isinstance(capabilities, Sequence) and not isinstance(capabilities, str | bytes | bytearray):
+            for item in capabilities:
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("mode") or "").strip() != "required":
+                    continue
+                capability_id = str(item.get("id") or item.get("capability_id") or "").strip()
+                if not capability_id:
+                    continue
+                kind = str(item.get("kind") or "").strip()
+                if kind == "skill" and capability_id not in skill_ids:
+                    skill_ids.append(capability_id)
+                elif kind == "skill_pack" and capability_id not in skill_pack_ids:
+                    skill_pack_ids.append(capability_id)
+        return skill_ids, skill_pack_ids
+
+    @classmethod
+    def _skills_context_pack_skill_ids(cls, skill_context_pack: Any) -> list[str]:
+        if not isinstance(skill_context_pack, Mapping):
+            return []
+        raw_skills = skill_context_pack.get("skills")
+        if not isinstance(raw_skills, Sequence) or isinstance(raw_skills, str | bytes | bytearray):
+            return []
+        skill_ids: list[str] = []
+        for item in raw_skills:
+            if not isinstance(item, Mapping):
+                continue
+            skill_id = str(item.get("skill_id") or item.get("id") or "").strip()
+            if skill_id and skill_id not in skill_ids:
+                skill_ids.append(skill_id)
+        return skill_ids
+
+    def _skills_context_budget_chars(self) -> int:
+        return self._option_int(("skills_context_budget_chars", "skills_context_budget"), default=12000)
+
+    def _skills_context_max_resource_chars(self) -> int:
+        return self._option_int(("skills_context_max_resource_chars", "skills_context_resource_chars"), default=6000)
+
+    def _option_int(self, names: tuple[str, ...], *, default: int) -> int:
+        sources: list[Any] = [self.options]
+        agent_task_options = self.options.get("agent_task") if isinstance(self.options, Mapping) else None
+        if isinstance(agent_task_options, Mapping):
+            sources.append(agent_task_options)
+        for source in sources:
+            if not isinstance(source, Mapping):
+                continue
+            for name in names:
+                raw_value = source.get(name)
+                if raw_value in (None, "", [], {}):
+                    continue
+                try:
+                    return max(0, int(raw_value))
+                except (TypeError, ValueError):
+                    continue
+        return default
+
     async def async_add_guidance(
         self,
         content: Any,

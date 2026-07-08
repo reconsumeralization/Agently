@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import Any
+import inspect
 
 
 class PythonSandboxActionExecutor:
@@ -57,6 +58,12 @@ class PythonSandboxActionExecutor:
         environment_resources = action_call.get("execution_resource_resources", {})
         if isinstance(environment_resources, dict):
             sandbox = environment_resources.get(action_id)
+            if sandbox is not None and hasattr(sandbox, "run_python_code"):
+                output = sandbox.run_python_code(
+                    python_code=python_code,
+                    timeout=int(policy.get("timeout_seconds", 0) or 0) or None,
+                )
+                return await output if inspect.isawaitable(output) else output
             if sandbox is not None and hasattr(sandbox, "run"):
                 return sandbox.run(python_code)
 

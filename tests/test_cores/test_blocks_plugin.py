@@ -834,6 +834,46 @@ async def test_blocks_approval_wait_uses_policy_approval_gate():
 
 
 @pytest.mark.asyncio
+async def test_blocks_approval_wait_global_access_control_auto_allow():
+    Agently.configure_policy_approval(handler="fail_closed")
+    Agently.set_settings("access_control_policy.auto_allow", True)
+    try:
+        graph = Agently.blocks.compile(
+            {
+                "plan_id": "plan-approval-auto-allow",
+                "plan_blocks": [
+                    {
+                        "id": "approve",
+                        "plan_block_id": "approval_wait",
+                        "kind": "approval_wait",
+                        "bound_inputs": {
+                            "request": {
+                                "request_id": "blocks-approval-auto-allow",
+                                "capability": "write_file",
+                                "subject": "write report",
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+        execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=False)
+
+        await execution.async_start({"draft": True})
+        snapshot = await execution.async_close(timeout=5)
+
+        evidence = Agently.blocks.map_evidence(graph, snapshot)
+        output = evidence.execution_block_results[0]["output"]
+        assert execution.get_pending_interrupts() == {}
+        assert output["approved"] is True
+        assert output["decision"]["status"] == "approved"
+        assert output["decision"]["handler"] == "access_control_policy.auto_allow"
+    finally:
+        Agently.set_settings("access_control_policy.auto_allow", False)
+        Agently.configure_policy_approval(handler="input_timeout_fail")
+
+
+@pytest.mark.asyncio
 async def test_blocks_approval_wait_uses_triggerflow_pause_and_resume():
     Agently.configure_policy_approval(handler="fail_closed")
     try:

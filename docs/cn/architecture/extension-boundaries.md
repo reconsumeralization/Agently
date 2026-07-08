@@ -59,7 +59,7 @@ Plugin 在 core contract 背后提供可替换的 backend 行为。
 
 示例：
 
-- 用于 Python、Bash、Node.js、Docker、MCP、SQLite、vector store、browser 或 remote runner 的 `ExecutionResourceProvider`。
+- 用于 Python、Bash、Node.js、Docker-backed 常用语言 profiles、MCP、SQLite、vector store、browser 或 remote runner 的 `ExecutionResourceProvider`。
 - 用于一次原子 action call 的 `ActionExecutor`。
 - 用于 action planning 和 loop 行为的 `ActionRuntime`。
 - 用于执行策略的 `ActionFlow`。
@@ -77,8 +77,9 @@ Built-in 是 Agently 随框架提供的默认能力目录。它们以 Action 的
 适合作为 built-in 的能力：
 
 - 在受 policy 约束的 workspace 内执行 Bash 命令
-- 在安全 sandbox 内运行 Python 代码
-- 通过托管 runner 运行 Node.js 代码
+- 通过 Docker-backed runtime profile 运行 Python 代码
+- 通过 Docker-backed runtime profile 运行 Node.js 代码
+- 通过 Docker-backed runtime profiles 运行常用语言代码
 - 文件搜索、读取、写入
 - web 搜索与页面 browse
 - SQLite 读写
@@ -103,12 +104,13 @@ agent.enable_python(...)
 agent.enable_shell(...)
 agent.enable_workspace_file_actions(...)
 agent.enable_nodejs(...)
+agent.enable_code_runtime(...)
 agent.enable_sqlite(...)
 agent.enable_vector_store(...)
 agent.enable_coding_workspace(...)
 ```
 
-这些 API 应该描述开发者意图，不应该要求应用开发者理解 `ExecutionResourceHandle`、provider lifecycle 或 executor 内部机制。
+这些 API 应该描述开发者意图，不应该要求应用开发者理解 `ExecutionResourceHandle`、provider lifecycle 或 executor 内部机制。Python、shell、Node.js 和常用语言 code runtime 这类代码执行 helper 默认应使用 Docker-backed runtime profile；只有可信兼容路径才显式选择本地执行。
 
 ### Typing 与 IDE 辅助
 
@@ -131,8 +133,8 @@ manager、默认实现、registry、adapter、policy 或 validation 等多个架
 
 已落地案例包括 `core/Action`、`core/TriggerFlow`、`core/orchestration/TaskDAG`、
 `core/workspace`、`builtins/plugins/ExecutionResourceProvider` 和
-`builtins/plugins/SkillsExecutor`。公开 import 通过 package `__init__.py`
-和顶层 re-export 保持稳定。
+`builtins/plugins/SkillsManager`；`builtins/plugins/SkillsExecutor` 仅作为兼容
+facade 保留。公开 import 通过 package `__init__.py` 和顶层 re-export 保持稳定。
 
 ## Action 与 ExecutionResource
 

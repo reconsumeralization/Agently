@@ -23,6 +23,7 @@ from agently.core.operation.ExecutionResource import (
     ExecutionResourceApprovalRequired,
     ExecutionResourceError,
 )
+from agently.core.operation.PolicyApproval import merge_access_control_policy
 from agently.types.data import (
     ActionApproval,
     ActionCall,
@@ -48,6 +49,7 @@ class ActionDispatcher:
     # command must never carry these: setting them would let model output grant
     # its own approval or widen sandbox/network/path limits.
     HOST_ONLY_POLICY_KEYS = frozenset({
+        "auto_allow",
         "policy_approval_granted",
         "policy_approval_decision",
         "policy_approval_handler",
@@ -229,7 +231,7 @@ class ActionDispatcher:
         ):
             if isinstance(candidate, dict):
                 merged.update(cast(dict[str, Any], candidate))
-        return cast(ActionPolicy, merged)
+        return cast(ActionPolicy, merge_access_control_policy(merged, settings))
 
     def _approval_result(
         self,
@@ -407,6 +409,7 @@ class ActionDispatcher:
     @staticmethod
     def _to_execution_resource_policy(policy: ActionPolicy) -> ExecutionResourcePolicy:
         keys = {
+            "auto_allow",
             "approval_mode",
             "policy_approval_handler",
             "workspace_roots",
@@ -698,6 +701,16 @@ class ActionDispatcher:
         except ExecutionResourceError as error:
             for handle in ensured_handles:
                 await execution_resource.async_release(handle)
+            action_call.setdefault("diagnostics", [])
+            diagnostics = action_call.get("diagnostics")
+            if isinstance(diagnostics, list):
+                diagnostics.append(
+                    self._exception_diagnostic(
+                        code=error.code,
+                        message=str(error),
+                        meta=error.payload,
+                    )
+                )
             return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,

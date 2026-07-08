@@ -27,7 +27,7 @@ Agently 的 action 栈在编排层之下有三个可替换插件层：
 | `TriggerFlow` | action 之上的高层编排（loop、分支、pause/resume、子流）—— 见 [TriggerFlow](../triggerflow/overview.md) | `TriggerFlow` 核心 |
 | `ActionRuntime` | 规划协议、action 调用归一化、默认执行编排 | `AgentlyActionRuntime` |
 | `ActionFlow` | `ActionRuntime` 与 flow 表示之间的桥 | `TriggerFlowActionFlow` |
-| `ActionExecutor` | 单个 action 实际怎么跑 | local function、MCP、Python/Bash sandbox、Search/Browse、Node.js、Docker、SQLite executors |
+| `ActionExecutor` | 单个 action 实际怎么跑 | local function、MCP、Python/Bash sandbox、Search/Browse、Node.js、常用代码 runtime、Docker、SQLite executors |
 | `ExecutionResource` | executor 调用前需要准备的托管执行依赖 | MCP、Bash、Python、Node、Docker、Browser、SQLite providers |
 
 `Action` 是 `agently.core` 根导出的执行门面，连线：
@@ -104,9 +104,10 @@ print(calculate("3333+6666=?"))
 | `agent.use_actions(["name1", "name2"])` | 按名注册预注册的 action |
 | `agent.use_actions(Search(...))` | 挂载来自 `agently.builtins.actions` 的内置 Search package |
 | `agent.use_actions(Browse(...))` | 挂载来自 `agently.builtins.actions` 的内置 Browse package |
-| `agent.enable_python(...)` | 挂载托管 `run_python` action，用于确定性代码执行 |
-| `agent.enable_shell(...)` | 挂载带 workspace root、命令 allowlist、timeout 和有界输出预览的托管 `run_bash` action |
-| `agent.enable_nodejs(...)` | 挂载托管 `run_nodejs` action |
+| `agent.enable_python(...)` | 挂载默认 Docker-backed 的 `run_python` action，用于确定性代码执行 |
+| `agent.enable_shell(...)` | 挂载默认 Docker-backed、带 workspace root、命令 allowlist、timeout 和有界输出预览的 `run_bash` action |
+| `agent.enable_nodejs(...)` | 挂载默认 Docker-backed 的 `run_nodejs` action |
+| `agent.enable_code_runtime(...)` | 挂载常用语言 Docker-backed code runtime action，支持 Python、JavaScript/Node.js、TypeScript、C、C++、Go、Rust、Java、C#/.NET、PHP、Ruby、Perl、R、Lua 和 Bash |
 | `agent.enable_sqlite(...)` | 挂载托管 `query_sqlite` action |
 | `agent.enable_workspace_file_actions(...)` | 把当前 Workspace 文件作业区暴露成 handler-backed 列表、搜索、读取、写入 actions；`export=True` 且 `write=True` 时额外暴露 `export_file` |
 | `agent.enable_coding_agent_actions(...)` | 暴露 coding-agent Workspace actions，用于文件读回、glob/grep 检索、定点编辑、unified diff patch 和带 guard 的整文件写入 |
@@ -123,6 +124,21 @@ agent 上可见的 action/tool schema，包括 agent-scoped actions、通过
 应用代码要给模型开放 Python、shell、workspace 等常见能力时，优先使用
 `enable_*` helpers。只有在开发自定义 Action 后端时，才需要使用
 `register_action(..., executor=..., execution_resources=[...])`。
+
+`agent.enable_python(...)`、`agent.enable_shell(...)` 和
+`agent.enable_nodejs(...)` 默认使用 `sandbox="auto"` 与
+`provisioning_profile="strict"`：先检查本地 Docker CLI 和 Docker daemon，再通过
+Docker-backed ExecutionResource profile 执行代码。缺失镜像默认
+`image_pull_policy="never"`，会用 `execution_resource.docker_image_missing`
+等结构化 diagnostics fail closed，不会静默退回到宿主进程执行。只有可信兼容路径才应显式传
+`sandbox="trusted_local"`，使用旧的 in-process Python、本地 shell 或本地 Node.js runner。
+
+Coding Agent、Agently Skills、examples 和框架测试可使用
+`provisioning_profile="developer"` 或 `"ci"`。这些 profile 默认
+`image_pull_policy="if_missing"` 且 `dependency_policy="install"`，provider 可以自动
+拉取缺失 Docker 镜像，并在固定 entrypoint 执行前从标准 manifest 准备依赖。依赖安装不是
+模型可见的 action input；不要让模型通过代码 action schema 直接运行 `pip`、`npm`、
+`cargo` 或其他包管理命令。
 
 coding-agent 风格的本地文件工作优先使用
 `agent.enable_coding_agent_actions(...)`。它会在当前 Workspace file root 上暴露
@@ -305,7 +321,7 @@ agent.set_settings("action.planning_model_key", "task-main")
 ```
 
 这个配置同时作用于默认 structured-plan 和 native tool-call planning
-路径。当 SkillsExecutor 或 AgentTask 把一个 bounded action round
+路径。当 SkillsManager-backed Skills execution 或 AgentTask 把一个 bounded action round
 委托给 ActionRuntime 时尤其重要，否则 action planning 可能没有显式使用
 预期的 `model_pool` 业务 key。
 

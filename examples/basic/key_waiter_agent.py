@@ -1,5 +1,3 @@
-import asyncio
-
 from agently import Agently
 
 Agently.set_settings(
@@ -14,8 +12,7 @@ Agently.set_settings(
 agent = Agently.create_agent()
 
 # Get specific key before all generation completed
-(
-
+thinking_execution = (
     agent.input("34643523+52131231=?").output(
         {
             "thinking": (str,),
@@ -25,11 +22,11 @@ agent = Agently.create_agent()
     )
 )
 
-reply = agent.get_key_result("thinking")
+reply = thinking_execution.get_key_result("thinking")
 print(reply)
 
 # Get specific keys from generator before generation completed
-(
+wait_execution = (
     agent.input("34643523+52131231=?").output(
         {
             "thinking": (str,),
@@ -39,7 +36,7 @@ print(reply)
     )
 )
 
-gen = agent.wait_keys(["thinking", "reply"])
+gen = wait_execution.wait_keys(["thinking", "reply"])
 for event, data in gen:
     print(event, data)
 
@@ -69,9 +66,11 @@ for event, data in gen:
 #
 # How it works:
 # Three APIs for extracting specific structured output fields before or as they arrive:
-# get_key_result("key") — blocks until the specified key is fully generated,
-#   returns its value; remaining keys continue generating in the background.
-# wait_keys(["key1","key2"]) — returns a generator that yields (key_name, value)
-#   tuples as each named key finishes; other keys are discarded.
-# when_key("key", callback) + start_waiter() — registers callbacks dispatched
-#   automatically as each key completes; start_waiter() drives the generator.
+# agent.input(...).output(...) returns an AgentExecution. Key waiter APIs live on
+# that one-run execution:
+#   execution.get_key_result("key") — blocks until the specified key is fully generated,
+#     returns its value; remaining keys continue generating in the background.
+#   execution.wait_keys(["key1","key2"]) — returns a generator that yields
+#     (key_name, value) tuples as each named key finishes; other keys are discarded.
+#   execution.when_key("key", callback) + start_waiter() — registers callbacks
+#     dispatched automatically as each key completes; start_waiter() drives the generator.

@@ -3,6 +3,8 @@ from typing import Any, cast
 import importlib
 import sys
 import types
+import uuid
+from pathlib import Path
 
 from agently import Agently
 from agently.core import (
@@ -141,6 +143,211 @@ def test_action_python_sandbox_uses_execution_resource():
     result_data = cast(dict[str, Any], result.get("data"))
     assert result_data["result"] == 42
     assert Agently.execution_resource.list(scope="action_call") == []
+
+
+def test_default_python_docker_sandbox_fails_closed_when_docker_unavailable(monkeypatch):
+    docker_module = importlib.import_module(
+        "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
+    )
+
+    monkeypatch.setattr(docker_module.shutil, "which", lambda binary: None)
+    action_id = f"docker_missing_python_{uuid.uuid4().hex[:8]}"
+    agent = Agently.create_agent()
+    agent.enable_python(action_id=action_id)
+
+    result = agent.action.execute_action(action_id, {"python_code": "result = 1"})
+
+    assert result.get("status") == "error"
+    assert result.get("success") is False
+    diagnostics = result.get("diagnostics", [])
+    assert any(item.get("code") == "execution_resource.docker_unavailable" for item in diagnostics)
+    assert Agently.execution_resource.list(scope="action_call") == []
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_strict_profile_reports_missing_image_without_pull(monkeypatch):
+    docker_module = importlib.import_module(
+        "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        _ = kwargs
+        calls.append([str(item) for item in args])
+        if args[:2] == ["docker", "version"]:
+            return types.SimpleNamespace(returncode=0, stdout="26.0.0\n", stderr="")
+        if args[:3] == ["docker", "image", "inspect"]:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="No such image")
+        raise AssertionError(f"unexpected docker command: {args}")
+
+    monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{ binary }")
+    monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+
+    manager = _create_manager()
+    with pytest.raises(ExecutionResourceError) as exc_info:
+        await manager.async_ensure(
+            cast(ExecutionResourceRequirement, {
+                "kind": "docker",
+                "scope": "action_call",
+                "resource_key": "strict_missing_node",
+                "config": {
+                    "runtime_profile": {
+                        "language": "nodejs",
+                        "image": "node:22-slim",
+                        "provisioning_profile": "strict",
+                        "image_pull_policy": "never",
+                    }
+                },
+                "policy": {"timeout_seconds": 20},
+            })
+        )
+
+    assert exc_info.value.code == "execution_resource.docker_image_missing"
+    assert any(call[:3] == ["docker", "image", "inspect"] for call in calls)
+    assert not any(call[:2] == ["docker", "pull"] for call in calls)
+    assert manager.list() == []
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_developer_profile_pulls_missing_image(monkeypatch):
+    docker_module = importlib.import_module(
+        "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
+    )
+    calls: list[list[str]] = []
+    pulled = False
+
+    def fake_run(args, **kwargs):
+        nonlocal pulled
+        _ = kwargs
+        calls.append([str(item) for item in args])
+        if args[:2] == ["docker", "version"]:
+            return types.SimpleNamespace(returncode=0, stdout="26.0.0\n", stderr="")
+        if args[:3] == ["docker", "image", "inspect"]:
+            return types.SimpleNamespace(returncode=0 if pulled else 1, stdout="sha256:test\n" if pulled else "", stderr="")
+        if args[:2] == ["docker", "pull"]:
+            pulled = True
+            return types.SimpleNamespace(returncode=0, stdout="pulled node:22-slim\n", stderr="")
+        raise AssertionError(f"unexpected docker command: {args}")
+
+    monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{ binary }")
+    monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+
+    manager = _create_manager()
+    handle = await manager.async_ensure(
+        cast(ExecutionResourceRequirement, {
+            "kind": "docker",
+            "scope": "action_call",
+            "resource_key": "developer_node",
+            "config": {
+                "runtime_profile": {
+                    "language": "nodejs",
+                    "image": "node:22-slim",
+                    "provisioning_profile": "developer",
+                }
+            },
+            "policy": {"timeout_seconds": 20},
+        })
+    )
+
+    meta = cast(dict[str, Any], handle.get("meta", {}))
+    profile = cast(dict[str, Any], meta.get("runtime_profile", {}))
+    image_preparation = cast(dict[str, Any], meta.get("image_preparation", {}))
+    assert profile["image_pull_policy"] == "if_missing"
+    assert profile["dependency_policy"] == {"mode": "install"}
+    assert image_preparation["status"] == "pulled"
+    assert any(call[:2] == ["docker", "pull"] and call[-1] == "node:22-slim" for call in calls)
+    await manager.async_release(handle)
+
+
+@pytest.mark.asyncio
+async def test_docker_code_runtime_c_generates_fixed_build_run_script(monkeypatch):
+    docker_module = importlib.import_module(
+        "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
+    )
+    scripts: dict[str, str] = {}
+    run_args: list[str] = []
+
+    def fake_run(args, **kwargs):
+        _ = kwargs
+        if args[:3] == ["docker", "image", "inspect"]:
+            return types.SimpleNamespace(returncode=0, stdout="sha256:gcc\n", stderr="")
+        if args[:2] == ["docker", "run"]:
+            run_args.extend(str(item) for item in args)
+            mount = next(str(args[index + 1]) for index, item in enumerate(args) if item == "-v" and ":/sandbox:ro" in str(args[index + 1]))
+            host_path = Path(mount.split(":/sandbox:ro", 1)[0])
+            scripts["run.sh"] = (host_path / "run.sh").read_text(encoding="utf-8")
+            scripts["main.c"] = (host_path / "main.c").read_text(encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout="hello\n", stderr="")
+        raise AssertionError(f"unexpected docker command: {args}")
+
+    monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{ binary }")
+    monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+
+    resource = docker_module.DockerExecutionResource(
+        runtime_profile={
+            "language": "c",
+            "provisioning_profile": "strict",
+            "image_pull_policy": "never",
+        }
+    )
+    result = await resource.run_code(
+        language="c",
+        source_code='#include <stdio.h>\nint main(void){ puts("hello"); }\n',
+        args=["arg1"],
+    )
+
+    assert result["ok"] is True
+    assert "gcc:14" in run_args
+    assert run_args[-3:] == ["sh", "/sandbox/run.sh", "arg1"]
+    assert "cc /sandbox/main.c -o /tmp/agently-code-runtime-app" in scripts["run.sh"]
+    assert 'exec /tmp/agently-code-runtime-app "$@"' in scripts["run.sh"]
+    assert "puts(\"hello\")" in scripts["main.c"]
+
+
+@pytest.mark.asyncio
+async def test_docker_code_runtime_go_generates_fixed_build_run_script(monkeypatch):
+    docker_module = importlib.import_module(
+        "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
+    )
+    scripts: dict[str, str] = {}
+    run_args: list[str] = []
+
+    def fake_run(args, **kwargs):
+        _ = kwargs
+        if args[:3] == ["docker", "image", "inspect"]:
+            return types.SimpleNamespace(returncode=0, stdout="sha256:go\n", stderr="")
+        if args[:2] == ["docker", "run"]:
+            run_args.extend(str(item) for item in args)
+            mount = next(str(args[index + 1]) for index, item in enumerate(args) if item == "-v" and ":/sandbox:ro" in str(args[index + 1]))
+            host_path = Path(mount.split(":/sandbox:ro", 1)[0])
+            scripts["run.sh"] = (host_path / "run.sh").read_text(encoding="utf-8")
+            scripts["main.go"] = (host_path / "main.go").read_text(encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout="hello\n", stderr="")
+        raise AssertionError(f"unexpected docker command: {args}")
+
+    monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{ binary }")
+    monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+
+    resource = docker_module.DockerExecutionResource(
+        runtime_profile={
+            "language": "go",
+            "provisioning_profile": "strict",
+            "image_pull_policy": "never",
+        }
+    )
+    result = await resource.run_code(
+        language="go",
+        source_code='package main\nimport "fmt"\nfunc main(){ fmt.Println("hello") }\n',
+    )
+
+    assert result["ok"] is True
+    assert "golang:1" in run_args
+    assert run_args[-2:] == ["sh", "/sandbox/run.sh"]
+    assert "GOCACHE=/tmp/go-build" in scripts["run.sh"]
+    assert "GOMODCACHE=/tmp/go-mod" in scripts["run.sh"]
+    assert "go build -o /tmp/agently-code-runtime-app ./main.go" in scripts["run.sh"]
+    assert 'exec /tmp/agently-code-runtime-app "$@"' in scripts["run.sh"]
+    assert "fmt.Println" in scripts["main.go"]
 
 
 def test_action_bash_sandbox_uses_execution_resource(tmp_path):
@@ -490,6 +697,156 @@ def test_mcp_transport_normalization_supports_url_headers_and_configs():
     assert merged["mcpServers"]["weather"]["headers"] == {"X-Team": "ops"}
     assert "headers" not in merged["mcpServers"]["filesystem"]
     assert normalize_mcp_transport(config) is config
+
+
+@pytest.mark.asyncio
+async def test_docker_execution_resource_requires_daemon_preflight(monkeypatch):
+    from agently.builtins.plugins.ExecutionResourceProvider import DockerExecutionResourceProvider
+    docker_module = importlib.import_module(
+        "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
+    )
+
+    class FakeCompletedProcess:
+        returncode = 1
+        stdout = ""
+        stderr = "Cannot connect to the Docker daemon"
+
+    monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(docker_module.subprocess, "run", lambda *args, **kwargs: FakeCompletedProcess())
+
+    provider = DockerExecutionResourceProvider()
+
+    with pytest.raises(ExecutionResourceError) as raised:
+        await provider.async_ensure(
+            requirement={
+                "kind": "docker",
+                "scope": "action_call",
+                "resource_key": "docker_test",
+                "config": {"docker_binary": "docker"},
+            },
+            policy={},
+            existing_handle=None,
+        )
+
+    assert raised.value.code == "execution_resource.docker_unavailable"
+    assert raised.value.payload["docker_binary"] == "docker"
+    assert raised.value.payload["reason"] == "daemon_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_docker_python_runtime_profile_uses_isolated_defaults(monkeypatch):
+    from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
+        DockerExecutionResource,
+    )
+    docker_module = importlib.import_module(
+        "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
+    )
+
+    calls: list[list[str]] = []
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = "ok\n"
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        _ = kwargs
+        calls.append([str(item) for item in args])
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+
+    resource = DockerExecutionResource(
+        docker_binary="docker",
+        timeout=7,
+        runtime_profile={
+            "language": "python",
+            "image": "python:3.12-slim",
+            "network_mode": "disabled",
+            "dependency_policy": {"mode": "deny"},
+        },
+    )
+
+    result = await resource.run_python_code(python_code="print('ok')", timeout=5)
+
+    assert result["ok"] is True
+    args = calls[-1]
+    assert args[:3] == ["docker", "run", "--rm"]
+    assert "--network" in args
+    assert args[args.index("--network") + 1] == "none"
+    assert "--cpus" in args
+    assert "--memory" in args
+    assert any(arg.endswith(":/sandbox:ro") for arg in args)
+    assert "python:3.12-slim" in args
+    image_index = args.index("python:3.12-slim")
+    assert args[image_index + 1 : image_index + 3] == ["python", "/sandbox/main.py"]
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_profile_reports_timeout(monkeypatch):
+    from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
+        DockerExecutionResource,
+    )
+    docker_module = importlib.import_module(
+        "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
+    )
+
+    def fake_run(args, **kwargs):
+        _ = kwargs
+        if args[:3] == ["docker", "image", "inspect"]:
+            return types.SimpleNamespace(returncode=0, stdout="sha256:python\n", stderr="")
+        raise docker_module.subprocess.TimeoutExpired(
+            cmd=["docker", "run"],
+            timeout=3,
+            output="partial stdout",
+            stderr="partial stderr",
+        )
+
+    monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+
+    resource = DockerExecutionResource(
+        docker_binary="docker",
+        runtime_profile={
+            "language": "python",
+            "image": "python:3.12-slim",
+        },
+    )
+
+    result = await resource.run_python_code(python_code="import time; time.sleep(10)", timeout=3)
+
+    assert result["ok"] is False
+    assert result["status"] == "timed_out"
+    assert result["reason"] == "container_timeout"
+    assert result["diagnostics"][0]["code"] == "docker_runtime.container_timeout"
+
+
+@pytest.mark.asyncio
+async def test_docker_shell_runtime_profile_keeps_command_allowlist(tmp_path):
+    from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
+        DockerExecutionResource,
+    )
+
+    resource = DockerExecutionResource(
+        docker_binary="docker",
+        runtime_profile={
+            "language": "shell",
+            "image": "python:3.12-slim",
+            "allowed_cmd_prefixes": ["pwd"],
+            "allowed_workdir_roots": [str(tmp_path)],
+        },
+    )
+
+    blocked = await resource.run_shell_command(
+        cmd="python -c 'print(1)'",
+        workdir=str(tmp_path),
+    )
+
+    assert blocked["ok"] is False
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "cmd_not_allowed"
+    assert blocked["diagnostics"][0]["code"] == "shell.cmd_not_allowed"
 
 
 @pytest.mark.asyncio

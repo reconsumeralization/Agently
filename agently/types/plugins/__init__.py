@@ -37,6 +37,7 @@ from .SkillsExecutor import (
     SkillsPlanningContext,
     SkillsRuntimeContext,
 )
+from .SkillsManager import SkillsManager
 from .AgentOrchestrator import AgentOrchestrator
 from .AgentExecution import AgentExecution, AgentStepExecutor
 from .Workspace import (

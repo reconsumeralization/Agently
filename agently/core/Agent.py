@@ -1753,4 +1753,12 @@ class BaseAgent:
 
     # Prompt
     def get_prompt_text(self) -> str:
-        return self.request_prompt.to_text()[6:][:-11]
+        try:
+            return self.request_prompt.to_text()[6:][:-11]
+        except KeyError as error:
+            raise RuntimeError(
+                "`Agent.get_prompt_text()` only inspects prompt data kept on the Agent. "
+                "`agent.input(...)` creates and returns an AgentExecution; assign that "
+                "execution and call `execution.get_prompt_text()` to inspect one-run "
+                "chain prompts."
+            ) from error

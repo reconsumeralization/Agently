@@ -1,6 +1,8 @@
 import pytest
 
 import asyncio
+import shlex
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,7 +109,7 @@ def test_model_policy_override_cannot_grant_approval():
     blocked = action.execute_action(
         action_id,
         {},
-        policy_override={"policy_approval_granted": True, "approval_mode": "auto"},
+        policy_override={"policy_approval_granted": True, "approval_mode": "auto", "auto_allow": True},
         source_protocol="structured_plan",
     )
     assert blocked.get("status") == "blocked"
@@ -126,6 +128,7 @@ def test_sanitize_policy_override_strips_host_only_keys_for_model_sources():
     from agently.core.operation.Action.ActionDispatcher import ActionDispatcher
 
     override: ActionPolicy = {
+        "auto_allow": True,
         "policy_approval_granted": True,
         "allowed_cmd_prefixes": ["rm"],
     }
@@ -133,9 +136,10 @@ def test_sanitize_policy_override_strips_host_only_keys_for_model_sources():
         override, source_protocol="native_tool_calls"
     )
     assert "policy_approval_granted" not in sanitized
+    assert "auto_allow" not in sanitized
     assert "allowed_cmd_prefixes" not in sanitized
     assert sanitized == {}
-    assert set(stripped) == {"policy_approval_granted", "allowed_cmd_prefixes"}
+    assert set(stripped) == {"auto_allow", "policy_approval_granted", "allowed_cmd_prefixes"}
 
     kept, none_stripped = ActionDispatcher._sanitize_policy_override(
         override, source_protocol="direct"
@@ -237,9 +241,9 @@ def test_model_sourced_bash_action_input_strips_allow_unsafe(tmp_path):
     agent = Agently.create_agent()
     action_id = f"bash_input_safety_{ uuid.uuid4().hex[:8] }"
     target = tmp_path / "unsafe_probe.txt"
-    command = "python -c \"open('unsafe_probe.txt','w').write('bypassed')\""
+    command = f"{ shlex.quote(sys.executable) } -c \"open('unsafe_probe.txt','w').write('bypassed')\""
 
-    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id=action_id)
+    agent.enable_shell(root=tmp_path, commands=["pwd"], action_id=action_id, sandbox="trusted_local")
     spec = agent.action.action_registry.get_spec(action_id)
     assert spec is not None
     kwargs = spec.get("kwargs")
@@ -505,6 +509,30 @@ def test_action_dispatcher_fail_closed_handler_returns_approval_required():
     finally:
         Agently.configure_policy_approval(handler="input_timeout_fail")
     assert legacy["status"] == "approval_required"
+
+
+def test_action_dispatcher_global_access_control_auto_allow_approves():
+    action = Agently.action
+    action_id = f"global_auto_allow_action_{ uuid.uuid4().hex[:8] }"
+    action.register_action(
+        action_id=action_id,
+        desc="Approval gated action.",
+        kwargs={},
+        func=lambda: "ok",
+        approval_required=True,
+        expose_to_model=False,
+    )
+
+    Agently.configure_policy_approval(handler="fail_closed")
+    Agently.set_settings("access_control_policy.auto_allow", True)
+    try:
+        result = action.execute_action(action_id, {})
+    finally:
+        Agently.set_settings("access_control_policy.auto_allow", False)
+        Agently.configure_policy_approval(handler="input_timeout_fail")
+
+    assert result.get("status") == "success"
+    assert result.get("result") == "ok"
 
 
 def test_action_sandbox_executors(tmp_path):

@@ -35,6 +35,120 @@ class ActionResourceRegistrar:
         self._action = action
 
     @staticmethod
+    def _normalize_code_sandbox(value: Literal["auto", "docker", "trusted_local"] | str) -> Literal["auto", "docker", "trusted_local"]:
+        normalized = str(value or "trusted_local").strip().lower().replace("-", "_")
+        if normalized in {"local", "python", "node", "bash"}:
+            normalized = "trusted_local"
+        if normalized not in {"auto", "docker", "trusted_local"}:
+            raise ValueError("sandbox must be one of: 'auto', 'docker', 'trusted_local'.")
+        return cast(Literal["auto", "docker", "trusted_local"], normalized)
+
+    @staticmethod
+    def _normalize_dependency_policy(value: Literal["deny", "request", "install"] | dict[str, Any] | str) -> dict[str, Any]:
+        if isinstance(value, dict):
+            normalized = dict(value)
+            mode = str(normalized.get("mode", "deny")).strip().lower() or "deny"
+        else:
+            mode = str(value or "deny").strip().lower() or "deny"
+            normalized = {}
+        if mode not in {"deny", "request", "install"}:
+            raise ValueError("dependency_policy must be one of: 'deny', 'request', 'install'.")
+        normalized["mode"] = mode
+        return normalized
+
+    @staticmethod
+    def _normalize_provisioning_profile(value: Literal["strict", "developer", "ci"] | str) -> Literal["strict", "developer", "ci"]:
+        normalized = str(value or "strict").strip().lower().replace("-", "_")
+        if normalized not in {"strict", "developer", "ci"}:
+            raise ValueError("provisioning_profile must be one of: 'strict', 'developer', 'ci'.")
+        return cast(Literal["strict", "developer", "ci"], normalized)
+
+    @staticmethod
+    def _normalize_image_pull_policy(
+        value: Literal["never", "request", "if_missing", "always"] | str | None,
+        *,
+        provisioning_profile: Literal["strict", "developer", "ci"],
+    ) -> Literal["never", "request", "if_missing", "always"]:
+        if value is None or str(value).strip() == "":
+            return "if_missing" if provisioning_profile in {"developer", "ci"} else "never"
+        normalized = str(value).strip().lower().replace("-", "_")
+        if normalized not in {"never", "request", "if_missing", "always"}:
+            raise ValueError("image_pull_policy must be one of: 'never', 'request', 'if_missing', 'always'.")
+        return cast(Literal["never", "request", "if_missing", "always"], normalized)
+
+    @staticmethod
+    def _docker_policy(
+        default_policy: "ActionPolicy | None",
+        *,
+        timeout: int,
+    ) -> "ExecutionResourcePolicy":
+        policy = cast(ExecutionResourcePolicy, dict(default_policy or {}))
+        policy.setdefault("network_mode", "disabled")
+        policy.setdefault("timeout_seconds", timeout)
+        return policy
+
+    def _docker_runtime_requirement(
+        self,
+        *,
+        action_id: str,
+        language: str,
+        image: str,
+        timeout: int,
+        default_policy: "ActionPolicy | None",
+        docker_binary: str,
+        docker_default_args: list[str] | None,
+        dependency_policy: Literal["deny", "request", "install"] | dict[str, Any] | str | None,
+        provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
+        image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
+        runtime_profile: dict[str, Any] | None = None,
+    ) -> "ExecutionResourceRequirement":
+        normalized_provisioning_profile = self._normalize_provisioning_profile(provisioning_profile)
+        normalized_dependency_policy = (
+            self._normalize_dependency_policy(dependency_policy)
+            if dependency_policy is not None
+            else {"mode": "install"} if normalized_provisioning_profile in {"developer", "ci"} else {"mode": "deny"}
+        )
+        normalized_image_pull_policy = self._normalize_image_pull_policy(
+            image_pull_policy,
+            provisioning_profile=normalized_provisioning_profile,
+        )
+        profile = dict(runtime_profile or {})
+        profile.update(
+            {
+                "language": language,
+                "image": image,
+                "provisioning_profile": normalized_provisioning_profile,
+                "image_pull_policy": normalized_image_pull_policy,
+                "network_mode": (
+                    profile.get("network_mode")
+                    or (
+                        "bridge"
+                        if normalized_provisioning_profile in {"developer", "ci"}
+                        and normalized_dependency_policy.get("mode") == "install"
+                        else "disabled"
+                    )
+                ),
+                "dependency_policy": normalized_dependency_policy,
+            }
+        )
+        requirement = cast(ExecutionResourceRequirement, {
+            "requirement_id": f"docker:{ action_id }",
+            "kind": "docker",
+            "scope": "action_call",
+            "resource_key": action_id,
+            "config": {
+                "docker_binary": docker_binary,
+                "timeout": timeout,
+                "default_args": docker_default_args or [],
+                "runtime_profile": profile,
+            },
+            "policy": self._docker_policy(default_policy, timeout=timeout),
+        })
+        if normalized_dependency_policy.get("mode") == "request" or normalized_image_pull_policy == "request":
+            requirement["approval_required"] = True
+        return requirement
+
+    @staticmethod
     def _format_bash_sandbox_desc(
         desc: str,
         *,
@@ -135,15 +249,61 @@ class ActionResourceRegistrar:
         self,
         *,
         action_id: str = "python_sandbox",
-        desc: str = "Execute Python code inside a restricted sandbox.",
+        desc: str = "Execute Python code through an explicitly trusted local Python execution resource.",
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
         preset_objects: dict[str, object] | None = None,
         base_vars: dict[str, Any] | None = None,
         allowed_return_types: list[type] | None = None,
+        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
+        docker_image: str = "python:3.12-slim",
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: Literal["deny", "request", "install"] | dict[str, Any] | str | None = None,
+        provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
+        image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
+        timeout: int = 60,
     ):
         action = self._action
+        sandbox_mode = self._normalize_code_sandbox(sandbox)
+        if sandbox_mode != "trusted_local" and (
+            preset_objects is not None or base_vars is not None or allowed_return_types is not None
+        ):
+            raise ValueError(
+                "preset_objects, base_vars, and allowed_return_types require sandbox='trusted_local'."
+            )
+        execution_resources: list[ExecutionResourceRequirement]
+        if sandbox_mode == "trusted_local":
+            execution_resources = cast(list[ExecutionResourceRequirement], [
+                {
+                    "requirement_id": f"python:{ action_id }",
+                    "kind": "python",
+                    "scope": "action_call",
+                    "resource_key": action_id,
+                    "config": {
+                        "preset_objects": preset_objects,
+                        "base_vars": base_vars,
+                        "allowed_return_types": allowed_return_types,
+                    },
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
+                }
+            ])
+        else:
+            execution_resources = [
+                self._docker_runtime_requirement(
+                    action_id=action_id,
+                    language="python",
+                    image=docker_image,
+                    timeout=timeout,
+                    default_policy=default_policy,
+                    docker_binary=docker_binary,
+                    docker_default_args=docker_default_args,
+                    dependency_policy=dependency_policy,
+                    provisioning_profile=provisioning_profile,
+                    image_pull_policy=image_pull_policy,
+                )
+            ]
         action.register_action(
             action_id=action_id,
             desc=desc,
@@ -159,20 +319,7 @@ class ActionResourceRegistrar:
             side_effect_level="exec",
             sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_resources=cast(list[ExecutionResourceRequirement], [
-                {
-                    "requirement_id": f"python:{ action_id }",
-                    "kind": "python",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "preset_objects": preset_objects,
-                        "base_vars": base_vars,
-                        "allowed_return_types": allowed_return_types,
-                    },
-                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
-                }
-            ]),
+            execution_resources=execution_resources,
         )
         return action
 
@@ -190,8 +337,16 @@ class ActionResourceRegistrar:
         env: dict[str, str] | None = None,
         max_output_chars: int = 20000,
         output_artifact_dir: str | Path | None = None,
+        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
+        docker_image: str = "python:3.12-slim",
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: Literal["deny", "request", "install"] | dict[str, Any] | str | None = None,
+        provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
+        image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
     ):
         action = self._action
+        sandbox_mode = self._normalize_code_sandbox(sandbox)
         model_desc = self._format_bash_sandbox_desc(
             desc,
             allowed_cmd_prefixes=allowed_cmd_prefixes,
@@ -199,6 +354,47 @@ class ActionResourceRegistrar:
             timeout=timeout,
             max_output_chars=max_output_chars,
         )
+        if sandbox_mode == "trusted_local":
+            execution_resources = cast(list[ExecutionResourceRequirement], [
+                {
+                    "requirement_id": f"bash:{ action_id }",
+                    "kind": "bash",
+                    "scope": "action_call",
+                    "resource_key": action_id,
+                    "config": {
+                        "allowed_cmd_prefixes": allowed_cmd_prefixes,
+                        "allowed_workdir_roots": allowed_workdir_roots,
+                        "timeout": timeout,
+                        "env": env,
+                        "max_output_chars": max_output_chars,
+                        "output_artifact_dir": output_artifact_dir,
+                    },
+                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
+                }
+            ])
+        else:
+            roots = [str(Path(root).expanduser().resolve()) for root in (allowed_workdir_roots or [])]
+            execution_resources = [
+                self._docker_runtime_requirement(
+                    action_id=action_id,
+                    language="shell",
+                    image=docker_image,
+                    timeout=timeout,
+                    default_policy=default_policy,
+                    docker_binary=docker_binary,
+                    docker_default_args=docker_default_args,
+                    dependency_policy=dependency_policy,
+                    provisioning_profile=provisioning_profile,
+                    image_pull_policy=image_pull_policy,
+                    runtime_profile={
+                        "allowed_cmd_prefixes": list(allowed_cmd_prefixes or []),
+                        "allowed_workdir_roots": roots,
+                        "env": env,
+                        "max_output_chars": max_output_chars,
+                        "output_artifact_dir": str(output_artifact_dir) if output_artifact_dir is not None else None,
+                    },
+                )
+            ]
         action.register_action(
             action_id=action_id,
             desc=model_desc,
@@ -221,23 +417,7 @@ class ActionResourceRegistrar:
             sandbox_required=True,
             expose_to_model=expose_to_model,
             meta={"host_only_input_keys": ["allow_unsafe"]},
-            execution_resources=cast(list[ExecutionResourceRequirement], [
-                {
-                    "requirement_id": f"bash:{ action_id }",
-                    "kind": "bash",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "allowed_cmd_prefixes": allowed_cmd_prefixes,
-                        "allowed_workdir_roots": allowed_workdir_roots,
-                        "timeout": timeout,
-                        "env": env,
-                        "max_output_chars": max_output_chars,
-                        "output_artifact_dir": output_artifact_dir,
-                    },
-                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
-                }
-            ]),
+            execution_resources=execution_resources,
         )
         return action
 
@@ -253,22 +433,18 @@ class ActionResourceRegistrar:
         cwd: str | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
+        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
+        docker_image: str = "node:22-slim",
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: Literal["deny", "request", "install"] | dict[str, Any] | str | None = None,
+        provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
+        image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
     ):
         action = self._action
-        action.register_action(
-            action_id=action_id,
-            desc=desc,
-            kwargs={
-                "js_code": (str, "JavaScript code to execute with Node.js."),
-                "args": ("list[str]", "Optional command-line arguments."),
-            },
-            executor=action._create_executor("NodeJSActionExecutor", timeout=timeout),
-            tags=tags,
-            default_policy=default_policy,
-            side_effect_level="exec",
-            sandbox_required=True,
-            expose_to_model=expose_to_model,
-            execution_resources=cast(list[ExecutionResourceRequirement], [
+        sandbox_mode = self._normalize_code_sandbox(sandbox)
+        if sandbox_mode == "trusted_local":
+            execution_resources = cast(list[ExecutionResourceRequirement], [
                 {
                     "requirement_id": f"node:{ action_id }",
                     "kind": "node",
@@ -282,7 +458,110 @@ class ActionResourceRegistrar:
                     },
                     "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }
-            ]),
+            ])
+        else:
+            execution_resources = [
+                self._docker_runtime_requirement(
+                    action_id=action_id,
+                    language="nodejs",
+                    image=docker_image,
+                    timeout=timeout,
+                    default_policy=default_policy,
+                    docker_binary=docker_binary,
+                    docker_default_args=docker_default_args,
+                    dependency_policy=dependency_policy,
+                    provisioning_profile=provisioning_profile,
+                    image_pull_policy=image_pull_policy,
+                    runtime_profile={
+                        "cwd": cwd,
+                        "env": env,
+                    },
+                )
+            ]
+        action.register_action(
+            action_id=action_id,
+            desc=desc,
+            kwargs={
+                "js_code": (str, "JavaScript code to execute with Node.js."),
+                "args": ("list[str]", "Optional command-line arguments."),
+            },
+            executor=action._create_executor("NodeJSActionExecutor", timeout=timeout),
+            tags=tags,
+            default_policy=default_policy,
+            side_effect_level="exec",
+            sandbox_required=True,
+            expose_to_model=expose_to_model,
+            execution_resources=execution_resources,
+        )
+        return action
+
+    def register_code_runtime_action(
+        self,
+        *,
+        language: str,
+        action_id: str | None = None,
+        desc: str | None = None,
+        tags: str | list[str] | None = None,
+        default_policy: "ActionPolicy | None" = None,
+        expose_to_model: bool = False,
+        docker_image: str | None = None,
+        docker_binary: str = "docker",
+        docker_default_args: list[str] | None = None,
+        dependency_policy: Literal["deny", "request", "install"] | dict[str, Any] | str | None = None,
+        provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
+        image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
+        timeout: int = 60,
+    ):
+        from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
+            get_code_runtime_profile,
+        )
+
+        action = self._action
+        profile = get_code_runtime_profile(language, image=docker_image)
+        canonical_language = profile["language"]
+        resolved_action_id = action_id or f"run_{ canonical_language }_code"
+        resolved_desc = desc or (
+            f"Run { canonical_language } code inside a Docker-backed code runtime sandbox. "
+            "The runtime image and dependency preparation are controlled by host policy; "
+            "do not include package-manager or compiler commands unless the action schema explicitly asks for source files."
+        )
+        execution_resources = [
+            self._docker_runtime_requirement(
+                action_id=resolved_action_id,
+                language=canonical_language,
+                image=str(profile["image"]),
+                timeout=timeout,
+                default_policy=default_policy,
+                docker_binary=docker_binary,
+                docker_default_args=docker_default_args,
+                dependency_policy=dependency_policy,
+                provisioning_profile=provisioning_profile,
+                image_pull_policy=image_pull_policy,
+                runtime_profile={
+                    "source_file": profile["source_file"],
+                    "entrypoint": profile["entrypoint"],
+                },
+            )
+        ]
+        action.register_action(
+            action_id=resolved_action_id,
+            desc=resolved_desc,
+            kwargs={
+                "source_code": (str, "Primary source code to run in the configured language runtime."),
+                "files": ("dict[str, str] | None", "Optional additional source or dependency manifest files."),
+                "args": ("list[str]", "Optional command-line arguments passed to the program."),
+            },
+            executor=action._create_executor(
+                "CodeRuntimeActionExecutor",
+                language=canonical_language,
+                timeout=timeout,
+            ),
+            tags=tags,
+            default_policy=default_policy,
+            side_effect_level="exec",
+            sandbox_required=True,
+            expose_to_model=expose_to_model,
+            execution_resources=execution_resources,
         )
         return action
 
