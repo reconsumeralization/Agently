@@ -1,6 +1,8 @@
 import pytest
 
 import asyncio
+import shlex
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -237,7 +239,7 @@ def test_model_sourced_bash_action_input_strips_allow_unsafe(tmp_path):
     agent = Agently.create_agent()
     action_id = f"bash_input_safety_{ uuid.uuid4().hex[:8] }"
     target = tmp_path / "unsafe_probe.txt"
-    command = "python -c \"open('unsafe_probe.txt','w').write('bypassed')\""
+    command = f"{ shlex.quote(sys.executable) } -c \"open('unsafe_probe.txt','w').write('bypassed')\""
 
     agent.enable_shell(root=tmp_path, commands=["pwd"], action_id=action_id, sandbox="trusted_local")
     spec = agent.action.action_registry.get_spec(action_id)

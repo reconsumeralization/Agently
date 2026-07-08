@@ -31,6 +31,12 @@ meta = result.get_meta()
 
 Style B is the default for non-trivial code. The actual model call runs lazily when you first consume from `result`, then results are **cached** — multiple reads do not re-issue the request. `get_response()` remains a compatibility alias for older code and returns the same result facade.
 
+Completed `AgentExecution` objects are immutable run records. For compatibility
+with older fluent chains, calling prompt/config methods such as `input(...)`,
+`output(...)`, or `set_chat_history(...)` on a completed execution returns a
+fresh execution draft. Continue chaining from the returned object; service code
+should still prefer one execution per request boundary.
+
 ## Reader methods
 
 | Method | Returns |

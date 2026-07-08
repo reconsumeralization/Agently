@@ -29,9 +29,32 @@ This fixes the previous mismatch where AgentTask-backed executions could make
 `get_data()` return the internal terminal envelope while direct executions
 returned the business object.
 
+## AgentExecution Chain Reuse Compatibility
+
+Prompt/config methods chained on a completed `AgentExecution` now return a fresh
+execution draft instead of reusing the completed run result. This preserves
+legacy fluent code such as `execution.input(...).start()` inside a loop while
+keeping completed executions as immutable run records.
+
+Recommended service code should still create or capture one `AgentExecution` per
+request boundary. The compatibility behavior exists so older chains continue
+from the returned draft with current Agent-level state such as chat history.
+
+## Public Typing Gate
+
+`compatibility/public-typing-allowlist.json` records the current intentional
+`Any` compatibility boundaries for public surfaces. The release gate scans the
+listed public surfaces automatically, so new public methods must be fully typed
+unless the release adds a reviewed allowlist entry with owner, reason, narrowing
+plan, and expiry.
+
 ## Compatibility
 
 - Package target: `4.1.4.1` development line.
 - Release manifest: `compatibility/in-development.json`.
 - Existing task terminal envelope fields are unchanged; callers that depended
   on them should switch from `get_data()` to `get_full_data()`.
+- Completed-execution prompt/config chaining is supported as a compatibility
+  bridge, but new service code should treat each request as a new execution.
+- Public typing allowlist entries are exception records, not a list of allowed
+  public methods.

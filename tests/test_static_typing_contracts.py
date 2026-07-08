@@ -56,6 +56,8 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
 
         execution = agent.create_execution().input("hello").output({"reply": (str,)})
         assert_type(execution, AgentExecution)
+        assert_type(agent.input("next turn").output({"reply": (str,)}), AgentExecution)
+        assert_type(execution.input("reuse draft").output({"reply": (str,)}), AgentExecution)
         assert_type(execution.get_generator(), Generator[str, None, None])
         assert_type(execution.get_generator(type="delta"), Generator[str, None, None])
         assert_type(execution.get_generator(type="instant"), Generator[AgentExecutionStreamData, None, None])

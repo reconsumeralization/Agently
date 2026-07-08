@@ -192,16 +192,19 @@ class AgentExecution:
         }
         self.diagnostics: dict[str, Any] = initial_diagnostics()
         self.workspace_refs: dict[str, Any] = initial_workspace_refs()
+        self.result: Any = None
+        self.status = "created"
+        self._started = False
+        self._completed = False
+        self._error: BaseException | None = None
+        self._selected_route: tuple[str, dict[str, Any]] | None = None
         self._load_strategy_state_from_options()
         self.effective_options = self._build_effective_options()
         apply_effort_strategy_limits(self)
         self.effective_options = self._build_effective_options()
-        self.result: Any = None
-        self.status = "created"
         self.prompt_snapshot: dict[str, Any] = self._snapshot_prompt()
+        self.execution_prompt_snapshot: dict[str, Any] = self._snapshot_execution_prompt()
 
-        self._started = False
-        self._completed = False
         self._start_lock = asyncio.Lock()
         self.route_planner = HybridRoutePlanner(self.agent, prompt_snapshot=self.prompt_snapshot, execution=self)
         self.stream = AgentExecutionStream(
@@ -210,8 +213,6 @@ class AgentExecution:
         ).bind_execution(self)
         self.execution_context.set_progress_callback(self._publish_runtime_progress)
         self.execution_context.set_exchange_callback(self._publish_exchange_stream_item)
-        self._error: BaseException | None = None
-        self._selected_route: tuple[str, dict[str, Any]] | None = None
         self._seen_action_log_keys: set[str] = set()
 
         self.start = FunctionShifter.syncify(self.async_start)
@@ -233,9 +234,47 @@ class AgentExecution:
 
         def wrapper(*args: Any, **kwargs: Any):
             result = attr(*args, **kwargs)
-            return self if result is self.agent else result
+            if result is self.agent:
+                return self._reconfiguration_target()
+            return result
 
         return wrapper
+
+    def _reconfiguration_target(self) -> "AgentExecution":
+        if not self._started:
+            return self
+        return self._fork_for_reconfiguration()
+
+    def _fork_for_reconfiguration(self) -> "AgentExecution":
+        fork = cast(
+            AgentExecution,
+            self.agent.create_execution(
+                lineage=dict(self.lineage),
+                limits=dict(self.limits),
+                options=dict(self.options),
+                parent_run_context=self.parent_run_context,
+            ),
+        )
+        prompt_snapshot = dict(self.execution_prompt_snapshot)
+        for key, value in prompt_snapshot.items():
+            fork.set_execution_prompt(key, value)
+        extension_handlers_snapshot = self.request.extension_handlers.get(inherit=False)
+        if isinstance(extension_handlers_snapshot, dict):
+            for key, value in extension_handlers_snapshot.items():
+                fork.request.extension_handlers.set(key, value)
+        fork.goal_items = list(self.goal_items)
+        fork.success_criteria_items = list(self.success_criteria_items)
+        fork.generated_success_criteria = list(self.generated_success_criteria)
+        fork.local_action_ids = list(self.local_action_ids)
+        fork.local_required_action_ids = list(self.local_required_action_ids)
+        fork.local_skill_selectors = [dict(item) for item in self.local_skill_selectors]
+        fork.local_skills_pack_selectors = [dict(item) for item in self.local_skills_pack_selectors]
+        fork.task_options = dict(self.task_options)
+        fork.strategy_name = self.strategy_name
+        fork._sync_action_scope(source="AgentExecution.compatibility_fork")
+        fork.effective_options = fork._build_effective_options()
+        fork._selected_route = None
+        return fork
 
     def _resolve_request(self, agent: Any, request: Any):
         if request is not None:
@@ -253,8 +292,13 @@ class AgentExecution:
         prompt_snapshot = self.request.prompt.get()
         return dict(prompt_snapshot) if isinstance(prompt_snapshot, dict) else {}
 
+    def _snapshot_execution_prompt(self) -> dict[str, Any]:
+        prompt_snapshot = self.request.prompt.get(inherit=False)
+        return dict(prompt_snapshot) if isinstance(prompt_snapshot, dict) else {}
+
     def _refresh_prompt_snapshot(self):
         self.prompt_snapshot = self._snapshot_prompt()
+        self.execution_prompt_snapshot = self._snapshot_execution_prompt()
         self.route_planner.prompt_snapshot = dict(self.prompt_snapshot)
         self._selected_route = None
         return self
@@ -420,9 +464,13 @@ class AgentExecution:
         parent_run_context: "RunContext | None" = None,
     ) -> "AgentExecution":
         if self._started:
-            if any(value is not None for value in (lineage, limits, options, parent_run_context)):
-                raise RuntimeError("Cannot reconfigure an AgentExecution after it has started.")
-            return self
+            target = self._fork_for_reconfiguration()
+            return target.create_execution(
+                lineage=lineage,
+                limits=limits,
+                options=options,
+                parent_run_context=parent_run_context,
+            )
         if lineage is not None:
             self.lineage = normalize_execution_lineage(lineage)
         self.limits = normalize_execution_limits(limits)
@@ -480,68 +528,84 @@ class AgentExecution:
         return await add_guidance_entry(self, content, author=author, target=target, meta=meta)
 
     def set_execution_prompt(self, key: Any, value: Any, *, mappings: dict[str, Any] | None = None) -> "AgentExecution":
-        self._draft.set_execution_prompt(key, value, mappings=mappings)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.set_execution_prompt(key, value, mappings=mappings)
+        return target._refresh_prompt_snapshot()
 
     def remove_execution_prompt(self, key: Any) -> "AgentExecution":
-        self._draft.remove_execution_prompt(key)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.remove_execution_prompt(key)
+        return target._refresh_prompt_snapshot()
 
     def validate(self, handler: "OutputValidateHandler") -> "AgentExecution":
-        self._draft.validate(handler)
-        return self
+        target = self._reconfiguration_target()
+        target._draft.validate(handler)
+        return target
 
     def system(self, prompt: Any, *, mappings: dict[str, Any] | None = None, always: bool = False) -> "AgentExecution":
-        self._draft.system(prompt, mappings=mappings, always=always)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.system(prompt, mappings=mappings, always=always)
+        return target._refresh_prompt_snapshot()
 
     def rule(self, prompt: Any, *, mappings: dict[str, Any] | None = None, always: bool = False) -> "AgentExecution":
-        self._draft.rule(prompt, mappings=mappings, always=always)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.rule(prompt, mappings=mappings, always=always)
+        return target._refresh_prompt_snapshot()
 
     def role(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.role(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.role(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def user_info(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.user_info(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.user_info(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def input(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.input(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.input(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def info(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.info(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.info(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def instruct(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.instruct(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.instruct(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def examples(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.examples(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.examples(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def output(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.output(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.output(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def attachment(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.attachment(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.attachment(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def image(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.image(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.image(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def set_prompt_options(self, options: dict[str, Any], *, always: bool = False) -> "AgentExecution":
-        self._draft.set_prompt_options(options, always=always)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.set_prompt_options(options, always=always)
+        return target._refresh_prompt_snapshot()
 
     def language(self, *args: Any, **kwargs: Any) -> "AgentExecution":
-        self._draft.language(*args, **kwargs)
-        return self._refresh_prompt_snapshot()
+        target = self._reconfiguration_target()
+        target._draft.language(*args, **kwargs)
+        return target._refresh_prompt_snapshot()
 
     def use_dynamic_task(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         raise ValueError(
@@ -637,22 +701,24 @@ class AgentExecution:
         return content
 
     def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution":
+        target = self._reconfiguration_target()
         if isinstance(goal, (list, tuple, set)):
-            set_execution_goals(self, tuple(goal))
+            set_execution_goals(target, tuple(goal))
         else:
             text = str(goal or "").strip()
             if text:
-                set_execution_goals(self, (text,))
+                set_execution_goals(target, (text,))
         if success_criteria is not None:
-            set_success_criteria(self, success_criteria)
-        return self
+            set_success_criteria(target, success_criteria)
+        return target
 
     goals = goal
 
     def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
-        return configure_effort(self, value, **strategy)
+        return configure_effort(self._reconfiguration_target(), value, **strategy)
 
     def use_actions(self, *args: Any, **kwargs: Any) -> "AgentExecution":
+        target = self._reconfiguration_target()
         register = getattr(self.agent, "_register_action_items", None)
         if callable(register):
             raw_names = register(args[0] if args else None)
@@ -663,14 +729,15 @@ class AgentExecution:
         names = raw_names if isinstance(raw_names, (list, tuple, set)) else []
         for name in names:
             text = str(name or "").strip()
-            if text and text not in self.local_action_ids:
-                self.local_action_ids.append(text)
-        self._sync_action_scope(source="AgentExecution.use_actions")
-        self._selected_route = None
-        self.effective_options = self._build_effective_options()
-        return self
+            if text and text not in target.local_action_ids:
+                target.local_action_ids.append(text)
+        target._sync_action_scope(source="AgentExecution.use_actions")
+        target._selected_route = None
+        target.effective_options = target._build_effective_options()
+        return target
 
     def require_actions(self, *args: Any, **kwargs: Any) -> "AgentExecution":
+        target = self._reconfiguration_target()
         register = getattr(self.agent, "_register_action_items", None)
         if callable(register):
             raw_names = register(args[0] if args else None)
@@ -681,14 +748,14 @@ class AgentExecution:
         names = raw_names if isinstance(raw_names, (list, tuple, set)) else []
         for name in names:
             text = str(name or "").strip()
-            if text and text not in self.local_action_ids:
-                self.local_action_ids.append(text)
-            if text and text not in self.local_required_action_ids:
-                self.local_required_action_ids.append(text)
-        self._sync_action_scope(source="AgentExecution.require_actions")
-        self._selected_route = None
-        self.effective_options = self._build_effective_options()
-        return self
+            if text and text not in target.local_action_ids:
+                target.local_action_ids.append(text)
+            if text and text not in target.local_required_action_ids:
+                target.local_required_action_ids.append(text)
+        target._sync_action_scope(source="AgentExecution.require_actions")
+        target._selected_route = None
+        target.effective_options = target._build_effective_options()
+        return target
 
     def _sync_action_scope(self, *, source: str):
         self.execution_context.set_action_scope(self.local_action_ids, source=source)
@@ -698,47 +765,52 @@ class AgentExecution:
         return self
 
     def use_skills(self, skills: Any, **kwargs: Any) -> "AgentExecution":
+        target = self._reconfiguration_target()
         normalize = getattr(self.agent, "_normalize_skill_selector_entries", None)
         if callable(normalize):
             raw_entries = normalize(skills, **kwargs)
         else:
             raw_entries = [{"selector": skills, "mode": kwargs.get("mode", "model_decision")}]
         entries = raw_entries if isinstance(raw_entries, list) else []
-        self.local_skill_selectors.extend(entries)
-        self._selected_route = None
-        self.effective_options = self._build_effective_options()
-        return self
+        target.local_skill_selectors.extend(entries)
+        target._selected_route = None
+        target.effective_options = target._build_effective_options()
+        return target
 
     def require_skills(self, skills: Any, **kwargs: Any) -> "AgentExecution":
         kwargs["mode"] = "required"
         return self.use_skills(skills, **kwargs)
 
     def use_skills_packs(self, skills_packs: Any, *, mode: Any = "model_decision") -> "AgentExecution":
+        target = self._reconfiguration_target()
         if mode not in {"model_decision", "required"}:
             raise ValueError("Skill pack mode must be one of: 'model_decision', 'required'.")
         items = skills_packs if isinstance(skills_packs, (list, tuple, set)) else [skills_packs]
-        self.local_skills_pack_selectors.extend(
+        target.local_skills_pack_selectors.extend(
             {"selector": item, "mode": mode}
             for item in items
         )
-        self._selected_route = None
-        self.effective_options = self._build_effective_options()
-        return self
+        target._selected_route = None
+        target.effective_options = target._build_effective_options()
+        return target
 
     def route_policy(self, value: Any) -> "AgentExecution":
-        self.options["route_policy"] = DataFormatter.sanitize(value)
-        self.effective_options = self._build_effective_options()
-        self._selected_route = None
-        return self
+        target = self._reconfiguration_target()
+        target.options["route_policy"] = DataFormatter.sanitize(value)
+        target.effective_options = target._build_effective_options()
+        target._selected_route = None
+        return target
 
     def access_control_policy(self, value: Any) -> "AgentExecution":
-        self.options["access_control_policy"] = DataFormatter.sanitize(value)
-        self.effective_options = self._build_effective_options()
-        return self
+        target = self._reconfiguration_target()
+        target.options["access_control_policy"] = DataFormatter.sanitize(value)
+        target.effective_options = target._build_effective_options()
+        return target
 
     def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution":
+        target = self._reconfiguration_target()
         if value is not None:
-            apply_strategy_selection(self, value, source="explicit_strategy")
+            apply_strategy_selection(target, value, source="explicit_strategy")
         if options:
             if "execution" in options:
                 from agently.core.application import AgentTask
@@ -746,10 +818,10 @@ class AgentExecution:
                 options = dict(options)
                 options["execution"] = AgentTask.normalize_execution_strategy(options.get("execution"))
                 options["_execution_strategy_source"] = "explicit_strategy_option"
-            self.task_options.update(options)
-        self.effective_options = self._build_effective_options()
-        self._selected_route = None
-        return self
+            target.task_options.update(options)
+        target.effective_options = target._build_effective_options()
+        target._selected_route = None
+        return target
 
     def route_options(self, route_name: str) -> dict[str, Any]:
         return state_route_options(self, route_name)

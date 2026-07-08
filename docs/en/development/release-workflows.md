@@ -156,6 +156,9 @@ Before release:
   candidate interpreter before running `pytest`
 - audit changed public surfaces for missing annotations and unjustified broad
   `Any`
+- run the public typing allowlist check; `compatibility/public-typing-allowlist.json`
+  is only for documented `Any` compatibility boundaries, not for listing public
+  methods
 - confirm `agently/py.typed` exists in the source tree and is included in the
   built or installed package
 - run a Pylance-equivalent `pyright` smoke from outside the repository source

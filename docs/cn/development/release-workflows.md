@@ -131,6 +131,8 @@ Pylance / pyright 兼容 IDE 提供可用提示。
   `examples/` 运行 `pyright`
 - 审查本次变更触及的 public surface，确认没有缺失 annotation，也没有未说明理由的宽
   `Any`
+- 运行 public typing allowlist 检查；`compatibility/public-typing-allowlist.json`
+  只记录带说明的 `Any` 兼容边界，不是公开方法清单
 - 确认源码树包含 `agently/py.typed`，并且构建产物或已安装候选包也包含该文件
 - 在仓库源码路径之外，对已安装候选包运行一次等价于 Pylance 的 `pyright` smoke，
   导入代表性的 root public API 和本次变更的 public surface

@@ -4616,7 +4616,7 @@ async def test_agent_execution_add_guidance_during_flat_task_does_not_wait_for_c
         "_request_verification": request_verification,
     }
 
-    run_task = asyncio.create_task(execution.async_get_data())
+    run_task = asyncio.create_task(execution.async_get_full_data())
     await asyncio.wait_for(plan_started.wait(), timeout=3)
 
     guidance = await asyncio.wait_for(
@@ -4704,7 +4704,7 @@ async def test_agent_execution_add_guidance_before_task_creation_is_queued_then_
     )
     assert guidance["status"] == "queued"
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
 
@@ -5608,7 +5608,7 @@ async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
 
@@ -5638,7 +5638,7 @@ async def test_flat_strategy_does_not_receive_taskboard_harness_state(tmp_path):
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     request_text = "\n".join(MockAgentExecutionRequester.requests)
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -5669,7 +5669,7 @@ async def test_structured_deliverable_contract_requires_workspace_readback(tmp_p
         }
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     verification = task_meta["iterations"][0]["verification"]
@@ -5694,7 +5694,7 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     first_verification = task_meta["iterations"][0]["verification"]
@@ -5741,7 +5741,7 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
         max_iterations=1,
     ).use_actions(["probe_action"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     delta_text = "".join([chunk async for chunk in execution.get_async_generator(type="delta")])
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -5788,7 +5788,7 @@ async def test_flat_request_timeout_does_not_cancel_progressing_child_execution(
         },
     ).use_actions(["probe_action"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
 
@@ -5817,7 +5817,7 @@ async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_p
     ).use_actions(["probe_action"])
 
     started_at = asyncio.get_running_loop().time()
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     elapsed = asyncio.get_running_loop().time() - started_at
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -5850,7 +5850,7 @@ async def test_flat_plan_no_progress_timeout_is_reported_as_idle_guard(tmp_path)
         limits={"max_no_progress_seconds": 0.05},
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     terminal_phase = task_meta["diagnostics"]["phases"][-1]
@@ -5880,7 +5880,7 @@ async def test_flat_action_planning_stall_preserves_completed_action_logs(tmp_pa
         limits={"max_no_progress_seconds": 1.5},
     ).use_actions(["probe_action"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     iteration = task_meta["iterations"][0]
@@ -5981,7 +5981,7 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
 
     started_at = asyncio.get_running_loop().time()
     stream_task = asyncio.create_task(collect_stream())
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     stream_items = await stream_task
     meta = await execution.async_get_meta()
     delta_text = "".join([chunk async for chunk in execution.get_async_generator(type="delta")])
@@ -6019,7 +6019,7 @@ async def test_workspace_artifact_draft_retry_status_resets_partial_without_publ
         max_iterations=1,
     )
 
-    await execution.async_get_data()
+    await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
@@ -6056,7 +6056,7 @@ async def test_workspace_artifact_draft_writes_natural_text_without_output_contr
         max_iterations=1,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
@@ -6104,7 +6104,7 @@ async def test_flat_actions_shape_fans_out_multiple_commands_in_one_step(tmp_pat
         max_iterations=1,
     ).use_actions(["slow_a", "slow_b"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     action_logs = task_meta["iterations"][0]["execution_meta"]["logs"]["action_logs"]
@@ -6139,7 +6139,7 @@ async def test_flat_verifier_uses_bounded_action_evidence_prompt(tmp_path):
         max_iterations=1,
     ).use_actions(["probe_action"])
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     verify_requests = [
         request
         for request in MockAgentExecutionRequester.requests
@@ -6168,7 +6168,7 @@ async def test_flat_promotes_report_like_evidence_to_candidate_final_result(tmp_
         max_iterations=1,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     verify_requests = [
         request
         for request in MockAgentExecutionRequester.requests
@@ -6195,7 +6195,7 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6245,7 +6245,7 @@ async def test_taskboard_checkpoint_and_resume_snapshot_include_handoff_projecti
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
 
@@ -6288,7 +6288,7 @@ async def test_taskboard_resume_terminal_snapshot_without_reexecuting_cards(tmp_
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     assert result["status"] == "completed"
     assert result["final_result"] == "taskboard accepted result"
 
@@ -6417,7 +6417,7 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6570,7 +6570,7 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6628,7 +6628,7 @@ async def test_taskboard_final_preserves_complete_candidate_from_terminal_card(t
         max_iterations=2,
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
@@ -6684,7 +6684,7 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
     ).use_actions(["produce_large_evidence"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6737,7 +6737,7 @@ async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(t
     ).use_actions(["produce_large_evidence"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6790,7 +6790,7 @@ async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs
     ).use_actions(["produce_large_evidence"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6841,7 +6841,7 @@ async def test_taskboard_request_timeout_does_not_cancel_progressing_card_by_def
         },
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     assert "taskboard" in task_meta["result"], task_meta["result"]
@@ -6870,7 +6870,7 @@ async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
         },
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -6911,7 +6911,7 @@ async def test_taskboard_tick_timeout_does_not_cancel_running_cards(tmp_path):
         },
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     revision = task_meta["result"]["taskboard"]["revision"]
@@ -6943,7 +6943,7 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
     )
 
     started_at = asyncio.get_running_loop().time()
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     elapsed = asyncio.get_running_loop().time() - started_at
     task_meta = meta["logs"]["route_logs"]["agent_task"]
@@ -7008,7 +7008,7 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -7044,7 +7044,7 @@ async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp
     ).use_actions(["probe_action"])
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = task_meta["result"]["taskboard"]
@@ -7205,7 +7205,7 @@ async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task(tmp_path):
 
     cast(Any, execution)._agent_task_step_overrides = {"_request_plan": slow_request_plan}
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
 
     assert result["status"] == "timed_out"
@@ -7256,7 +7256,7 @@ async def test_execution_first_chain_allows_goal_after_prompt_output(tmp_path):
         .goal("Write the final summary.", success_criteria=["The final summary is returned."])
     )
 
-    data = await execution.async_get_data()
+    data = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
 
     assert data["accepted"] is True
@@ -7274,7 +7274,7 @@ async def test_allow_create_task_false_blocks_goal_pursuit(tmp_path):
         limits={"allow_create_task": False}
     )
 
-    result = await execution.async_get_data()
+    result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
 
     assert result["status"] in {"blocked", "max_iterations"}
@@ -7606,7 +7606,7 @@ async def test_agent_execution_model_request_exposes_action_logs_and_artifacts()
     )
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
-    data = await execution.async_get_data()
+    data = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
 
     action_items = [item for item in stream_items if item.path == "actions.echo_cli"]
