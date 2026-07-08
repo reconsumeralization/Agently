@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agently.types.data import PolicyApprovalDecision, PolicyApprovalHandler, PolicyApprovalRequest
 from agently.utils import FunctionShifter
 from agently.utils.DataGuardian import _copy_public
+from .AccessControlPolicy import access_policy_auto_allow, merge_access_control_policy
 
 if TYPE_CHECKING:
     from agently.core.runtime.EventCenter import EventCenter
@@ -161,9 +162,28 @@ class PolicyApprovalManager:
         handler: str | None = None,
     ) -> PolicyApprovalDecision:
         normalized_request = self.normalize_request(request)
+        normalized_request["policy"] = merge_access_control_policy(
+            normalized_request.get("policy", {}),
+            self.settings,
+        )
         handler_name = self._resolve_handler_name(handler)
-        selected = self._handlers.get(handler_name)
         await self._emit("policy.approval.requested", normalized_request)
+        if access_policy_auto_allow(normalized_request.get("policy")):
+            decision = self.normalize_decision(
+                {
+                    "status": "approved",
+                    "approved": True,
+                    "reason": (
+                        "Auto-allowed by host access_control_policy.auto_allow "
+                        f"for '{ normalized_request.get('subject') or normalized_request.get('capability') }'."
+                    ),
+                    "meta": {"auto_allow": True},
+                },
+                handler="access_control_policy.auto_allow",
+            )
+            await self._emit("policy.approval.approved", normalized_request, decision)
+            return decision
+        selected = self._handlers.get(handler_name)
         if selected is None:
             decision = self.normalize_decision(
                 {
@@ -198,6 +218,11 @@ class PolicyApprovalManager:
         settings: Any = None,
     ):
         normalized_request = self.normalize_request(request)
+        gate_settings = settings if settings is not None else getattr(runtime_data, "settings", None)
+        normalized_request["policy"] = merge_access_control_policy(
+            normalized_request.get("policy", {}),
+            gate_settings,
+        )
         if getattr(runtime_data, "is_resume", False):
             decision = self._claim_resumed_gate_decision(runtime_data, normalized_request, interrupt_id)
             if decision is not None:
@@ -220,7 +245,7 @@ class PolicyApprovalManager:
                         "subject": str(normalized_request.get("subject") or ""),
                     },
                 },
-                settings=settings if settings is not None else getattr(runtime_data, "settings", None),
+                settings=gate_settings,
             )
             if routing:
                 channel_id = routing.get("channel_id")

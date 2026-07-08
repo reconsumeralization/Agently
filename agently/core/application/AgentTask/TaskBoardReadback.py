@@ -35,6 +35,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
         refs = self._taskboard_readback_artifact_refs(evidence_view)
         file_refs = self._taskboard_readback_file_refs(evidence_view)
+        skill_readbacks = self._taskboard_skill_context_readbacks(context.card, context_pack)
+        skill_readback_evidence_items = self._taskboard_skill_context_readback_evidence_items(
+            skill_readbacks,
+            card_id=str(getattr(context.card, "id", "") or ""),
+        )
         card_metadata = getattr(context.card, "metadata", {})
         if isinstance(card_metadata, Mapping):
             target_refs = self._normalize_taskboard_target_refs(
@@ -58,6 +63,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "card": context.card.to_dict(),
                 "artifact_refs": hot_artifact_refs,
                 "file_refs": hot_file_refs,
+                "skill_context_readbacks": DataFormatter.sanitize(skill_readbacks),
                 "evidence_scope": evidence_card_ids or "all",
             },
             input_refs=tuple(
@@ -65,12 +71,15 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 for item in [
                     *[ref for ref in refs if isinstance(ref, Mapping)],
                     *[ref for ref in file_refs if isinstance(ref, Mapping)],
+                    *[ref.get("ref", {}) for ref in skill_readbacks if isinstance(ref, Mapping)],
                 ]
+                if isinstance(item, Mapping)
             ),
             expected_deliverable={
                 "allowed_execution_shape": "readback",
                 "artifact_ref_count": len(refs),
                 "file_ref_count": len(file_refs),
+                "skill_context_ref_count": len(skill_readbacks),
             },
             evidence_requirements=tuple(
                 [
@@ -88,6 +97,15 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                         "source": "taskboard_workspace_file_readback",
                     }
                     for ref in file_refs
+                    if isinstance(ref, Mapping)
+                ]
+                + [
+                    {
+                        "skill_id": str(ref.get("skill_id") or ""),
+                        "path": str(ref.get("path") or ""),
+                        "source": "taskboard_skill_context_readback",
+                    }
+                    for ref in skill_readbacks
                     if isinstance(ref, Mapping)
                 ]
             ),
@@ -146,7 +164,35 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             effective_file_refs = [dict(ref) for ref in file_refs if isinstance(ref, Mapping)]
             diagnostics: list[dict[str, Any]] = []
             readback_evidence_items: list[dict[str, Any]] = []
-            if not refs and not file_refs:
+            if not refs and not file_refs and skill_readbacks:
+                status = "completed"
+                success_count = 0
+                failed_count = 0
+                file_success_count = 0
+                file_failed_count = 0
+                readback_evidence_items = list(skill_readback_evidence_items)
+                diagnostics.append(
+                    {
+                        "code": "taskboard.readback.skill_context_refs",
+                        "card_id": context.card.id,
+                        "skill_context_ref_count": len(skill_readbacks),
+                    }
+                )
+                payload = {
+                    "status": status,
+                    "answer": f"Read {len(skill_readbacks)} Skill context refs from the Manager context pack.",
+                    "readbacks": readbacks,
+                    "file_readbacks": file_readbacks,
+                    "skill_context_readbacks": DataFormatter.sanitize(skill_readbacks),
+                    "evidence_items": DataFormatter.sanitize(readback_evidence_items),
+                    "evidence": [
+                        f"skill:{item.get('skill_id')}:{item.get('path')} status={item.get('status')}"
+                        for item in skill_readbacks
+                    ],
+                    "remaining_work": [],
+                    "diagnostics": diagnostics,
+                }
+            elif not refs and not file_refs:
                 status = "blocked"
                 success_count = 0
                 failed_count = 0
@@ -300,6 +346,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                         file_readbacks,
                         card_id=context.card.id,
                     ),
+                    *skill_readback_evidence_items,
                 ]
                 payload = {
                     "status": status,
@@ -309,6 +356,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     ),
                     "readbacks": readbacks,
                     "file_readbacks": file_readbacks,
+                    "skill_context_readbacks": DataFormatter.sanitize(skill_readbacks),
                     "file_refs": DataFormatter.sanitize(effective_file_refs),
                     "evidence_items": DataFormatter.sanitize(readback_evidence_items),
                     "evidence": [
@@ -321,6 +369,10 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                             f"file:{ item.get('path') } status={ item.get('status') }"
                             for item in file_readbacks
                             if item.get("path")
+                        ],
+                        *[
+                            f"skill:{ item.get('skill_id') }:{ item.get('path') } status={ item.get('status') }"
+                            for item in skill_readbacks
                         ],
                     ],
                     "remaining_work": remaining_work,
@@ -543,6 +595,206 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "artifact_refs": refs,
             }
         ]
+
+    @classmethod
+    def _taskboard_skill_context_readbacks(
+        cls,
+        card: Any,
+        context_pack: Any,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(context_pack, Mapping):
+            return []
+        skill_context_pack = context_pack.get("skills_context_pack")
+        if not isinstance(skill_context_pack, Mapping):
+            return []
+        requested_refs = cls._taskboard_card_requested_skill_refs(card)
+        raw_skills = skill_context_pack.get("skills")
+        if not isinstance(raw_skills, Sequence) or isinstance(raw_skills, str | bytes | bytearray):
+            return []
+        readbacks: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        def add_entry(
+            *,
+            skill_id: str,
+            path: str,
+            citation: str,
+            content: str,
+            truncated: bool,
+            kind: str,
+            summary: str = "",
+        ) -> None:
+            aliases = cls._taskboard_skill_context_aliases(skill_id=skill_id, path=path, citation=citation)
+            if requested_refs and not any(alias in requested_refs for alias in aliases):
+                return
+            key = (skill_id, path, citation)
+            if key in seen:
+                return
+            seen.add(key)
+            readbacks.append(
+                DataFormatter.sanitize(
+                    {
+                        "ok": bool(content.strip()),
+                        "status": "completed" if content.strip() else "empty",
+                        "skill_id": skill_id,
+                        "path": path,
+                        "citation": citation,
+                        "kind": kind,
+                        "summary": summary,
+                        "content_preview": content,
+                        "truncated": bool(truncated),
+                        "ref": {
+                            "kind": "skill_context",
+                            "source": "skills_manager.context_pack",
+                            "skill_id": skill_id,
+                            "path": path,
+                            "citation": citation,
+                            "content_state": "bounded_readback_available" if content.strip() else "empty",
+                        },
+                        "aliases": aliases,
+                    }
+                )
+            )
+
+        for skill in raw_skills:
+            if not isinstance(skill, Mapping):
+                continue
+            skill_id = str(skill.get("skill_id") or skill.get("id") or "").strip()
+            if not skill_id:
+                continue
+            guidance = skill.get("guidance")
+            if isinstance(guidance, Mapping):
+                path = str(guidance.get("path") or "SKILL.md").strip() or "SKILL.md"
+                citation = str(guidance.get("citation") or f"skills/{skill_id}/{path}").strip()
+                add_entry(
+                    skill_id=skill_id,
+                    path=path,
+                    citation=citation,
+                    content=str(guidance.get("excerpt") or guidance.get("content") or ""),
+                    truncated=bool(guidance.get("truncated")),
+                    kind="guidance",
+                    summary=str(guidance.get("summary") or ""),
+                )
+            resources = skill.get("selected_resources")
+            if not isinstance(resources, Sequence) or isinstance(resources, str | bytes | bytearray):
+                continue
+            for resource in resources:
+                if not isinstance(resource, Mapping):
+                    continue
+                path = str(resource.get("path") or "").strip()
+                if not path:
+                    continue
+                citation = str(resource.get("citation") or f"skills/{skill_id}/{path}").strip()
+                add_entry(
+                    skill_id=skill_id,
+                    path=path,
+                    citation=citation,
+                    content=str(resource.get("content") or resource.get("excerpt") or ""),
+                    truncated=bool(resource.get("truncated")),
+                    kind=str(resource.get("kind") or "resource"),
+                    summary=str(resource.get("summary") or ""),
+                )
+        return readbacks
+
+    @classmethod
+    def _taskboard_card_requested_skill_refs(cls, card: Any) -> set[str]:
+        requested: set[str] = set(cls._normalize_text_ref_sequence(getattr(card, "input_refs", ()) or ()))
+        evidence_contract = getattr(card, "evidence_contract", {})
+        if isinstance(evidence_contract, Mapping):
+            requested.update(cls._normalize_text_ref_sequence(evidence_contract.get("evidence_to_use")))
+            requested.update(cls._normalize_text_ref_sequence(evidence_contract.get("requires_skill_refs")))
+        metadata = getattr(card, "metadata", {})
+        if isinstance(metadata, Mapping):
+            requested.update(cls._normalize_text_ref_sequence(metadata.get("skill_context_refs")))
+        return requested
+
+    @staticmethod
+    def _normalize_text_ref_sequence(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if not isinstance(value, Sequence) or isinstance(value, bytes | bytearray):
+            return []
+        refs: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text and text not in refs:
+                refs.append(text)
+        return refs
+
+    @staticmethod
+    def _taskboard_skill_context_aliases(*, skill_id: str, path: str, citation: str) -> list[str]:
+        aliases: list[str] = []
+        for value in (
+            citation,
+            path,
+            f"{skill_id}/{path}" if path else "",
+            f"skills/{skill_id}/{path}" if path else "",
+            f"skills/{skill_id}/SKILL.md" if path == "SKILL.md" else "",
+        ):
+            text = str(value or "").strip()
+            if text and text not in aliases:
+                aliases.append(text)
+        return aliases
+
+    def _taskboard_skill_context_readback_evidence_items(
+        self,
+        readbacks: Sequence[Mapping[str, Any]],
+        *,
+        card_id: str,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for index, readback in enumerate(readbacks):
+            if not isinstance(readback, Mapping):
+                continue
+            skill_id = str(readback.get("skill_id") or "").strip()
+            path = str(readback.get("path") or "").strip()
+            citation = str(readback.get("citation") or "").strip()
+            source = "skills_manager.context_pack"
+            evidence_id = self._taskboard_workspace_readback_evidence_id(
+                "skill_context_readback",
+                citation or f"{skill_id}/{path}",
+                f"agent_task.taskboard.card.{card_id}.{source}",
+            )
+            ok = bool(readback.get("ok"))
+            preview = str(readback.get("content_preview") or "")
+            truncated = bool(readback.get("truncated"))
+            item: dict[str, Any] = {
+                "id": evidence_id,
+                "kind": "skill_context.readback",
+                "status": "ok" if ok else "empty",
+                "raw_status": readback.get("status") or ("read" if ok else "empty"),
+                "body_state": "truncated" if truncated else ("full" if preview else "empty"),
+                "skill_id": skill_id,
+                "path": path,
+                "citation": citation,
+                "source": source,
+                "truncated": truncated,
+                "aliases": self._taskboard_skill_context_aliases(
+                    skill_id=skill_id,
+                    path=path,
+                    citation=citation,
+                ),
+                "provenance": {
+                    "source": source,
+                    "taskboard_card_id": card_id,
+                    "skill_id": skill_id,
+                    "path": path,
+                    "citation": citation,
+                    "readback_index": index,
+                },
+                "supports": {
+                    "content": bool(ok and preview),
+                    "unavailability": not ok,
+                    "ref_pointer": False,
+                },
+            }
+            if preview:
+                item["body"] = preview
+            summary = str(readback.get("summary") or "").strip()
+            if summary:
+                item["summary"] = summary
+            items.append(DataFormatter.sanitize(item))
+        return self._dedupe_taskboard_readback_evidence_items(items)
 
     @classmethod
     def _taskboard_readback_artifact_refs(cls, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:

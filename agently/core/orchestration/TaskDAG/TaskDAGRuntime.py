@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from agently.types.data import TaskDAG, TaskDAGNode
 from agently.types.trigger_flow import TriggerFlowRuntimeData
 from agently.utils import DataLocator, FunctionShifter
+from agently.core.operation.PolicyApproval import merge_access_control_policy
 
 from .TaskDAGHelpers import (
     _approval_payload,
@@ -243,6 +244,7 @@ def _make_task_runner(
                 from agently.base import policy_approval
                 from agently.core.orchestration.TriggerFlow.Control import TriggerFlowPauseSignal
 
+                policy = merge_access_control_policy(dict(graph.policies), data.settings)
                 gate_result = await policy_approval.async_gate(
                     data,
                     {
@@ -251,7 +253,7 @@ def _make_task_runner(
                         "subject": resolved_task.title or resolved_task.id,
                         "risk": "task_dag_approval",
                         "payload": _approval_payload(resolved_task, task_input),
-                        "policy": dict(graph.policies),
+                        "policy": policy,
                         "lineage": {
                             "graph_id": graph.graph_id,
                             "task_id": resolved_task.id,
@@ -260,6 +262,7 @@ def _make_task_runner(
                     },
                     interrupt_id=f"task:{ graph.graph_id }:{ resolved_task.id }",
                     resume_to="self",
+                    settings=data.settings,
                 )
                 if isinstance(gate_result, TriggerFlowPauseSignal):
                     return gate_result

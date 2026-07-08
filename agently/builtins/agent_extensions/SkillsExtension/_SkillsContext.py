@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Agent → Plugin context adapter for Skills Executor.
+"""Agent → Plugin context adapter for Skills Manager.
 
-``AgentSkillsRuntimeContext`` bridges the Agent's internal API (settings, model
+``AgentSkillsManagerContext`` bridges the Agent's internal API (settings, model
 requests, runtime stream emission, ExecutionResource handle) to the
-``SkillsExecutor`` plugin protocols (``SkillsPlanningContext`` /
+``SkillsManager`` plugin protocols (``SkillsPlanningContext`` /
 ``SkillsExecutionContext`` / ``SkillsRuntimeContext``).
 
 This adapter pattern keeps the plugin implementation decoupled from concrete
@@ -31,31 +31,52 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Literal
 
 from agently.types.data import ModelStreamingHandler, SkillRuntimeStreamHandler
 from agently.types.plugins import SkillsRuntimeContext
 
 
-class AgentSkillsRuntimeContext:
-    """Agent component adapter passed into SkillsExecutor plugins."""
+class AgentSkillsManagerContext:
+    """Agent component adapter passed into SkillsManager plugins."""
 
     def __init__(
         self,
         agent: Any,
         *,
+        settings_overrides: Mapping[str, Any] | None = None,
         runtime_stream_handler: SkillRuntimeStreamHandler | None = None,
         resource_reader: Callable[
             [str, str, int], str | Awaitable[str]
         ] | None = None,
     ):
         self.agent = agent
+        self._settings_overrides = dict(settings_overrides or {})
         self._runtime_stream_handler = runtime_stream_handler
         self._resource_reader = resource_reader
 
+    @staticmethod
+    def _get_overlay_value(source: Mapping[str, Any], key: str) -> Any:
+        if key in source:
+            return source[key]
+        current: Any = source
+        for part in key.split("."):
+            if not isinstance(current, Mapping) or part not in current:
+                return None
+            current = current[part]
+        return current
+
     def get_setting(self, key: str, default: Any = None) -> Any:
-        return self.agent.settings.get(key, default)
+        value = self.agent.settings.get(key, default)
+        override = self._get_overlay_value(self._settings_overrides, key)
+        if isinstance(value, dict) and isinstance(override, Mapping):
+            merged = dict(value)
+            merged.update(dict(override))
+            return merged
+        if override is not None:
+            return override
+        return value
 
     async def async_request_model(
         self,
@@ -225,16 +246,22 @@ class AgentSkillsRuntimeContext:
         return getattr(self.agent, "execution_resource", None)
 
 
-def create_agent_skills_runtime_context(
+def create_agent_skills_manager_context(
     agent: Any,
     *,
+    settings_overrides: Mapping[str, Any] | None = None,
     runtime_stream_handler: SkillRuntimeStreamHandler | None = None,
     resource_reader: Callable[
         [str, str, int], str | Awaitable[str]
     ] | None = None,
 ) -> SkillsRuntimeContext:
-    return AgentSkillsRuntimeContext(
+    return AgentSkillsManagerContext(
         agent,
+        settings_overrides=settings_overrides,
         runtime_stream_handler=runtime_stream_handler,
         resource_reader=resource_reader,
     )
+
+
+AgentSkillsRuntimeContext = AgentSkillsManagerContext
+create_agent_skills_runtime_context = create_agent_skills_manager_context

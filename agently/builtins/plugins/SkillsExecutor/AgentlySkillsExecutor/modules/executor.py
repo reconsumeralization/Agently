@@ -30,7 +30,9 @@ from agently.types.data import SkillExecutionDict, SkillExecutionPlan, SkillExec
 from agently.types.plugins import SkillsEffortStrategyHandler, SkillsExecutionContext
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
 
-from agently.core.application.SkillsExecutor.adapter import RegistrySkillSource, SkillCapabilityAdapter
+from agently.core.application.SkillsManager.adapter import RegistrySkillSource, SkillCapabilityAdapter
+from agently.core.application.SkillsManager.action_resolution import LocalSkillActionResolver
+from agently.core.operation.PolicyApproval import merge_access_control_policy
 from .registry import SkillRegistry
 from .effort_strategies import create_builtin_effort_strategy_handlers
 from .contexts import RuntimeStreamCaptureContext
@@ -155,6 +157,7 @@ class SkillExecutor:
         capability_policy = self._capability_policy(context=context, plan=plan)
         capability_scope = str(capability_policy.get("capability_scope") or "agent").strip().lower()
         mounted_action_ids = list(capability_result.get("mounted_action_ids", []) or [])
+        resolved_action_ids = list(capability_result.get("resolved_action_ids", []) or mounted_action_ids)
         if capability_result["status"] in {"blocked", "approval_required"}:
             self._release_scoped_capabilities(context, capability_scope, mounted_action_ids)
             return self._build_execution(
@@ -171,10 +174,10 @@ class SkillExecutor:
             )
 
         effort_config = self._resolve_effort(context, effort)
-        if mounted_action_ids:
+        if resolved_action_ids:
             configured_allowed = _ensure_list(effort_config.get("allowed_actions"))
             allowed_actions: list[str] = []
-            for action_id in [*configured_allowed, *mounted_action_ids]:
+            for action_id in [*configured_allowed, *resolved_action_ids]:
                 text = str(action_id or "").strip()
                 if text and text not in allowed_actions:
                     allowed_actions.append(text)
@@ -347,6 +350,7 @@ class SkillExecutor:
         runtime_resources: dict[str, Any] = {
             "blocks.handlers": {handler_key: run_strategy},
             "skills.capability_adapter": SkillCapabilityAdapter(RegistrySkillSource(self.registry)),
+            "skills.manager": self,
             "skills.executor": self,
         }
         agent = getattr(context, "agent", None)
@@ -580,6 +584,11 @@ class SkillExecutor:
                         "need": need,
                         "skill_id": item.get("skill_id"),
                         "action_ids": action_ids,
+                        "action_resolution": _copy_public(_ensure_dict(item.get("action_resolution"))),
+                        "execution_resource_requirements": _copy_public(
+                            _ensure_list(_ensure_dict(item.get("action_resolution")).get("execution_resource_requirements"))
+                        ),
+                        "mounted": item.get("mounted", True),
                     }
                 )
         return {
@@ -839,12 +848,13 @@ class SkillExecutor:
             for item in _ensure_list(plan.get("selected_skills"))
             if isinstance(item, dict)
         }
-        policy = self._capability_policy(context=context, plan=plan)
-        min_confidence = self._min_auto_mount_confidence(policy)
+        base_policy = self._capability_policy(context=context, plan=plan)
+        min_confidence = self._min_auto_mount_confidence(base_policy)
         approval_required = False
         blocked = False
         mounted_keys: set[tuple[str, str]] = set()
         mounted_action_ids: list[str] = []
+        resolved_action_ids: list[str] = []
 
         for need in needs:
             need_name = str(need.get("need") or "")
@@ -865,6 +875,7 @@ class SkillExecutor:
                 })
                 runtime_stream.append(self._capability_event("skills.capability.advisory", need, mode="advisory"))
                 continue
+            policy = self._capability_policy_for_need(base_policy, need)
             mode = self._policy_mode(policy, need_name)
             event_policy_mode = mode
             if mode == "off":
@@ -904,6 +915,46 @@ class SkillExecutor:
             if mount_key in mounted_keys:
                 continue
             mounted_keys.add(mount_key)
+            local_resolution = await self._resolve_local_action_candidate(
+                context=context,
+                agent=agent,
+                need=need,
+                policy=policy,
+            )
+            local_status = str(local_resolution.get("status") or "no_match")
+            if local_status == "selected":
+                action_ids = [
+                    str(action_id)
+                    for action_id in _ensure_list(local_resolution.get("action_ids"))
+                    if str(action_id).strip()
+                ]
+                for action_id in action_ids:
+                    if action_id not in resolved_action_ids:
+                        resolved_action_ids.append(action_id)
+                diagnostics.append({
+                    **self._capability_diagnostic("capability_mounted", need, mode=event_policy_mode),
+                    "action_ids": action_ids,
+                    "action_resolution": _copy_public(local_resolution),
+                    "mounted": False,
+                })
+                runtime_stream.append({
+                    **self._capability_event("skills.capability.mounted", need, mode=event_policy_mode),
+                    "action_ids": action_ids,
+                    "action_resolution": _copy_public(local_resolution),
+                    "mounted": False,
+                })
+                continue
+            if local_status in {"ambiguous", "low_confidence"}:
+                diagnostics.append({
+                    **self._capability_diagnostic("capability_action_resolution_failed", need, mode=event_policy_mode),
+                    "action_resolution": _copy_public(local_resolution),
+                })
+                runtime_stream.append({
+                    **self._capability_event("skills.capability.action_resolution_failed", need, mode=event_policy_mode),
+                    "action_resolution": _copy_public(local_resolution),
+                })
+                blocked = True
+                continue
             try:
                 action_ids_before_mount = self._agent_action_ids(agent)
                 action_ids = await self._mount_capability(
@@ -923,6 +974,10 @@ class SkillExecutor:
                 })
                 blocked = True
                 continue
+            for action_id in action_ids:
+                text = str(action_id or "").strip()
+                if text and text not in resolved_action_ids:
+                    resolved_action_ids.append(text)
             for action_id in self._new_action_ids(agent, action_ids_before_mount):
                 if action_id and action_id not in mounted_action_ids:
                     mounted_action_ids.append(action_id)
@@ -936,10 +991,10 @@ class SkillExecutor:
             })
 
         if blocked:
-            return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids}
+            return {"status": "blocked", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids, "resolved_action_ids": resolved_action_ids}
         if approval_required:
-            return {"status": "approval_required", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids}
-        return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids}
+            return {"status": "approval_required", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids, "resolved_action_ids": resolved_action_ids}
+        return {"status": "success", "diagnostics": diagnostics, "runtime_stream": runtime_stream, "mounted_action_ids": mounted_action_ids, "resolved_action_ids": resolved_action_ids}
 
     def _capability_policy(
         self,
@@ -960,7 +1015,23 @@ class SkillExecutor:
                 else:
                     merged[key] = value
             policy = merged
-        return policy
+        return merge_access_control_policy(
+            policy,
+            None,
+            _ensure_dict(context.get_setting("access_control_policy", {})),
+        )
+
+    def _capability_policy_for_need(self, policy: dict[str, Any], need: dict[str, Any]) -> dict[str, Any]:
+        resolved = dict(policy)
+        skill_id = str(need.get("skill_id") or "").strip()
+        scoped_ids = {
+            str(item or "").strip()
+            for item in _ensure_list(policy.get("auto_allow_skill_ids"))
+            if str(item or "").strip()
+        }
+        if skill_id and skill_id in scoped_ids:
+            resolved["auto_allow"] = True
+        return resolved
 
     @staticmethod
     def _min_auto_mount_confidence(policy: dict[str, Any]) -> float | None:
@@ -973,6 +1044,8 @@ class SkillExecutor:
             return None
 
     def _policy_mode(self, policy: dict[str, Any], need_name: str) -> str:
+        if bool(policy.get("auto_allow", False)):
+            return "allow"
         auto_load = _ensure_dict(policy.get("auto_load"))
         raw = auto_load.get(need_name, policy.get(need_name, "off"))
         if isinstance(raw, dict):
@@ -1119,6 +1192,50 @@ class SkillExecutor:
             await agent.async_use_mcp(mcp_config)
             return ["mcp"]
         raise RuntimeError(f"No built-in capability loader for need '{ need_name }'.")
+
+    async def _resolve_local_action_candidate(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        agent: Any,
+        need: dict[str, Any],
+        policy: dict[str, Any],
+    ) -> dict[str, Any]:
+        resolution_policy = self._action_resolution_policy(context=context, policy=policy)
+        if not bool(resolution_policy.get("enabled", True)):
+            return {
+                "skill_id": str(need.get("skill_id") or ""),
+                "need": str(need.get("need") or ""),
+                "status": "no_match",
+                "diagnostics": [{"code": "local_action_resolution.disabled"}],
+            }
+        min_confidence = resolution_policy.get("min_confidence", 0.75)
+        try:
+            threshold = float(min_confidence)
+        except (TypeError, ValueError):
+            threshold = 0.75
+        resolver = LocalSkillActionResolver(min_confidence=threshold)
+        return await resolver.async_resolve(
+            agent=agent,
+            context=context,
+            need=need,
+            policy=resolution_policy,
+        )
+
+    def _action_resolution_policy(
+        self,
+        *,
+        context: SkillsExecutionContext,
+        policy: dict[str, Any],
+    ) -> dict[str, Any]:
+        configured = _ensure_dict(context.get_setting("skills.action_resolution", {}))
+        scoped = _ensure_dict(policy.get("action_resolution"))
+        merged = {**configured, **scoped}
+        if "model_assisted" not in merged:
+            merged["model_assisted"] = bool(context.get_setting("skills.action_resolution.model_assisted", False))
+        if "enabled" not in merged:
+            merged["enabled"] = True
+        return merged
 
     def _web_search_options(self, policy: dict[str, Any]) -> dict[str, Any]:
         options = _ensure_dict(policy.get("web_search"))

@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from agently.core.application.SkillsExecutor import (
+from agently.core.application.SkillsManager import (
     DictSkillSource,
     RegistrySkillSource,
     SkillCapabilityAdapter,

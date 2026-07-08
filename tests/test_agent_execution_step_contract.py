@@ -564,6 +564,98 @@ async def test_taskboard_work_units_receive_task_context_contract(tmp_path):
         )
 
 
+@pytest.mark.asyncio
+async def test_taskboard_readback_card_consumes_skill_context_pack_refs(tmp_path):
+    agent = _create_agent("execution-taskboard-skill-context-readback").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Summarize agently-request setup guidance.",
+        success_criteria=["The summary uses the required Skill context."],
+        execution="taskboard",
+    )
+    captured_work_units: list[dict[str, Any]] = []
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any) -> tuple[Any, dict[str, Any], WorkUnitResult]:
+        work_unit = cast(Any, kwargs["work_unit"])
+        captured_work_units.append(work_unit.to_dict())
+        raw = await kwargs["handler"]({})
+        return (
+            raw["execution_result"],
+            raw["execution_meta"],
+            WorkUnitResult(id=str(work_unit.id), status=str(raw["execution_result"]["status"])),
+        )
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    context_pack: WorkspaceContextPackage = {
+        "goal": task.goal,
+        "items": [],
+        "profile": "test",
+        "omitted": [],
+        "diagnostics": {},
+        "skills_context_pack": {
+            "schema_version": "agently.skills.context_pack.v1",
+            "skills": [
+                {
+                    "skill_id": "agently-request",
+                    "guidance": {
+                        "path": "SKILL.md",
+                        "excerpt": "Use Agently model settings and output control for request setup.",
+                        "citation": "skills/agently-request/SKILL.md",
+                    },
+                    "selected_resources": [
+                        {
+                            "path": "references/model-setup.md",
+                            "kind": "reference",
+                            "content": "Configure a provider model key before creating a request.",
+                            "citation": "skills/agently-request/references/model-setup.md",
+                            "truncated": False,
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-skill-context-readback",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "taskboard-skill-context-readback-graph",
+                "cards": [
+                    {
+                        "id": "read-skill",
+                        "objective": "Read the required Skill references.",
+                        "allowed_execution_shape": "readback",
+                        "input_refs": [
+                            "skills/agently-request/SKILL.md",
+                            "skills/agently-request/references/model-setup.md",
+                        ],
+                        "evidence_contract": {
+                            "evidence_to_use": [
+                                "skills/agently-request/SKILL.md",
+                                "skills/agently-request/references/model-setup.md",
+                            ]
+                        },
+                    }
+                ],
+            }
+        ),
+    )
+    card = revision.graph.card_by_id()["read-skill"]
+
+    result = await task._run_taskboard_readback_card(
+        SimpleNamespace(revision=revision, card=card, dependency_results={}, planning_policy=None),
+        context_pack,
+    )
+
+    assert result.status == "completed"
+    assert result.preview["skill_context_readbacks"][0]["skill_id"] == "agently-request"
+    assert result.preview["remaining_work"] == []
+    evidence_items = result.metadata["evidence_ledger"]["items"]
+    assert {item["kind"] for item in evidence_items} == {"skill_context.readback"}
+    assert any("model settings" in item.get("body", "") for item in evidence_items)
+    assert captured_work_units[0]["input_refs"][0]["kind"] == "skill_context"
+
+
 def _write_skill(root: Path):
     root.mkdir(parents=True, exist_ok=True)
     (root / "SKILL.md").write_text(
@@ -4715,6 +4807,123 @@ async def test_agent_execution_add_guidance_before_task_creation_is_queued_then_
 
 
 @pytest.mark.asyncio
+async def test_agent_task_context_pack_loads_required_skill_context(tmp_path, monkeypatch):
+    agent = _create_agent("execution-required-skill-context-pack").use_workspace(tmp_path / "workspace")
+    calls: list[dict[str, Any]] = []
+
+    async def fake_build_skills_context_pack(**kwargs: Any) -> dict[str, Any]:
+        calls.append(DataFormatter.sanitize(kwargs))
+        return {
+            "schema_version": "agently.skills.context_pack.v1",
+            "task": kwargs.get("task", ""),
+            "used_chars": 128,
+            "skills": [
+                {
+                    "skill_id": "agently-request",
+                    "source": {"installed_path": "/tmp/registry/agently-request"},
+                    "guidance": {
+                        "path": "SKILL.md",
+                        "excerpt": "Use Agently request output control.",
+                        "citation": "skills/agently-request/SKILL.md",
+                    },
+                    "selected_resources": [],
+                }
+            ],
+            "citations": ["skills/agently-request/SKILL.md"],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(agent, "async_build_skills_context_pack", fake_build_skills_context_pack, raising=False)
+    task = AgentTask(
+        agent,
+        goal="Build a structured Agently request.",
+        success_criteria=["The answer follows Agently request guidance."],
+        execution="flat",
+        options={"capability_constraints": {"skills": {"required": ["agently-request"]}}},
+    )
+
+    context_pack = await task._build_context()
+
+    assert calls
+    assert calls[0]["skill_ids"] == ["agently-request"]
+    assert calls[0]["actionize_scripts"] is True
+    skills_context_pack = context_pack.get("skills_context_pack")
+    assert isinstance(skills_context_pack, dict)
+    skills = skills_context_pack.get("skills")
+    assert isinstance(skills, list)
+    assert skills[0]["skill_id"] == "agently-request"
+    assert "source" not in skills[0]
+    assert "/tmp/registry" not in json.dumps(skills_context_pack, ensure_ascii=False)
+    assert context_pack["diagnostics"]["skills_context_pack"]["status"] == "loaded"
+    assert context_pack["diagnostics"]["skills_context_pack"]["loaded_skill_ids"] == ["agently-request"]
+
+
+def test_flat_context_pack_skill_binding_satisfies_required_skill_evidence(tmp_path):
+    agent = _create_agent("execution-flat-required-skill-binding").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Build a structured Agently request.",
+        success_criteria=["The answer follows Agently request guidance."],
+        execution="flat",
+        options={"capability_constraints": {"skills": {"required": ["agently-request"]}}},
+    )
+    context_pack: WorkspaceContextPackage = {
+        "goal": task.goal,
+        "items": [],
+        "profile": "test",
+        "omitted": [],
+        "diagnostics": {},
+        "skills_context_pack": {
+            "schema_version": "agently.skills.context_pack.v1",
+            "skills": [{"skill_id": "agently-request"}],
+        },
+    }
+    execution_meta = {
+        "status": "success",
+        "logs": {},
+        "effective_options": {
+            "capability_constraints": {"skills": {"required": ["agently-request"]}},
+        },
+    }
+
+    enriched_meta = task._flat_execution_meta_with_context_capability_logs(
+        execution_meta,
+        context_pack=context_pack,
+    )
+    summary = task._execution_log_summary(enriched_meta)
+
+    assert summary["selected_skill_ids"] == ["agently-request"]
+    assert summary["missing_required_skills"] == []
+    assert "agently-request" in summary["capabilities_used"]
+    assert summary["capability_evidence"]["skills"]["selected"] == ["agently-request"]
+    assert summary["capability_evidence_requirements"] == [
+        {
+            "capability_id": "agently-request",
+            "capability_kind": "skill",
+            "kind": "capability_used",
+            "required": True,
+            "source": "flat_required_skill_context",
+        }
+    ]
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "done",
+            "missing_criteria": [],
+            "final_result": "done",
+        },
+        execution_evidence_summary=summary,
+        candidate_final_result="done",
+    )
+
+    assert verification["is_complete"] is True
+    assert verification["missing_required_capabilities"] == []
+    assert verification["missing_capability_evidence"] == []
+
+
+@pytest.mark.asyncio
 async def test_agent_execution_guidance_on_non_task_route_is_not_applied_or_prompt_injected():
     agent = _create_agent("execution-guidance-non-task")
     execution = (
@@ -5051,6 +5260,216 @@ async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_pa
     assert task.result["taskboard"]["final_verification"]["is_complete"] is True
     assert task.result["taskboard"]["taskboard_acceptance_index"]["metadata"]["green_count"] == 1
     assert task.result["taskboard"]["acceptance_verification_plan"]["all_satisfied"] is True
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_requires_required_skill_context_evidence(tmp_path, monkeypatch):
+    agent = _create_agent("execution-taskboard-required-skill-missing").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce an Agently request checklist.",
+        success_criteria=["The checklist uses required Agently request guidance."],
+        execution="taskboard",
+        options={
+            "capability_constraints": {"skills": {"required": ["agently-request"]}},
+            "planner_capabilities": [
+                {
+                    "id": "agently-request",
+                    "kind": "skill",
+                    "route": "model_request",
+                    "guidance_access": "context_pack",
+                    "mode": "required",
+                }
+            ],
+        },
+    )
+    revision = TaskBoardRevision.create(
+        board_id="required-skill-missing",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "required-skill-missing-graph",
+                "cards": [{"id": "final", "objective": "Produce the checklist."}],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": "rev-0",
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final",
+                        "status": "completed",
+                        "preview": {"final_result": "Checklist without Skill context evidence."},
+                    },
+                }
+            ],
+        },
+    )
+
+    async def fake_taskboard_final(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "accepted": True,
+            "reason": "Finalizer accepted the candidate.",
+            "final_result": "Checklist without Skill context evidence.",
+            "missing_criteria": [],
+        }
+
+    async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Verifier accepted the candidate.",
+            "final_result": "Checklist without Skill context evidence.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion": "The checklist uses required Agently request guidance.",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "The candidate looks complete.",
+                }
+            ],
+        }
+
+    async def no_missing_deliverables() -> list[dict[str, Any]]:
+        return []
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
+    monkeypatch.setattr(task, "_request_verification", fake_request_verification)
+    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+
+    assert terminal["terminal"] is False
+    assert terminal["status"] == "repair_requested"
+    assert "agently-request" in terminal["final_verification"]["missing_required_capabilities"]
+    assert any(
+        "agently-request" in item
+        for item in terminal["final_verification"]["missing_criteria"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_accepts_manager_loaded_required_skill_context(tmp_path, monkeypatch):
+    agent = _create_agent("execution-taskboard-required-skill-loaded").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        goal="Produce an Agently request checklist.",
+        success_criteria=["The checklist uses required Agently request guidance."],
+        execution="taskboard",
+        options={
+            "capability_constraints": {"skills": {"required": ["agently-request"]}},
+            "planner_capabilities": [
+                {
+                    "id": "agently-request",
+                    "kind": "skill",
+                    "route": "model_request",
+                    "guidance_access": "context_pack",
+                    "mode": "required",
+                }
+            ],
+        },
+    )
+    revision = TaskBoardRevision.create(
+        board_id="required-skill-loaded",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "required-skill-loaded-graph",
+                "cards": [{"id": "final", "objective": "Produce the checklist."}],
+            }
+        ),
+    )
+    completed_revision = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": "rev-0",
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": {
+                        "card_id": "final",
+                        "status": "completed",
+                        "preview": {"final_result": "Checklist grounded in agently-request guidance."},
+                    },
+                }
+            ],
+        },
+    )
+    verification_calls: list[dict[str, Any]] = []
+
+    async def fake_taskboard_final(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "accepted": True,
+            "reason": "Finalizer accepted the candidate.",
+            "final_result": "Checklist grounded in agently-request guidance.",
+            "missing_criteria": [],
+        }
+
+    async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        verification_calls.append(DataFormatter.sanitize(kwargs))
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Verifier accepted the candidate.",
+            "final_result": "Checklist grounded in agently-request guidance.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion": "The checklist uses required Agently request guidance.",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "The required Skill context is visible.",
+                }
+            ],
+        }
+
+    async def no_missing_deliverables() -> list[dict[str, Any]]:
+        return []
+
+    async def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
+    monkeypatch.setattr(task, "_request_verification", fake_request_verification)
+    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    terminal = await task._finalize_taskboard(
+        completed_revision,
+        context_pack=cast(
+            WorkspaceContextPackage,
+            {
+                "skills_context_pack": {
+                    "schema_version": "agently.skills.context_pack.v1",
+                    "skills": [{"skill_id": "agently-request"}],
+                }
+            },
+        ),
+    )
+
+    assert terminal == {"terminal": True, "status": "completed"}
+    assert task.result["accepted"] is True
+    assert task.result["taskboard"]["final_verification"]["missing_required_capabilities"] == []
+    prompt_bound_skills = verification_calls[0]["execution_meta"]["logs"]["route_logs"]["prompt_bound_skills"]
+    assert prompt_bound_skills == [
+        {
+            "skill_id": "agently-request",
+            "mode": "required",
+            "binding": "context_pack",
+            "source": "skills_manager",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -7888,11 +8307,11 @@ async def test_agent_execution_options_forward_skills_effort(tmp_path):
     assert meta["effective_options"]["execution"]["limits"]["max_model_requests"] == 0
     assert meta["consumed_options"]["routes.skills.effort"] == {
         "value": "fast",
-        "owner": "AgentlySkillsExecutor",
+        "owner": "AgentlySkillsManager",
     }
     assert meta["consumed_options"]["routes.skills.output_format"] == {
         "value": "flat_markdown",
-        "owner": "AgentlySkillsExecutor",
+        "owner": "AgentlySkillsManager",
     }
 
 

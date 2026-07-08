@@ -449,7 +449,11 @@ class TriggerFlowActionFlow:
                 policy_override = command.get("policy_override", {})
                 if not isinstance(policy_override, dict):
                     policy_override = {}
-                policy = action.action_dispatcher._merge_policy(settings, spec, policy_override)
+                sanitized_policy_override, _ = action.action_dispatcher._sanitize_policy_override(
+                    policy_override,
+                    source_protocol="structured_plan",
+                )
+                policy = action.action_dispatcher._merge_policy(settings, spec, sanitized_policy_override)
                 policy_approval_handler = settings.get("policy_approval.handler", None)
                 if policy_approval_handler is not None and not policy.get("policy_approval_handler"):
                     policy["policy_approval_handler"] = str(policy_approval_handler)
@@ -458,7 +462,7 @@ class TriggerFlowActionFlow:
                 if not approval_needed:
                     continue
                 if approval_key in approval_decisions:
-                    approved_override = dict(policy_override)
+                    approved_override = dict(sanitized_policy_override)
                     approved_override["policy_approval_granted"] = True
                     approved_override["policy_approval_decision"] = approval_decisions[approval_key]
                     command["policy_override"] = approved_override
@@ -494,7 +498,7 @@ class TriggerFlowActionFlow:
                 if gate_result.get("status") == "approved":
                     approval_decisions[approval_key] = gate_result
                     data.set_state("policy_approval_decisions", approval_decisions)
-                    approved_override = dict(policy_override)
+                    approved_override = dict(sanitized_policy_override)
                     approved_override["policy_approval_granted"] = True
                     approved_override["policy_approval_decision"] = gate_result
                     command["policy_override"] = approved_override

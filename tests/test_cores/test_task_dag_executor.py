@@ -451,6 +451,36 @@ async def test_task_dag_executor_approval_task_resumes_to_downstream_tasks():
 
 
 @pytest.mark.asyncio
+async def test_task_dag_executor_global_access_control_auto_allow_skips_approval_interrupt():
+    async def consume_approval(context):
+        return context.dependency_results["approve_write"]["status"]
+
+    graph = {
+        "graph_id": "approval-auto-allow-demo",
+        "tasks": [
+            {"id": "approve_write", "kind": "approval", "approval": {"type": "human_approval"}},
+            {"id": "write_report", "kind": "local", "depends_on": ["approve_write"]},
+        ],
+    }
+
+    execution = TaskDAGExecutor({"local": consume_approval}).compile(graph).create_execution(
+        auto_close=False
+    )
+    Agently.configure_policy_approval(handler="fail_closed")
+    Agently.set_settings("access_control_policy.auto_allow", True)
+    try:
+        await execution.async_start({"request": "publish"})
+        snapshot = await execution.async_close(timeout=1)
+    finally:
+        Agently.set_settings("access_control_policy.auto_allow", False)
+        Agently.configure_policy_approval(handler="input_timeout_fail")
+
+    assert execution.get_pending_interrupts() == {}
+    assert snapshot["task_results"]["approve_write"]["status"] == "approved"
+    assert snapshot["task_results"]["write_report"] == "approved"
+
+
+@pytest.mark.asyncio
 async def test_task_dag_executor_checkpoint_loads_approval_dag_and_continues_downstream():
     async def consume_approval(context):
         return f"approved={ context.dependency_results['approve_write']['approved'] }"

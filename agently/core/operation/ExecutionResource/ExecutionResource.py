@@ -23,6 +23,7 @@ from agently.types.data import (
     ExecutionResourceScope,
     ExecutionResourceStatus,
 )
+from agently.core.operation.PolicyApproval import access_policy_auto_allow, merge_access_control_policy
 from agently.utils import FunctionShifter
 
 if TYPE_CHECKING:
@@ -217,6 +218,8 @@ class ExecutionResourceManager:
         approval_required = bool(requirement.get("approval_required", False)) or approval_mode == "always"
         if not approval_required:
             return policy
+        if access_policy_auto_allow(policy):
+            return policy
         await self._emit(
             "execution_resource.approval_required",
             requirement=requirement,
@@ -272,7 +275,7 @@ class ExecutionResourceManager:
         else:
             requirement = self._normalize_requirement(requirement_or_id, scope=scope, owner_id=owner_id)
             self._requirements[str(requirement.get("requirement_id", ""))] = requirement
-        policy = cast(ExecutionResourcePolicy, dict(requirement.get("policy", {})))
+        policy = cast(ExecutionResourcePolicy, merge_access_control_policy(requirement.get("policy", {}), self.settings))
         policy = await self._resolve_approval(requirement, policy)
         reuse_key = str(requirement.get("reuse_key", ""))
         provider = self._get_provider(str(requirement["kind"]))

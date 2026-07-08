@@ -58,7 +58,7 @@ async def run_model_request_route(
             "skills.prompt_bound",
             {"selected_skills": prompt_bound_required_skills},
             route="model_request",
-            source="skills_executor",
+            source="skills_manager",
             meta={"binding": "prompt_guidance"},
         )
     if ensure_all_keys is not None:
@@ -332,6 +332,12 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
     mode = cast(Any, route_meta.get("mode", "model_decision"))
     task = execution.task_target()
     agent = cast(Any, execution.agent)
+    execution_access_policy = execution.effective_options.get("access_control_policy", {})
+    settings_overrides = (
+        {"access_control_policy": dict(execution_access_policy)}
+        if isinstance(execution_access_policy, Mapping)
+        else {}
+    )
     output = execution.prompt_snapshot.get("output")
     route_options = execution.route_options("skills")
     route_output_format = route_options.get("output_format")
@@ -341,11 +347,11 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
         else execution.prompt_snapshot.get("output_format")
     )
     if route_output_format is not None:
-        execution.record_consumed_option("routes.skills.output_format", output_format, owner="AgentlySkillsExecutor")
+        execution.record_consumed_option("routes.skills.output_format", output_format, owner="AgentlySkillsManager")
     effort = route_options.get("effort")
     if effort is not None:
         effort = str(effort)
-        execution.record_consumed_option("routes.skills.effort", effort, owner="AgentlySkillsExecutor")
+        execution.record_consumed_option("routes.skills.effort", effort, owner="AgentlySkillsManager")
     plan = await agent.async_resolve_skills_plan(
         task,
         skills=route_meta.get("skills"),
@@ -353,12 +359,13 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
         mode=mode,
         output=output,
         output_format=output_format,
+        _settings_overrides=settings_overrides,
     )
     await execution.emit_stream(
         "route.skills.plan",
         plan,
         route="skills",
-        source="skills_executor",
+        source="skills_manager",
         meta={"status": plan.get("status")},
     )
     if not plan.get("selected_skills"):
@@ -372,6 +379,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
                 output_format=output_format,
                 stream_handler=bridge_runtime_stream,
                 effort=effort,
+                _settings_overrides=settings_overrides,
             )
             execution.raise_if_limit_exceeded()
             execution.close_snapshot = skills_execution.close_snapshot
@@ -403,6 +411,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
         output_format=output_format,
         stream_handler=bridge_runtime_stream,
         effort=effort,
+        _settings_overrides=settings_overrides,
     )
     execution.raise_if_limit_exceeded()
     for log in skills_execution.skill_logs:
@@ -410,7 +419,7 @@ async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, An
             f"skills.{ log.get('skill_id', 'skill') }",
             log,
             route="skills",
-            source="skills_executor",
+            source="skills_manager",
             stage_id=None,
         )
     for log in skills_execution.action_logs:

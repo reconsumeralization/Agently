@@ -146,6 +146,7 @@ demo_*
 
 # Generated artifacts (comparison experiments, etc.)
 _artifacts/
+remote-audit:/
 
 # DB
 *.db

@@ -10,7 +10,7 @@ keywords: Agently, coding agents, Codex, Claude Code, Cursor, Skills
 
 如果你借助外部 coding agent（Codex、Claude Code、Cursor 等）写 Agently 应用，给该 agent 提供良好 Agently 上下文的规范方式是 `Agently-Skills` 伴生仓中的**官方 Agently Skills** 包。
 
-本文讲的是 **companion repo** 这条路径，不是框架内 runtime skill 消费。如果你要的是 Agently 自己在真实任务里安装并应用外部 skills，读 [Skills Executor](skills-executor.md)。
+本文讲的是 **companion repo** 这条路径，不是框架内 runtime skill 消费。如果你要的是 Agently 自己在真实任务里安装并应用外部 skills，读 [Skills Compatibility](skills-executor.md)。
 
 ## 什么是 Agently Skills
 
@@ -28,7 +28,8 @@ skill **不是**纯文档。它为 coding agent 结构化：每个 skill 告诉 
 这两件事要分开：
 
 - `Agently-Skills` companion repo：给外部 coding agent 用的 skill 包
-- Agently `Skills Executor`：Agently 框架内部的 runtime 能力
+- Agently runtime Skills：Agently 框架内部由 SkillsManager 拥有的 runtime
+  能力，`SkillsExecutor` 仅保留为兼容 facade
 
 伴生仓不会变成你的 Agently app 运行时依赖。它仍然只是给 coding agent 的指导包。
 

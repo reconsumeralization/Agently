@@ -321,7 +321,7 @@ agent.set_settings("action.planning_model_key", "task-main")
 ```
 
 这个配置同时作用于默认 structured-plan 和 native tool-call planning
-路径。当 SkillsExecutor 或 AgentTask 把一个 bounded action round
+路径。当 SkillsManager-backed Skills execution 或 AgentTask 把一个 bounded action round
 委托给 ActionRuntime 时尤其重要，否则 action planning 可能没有显式使用
 预期的 `model_pool` 业务 key。
 

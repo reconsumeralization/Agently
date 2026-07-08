@@ -1,12 +1,22 @@
 ---
-title: Skills Executor
-description: Standard SKILL.md packages installed and executed through Agently.
-keywords: Agently, Skills Executor, SKILL.md, skills, run_skills_task, use_skills
+title: Skills Compatibility
+description: Standard SKILL.md packages selected through Agent Skills APIs, with SkillsExecutor kept as a compatibility facade.
+keywords: Agently, Skills Manager, Skills Executor, SKILL.md, skills, run_skills_task, use_skills
 ---
 
-# Skills Executor
+# Skills Compatibility
 
 > Languages: **English** · [中文](../../cn/development/skills-executor.md)
+
+`SkillsManager` is Agently's internal owner for Skill discovery, progressive
+context disclosure, capability need discovery, and policy-gated Action
+candidate binding. It is not a new recommended public API. User code should
+prefer `agent.use_skills(...)`, AgentExecution Skills selection, and
+`agent.run_skills_task(...)` when a compatibility execution facade is needed.
+Context-pack APIs are advanced custom-planner/TaskDAG integration surfaces, not
+the ordinary user path. `Agently.skills_executor` remains for legacy registry,
+context-pack, resolver, and effort-strategy calls and now delegates to the
+internal manager.
 
 Agently Skills follow the standard Skills layout: `SKILL.md` is the capability
 definition, with optional `scripts/`, `references/`, and `assets/` resources.
@@ -26,7 +36,7 @@ Follow this checklist before recommending a release or rollback...
 ## Declare And Install
 
 For normal Agent runtime, declare Skills on the Agent with `use_skills(...)`.
-The Skills Executor treats repository/package selectors like Action candidates:
+The Skills runtime treats repository/package selectors like Action candidates:
 it records the source first, performs lightweight `SKILL.md` discovery during
 planning, and installs the full Skill only when the planner selects or requires
 it.
@@ -46,7 +56,8 @@ directory.
 When you author a local Skill, keep it in a real standalone directory that
 matches the standard layout. Do not build inline `SKILL.md` strings inside
 business code and do not use root-level YAML manifests such as `skill.yaml`.
-The application should pass the directory path to the executor:
+The application should pass the directory path to the compatibility registry
+facade:
 
 ```text
 my-skill/
@@ -317,7 +328,9 @@ execution = agent.input("Draft a release decision.").create_execution(
 ```
 
 For a fully custom action strategy, register an effort strategy handler on the
-Skills Executor and invoke it through `effort=`. The handler receives the Agent
+legacy SkillsExecutor facade and invoke it through `effort=`. This is an
+advanced compatibility surface; normal applications should use AgentExecution
+Skills selection and built-in effort presets. The handler receives the Agent
 runtime context, selected Skills plan, resolved effort config, and output
 format; it may request models, call Actions/MCP through the context, emit
 runtime stream items, and return the final output.
@@ -388,14 +401,16 @@ model instead of sending the symbolic key as a provider model name.
 When Skills are selected through Agent auto-orchestration, model field stream
 items are bridged to stable paths like `skills.model.fields.<field_path>`.
 
-## Context Packs for DAG Consumers
+## Advanced Context Packs for DAG Consumers
 
-When a custom planner, Dynamic Task, or TaskDAG node needs complete Skill
-context without forcing the whole Skills execution route, build a context pack.
-The pack exposes the selected `SKILL.md` guidance, task-relevant references,
-examples, optional assets, resource index metadata, citations, diagnostics, and
-policy-gated action candidates under schema
-`agently.skills.context_pack.v1`.
+AgentExecution normally asks the internal Skills Manager to build the context
+pack after the selected Skills are known. Application code should not manage
+this pack explicitly. When a custom planner, Dynamic Task, or TaskDAG node
+needs complete Skill context without forcing the whole Skills execution route,
+it may call the context-pack API as an advanced integration surface. The pack
+exposes the selected `SKILL.md` guidance, task-relevant references, examples,
+optional assets, resource index metadata, citations, diagnostics, and
+policy-gated action candidates under schema `agently.skills.context_pack.v1`.
 
 ```python
 pack = await agent.async_build_skills_context_pack(
@@ -408,7 +423,7 @@ pack = await agent.async_build_skills_context_pack(
 )
 ```
 
-For DAG-shaped execution, reuse the Skills Executor resolver adapter instead of
+For DAG-shaped execution, reuse the compatibility resolver adapter instead of
 creating a separate scheduler:
 
 ```python
@@ -443,7 +458,7 @@ the script.
 Bundled scripts and resources are never executed just because a Skill is
 installed. When a selected standard Skill describes a need for search, browse,
 HTTP, Workspace file access, Python, shell/script execution, or MCP, Skills
-Executor records structured `capability_needs` in the plan. The Skill still
+Manager records structured `capability_needs` in the plan. The Skill still
 does not grant capability. Before execution, Agently compares those needs with
 host policy and can auto-load only the built-in capabilities explicitly marked
 `allow`; `approval` and `off` fail closed with diagnostics.
@@ -475,6 +490,27 @@ agent.configure_skill_capabilities(
 agent.configure_policy_approval(handler="input_timeout_fail")
 ```
 
+Trusted hosts can enable automatic approval through the framework access-control
+settings instead of switching the approval handler:
+
+```python
+Agently.set_settings("access_control_policy.auto_allow", True)  # process default
+agent.set_settings("access_control_policy.auto_allow", True)    # this Agent only
+
+execution = agent.create_execution().access_control_policy({"auto_allow": True})
+
+agent.use_skills(
+    [{"source": "owner/skills-with-local-mcp", "auto_allow": True}],
+    mode="required",
+)
+```
+
+`auto_allow=True` is host authorization. It can approve Action,
+ExecutionResource, TaskDAG, Blocks, and Skills capability gates, but it does not
+remove structural boundaries such as Workspace roots, command allowlists, MCP
+configuration, HTTP allowlists, or sandbox policy. Selector-level
+`auto_allow=True` is scoped to the matching Skill only.
+
 The built-in read-only HTTP capability blocks private, loopback, and
 link-local hosts by default (an SSRF guard); use
 `http_request={"allow_hosts": [...]}` or `{"allow_private": true}` to allow
@@ -483,11 +519,13 @@ internal targets. The default script allowlist contains local interpreters
 fetch and execute arbitrary remote code; add them through policy only when
 required.
 
-When `capability_scope="execution"`, SkillsExecutor releases only capabilities
-that were newly mounted for that execution. If the host Agent already has an
-action with the requested action id, SkillsExecutor reuses it and leaves it
-registered after the Skills run; execution-scoped cleanup must not overwrite or
-unregister host-owned actions.
+When `capability_scope="execution"`, Agently releases only capabilities that
+were newly mounted for that execution. If the host Agent already has a matching
+Action, the internal SkillsManager can reuse that host-owned Action through a
+fuzzy local Action resolution step, then binds the final execution to the exact
+`action_id`. Ambiguous, low-confidence, policy-denied, or unavailable-resource
+matches fail closed with diagnostics; execution-scoped cleanup must not
+overwrite or unregister host-owned actions.
 
 For search-oriented Skills, Agently mounts the framework Search package backed
 by the `ddgs` Python package. Keep `ddgs` upgraded in the host environment
@@ -502,11 +540,11 @@ with `success=True` and backend diagnostics so the task can continue while the
 operator still sees the degraded providers.
 
 Workspace file operations are Workspace-owned. When an Agent has a Workspace,
-SkillsExecutor exposes file actions through the Workspace file boundary before
+SkillsManager exposes file actions through the Workspace file boundary before
 falling back to `agent.enable_workspace_file_actions(...)`.
 
 `approval` is handled by the framework-wide PolicyApproval handler, not by a
-SkillsExecutor-local handler. The default is `input_timeout_fail`: interactive
+Skills-local handler. The default is `input_timeout_fail`: interactive
 CLI runs ask for input and fail after timeout, while non-interactive services
 fail immediately. Tests and trusted local fixtures can use `auto_approve`.
 Production services should register a handler that matches the service wrapping
@@ -515,7 +553,7 @@ HTTP callback, webhook resume, SSE/WebSocket wait, or save-and-return interrupt
 id. Use `fail_closed` when the host wants a pending diagnostic or a TriggerFlow
 `policy_approval` interrupt instead of local input.
 
-Skills Executor does not treat Skill frontmatter such as `mcp`, `mcpServers`,
+SkillsManager does not treat Skill frontmatter such as `mcp`, `mcpServers`,
 `allow-scripts`, or Agently-specific `allowed-actions` as capability grants.
 Public `compatibility` and `metadata` may contribute evidence to
 `capability_needs`, but loading remains host-policy controlled.
@@ -534,7 +572,7 @@ synthesize missing backends.
 exercises the 4.1.3 remote-connector path end to end: public remote Skills are
 declared with `agent.use_skills(...)`, a free weather MCP server is registered
 through ActionRuntime, the model generates MCP action calls for real weather
-observations, and Skills Executor lazily materializes the selected Skills before
+observations, and the internal SkillsManager lazily materializes the selected Skills before
 running `effort="normal"`.
 
 ## Settings
@@ -553,7 +591,7 @@ Plugin defaults load first when present; framework settings are the final
 application-level defaults. Neither setting layer can replace `SKILL.md` as the
 Skill capability definition.
 
-Use the public Skills Executor configuration helper for local registry options:
+Use the legacy SkillsExecutor compatibility helper for local registry options:
 
 ```python
 Agently.skills_executor.configure(
@@ -564,17 +602,25 @@ Agently.skills_executor.configure(
 
 ## API Summary
 
+Recommended Agent APIs:
+
+- `agent.use_skills(...)`
+- `agent.use_skills_packs(...)`
+- `agent.resolve_skills_plan(...)`
+- `agent.run_skills_task(...)`
+
+Advanced integration API:
+
+- `agent.build_skills_context_pack(...)`
+
+Legacy compatibility facade:
+
 - `Agently.skills_executor.install_skills(...)`
 - `Agently.skills_executor.install_skills_pack(...)`
 - `Agently.skills_executor.configure(...)`
 - `Agently.skills_executor.inspect_skills(...)`
 - `Agently.skills_executor.build_context_pack(...)`
 - `Agently.skills_executor.task_dag_resolver(...)`
-- `agent.build_skills_context_pack(...)`
-- `agent.use_skills(...)`
-- `agent.use_skills_packs(...)`
-- `agent.resolve_skills_plan(...)`
-- `agent.run_skills_task(...)`
 
 `SkillContract` describes the installed standard Skill, Agently install
 metadata, decision card, resource index, and checksums. It does not contain

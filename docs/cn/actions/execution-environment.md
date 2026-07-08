@@ -140,6 +140,7 @@ Agently.execution_resource.inspect(id)
 Agently.execution_resource.list(scope="execution")
 Agently.policy_approval.register_handler("my_handler", handler)
 Agently.configure_policy_approval(handler="my_handler")
+Agently.set_settings("access_control_policy.auto_allow", True)
 ```
 
 声明是 lazy 的：只校验和记录 requirement，不启动任何东西。`ensure(...)` 会在 policy
@@ -147,6 +148,9 @@ Agently.configure_policy_approval(handler="my_handler")
 `Agently.policy_approval` handler 决定。默认 `input_timeout_fail` 只会在交互式 CLI
 中提示输入，并在超时后失败；非交互服务环境会立即失败。包裹 TriggerFlow execution
 的服务应注册自己的 handler，例如写入 pending approval 后用 `continue_with(...)` 恢复。
+可信宿主可以通过 settings 设置 `access_control_policy.auto_allow=True` 来自动批准
+policy gate；这不会绕过 requirement policy 中的 provider、sandbox、路径、命令或
+网络约束。
 复用 ready handle 前，manager 会调用
 `provider.async_health_check(handle)`。健康则 `ref_count + 1` 后复用；不健康则发出
 `execution_resource.unhealthy`，释放旧 handle，再 ensure 一个新 handle。V2 不加入后台

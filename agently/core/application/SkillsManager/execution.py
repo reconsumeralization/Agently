@@ -12,16 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .AccessControlPolicy import (
-    access_policy_auto_allow,
-    merge_access_control_policy,
-    resolve_access_control_policy,
-)
-from .PolicyApproval import PolicyApprovalManager
+from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.executor import SkillExecution
 
-__all__ = [
-    "PolicyApprovalManager",
-    "access_policy_auto_allow",
-    "merge_access_control_policy",
-    "resolve_access_control_policy",
-]
+__all__ = ["SkillExecution"]

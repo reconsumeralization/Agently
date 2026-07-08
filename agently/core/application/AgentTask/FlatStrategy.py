@@ -201,6 +201,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 execution_meta["diagnostics"]["evidence_binding_repair"] = DataFormatter.sanitize(
                     flat_evidence_repair_diagnostic
                 )
+        execution_meta = self._flat_execution_meta_with_context_capability_logs(
+            execution_meta,
+            context_pack=context_pack,
+        )
         await self._emit_process_progress_from_output(
             execution_result,
             stage="execution",
@@ -545,6 +549,79 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
         return {"terminal": False, "status": "continue"}
 
+    def _flat_execution_meta_with_context_capability_logs(
+        self,
+        execution_meta: Mapping[str, Any],
+        *,
+        context_pack: "WorkspaceContextPackage",
+    ) -> dict[str, Any]:
+        meta = dict(execution_meta)
+        if not isinstance(context_pack, Mapping):
+            return meta
+        skill_context_pack = context_pack.get("skills_context_pack")
+        loaded_skill_ids = self._skills_context_pack_skill_ids(skill_context_pack)
+        if not loaded_skill_ids:
+            return meta
+
+        logs = meta.get("logs")
+        logs = dict(logs) if isinstance(logs, Mapping) else {}
+        route_logs = logs.get("route_logs")
+        route_logs = dict(route_logs) if isinstance(route_logs, Mapping) else {}
+        prompt_bound_skills = [
+            dict(item)
+            for item in route_logs.get("prompt_bound_skills", [])
+            if isinstance(item, Mapping)
+        ]
+        existing_skill_ids = {
+            str(item.get("skill_id") or item.get("id") or item.get("name") or "").strip()
+            for item in prompt_bound_skills
+            if isinstance(item, Mapping)
+        }
+        for skill_id in loaded_skill_ids:
+            if skill_id in existing_skill_ids:
+                continue
+            prompt_bound_skills.append(
+                {
+                    "skill_id": skill_id,
+                    "mode": "required",
+                    "binding": "context_pack",
+                    "source": "skills_manager",
+                }
+            )
+        route_logs["prompt_bound_skills"] = DataFormatter.sanitize(prompt_bound_skills)
+        logs["route_logs"] = DataFormatter.sanitize(route_logs)
+        meta["logs"] = DataFormatter.sanitize(logs)
+
+        requirements = [
+            {
+                "capability_id": skill_id,
+                "capability_kind": "skill",
+                "kind": "capability_used",
+                "required": True,
+                "source": "flat_required_skill_context",
+            }
+            for skill_id in loaded_skill_ids
+        ]
+        for key in ("effective_options", "options"):
+            options = meta.get(key)
+            options = dict(options) if isinstance(options, Mapping) else {}
+            existing_requirements = self._capability_evidence_requirements_from_mapping(options)
+            options["capability_evidence_requirements"] = self._merge_capability_evidence_requirements(
+                existing_requirements,
+                requirements,
+            )
+            meta[key] = DataFormatter.sanitize(options)
+
+        diagnostics = meta.get("diagnostics")
+        diagnostics = dict(diagnostics) if isinstance(diagnostics, Mapping) else {}
+        diagnostics["flat_capability_logs"] = {
+            "selected_skill_ids": loaded_skill_ids,
+            "prompt_bound_skill_count": len(prompt_bound_skills),
+            "source": "skills_manager.context_pack",
+        }
+        meta["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        return meta
+
     def _should_request_flat_final_verification(
         self,
         execution_result: Any,
@@ -625,7 +702,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 budget=self.context_budget,
                 profile=self.context_profile,
             )
-            return self._context_pack_with_guidance(context_pack)
+            return await self._context_pack_with_task_context(context_pack)
         except Exception as error:
             fallback_reason: dict[str, Any] = {
                 "type": error.__class__.__name__,
@@ -649,7 +726,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                         fallback_error, fallback=fallback_error.__class__.__name__
                     ),
                 }
-                return self._context_pack_with_guidance(
+                return await self._context_pack_with_task_context(
                     cast(
                         "WorkspaceContextPackage",
                         {
@@ -663,7 +740,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 )
             diagnostics = fallback.setdefault("diagnostics", {})
             diagnostics["fallback_reason"] = fallback_reason
-            return self._context_pack_with_guidance(fallback)
+            return await self._context_pack_with_task_context(fallback)
 
     def _step_execution_policy(self) -> dict[str, Any]:
         agent_task_options = self.options.get("agent_task")
@@ -1559,6 +1636,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "do not shorten, infer, or reconstruct URLs, file paths, or source refs from source titles or prose feedback. "
             "source_refs with content_state='ref_only' prove only discovery or materialization; read the referenced "
             "file/ref before using its content for repository, document, or source-grounded claims. "
+            "When context_pack.skills_context_pack is present, its guidance and selected_resources are already "
+            "Manager-loaded Skill context. Use their content directly as task evidence; do not plan readback or "
+            "scoped_retrieval over skills/... citations, and do not treat Skill citations as Workspace file paths "
+            "or local registry paths. "
             "For web discovery tasks, if the task context already names an official domain, homepage, or URL and "
             "search results are empty, unstable, or inconclusive, plan a Browse step for that known entry point and "
             "follow same-site navigation links before concluding that the required source is unavailable. Search "

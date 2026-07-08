@@ -147,6 +147,8 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     runtime_capability_contract = in_development["companions"]["skills"]["runtime_capability_contract"]
     assert "agent.configure_skill_capabilities" in runtime_capability_contract["host_policy_surface"]
     assert "agent.configure_policy_approval" in runtime_capability_contract["host_policy_surface"]
+    assert "access_control_policy.auto_allow" in runtime_capability_contract["host_policy_surface"]
+    assert "access_control_policy.auto_allow" in runtime_capability_contract["policy_approval_surface"]
     assert runtime_capability_contract["policy_modes"] == ["allow", "approval", "off"]
     assert "capability_needs" in runtime_capability_contract["skill_capability_needs"]
     assert "script_run" in runtime_capability_contract["auto_loadable_needs"]

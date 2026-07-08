@@ -86,7 +86,9 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     plugin_manager.register("Blocks", AgentlyBlocks)
 
     from agently.builtins.plugins.SkillsExecutor import AgentlySkillsExecutor
+    from agently.builtins.plugins.SkillsManager import AgentlySkillsManager
 
+    plugin_manager.register("SkillsManager", AgentlySkillsManager)
     plugin_manager.register("SkillsExecutor", AgentlySkillsExecutor)
 
     from agently.builtins.plugins.AgentOrchestrator import AgentlyAgentOrchestrator

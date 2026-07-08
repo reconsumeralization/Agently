@@ -19,18 +19,18 @@ from typing_extensions import Self
 
 from agently.core import BaseAgent
 from agently.types.data import SkillContextPack, SkillContextPackIncludeMode, SkillContract, SkillExecutionPlan, SkillMode, SkillRuntimeStreamHandler
-from agently.types.plugins import SkillsExecutor
+from agently.types.plugins import SkillsManager
 from agently.utils import DeprecationWarnings, FunctionShifter
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
-from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.planner import (
-    _matches_selector,
-    _matches_skills_pack_selector,
+from agently.core.application.SkillsManager import (
+    matches_selector,
+    matches_skills_pack_selector,
 )
 
-from ._SkillsContext import create_agent_skills_runtime_context
+from ._SkillsContext import create_agent_skills_manager_context
 
 if TYPE_CHECKING:
-    from agently.builtins.plugins.SkillsExecutor.AgentlySkillsExecutor.modules.executor import SkillExecution
+    from agently.core.application.SkillsManager.execution import SkillExecution
     from agently.core import Prompt
     from agently.utils import Settings
     from agently.types.plugins import AgentExecution
@@ -40,9 +40,9 @@ class SkillsExtension(BaseAgent):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
-        from agently.base import skills_executor
+        from agently.base import skills_manager
 
-        self.skills_executor = cast(SkillsExecutor, skills_executor)
+        self.skills_manager = cast(SkillsManager, skills_manager)
 
         self.__session_skill_selectors: list[Any] = []
         self.__session_skills_pack_selectors: list[Any] = []
@@ -199,6 +199,7 @@ class SkillsExtension(BaseAgent):
         output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
+        _settings_overrides: dict[str, Any] | None = None,
     ) -> SkillExecutionPlan:
         task, output, output_format = self._skills_prompt_defaults(
             task,
@@ -208,8 +209,8 @@ class SkillsExtension(BaseAgent):
         )
         selectors = self._collect_skill_selectors(skills=skills, mode=mode)
         skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=skills_packs, mode=mode)
-        context = create_agent_skills_runtime_context(self)
-        return await self.skills_executor.async_resolve_plan(
+        context = create_agent_skills_manager_context(self, settings_overrides=_settings_overrides)
+        return await self.skills_manager.async_resolve_plan(
             context=context,
             task=task,
             skills=selectors,
@@ -256,6 +257,7 @@ class SkillsExtension(BaseAgent):
         actionize_scripts: bool = False,
         budget_chars: int = 12000,
         max_resource_chars: int = 6000,
+        _settings_overrides: dict[str, Any] | None = None,
     ) -> SkillContextPack:
         prompt_defaults = self._dynamic_task_prompt_defaults(task)
         resolved_task = task if task is not None and prompt_defaults["target"] is None else prompt_defaults["target"]
@@ -264,13 +266,14 @@ class SkillsExtension(BaseAgent):
         selectors.extend(required_selectors)
         skills_pack_selectors = self._collect_skills_pack_selectors(skills_packs=skills_packs, mode="model_decision")
         skills_pack_selectors.extend(self._collect_skills_pack_selectors(skills_packs=None, mode="required"))
-        context = create_agent_skills_runtime_context(
+        context = create_agent_skills_manager_context(
             self,
-            resource_reader=lambda sid, path, mb: self.skills_executor.read_resource(
+            settings_overrides=_settings_overrides,
+            resource_reader=lambda sid, path, mb: self.skills_manager.read_resource(
                 sid, path, max_bytes=mb
             ),
         )
-        return await self.skills_executor.async_build_context_pack(
+        return await self.skills_manager.async_build_context_pack(
             context=context,
             task=str(resolved_task or ""),
             intent=intent,
@@ -332,6 +335,7 @@ class SkillsExtension(BaseAgent):
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         stream_handler: SkillRuntimeStreamHandler | None = None,
         effort: str | None = None,
+        _settings_overrides: dict[str, Any] | None = None,
     ) -> "SkillExecution":
         task, output, output_format = self._skills_prompt_defaults(
             task,
@@ -347,6 +351,7 @@ class SkillsExtension(BaseAgent):
             mode=mode,
             output=output,
             output_format=output_format,
+            _settings_overrides=_settings_overrides,
         )
         execution = await self.async_execute_skills_plan(
             task,
@@ -354,6 +359,7 @@ class SkillsExtension(BaseAgent):
             output_format=output_format,
             stream_handler=stream_handler,
             effort=effort,
+            _settings_overrides=_settings_overrides,
         )
         self.__skill_execution_logs.append(execution.to_dict())
         return execution
@@ -391,15 +397,17 @@ class SkillsExtension(BaseAgent):
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         stream_handler: SkillRuntimeStreamHandler | None = None,
         effort: str | None = None,
+        _settings_overrides: dict[str, Any] | None = None,
     ) -> "SkillExecution":
-        context = create_agent_skills_runtime_context(
+        context = create_agent_skills_manager_context(
             self,
+            settings_overrides=_settings_overrides,
             runtime_stream_handler=stream_handler,
-            resource_reader=lambda sid, path, mb: self.skills_executor.read_resource(
+            resource_reader=lambda sid, path, mb: self.skills_manager.read_resource(
                 sid, path, max_bytes=mb
             ),
         )
-        return await self.skills_executor.async_execute_plan(
+        return await self.skills_manager.async_execute_plan(
             context=context,
             task=task,
             plan=plan,
@@ -416,6 +424,7 @@ class SkillsExtension(BaseAgent):
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         stream_handler: SkillRuntimeStreamHandler | None = None,
         effort: str | None = None,
+        _settings_overrides: dict[str, Any] | None = None,
     ) -> list[Any]:
         """Execute multiple skill plans concurrently or sequentially.
 
@@ -446,14 +455,15 @@ class SkillsExtension(BaseAgent):
                         prev_output = getattr(prev, "output", prev) if hasattr(prev, "output") else prev
                         accumulated = f"{task}\n\n[Prior result from skill {index}]: {str(prev_output)[:2000]}"
                         await data.async_set_state("task", accumulated)
-                    ctx = create_agent_skills_runtime_context(
+                    ctx = create_agent_skills_manager_context(
                         self,
+                        settings_overrides=_settings_overrides,
                         runtime_stream_handler=stream_handler,
-                        resource_reader=lambda sid, path, mb: self.skills_executor.read_resource(
+                            resource_reader=lambda sid, path, mb: self.skills_manager.read_resource(
                             sid, path, max_bytes=mb
                         ),
                     )
-                    exec_result = await self.skills_executor.async_execute_plan(
+                    exec_result = await self.skills_manager.async_execute_plan(
                         context=ctx,
                         task=accumulated,
                         plan=current_plan,
@@ -476,14 +486,15 @@ class SkillsExtension(BaseAgent):
         chunks = []
         for i, plan in enumerate(plans):
             async def run_one(data: Any, *, index: int = i, current_plan: SkillExecutionPlan = plan):
-                ctx = create_agent_skills_runtime_context(
+                ctx = create_agent_skills_manager_context(
                     self,
+                    settings_overrides=_settings_overrides,
                     runtime_stream_handler=stream_handler,
-                    resource_reader=lambda sid, path, mb: self.skills_executor.read_resource(
+                    resource_reader=lambda sid, path, mb: self.skills_manager.read_resource(
                         sid, path, max_bytes=mb
                     ),
                 )
-                exec_result = await self.skills_executor.async_execute_plan(
+                exec_result = await self.skills_manager.async_execute_plan(
                     context=ctx,
                     task=task,
                     plan=current_plan,
@@ -546,13 +557,13 @@ class SkillsExtension(BaseAgent):
             return []
         contracts: list[SkillContract] = []
         seen: set[str] = set()
-        for record in self.skills_executor.list_skills():
-            contract = self.skills_executor.inspect_skills(str(record["skill_id"]))
+        for record in self.skills_manager.list_skills():
+            contract = self.skills_manager.inspect_skills(str(record["skill_id"]))
             skill_id = str(contract.get("skill_id") or record.get("skill_id") or "")
             if skill_id in seen:
                 continue
-            if any(_matches_selector(contract, selector) for selector in selectors) or any(
-                _matches_skills_pack_selector(contract, selector) for selector in skills_pack_selectors
+            if any(matches_selector(contract, selector) for selector in selectors) or any(
+                matches_skills_pack_selector(contract, selector) for selector in skills_pack_selectors
             ):
                 contracts.append(contract)
                 if skill_id:

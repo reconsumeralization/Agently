@@ -59,6 +59,22 @@ listed public surfaces automatically, so new public methods must be fully typed
 unless the release adds a reviewed allowlist entry with owner, reason, narrowing
 plan, and expiry.
 
+## SkillsManager Internal Owner
+
+Skills now have an internal canonical owner named `SkillsManager` for
+installation/discovery, progressive context disclosure, capability need
+discovery, and policy-gated local Action candidate binding. `SkillsExecutor`
+remains a legacy compatibility facade for existing code such as
+`Agently.skills_executor` and `agent.run_skills_task(...)`; new user guidance
+prefers `agent.use_skills(...)` and AgentExecution Skills selection. Context
+packs are built internally for ordinary execution and remain available as an
+advanced custom-planner/TaskDAG integration surface.
+
+Local Action resolution can reuse already-mounted non-standard Actions such as
+`local_python_runner` when the capability need is unambiguous, then binds final
+execution to the exact `action_id`. Ambiguous, low-confidence, policy-denied,
+or resource-unavailable matches fail closed with diagnostics.
+
 ## Compatibility
 
 - Package target: `4.1.4.1` development line.
@@ -69,3 +85,6 @@ plan, and expiry.
   and examples should treat each request as a new execution.
 - Public typing allowlist entries are exception records, not a list of allowed
   public methods.
+- `SkillsManager` is internal. Do not recommend `Agently.skills_manager` as a
+  public API; use Agent Skills APIs or the legacy `Agently.skills_executor`
+  facade only for compatibility hooks.

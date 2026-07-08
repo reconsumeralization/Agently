@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from pathlib import Path
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Generator, Mapping
 from typing import Any, Literal, TYPE_CHECKING, cast
 
 import json5
@@ -691,6 +691,10 @@ class AgentExecution:
 
     def _with_local_skill_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         updated = dict(kwargs)
+        if "_settings_overrides" not in updated:
+            execution_access_policy = self.effective_options.get("access_control_policy", {})
+            if isinstance(execution_access_policy, Mapping):
+                updated["_settings_overrides"] = {"access_control_policy": dict(execution_access_policy)}
         mode = str(updated.get("mode") or "model_decision")
         if "skills" not in updated:
             selectors = [
@@ -731,15 +735,15 @@ class AgentExecution:
             ".agent": self.agent.agent_prompt.to_serializable_prompt_data(),
             ".execution": self.request_prompt.to_serializable_prompt_data(),
         }
-        content = json5.dumps(
+        content = str(json5.dumps(
             prompt_data,
             indent=2,
             ensure_ascii=False,
-        )
+        ))
         if save_to is not None:
             target = Path(save_to)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding=encoding)
+            target.write_text(content, encoding=encoding or "utf-8")
         return content
 
     def get_yaml_prompt(
@@ -761,7 +765,7 @@ class AgentExecution:
         if save_to is not None:
             target = Path(save_to)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding=encoding)
+            target.write_text(content, encoding=encoding or "utf-8")
         return content
 
     def _prompt_text_from_snapshot(self, prompt_snapshot: dict[str, Any]) -> str:

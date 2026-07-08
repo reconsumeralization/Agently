@@ -53,6 +53,19 @@ prompt inspection。
 参数和返回类型；如果确实需要 `Any`，必须在同一个 release 中加入带 owner、reason、
 narrowing plan 和 expiry 的 allowlist 记录。
 
+## SkillsManager 内部 Owner
+
+Skills 现在以 `SkillsManager` 作为内部 canonical owner，负责安装/发现、渐进式
+上下文披露、capability need 发现，以及受 policy 控制的本地 Action candidate
+绑定。`SkillsExecutor` 保留为 legacy compatibility facade，兼容
+`Agently.skills_executor` 和 `agent.run_skills_task(...)` 等既有代码；新的用户指引优先使用
+`agent.use_skills(...)` 和 AgentExecution Skills selection。普通执行的 context pack 由内部
+Manager 构建；显式 context-pack API 只作为 custom planner/TaskDAG 高级集成接口保留。
+
+本地 Action resolution 可以在能力需求不歧义时复用已挂载的非标准 Action，例如
+`local_python_runner`，然后把最终执行绑定到精确 `action_id`。歧义、低置信、policy
+拒绝或资源不可用都会 fail closed 并记录 diagnostics。
+
 ## 兼容性
 
 - Package target: `4.1.4.1` development line。
@@ -62,3 +75,6 @@ narrowing plan 和 expiry 的 allowlist 记录。
 - 已完成 execution 上的 prompt/config 链式调用现在 fail fast；新的服务代码与示例都应按请求创建新的
   execution。
 - public typing allowlist 是例外记录，不是允许公开方法清单。
+- `SkillsManager` 是内部概念。不要把 `Agently.skills_manager` 推荐为公开 API；需要
+  用户入口时使用 Agent Skills APIs，只有兼容 hook 才使用 legacy
+  `Agently.skills_executor` facade。

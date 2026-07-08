@@ -157,7 +157,8 @@ be over-design.
 Landed examples include `core/Action`, `core/TriggerFlow`,
 `core/orchestration/TaskDAG`, `core/workspace`,
 `builtins/plugins/ExecutionResourceProvider`, and
-`builtins/plugins/SkillsExecutor`. Keep public imports stable through package
+`builtins/plugins/SkillsManager`; `builtins/plugins/SkillsExecutor` is retained
+as a compatibility facade. Keep public imports stable through package
 `__init__.py` files and top-level re-exports.
 
 ## Action And ExecutionResource

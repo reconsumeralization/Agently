@@ -14,10 +14,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
-from .adapter import RegistrySkillSource, SkillCapabilityAdapter
+from agently.core.application.SkillsManager import SkillsManager
+from agently.utils import DeprecationWarnings
 
 if TYPE_CHECKING:
     from agently.core import PluginManager
@@ -25,49 +25,43 @@ if TYPE_CHECKING:
 
 
 class SkillsExecutor:
-    """Thin core entrypoint over the active SkillsExecutor plugin."""
+    """Deprecated compatibility facade over ``SkillsManager``."""
 
-    def __init__(self, plugin_manager: "PluginManager", settings: "Settings"):
-        self.plugin_manager = plugin_manager
-        self.settings = settings
-        self._impl = self._create_impl()
+    def __init__(
+        self,
+        plugin_manager: "PluginManager",
+        settings: "Settings",
+        *,
+        manager: SkillsManager | None = None,
+    ):
+        self.manager = manager or SkillsManager(plugin_manager, settings)
+        self.plugin_manager = self.manager.plugin_manager
+        self.settings = self.manager.settings
 
-    def _create_impl(self):
-        plugin_name = str(self.settings.get("plugins.SkillsExecutor.activate", "AgentlySkillsExecutor"))
-        plugin_class = cast(Any, self.plugin_manager.get_plugin("SkillsExecutor", plugin_name))
-        return plugin_class(plugin_manager=self.plugin_manager, settings=self.settings)
+    @staticmethod
+    def _warn_deprecated() -> None:
+        DeprecationWarnings.warn_deprecated_once(
+            "core.application.SkillsExecutor",
+            "SkillsExecutor is deprecated as an internal dependency; use SkillsManager internally. "
+            "Agently.skills_executor remains a compatibility facade.",
+            stacklevel=3,
+        )
 
     @property
     def impl(self):
-        return self._impl
+        self._warn_deprecated()
+        return self.manager.impl
 
     @property
     def registry(self):
-        return self._impl.registry
+        self._warn_deprecated()
+        return self.manager.registry
 
-    def capability_adapter(self) -> SkillCapabilityAdapter:
-        factory = getattr(self._impl, "capability_adapter", None)
-        if callable(factory):
-            return cast(SkillCapabilityAdapter, factory())
-        return SkillCapabilityAdapter(RegistrySkillSource(self.registry))
-
-    def discover_skill_capabilities(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        return self.capability_adapter().discover(limit=limit)
-
-    def activate_skill(self, skill_id: str, *, task: str | None = None, budget_chars: int = 4000):
-        return self.capability_adapter().activate(skill_id, task=task, budget_chars=budget_chars)
-
-    def configure(
-        self,
-        *,
-        registry_root: str | Path | None = None,
-        allowed_trust_levels: list[str] | None = None,
-    ) -> "SkillsExecutor":
-        if registry_root is not None:
-            self.settings.set("skills.registry.root", str(registry_root))
-        if allowed_trust_levels is not None:
-            self.settings._set_item_by_dot_path("skills.allowed_trust_levels", list(allowed_trust_levels), cover=True)
+    def configure(self, *args: Any, **kwargs: Any) -> "SkillsExecutor":
+        self._warn_deprecated()
+        self.manager.configure(*args, **kwargs)
         return self
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._impl, name)
+        self._warn_deprecated()
+        return getattr(self.manager, name)

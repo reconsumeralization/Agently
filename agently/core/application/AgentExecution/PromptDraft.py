@@ -283,6 +283,7 @@ class AgentExecutionPromptDraft:
         output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
+        _settings_overrides: dict[str, Any] | None = None,
     ):
         if output is not None and semantic_outputs is not None:
             raise ValueError("Use either output= or semantic_outputs= for Skills execution, not both.")
@@ -308,6 +309,7 @@ class AgentExecutionPromptDraft:
         output: Any = None,
         semantic_outputs: Any = None,
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
+        _settings_overrides: dict[str, Any] | None = None,
     ):
         task, output, output_format = self._skills_prompt_defaults(
             task,
@@ -322,6 +324,7 @@ class AgentExecutionPromptDraft:
             mode=mode,
             output=output,
             output_format=output_format,
+            _settings_overrides=_settings_overrides,
         )
 
     def resolve_skills_plan(self, *args: Any, **kwargs: Any):
@@ -339,6 +342,7 @@ class AgentExecutionPromptDraft:
         output_format: Literal["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal", "auto"] | None = None,
         stream_handler: "SkillRuntimeStreamHandler | None" = None,
         effort: str | None = None,
+        _settings_overrides: dict[str, Any] | None = None,
     ):
         task, output, output_format = self._skills_prompt_defaults(
             task,
@@ -355,6 +359,7 @@ class AgentExecutionPromptDraft:
             output_format=output_format,
             stream_handler=stream_handler,
             effort=effort,
+            _settings_overrides=_settings_overrides,
         )
 
     def run_skills_task(self, *args: Any, **kwargs: Any):

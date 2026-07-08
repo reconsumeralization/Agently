@@ -22,6 +22,7 @@ from .AgentExecution import (
 from .AgentTask import AgentTask
 from .Blocks import Blocks
 from .DynamicTask import ActionTaskAdapter, DynamicTask, SkillTaskAdapter
+from .SkillsManager import SkillsManager
 from .SkillsExecutor import SkillsExecutor
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "RuntimeStageStallError",
     "SkillTaskAdapter",
     "SkillsExecutor",
+    "SkillsManager",
 ]

@@ -361,7 +361,7 @@ agent.set_settings("action.planning_model_key", "task-main")
 
 This applies to the default structured-plan and native tool-call planning
 paths. It is especially important when a higher-level runtime such as
-SkillsExecutor or AgentTask delegates a bounded action round to
+SkillsManager-backed Skills execution or AgentTask delegates a bounded action round to
 ActionRuntime.
 
 `agent.get_action_result(..., timeout=N)` bounds the full action loop,

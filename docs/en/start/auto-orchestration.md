@@ -2,8 +2,8 @@
 
 Agently 4.1.3 makes `agent.start()` the default user-layer entrypoint for an
 Agent turn. It keeps returning the business result, while the Agent can route
-through ordinary model response, Actions, or Skills Executor when those
-capabilities were explicitly injected.
+through ordinary model response, Actions, or SkillsManager-backed Skills
+execution when those capabilities were explicitly injected.
 
 ```python
 result = (
@@ -852,10 +852,10 @@ means the Skill guidance must be applied: if the execution uses the ordinary
 `model_request` route with Actions, Agently injects the required SKILL.md
 guidance into that AgentExecution and records prompt-bound Skill evidence for
 AgentTask capability checks. A selected Skills route or `run_skills_task(...)`
-still runs the Skills Executor path.
+still runs the Skills compatibility execution path.
 
 Use `agent.run_skills_task(...)` or an explicit route policy when a caller must
-force the standalone Skills Executor route.
+force the standalone Skills compatibility route.
 
 ## Process Stream
 

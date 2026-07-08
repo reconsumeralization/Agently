@@ -2,7 +2,7 @@
 
 Agently 4.1.3 将 `agent.start()` 作为 Agent turn 的默认用户层入口。它仍然返回
 业务结果，但 Agent 可以在显式注入候选能力后，路由到普通模型响应、Actions 或
-Skills Executor。
+SkillsManager-backed Skills execution。
 
 ```python
 result = (
@@ -713,9 +713,9 @@ snapshot = await task.async_run(graph_input={"ticket": "TICKET-OK"})
 `mode="required"` 表示必须应用该 Skill guidance：如果执行选择普通
 `model_request` route 并使用 Actions，Agently 会把 required SKILL.md guidance 注入
 该 AgentExecution，并为 AgentTask capability 检查记录 prompt-bound Skill evidence。
-选中的 Skills route 或 `run_skills_task(...)` 仍然走 Skills Executor 路径。
+选中的 Skills route 或 `run_skills_task(...)` 仍然走 Skills 兼容执行路径。
 
-如果调用方必须强制使用独立 Skills Executor route，使用
+如果调用方必须强制使用独立 Skills 兼容 route，使用
 `agent.run_skills_task(...)` 或显式 route policy。
 
 ## 过程流

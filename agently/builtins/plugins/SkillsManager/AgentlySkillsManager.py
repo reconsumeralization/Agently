@@ -12,16 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .AccessControlPolicy import (
-    access_policy_auto_allow,
-    merge_access_control_policy,
-    resolve_access_control_policy,
-)
-from .PolicyApproval import PolicyApprovalManager
+from __future__ import annotations
 
-__all__ = [
-    "PolicyApprovalManager",
-    "access_policy_auto_allow",
-    "merge_access_control_policy",
-    "resolve_access_control_policy",
-]
+from agently.builtins.plugins.SkillsExecutor import AgentlySkillsExecutor
+
+
+class AgentlySkillsManager(AgentlySkillsExecutor):
+    """Builtin SkillsManager implementation.
+
+    The implementation is temporarily shared with the legacy
+    ``AgentlySkillsExecutor`` class while internal dependencies migrate to the
+    Manager facade and protocol.
+    """
+
+    name = "AgentlySkillsManager"

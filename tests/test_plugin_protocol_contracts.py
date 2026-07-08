@@ -31,7 +31,8 @@ from agently.builtins.plugins.ExecutionResourceProvider import (
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import AnthropicCompatible
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
 from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import OpenAIResponsesCompatible
-from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import AgentSkillsRuntimeContext
+from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import AgentSkillsManagerContext
+from agently.builtins.plugins.SkillsManager import AgentlySkillsManager
 from agently.builtins.plugins.SkillsExecutor import AgentlySkillsExecutor
 from agently.types.plugins import (
     ActionExecutor,
@@ -40,6 +41,7 @@ from agently.types.plugins import (
     AgentExecution,
     AgentOrchestrator,
     ExecutionResourceProvider,
+    SkillsManager,
     SkillsExecutor,
     SkillsRuntimeContext,
 )
@@ -62,6 +64,14 @@ def test_builtin_skills_executor_matches_plugin_protocol():
         assert callable(getattr(plugin, method_name))
 
 
+def test_builtin_skills_manager_matches_plugin_protocol():
+    plugin = AgentlySkillsManager(settings=Settings(name="protocol-manager-test"))
+
+    assert isinstance(plugin, SkillsManager)
+    for method_name in _method_names(SkillsManager):
+        assert callable(getattr(plugin, method_name))
+
+
 def test_builtin_skills_executor_has_no_stage_action_defaults():
     assert AgentlySkillsExecutor.DEFAULT_SETTINGS == {}
 
@@ -80,7 +90,7 @@ def test_agent_skills_context_matches_runtime_protocol():
             async def async_execute_action(*_args, **_kwargs):  # pragma: no cover - protocol shape only
                 return {"status": "success"}
 
-    context = AgentSkillsRuntimeContext(FakeAgent())
+    context = AgentSkillsManagerContext(FakeAgent())
 
     assert isinstance(context, SkillsRuntimeContext)
 

@@ -156,6 +156,7 @@ Agently.execution_resource.inspect(id)
 Agently.execution_resource.list(scope="execution")
 Agently.policy_approval.register_handler("my_handler", handler)
 Agently.configure_policy_approval(handler="my_handler")
+Agently.set_settings("access_control_policy.auto_allow", True)
 ```
 
 Declaration is lazy. It validates and records a requirement but does not start
@@ -165,6 +166,9 @@ handler. The default `input_timeout_fail` handler prompts only in an interactive
 CLI and denies after timeout or immediately in non-interactive services. Service
 wrappers around TriggerFlow executions should register their own handler, for
 example one that stores a pending approval and resumes with `continue_with(...)`.
+Trusted hosts can set `access_control_policy.auto_allow=True` through settings
+to approve policy gates automatically; this does not bypass provider, sandbox,
+path, command, or network constraints encoded in the requirement policy.
 Before reusing a ready handle, the manager calls
 `provider.async_health_check(handle)`. Healthy handles are reused with
 `ref_count + 1`; unhealthy handles emit `execution_resource.unhealthy`, are
