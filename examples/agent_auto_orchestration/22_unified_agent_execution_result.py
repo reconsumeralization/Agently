@@ -18,12 +18,13 @@ This example demonstrates the unified AgentExecution shape:
 
     One long-task strategy execution:
         execution = agent.create_task_loop(...)
+        execution = execution.input(...)
         result = execution.get_result()
 
 The business data is mocked. The model owns classification, drafting,
 verification, and task-loop judgement.
 
-Expected key output from one real DeepSeek run on 2026-06-08:
+Expected key output from one real DeepSeek run on 2026-07-08:
     provider=deepseek
     quick_result_type=AgentExecutionResult
     quick_category=renewal_risk
@@ -113,22 +114,25 @@ async def run_task_strategy(agent: Any) -> tuple[dict[str, Any], AgentExecutionM
         source={"type": "mock_business_system", "name": "account_health_signal"},
     )
 
-    execution = agent.create_task_loop(
-        task_id="renewal-risk-brief",
-        goal=(
-            "Create a concise renewal-risk brief for acct-nova-27. Use the provided account signal "
-            "as the only business evidence. The final result should name the risk, the evidence, "
-            "and one next action for the account manager."
-        ),
-        success_criteria=[
-            "The final result identifies the renewal risk clearly.",
-            "The result cites at least two facts from the account signal.",
-            "The result gives one concrete account-manager next action.",
-        ],
-        workspace=RUNTIME_ROOT,
-        max_iterations=1,
-        limits={"max_model_requests": 5, "max_seconds": 180, "max_no_progress_seconds": 90},
-        options={"agent_task": {"stream_snapshots": True, "request_timeout_seconds": 60}},
+    execution = (
+        agent.create_task_loop(
+            task_id="renewal-risk-brief",
+            goal=(
+                "Create a concise renewal-risk brief for acct-nova-27. Use the provided account signal "
+                "as the only business evidence. The final result should name the risk, the evidence, "
+                "and one next action for the account manager."
+            ),
+            success_criteria=[
+                "The final result identifies the renewal risk clearly.",
+                "The result cites at least two facts from the account signal.",
+                "The result gives one concrete account-manager next action.",
+            ],
+            workspace=RUNTIME_ROOT,
+            max_iterations=2,
+            limits={"max_model_requests": 8, "max_seconds": 240, "max_no_progress_seconds": 120},
+            options={"agent_task": {"stream_snapshots": True, "request_timeout_seconds": 90}},
+        )
+        .input({"account_signal": ACCOUNT_SIGNAL})
     )
 
     stream_paths = await collect_stream_paths(execution)

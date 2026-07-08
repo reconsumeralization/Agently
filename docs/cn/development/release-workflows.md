@@ -171,6 +171,33 @@ unit tests passed 发布。必须修复 example 或 release candidate，移除 r
 spec 和 release note 中明确延期受影响的 Foundation 能力，或由 maintainer 记录一次性
 waiver 和残余风险。
 
+## 锁定开发者用法 Example Gate
+
+部分 examples 是 release 锁定的开发者用法检查。它们保护开发者应如何使用 Agently 的
+推荐路径，而不只是框架底层 substrate。这个锁定集合应跨 release 持续维护，不能因为内部
+实现变化就随意漂移。锁定脚本放在 `examples/release_pinned_usage/`，由
+`examples/release_pinned_usage/pinned_usage_manifest.json` 选入。
+
+推荐 release 前必须：
+
+- 根据本次 release claim、README 指引、release note、compatibility manifest 或变更的
+  public API，识别受影响的锁定开发者用法 examples
+- 用 release candidate 实际运行这些脚本；如果 example 包含模型拥有的 routing、
+  planning、verification、evaluation 或 response generation，必须使用真实 DeepSeek 或本地
+  Ollama
+- 如果 release examples 可能触发 Skills、Actions、Workspace、network、Python、shell、
+  HTTP、browse、search 或 MCP capability loading，必须用显式全开的测试 capability
+  policy 运行；不要把这个 release-test 姿态和 Agently 默认 fail-closed runtime 权限姿态混淆
+- 记录 command、解释器、provider/model、环境假设、稳定 key output，以及 artifact、stream、
+  metadata 或 side-effect 证据
+- 如果推荐用法本应继续可用，则把失败视为 release blocker
+- 如果失败说明推荐用法本身必须改变，必须先暂停，不要直接重写 example；先请示维护者是否接受
+  在本 release 更新该用法
+
+release PR body 或 review notes 应列出本次运行的锁定 examples、纳入原因，以及结果是否
+保留了既有开发者可见用法形态。不要为了让 release gate 通过而静默把锁定 example 替换成
+新模式。
+
 ## Release PR 正文
 
 从 `dev` 到 `main` 的 release PR 必须包含足够信息，让 reviewer 不需要重新从 commit
@@ -184,6 +211,7 @@ history 里拼接事实，就能判断 release 是否可以接受或必须阻塞
 - validation commands 和结果，包括被跳过或失败的检查
 - 源码与已安装候选包的公开 typing 以及 Pylance / pyright IDE metadata 检查
 - 涉及 Foundation 层能力时的 Foundation example effect checks
+- 受影响推荐用法的锁定开发者用法 example checks
 - clean install smoke 的环境和结果
 - compatibility manifest 更新和 companion repository 状态
 - 如果 runtime events、observation payload、lineage 或 DevTools 代码变化，需要写明

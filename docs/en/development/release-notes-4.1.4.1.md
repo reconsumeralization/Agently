@@ -1,15 +1,16 @@
 ---
-title: Agently 4.1.4.1 Development Notes
-description: Agently 4.1.4.1 development notes for AgentExecutionResult business-data and full-data reader compatibility.
-keywords: Agently, development notes, 4.1.4.1, AgentExecutionResult, get_data, get_full_data
+title: Agently 4.1.4.1 Release Notes
+description: Agently 4.1.4.1 release notes for AgentExecutionResult business-data and full-data reader compatibility.
+keywords: Agently, release notes, 4.1.4.1, AgentExecutionResult, get_data, get_full_data
 ---
 
-# Agently 4.1.4.1 Development Notes
+# Agently 4.1.4.1 Release Notes
 
 > Languages: **English** · [中文](../../cn/development/release-notes-4.1.4.1.md)
 
-Agently 4.1.4.1 is the development line after the 4.1.4 release. This page
-records accepted in-development behavior as it lands.
+Agently 4.1.4.1 is a compatibility release after the 4.1.4 AgentExecution and
+TaskBoard release. It restores stable AgentExecution result-reader and facade
+usage while keeping the 4.1.4 task-execution baseline.
 
 ## AgentExecution Result Views
 
@@ -59,6 +60,15 @@ listed public surfaces automatically, so new public methods must be fully typed
 unless the release adds a reviewed allowlist entry with owner, reason, narrowing
 plan, and expiry.
 
+## Release-Pinned Usage Examples
+
+`examples/release_pinned_usage/` now records release-pinned developer usage
+checks for public facade shapes that should remain stable across releases. The
+selected scripts are listed in
+`examples/release_pinned_usage/pinned_usage_manifest.json` and must not be
+edited, replaced, or removed without explicit maintainer confirmation for the
+release.
+
 ## SkillsManager Internal Owner
 
 Skills now have an internal canonical owner named `SkillsManager` for
@@ -77,14 +87,16 @@ or resource-unavailable matches fail closed with diagnostics.
 
 ## Compatibility
 
-- Package target: `4.1.4.1` development line.
-- Release manifest: `compatibility/in-development.json`.
+- Package version: `4.1.4.1`.
+- Release manifest: `compatibility/releases/4.1.4.1.json`.
 - Existing task terminal envelope fields are unchanged; callers that depended
   on them should switch from `get_data()` to `get_full_data()`.
 - Completed-execution prompt/config chaining now fails fast; new service code
   and examples should treat each request as a new execution.
 - Public typing allowlist entries are exception records, not a list of allowed
   public methods.
+- Release-pinned usage scripts under `examples/release_pinned_usage/` are
+  release gates; usage-shape edits require maintainer confirmation.
 - `SkillsManager` is internal. Do not recommend `Agently.skills_manager` as a
   public API; use Agent Skills APIs or the legacy `Agently.skills_executor`
   facade only for compatibility hooks.

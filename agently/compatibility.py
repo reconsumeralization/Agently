@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.4"
-CURRENT_RELEASE_TRAIN = "2026-07-4.1.4"
+CURRENT_FRAMEWORK_VERSION = "4.1.4.1"
+CURRENT_RELEASE_TRAIN = "2026-07-4.1.4.1"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -15,15 +15,17 @@ DOCS_PUBLIC_SURFACE_PROTOCOL = "agently-docs.public-surface.v1"
 
 _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
  'framework': 'agently',
- 'framework_version': '4.1.4',
- 'release_train': '2026-07-4.1.4',
- 'released_at': '2026-07-07',
- 'notes': 'Version-scoped companion compatibility manifest for the Agently 4.1.4 release line. This release promotes '
-          'the accumulated AgentTask and AgentExecution strategy work after 4.1.3.9: direct/flat/taskboard route '
-          'selection, TaskBoard incremental acceptance with scoped verifier evidence and cache reuse, user-facing '
-          'final_response without an extra narrator request, prompt-safe runtime context, runtime guidance, improved '
-          'progress stream projection, artifact readback/final-deliverable hardening, and factual-integrity verifier '
-          'safeguards for long-running task execution.',
+ 'framework_version': '4.1.4.1',
+ 'release_train': '2026-07-4.1.4.1',
+ 'released_at': '2026-07-08',
+ 'notes': 'Version-scoped companion compatibility manifest for the Agently 4.1.4.1 release line. This release keeps '
+          'the 4.1.4 task-execution baseline and fixes AgentExecutionResult reader compatibility so get_data() '
+          'consistently returns business data while get_full_data() exposes full route/task envelopes. It restores '
+          'basic AgentExecution facade compatibility for one-run quick chains, prompt inspection, object results, key '
+          'waiters, streaming_print, specific-event streams, and instant-stream full_data snapshots while making '
+          'completed-execution prompt/config chaining fail fast. It also records release-pinned developer usage '
+          'examples as a release gate and keeps SkillsManager as the internal canonical Skills capability owner with '
+          'SkillsExecutor as a legacy compatibility facade.',
  'companions': {'devtools': {'companion_package': 'agently-devtools',
                              'runtime_protocol': 'agently-devtools.observation-runtime.v1',
                              'event_naming': {'preferred_event_type': 'RuntimeEvent',
@@ -170,19 +172,22 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                 'skills': {'repository': 'Agently-Skills',
                            'authoring_protocol': 'agently-skills.authoring.v2',
                            'authoring_format': 'standard SKILL.md only',
-                           'runtime_capability_contract': {'skill_capability_needs': 'SkillsExecutor records selected '
+                           'runtime_capability_contract': {'skill_capability_needs': 'SkillsManager records selected '
                                                                                      'Skill capability needs in '
                                                                                      'SkillExecutionPlan.capability_needs '
                                                                                      'from SKILL.md guidance, resource '
                                                                                      'indexes, public compatibility, '
                                                                                      'public metadata, and optional '
                                                                                      'model-assisted inference.',
-                                                           'skill_context_pack_contract': 'SkillsExecutor exposes '
+                                                           'skill_context_pack_contract': 'SkillsManager owns '
                                                                                           'build_context_pack(...), '
                                                                                           'async_build_context_pack(...), '
                                                                                           'and task_dag_resolver() for '
                                                                                           'custom planners and TaskDAG '
-                                                                                          'skill nodes. The '
+                                                                                          'skill nodes; '
+                                                                                          'Agently.skills_executor '
+                                                                                          'remains a compatibility '
+                                                                                          'facade. The '
                                                                                           'agently.skills.context_pack.v1 '
                                                                                           'payload includes SKILL.md '
                                                                                           'guidance excerpts, '
@@ -197,7 +202,9 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                            'host_policy_surface': 'agent.configure_skill_capabilities(auto_load={...}, '
                                                                                   'workspace_root=..., mcp_config=..., '
                                                                                   'python=..., search=...) plus '
-                                                                                  'agent.configure_policy_approval(handler=...)',
+                                                                                  'agent.configure_policy_approval(handler=...) '
+                                                                                  'and settings-backed '
+                                                                                  'access_control_policy.auto_allow',
                                                            'search_provider': 'Framework Search uses the ddgs package '
                                                                               'by default, keeps backend configurable '
                                                                               'through host policy, supports '
@@ -209,7 +216,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                               'returns no usable parsed result.',
                                                            'workspace_file_action_owner': 'Workspace owns file action '
                                                                                           'roots and path boundaries; '
-                                                                                          'SkillsExecutor prefers '
+                                                                                          'SkillsManager prefers '
                                                                                           'workspace.enable_file_actions(agent, '
                                                                                           '...) before falling back to '
                                                                                           'agent.enable_workspace_file_actions(...).',
@@ -220,9 +227,11 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                                       'fail_closed for pending '
                                                                                       'diagnostics/TriggerFlow gates, '
                                                                                       'auto_approve for tests, input, '
-                                                                                      'or registered service-specific '
-                                                                                      'handlers.',
-                                                           'skills_abort_diagnostics': 'SkillsExecutor emits '
+                                                                                      'registered service-specific '
+                                                                                      'handlers, or host-owned '
+                                                                                      'access_control_policy.auto_allow '
+                                                                                      'settings.',
+                                                           'skills_abort_diagnostics': 'Skills runtime emits '
                                                                                        'skills.execution.aborted on '
                                                                                        'cooperative cancellation or '
                                                                                        'framework execution failure '
@@ -289,16 +298,17 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                'usefulness; approval_wait records waiting evidence while using '
                                                'PolicyApproval and TriggerFlow pause/resume; external_wait records '
                                                'waiting evidence while using TriggerFlow pause/resume.',
-                           'skills_contract': 'Skills are progressive context/capability packages. SkillsExecutor '
+                           'skills_contract': 'Skills are progressive context/capability packages. SkillsManager '
                                               'exposes capability_adapter(), discover_skill_capabilities(...), and '
                                               'activate_skill(...) so Skill activation can feed PlanBlock selection '
                                               'and EvidenceEnvelope skill_context records without executing Skill '
-                                              'resources or proving side effects. agent.run_skills_task(...) remains a '
-                                              'compatibility facade that builds skill_activation plus concrete '
-                                              'strategy PlanBlocks, lowers single_shot to a model_request '
-                                              'ExecutionBlock, lowers runtime_chain/staged/react/custom labels to '
-                                              'flow_segment ExecutionBlocks, and records Blocks plan/evidence metadata '
-                                              "in SkillExecution.close_snapshot['blocks'].",
+                                              'resources or proving side effects. Agently.skills_executor and '
+                                              'agent.run_skills_task(...) remain compatibility facades; the execution '
+                                              'route builds skill_activation plus concrete strategy PlanBlocks, lowers '
+                                              'single_shot to a model_request ExecutionBlock, lowers '
+                                              'runtime_chain/staged/react/custom labels to flow_segment '
+                                              'ExecutionBlocks, and records Blocks plan/evidence metadata in '
+                                              "SkillExecution.close_snapshot['blocks'].",
                            'task_dag_contract': 'TaskDAGExecutor.compile_blocks(...) and async_run_blocks(...) '
                                                 'validate TaskDAG data under TaskDAG ownership, lower validated DAG '
                                                 'nodes through Blocks, run on TriggerFlow, and map TaskDAG semantic '
@@ -388,8 +398,11 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                        'artifact_status=degraded, while useful but unaccepted '
                                                        'artifacts remain accepted=false with artifact_status=partial. '
                                                        'get_text()/async_get_text() prefer final_response for '
-                                                       'task-strategy result dicts while get_data() returns the '
-                                                       'structured payload. TaskBoard terminal payloads may include '
+                                                       'task-strategy result dicts; get_data()/async_get_data() return '
+                                                       'the business final_result view when present and parse it '
+                                                       'against the declared output contract when possible; '
+                                                       'get_full_data()/async_get_full_data() return the complete '
+                                                       'route/task envelope. TaskBoard terminal payloads may include '
                                                        'taskboard.completion_notes as a bounded projection of card '
                                                        'summaries, known gaps, verifier notes, and acceptance '
                                                        'progress; it is process context for final-response disclosure, '
@@ -540,6 +553,31 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                      'host-only direct execution grant, is not exposed '
                                                                      'in model-visible shell action schemas, and is '
                                                                      'stripped from model-planned action inputs.',
+                                   'docker_code_runtime_sandbox_contract': 'agent.enable_python(...), '
+                                                                           'agent.enable_shell(...), '
+                                                                           'agent.enable_nodejs(...), and '
+                                                                           'agent.enable_code_runtime(...) use '
+                                                                           'Docker-backed ExecutionResource runtime '
+                                                                           'profiles after checking both the Docker '
+                                                                           'CLI and daemon. Strict profiles fail '
+                                                                           'closed with structured diagnostics when '
+                                                                           'Docker or a configured image is '
+                                                                           'unavailable instead of falling back to '
+                                                                           'host execution; developer and CI profiles '
+                                                                           'may use image_pull_policy="if_missing" and '
+                                                                           'dependency_policy="install" for host-owned '
+                                                                           'image and dependency preparation. '
+                                                                           'enable_code_runtime(...) provides built-in '
+                                                                           'profiles for Python, JavaScript/Node.js, '
+                                                                           'TypeScript, C, C++, Go, Rust, Java, '
+                                                                           'C#/.NET, PHP, Ruby, Perl, R, Lua, and '
+                                                                           'Bash. Low-level register_* sandbox helpers '
+                                                                           'keep trusted-local defaults for '
+                                                                           'compatibility, and helper users may pass '
+                                                                           'sandbox="trusted_local" explicitly. '
+                                                                           'Dependency installation remains '
+                                                                           'host/provider-owned resource preparation, '
+                                                                           'not a model-visible action input.',
                                    'coding_workspace_actions_contract': 'agent.enable_coding_agent_actions(...) '
                                                                         'exposes Workspace-owned read_file, '
                                                                         'glob_files, grep_files, edit_file, '
@@ -790,8 +828,12 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                            'and explicitly bound to Agents, TriggerFlow executions, or '
                                                            'service workers when they must share task information; '
                                                            'separate Workspaces exchange information only through '
-                                                           'application-level search/read/write/link logic. Workspace.put(...) is the canonical record-write API and accepts content=... plus profile=... for compatibility handlers; workspace.ingest(...) remains a compatibility alias over put(..., profile=...). '
-                                                           'Third-party Workspace backends can be passed directly to '
+                                                           'application-level search/read/write/link logic. '
+                                                           'Workspace.put(...) is the canonical record-write API and '
+                                                           'accepts content=... plus profile=... for compatibility '
+                                                           'handlers; workspace.ingest(...) remains a compatibility '
+                                                           'alias over put(..., profile=...). Third-party Workspace '
+                                                           'backends can be passed directly to '
                                                            'agent.use_workspace(backend), '
                                                            'flow.create_execution(workspace=backend), or registered '
                                                            'through Agently.workspace.register_backend_provider(name, '
@@ -1082,7 +1124,18 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                  'AgentExecution.set_turn_prompt(...) are removed from '
                                                                  'the 4.1.3.7 development line. Agent-level persistent '
                                                                  'state remains on define(...), always=True, '
-                                                                 'set_agent_prompt(...), and stable setup APIs.',
+                                                                 'set_agent_prompt(...), and stable setup APIs. '
+                                                                 'Completed AgentExecution instances are immutable run '
+                                                                 'records; prompt/config mutators called after start '
+                                                                 'raise a lifecycle error instead of silently creating '
+                                                                 'a second run from the completed record. Agent '
+                                                                 'quick-prompt expressions such as '
+                                                                 'agent.input(...).start() continue to create fresh '
+                                                                 'isolated executions in loops; explicit execution '
+                                                                 'variables should use agent.input(...), '
+                                                                 'agent.create_execution(...), or '
+                                                                 'execution.create_execution(...) for the next request '
+                                                                 'boundary.',
                                                      'compatibility_policy': 'Expression-local chaining is the '
                                                                              'recommended execution-scoped shape. '
                                                                              'Multi-statement setup should capture '
@@ -1093,7 +1146,11 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                              'Explicit low-level '
                                                                              'agent.create_request()/agent.request '
                                                                              'builders remain available for direct '
-                                                                             'ModelRequest use.'},
+                                                                             'ModelRequest use. Completed-execution '
+                                                                             'reconfiguration is not a compatibility '
+                                                                             'surface; it fails fast so explicit '
+                                                                             'AgentExecution variables remain one-run '
+                                                                             'owners.'},
                    'response_stream_type_surface': {'status': 'in-development',
                                                     'surface': ['StreamingData',
                                                                 'StreamingData.is_complete',
@@ -1333,14 +1390,14 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'migration diagnostics; use '
                                                              'Agently.create_dynamic_task(...) or direct '
                                                              'TaskDAGExecutor(...) for independent DAG workflows. '
-                                                             'Consumers read final data, text, streams, metadata, '
-                                                             'execution_strategy, effective_execution_strategy, '
-                                                             'task_shape_analysis, reflection refs, Workspace refs, '
-                                                             'and task refs through AgentExecutionResult or the '
-                                                             'execution stream/meta facade. '
-                                                             'get_async_generator(type="delta") returns the public '
-                                                             'text-increment stream, including model-generated text '
-                                                             'increments plus projected process paragraphs for '
+                                                             'Consumers read final business data, full execution data, '
+                                                             'text, streams, metadata, execution_strategy, '
+                                                             'effective_execution_strategy, task_shape_analysis, '
+                                                             'reflection refs, Workspace refs, and task refs through '
+                                                             'AgentExecutionResult or the execution stream/meta '
+                                                             'facade. get_async_generator(type="delta") returns the '
+                                                             'public text-increment stream, including model-generated '
+                                                             'text increments plus projected process paragraphs for '
                                                              'progress, structured progress_message, action '
                                                              'observations, Flat plan/action summaries, TaskBoard '
                                                              'status tables, snapshots, phases, retry markers, and '
@@ -1387,12 +1444,16 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                              'return accepted=false, artifact_status=partial, and '
                                                              'final_response explaining produced output plus unmet '
                                                              'requirements. get_text()/async_get_text() prefer '
-                                                             'final_response for task-strategy result dicts while '
-                                                             'get_data() returns the structured payload; terminal '
-                                                             'response text is produced without an extra narrator '
-                                                             'request. TaskBoard terminal taskboard.completion_notes '
-                                                             'is an additive projection for final-response disclosure '
-                                                             'and progress inspection only; it must not be treated as '
+                                                             'final_response for task-strategy result dicts; '
+                                                             'get_data()/async_get_data() return the business '
+                                                             'final_result view when present and parse it against the '
+                                                             'declared output contract when possible; '
+                                                             'get_full_data()/async_get_full_data() return the '
+                                                             'complete route/task envelope; terminal response text is '
+                                                             'produced without an extra narrator request. TaskBoard '
+                                                             'terminal taskboard.completion_notes is an additive '
+                                                             'projection for final-response disclosure and progress '
+                                                             'inspection only; it must not be treated as '
                                                              'EvidenceEnvelope evidence or acceptance proof. '
                                                              'Model-produced verifier/finalizer prose fields are '
                                                              'display context only; semantic completion, '
@@ -1495,7 +1556,21 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                         'image/webp',
                                                         'image/gif',
                                                         'image/bmp'],
-                             'common_file_handling_target': '4.1.4'}}}
+                             'common_file_handling_target': '4.1.4'}},
+ 'public_typing': {'status': 'in-development',
+                   'surface': ['compatibility/public-typing-allowlist.json',
+                               'tests/test_public_typing_allowlist.py',
+                               'pyright over agently/, tests/, examples/'],
+                   'contract': 'Public methods on listed public surfaces are scanned automatically for missing '
+                               'annotations and broad Any. New public methods default to fully typed parameters and '
+                               'returns; Any is allowed only at documented compatibility or payload-extension '
+                               'boundaries listed in compatibility/public-typing-allowlist.json with owner, reason, '
+                               'narrowing plan, and expiry.',
+                   'compatibility_policy': 'The allowlist records current intentional escape hatches; it is not a '
+                                           'public-method allowlist. Version upgrades may add public methods without '
+                                           'editing the surface inventory, but any new missing annotation or Any '
+                                           'position must either be narrowed before release or added as a reviewed '
+                                           'compatibility exception.'}}
 
 def get_current_release_manifest() -> dict[str, Any]:
     return deepcopy(_CURRENT_RELEASE_MANIFEST)

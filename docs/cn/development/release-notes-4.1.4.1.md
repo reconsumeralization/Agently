@@ -1,15 +1,16 @@
 ---
-title: Agently 4.1.4.1 Development Notes
-description: Agently 4.1.4.1 关于 AgentExecutionResult 业务数据与完整数据 reader 兼容性的开发线说明。
-keywords: Agently, development notes, 4.1.4.1, AgentExecutionResult, get_data, get_full_data
+title: Agently 4.1.4.1 Release Notes
+description: Agently 4.1.4.1 关于 AgentExecutionResult 业务数据与完整数据 reader 兼容性的发布说明。
+keywords: Agently, release notes, 4.1.4.1, AgentExecutionResult, get_data, get_full_data
 ---
 
-# Agently 4.1.4.1 Development Notes
+# Agently 4.1.4.1 Release Notes
 
 > 语言：[English](../../en/development/release-notes-4.1.4.1.md) · **中文**
 
-Agently 4.1.4.1 是 4.1.4 发布后的开发线。本页记录已经落地的 in-development
-行为。
+Agently 4.1.4.1 是 4.1.4 AgentExecution 和 TaskBoard 发布后的兼容性 release。它在保留
+4.1.4 task-execution baseline 的同时，恢复稳定的 AgentExecution result-reader 与 facade
+用法。
 
 ## AgentExecution Result 视图
 
@@ -53,6 +54,13 @@ prompt inspection。
 参数和返回类型；如果确实需要 `Any`，必须在同一个 release 中加入带 owner、reason、
 narrowing plan 和 expiry 的 allowlist 记录。
 
+## Release 锁定用法 Examples
+
+`examples/release_pinned_usage/` 现在记录 release 锁定的开发者用法检查，用来保护跨
+release 应保持稳定的 public facade 用法形态。入选脚本记录在
+`examples/release_pinned_usage/pinned_usage_manifest.json`，没有本次 release 的明确
+维护者确认，不得编辑、替换或移除。
+
 ## SkillsManager 内部 Owner
 
 Skills 现在以 `SkillsManager` 作为内部 canonical owner，负责安装/发现、渐进式
@@ -68,13 +76,15 @@ Manager 构建；显式 context-pack API 只作为 custom planner/TaskDAG 高级
 
 ## 兼容性
 
-- Package target: `4.1.4.1` development line。
-- Release manifest: `compatibility/in-development.json`。
+- Package version: `4.1.4.1`。
+- Release manifest: `compatibility/releases/4.1.4.1.json`。
 - 既有 task 终态 envelope 字段不变；依赖这些字段的调用方应从 `get_data()`
   切到 `get_full_data()`。
 - 已完成 execution 上的 prompt/config 链式调用现在 fail fast；新的服务代码与示例都应按请求创建新的
   execution。
 - public typing allowlist 是例外记录，不是允许公开方法清单。
+- `examples/release_pinned_usage/` 下的 release 锁定用法脚本属于 release gate；用法形态变更需要
+  维护者确认。
 - `SkillsManager` 是内部概念。不要把 `Agently.skills_manager` 推荐为公开 API；需要
   用户入口时使用 Agent Skills APIs，只有兼容 hook 才使用 legacy
   `Agently.skills_executor` facade。

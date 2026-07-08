@@ -205,6 +205,39 @@ the release candidate, remove the release claim, explicitly defer the affected
 Foundation capability in specs and release notes, or record a maintainer waiver
 with the residual risk.
 
+## Pinned Developer Usage Example Gate
+
+Some examples are release-pinned developer usage checks. They protect the
+recommended ways developers are expected to build with Agently, not only the
+framework substrate. The pinned set should be maintained across releases and
+should not drift just because an internal implementation changed.
+Pinned scripts live under `examples/release_pinned_usage/` and are selected by
+`examples/release_pinned_usage/pinned_usage_manifest.json`.
+
+Before recommending a release:
+
+- identify the pinned developer usage examples affected by the release claims,
+  README guidance, release notes, compatibility manifest, or changed public API
+- run those scripts against the release candidate, using real DeepSeek or local
+  Ollama when the example contains model-owned routing, planning, verification,
+  evaluation, or response generation
+- run release examples with an explicit all-allowed test capability policy when
+  they may exercise Skills, Actions, Workspace, network, Python, shell, HTTP,
+  browse, search, or MCP capability loading; do not confuse this release-test
+  posture with Agently's default fail-closed runtime permission posture
+- record the command, interpreter, provider/model, environment assumptions,
+  stable key output, and any artifact, stream, metadata, or side-effect evidence
+- treat a failure as a release blocker when the recommended usage should still
+  work
+- if a failure shows that the recommended usage itself must change, stop before
+  rewriting the example and ask the maintainer whether this release should
+  accept that usage update
+
+The release PR body or review notes should list the pinned examples that were
+run, the reason each one was included, and whether the result preserved the
+existing developer-facing usage shape. Do not silently replace a pinned example
+with a new pattern only to make the release gate pass.
+
 ## Release PR Body
 
 The release PR from `dev` to `main` must include enough information for a
@@ -220,6 +253,7 @@ At minimum, include:
 - public typing and Pylance/pyright IDE metadata checks for source and installed
   package candidates
 - Foundation example effect checks for touched Foundation-layer capabilities
+- pinned developer usage example checks for affected recommended usage shapes
 - clean install smoke environment and result
 - compatibility manifest updates and companion repository status
 - DevTools version or protocol recommendation when runtime events,

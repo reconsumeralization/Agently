@@ -615,6 +615,7 @@ Useful entry points:
 | `examples/builtin_actions/` | Search/Browse package examples |
 | `examples/fastapi/` | service exposure examples |
 | `examples/devtools/` | optional DevTools observation examples |
+| `examples/release_pinned_usage/` | release-pinned developer usage checks; selected scripts require maintainer confirmation before usage-shape edits |
 
 Archived examples live under `examples/archived/` and are compatibility references, not the recommended starting point for new apps.
 

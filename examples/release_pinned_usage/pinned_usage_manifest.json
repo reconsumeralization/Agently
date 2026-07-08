@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "directory": "examples/release_pinned_usage",
+    "edit_rule": "Selected scripts must not be edited, replaced, or removed without explicit maintainer confirmation for that release.",
+    "failure_rule": "If a selected script fails because the recommended usage shape changed, stop and ask whether the release should accept that usage update.",
+    "release_test_permissions": "Release example checks run with explicit all-allowed test capability policy when Skills, Actions, Workspace, network, Python, shell, HTTP, browse, search, or MCP capability loading may be exercised.",
+    "release_notes": "Record commands, environment, stable key output, and any skipped or failed checks in release review notes."
+  },
+  "selected_scripts": [
+    {
+      "path": "examples/release_pinned_usage/01_agent_execution_result_lifecycle.py",
+      "protected_usage": [
+        "agent.input(...).output(...).get_result()",
+        "AgentExecutionResult.get_data(...)",
+        "AgentExecutionResult.get_full_data(...)",
+        "AgentExecutionResult.get_data_object(...)",
+        "execution.get_prompt_text()",
+        "completed execution mutators fail fast",
+        "execution.create_execution() for the next request"
+      ],
+      "model_dependency": "none; local ModelRequester probe",
+      "requires_human_confirmation_for_edits": true,
+      "release_gate_reason": "4.1.4.1 restores AgentExecution result readers and one-run lifecycle behavior."
+    },
+    {
+      "path": "examples/release_pinned_usage/02_agent_execution_stream_key_readers.py",
+      "protected_usage": [
+        "execution.get_key_result(...)",
+        "execution.wait_keys(...)",
+        "execution.when_key(...).start_waiter()",
+        "execution.get_generator(type=\"specific\")",
+        "execution.streaming_print()"
+      ],
+      "model_dependency": "none; local ModelRequester probe",
+      "requires_human_confirmation_for_edits": true,
+      "release_gate_reason": "4.1.4.1 restores AgentExecution key reader and stream facade compatibility."
+    },
+    {
+      "path": "examples/release_pinned_usage/03_skills_executor_compatibility_facade.py",
+      "protected_usage": [
+        "Agently.skills_executor.configure(...)",
+        "Agently.skills_executor.install_skills(...)",
+        "Agently.skills_executor.inspect_skills(...)",
+        "agent.resolve_skills_plan(..., mode=\"required\")"
+      ],
+      "model_dependency": "none; standard SKILL.md registry and planner probe",
+      "requires_human_confirmation_for_edits": true,
+      "release_gate_reason": "4.1.4.1 keeps SkillsExecutor as a legacy compatibility facade while SkillsManager is the internal owner."
+    }
+  ],
+  "model_backed_release_examples": [
+    {
+      "path": "examples/agent_auto_orchestration/22_unified_agent_execution_result.py",
+      "reason": "Real-model AgentExecution quick prompt plus task-loop result usage.",
+      "provider": "DeepSeek or local Ollama"
+    },
+    {
+      "path": "examples/agent_auto_orchestration/23_agent_execution_auto_dispatch.py",
+      "reason": "Real-model AgentExecution route dispatch and task evidence usage.",
+      "provider": "DeepSeek or local Ollama"
+    },
+    {
+      "path": "examples/skills_executor/08_architecture_diagram_skill.py",
+      "reason": "Real-model Skills task compatibility facade and artifact-producing skill usage.",
+      "provider": "DeepSeek or local Ollama"
+    }
+  ]
+}
