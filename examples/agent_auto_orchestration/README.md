@@ -1,8 +1,8 @@
 # Agent Auto-Orchestration Examples
 
-These examples are the current 4.1.3.8 development-line examples for
-AgentExecution, Dynamic Task DAG, ActionRuntime, and the Blocks-backed Skills
-compatibility path.
+These examples are the current recommended examples for AgentExecution,
+Dynamic Task DAG, ActionRuntime, and the Blocks-backed Skills compatibility
+path.
 
 Older Skills auto-orchestration examples from before the 4.1.3.8 Blocks
 lifecycle refactor were moved to:
