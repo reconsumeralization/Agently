@@ -43,7 +43,9 @@ from .AgentExecution import AgentExecution, AgentStepExecutor
 from .Workspace import (
     CheckpointStore,
     ContentStore,
+    DBStoreProvider,
     DurableCheckpointStore,
+    EmbeddingProvider,
     ExecutionSnapshotStore,
     EvidenceLinker,
     IngestionProfile,
@@ -55,8 +57,10 @@ from .Workspace import (
     ScopePruner,
     TextIndex,
     VectorIndex,
+    VectorStoreProvider,
     WorkspaceBackend,
     WorkspaceBackendProvider,
+    WorkspaceProviderFactory,
 )
 from .WorkspaceFileIOHandler import WorkspaceFileIOHandler
 from .ContextBuilder import ContextBuilder, ContextPlanner, Retriever

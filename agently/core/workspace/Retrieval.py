@@ -27,6 +27,7 @@ from agently.types.data.workspace import (
     WorkspaceRetrievalPackage,
     WorkspaceRetrievalSelection,
 )
+from .Stores import EmbeddingProviderUnavailableError, VectorStoreProviderUnavailableError
 
 if TYPE_CHECKING:
     from .Workspace import Workspace
@@ -220,7 +221,7 @@ def _resolve_retrieval_method(
             "reason": "caller_requested",
         }
 
-    vector_available = _workspace_vector_available(workspace)
+    vector_available, vector_unavailable_reason = _workspace_vector_state(workspace)
     embedding_policy_configured, embedding_policy_reason = _embedding_policy_configured(settings)
     if vector_available and embedding_policy_configured:
         return requested_method, "hybrid", {
@@ -230,14 +231,31 @@ def _resolve_retrieval_method(
         }
     return requested_method, "keyword", {
         "mode": "auto",
-        "reason": "vector_index_unavailable" if not vector_available else "embedding_policy_not_configured",
+        "reason": vector_unavailable_reason if not vector_available else "embedding_policy_not_configured",
         "vector_index_available": vector_available,
     }
 
 
 def _workspace_vector_available(workspace: "Workspace") -> bool:
+    available, _ = _workspace_vector_state(workspace)
+    return available
+
+
+def _workspace_vector_state(workspace: "Workspace") -> tuple[bool, str]:
+    backend = getattr(workspace, "backend", None)
+    if getattr(backend, "vector_store_fallback_reason", None):
+        fallback_reason = str(getattr(backend, "vector_store_fallback_reason"))
+    else:
+        fallback_reason = ""
     vector_index = getattr(getattr(workspace, "backend", None), "vector_index", None)
-    return vector_index is not None and getattr(vector_index, "name", None) != "noop"
+    if vector_index is None or getattr(vector_index, "name", None) == "noop":
+        return False, "vector_store_unavailable"
+    if getattr(vector_index, "name", None) == "vector_pipeline":
+        if getattr(backend, "vector_store_provider", None) is None:
+            return False, "vector_store_unavailable"
+        if getattr(backend, "embedding_provider", None) is None:
+            return False, "embedding_provider_unavailable"
+    return True, fallback_reason or "available"
 
 
 def _embedding_policy_configured(settings: Any) -> tuple[bool, str]:
@@ -391,17 +409,34 @@ async def _vector_record_candidates(
     vector_diagnostics: dict[str, Any] = {"requested": True, "used": False}
     diagnostics["vector"] = vector_diagnostics
     vector_index = getattr(workspace.backend, "vector_index", None)
+    vector_available, unavailable_reason = _workspace_vector_state(workspace)
+    backend = getattr(workspace, "backend", None)
+    if getattr(backend, "vector_store_provider_name", None):
+        vector_diagnostics["vector_store_provider"] = getattr(backend, "vector_store_provider_name")
+    if getattr(backend, "vector_store_fallback_reason", None):
+        vector_diagnostics["fallback_reason"] = getattr(backend, "vector_store_fallback_reason")
     if query is None or str(query).strip() == "":
         vector_diagnostics["reason"] = "empty_query"
         return []
-    if vector_index is None or getattr(vector_index, "name", None) == "noop":
-        vector_diagnostics["reason"] = "vector_index_unavailable"
+    if not vector_available:
+        vector_diagnostics["reason"] = unavailable_reason
+        return []
+    if vector_index is None:
+        vector_diagnostics["reason"] = unavailable_reason or "vector_store_unavailable"
         return []
     similarity = getattr(vector_index, "similarity", None)
     if similarity is not None:
         vector_diagnostics["similarity"] = similarity
     try:
         records = await vector_index.search(str(query), filters=filters, limit=limit)
+    except EmbeddingProviderUnavailableError as exc:
+        vector_diagnostics["reason"] = "embedding_provider_unavailable"
+        vector_diagnostics["error"] = str(exc)
+        return []
+    except VectorStoreProviderUnavailableError as exc:
+        vector_diagnostics["reason"] = "vector_store_unavailable"
+        vector_diagnostics["error"] = str(exc)
+        return []
     except Exception as exc:
         vector_diagnostics["reason"] = "vector_search_failed"
         vector_diagnostics["error"] = str(exc)

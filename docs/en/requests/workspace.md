@@ -123,29 +123,32 @@ results = await agent.workspace.retrieve(
 
 Defaults are conservative:
 
-- candidate source is record keyword/FTS search plus tag retrieval;
+- candidate source is `DBStoreProvider` keyword/FTS search plus tag retrieval;
 - selection uses a character budget (`selection="length"`);
 - `selection="top_n"` is available when callers need a fixed number of items;
 - retrieval candidate strategy and rerank are separate decisions:
   `method="auto"` chooses the candidate source, while `rerank=None` decides
   whether model rerank is worth the extra request;
-- `method="auto"` is the default. It resolves to keyword/tag retrieval unless a
-  non-noop backend `vector_index` is present and Workspace retrieval settings
-  express vector preference, for example
+- `method="auto"` is the default. It resolves to keyword/tag retrieval unless
+  the backend has both an `EmbeddingProvider` and a `VectorStoreProvider`, and Workspace
+  retrieval settings express vector preference, for example
   `workspace.retrieval.candidate_strategy="hybrid"`,
   `workspace.retrieval.vector_preferred=True`, or
   `workspace.retrieval.embedding_model="<model-name>"`;
 - `method="keyword"`, `method="vector"`, and `method="hybrid"` remain explicit
   caller overrides;
-- the default local backend keeps `NoopVectorIndex`; provider-specific
-  embedding clients are application or plugin logic and should be installed by
-  supplying a backend `vector_index`. If callers install the built-in
-  `LocalVectorIndex(embedder)`, Workspace uses cosine similarity by default and
-  also supports `similarity="dot"` or `similarity="l2"`. Custom vector indexes
-  own their own distance formula. The Chroma integration defaults its collection
-  space to cosine as its adapter-level default;
-- if the backend only has `NoopVectorIndex`, vector mode degrades to
-  deterministic candidates and records diagnostics;
+- the default local backend uses `db_store_provider="sqlite"` for the record DB
+  and `vector_store_provider="auto"` for vectors: Chroma is selected when
+  `chromadb` is importable and initialization succeeds, otherwise Workspace
+  falls back to a SQLite vector table in `workspace.db`;
+- record DB, embedding, and vector storage are separate providers. A
+  lower-capability `DBStoreProvider` keeps the same method surface and returns
+  empty/absent values for unsupported advanced features. A vector store may be
+  present without an embedding provider; in that case vector mode degrades to
+  deterministic candidates and records `embedding_provider_unavailable`
+  diagnostics. The built-in `LocalVectorIndex(embedder)` remains as a
+  compatibility adapter for callers that still want one object to own both
+  embedding and local vector scoring;
 - `rerank=None` uses a structural cost gate: rerank is skipped for focused
   candidate pools and used for oversized, weakly filtered, mixed-source, or
   highly dispersed pools;
@@ -553,18 +556,40 @@ retriever, and packager profiles.
 
 ## Plugin Seams
 
-Workspace exposes low-level backend seams for content, metadata, checkpoints,
-RuntimeEvent storage, ref resolution, retention, evidence links, text index,
-policy, and vector index. The default local backend is filesystem content plus
-SQLite metadata/FTS and `NoopVectorIndex`; provider-specific embedding clients
-belong in application code, a custom backend, or a plugin-provided
-`vector_index`. The built-in `LocalVectorIndex(embedder)` is available when an
-application wants a provider-neutral local vector scorer; its default similarity
-is cosine, with dot product and L2 as explicit options.
+Workspace exposes provider seams for content, DB storage, policy, embedding,
+and vector storage. The default local backend uses filesystem content plus
+`db_store_provider="sqlite"` for records/FTS/links/checkpoints/runtime metadata,
+and `vector_store_provider="auto"` for vector storage: Chroma is used when
+`chromadb` is available, otherwise Workspace falls back to a SQLite vector
+table. `DBStoreProvider` is the normalized record DB adapter surface for SQLite
+today and future MySQL, Postgres, or local-file implementations; lower-capability
+providers keep the same method surface and return empty/absent results for
+advanced capabilities they do not support. Embedding is a separate provider
+(`EmbeddingProvider`) from vector storage (`VectorStoreProvider`), so
+applications can swap model-owned vectorization independently from Chroma,
+SQLite, or a custom vector database. The built-in `LocalVectorIndex(embedder)`
+remains available as a compatibility adapter when an application still wants one
+object to own both embedding and local vector scoring.
 ContextBuilder exposes
 `ContextPlanner`, `WorkspaceContextRetriever`, and `ContextPackager`; advanced
 model-assisted planning, vector retrieval, reranking, compression, and remote
 backends are expected to arrive as plugins over this foundation.
+
+Component providers can be registered independently:
+
+```python
+Agently.workspace.register_embedding_provider("agent", build_embedding_provider)
+Agently.workspace.register_db_store_provider("sqlite", build_db_store_provider)
+Agently.workspace.register_vector_store_provider("pgvector", build_pgvector_store)
+
+workspace = Agently.create_workspace(
+    "./.agently/projects/support",
+    db_store_provider="sqlite",
+    embedding_provider="agent",
+    embedding_options={"agent": embedding_agent},
+    vector_store_provider="auto",
+)
+```
 
 Custom backends can be passed directly to `agent.use_workspace(...)` or
 registered by name when they implement the Workspace backend protocol:
@@ -604,6 +629,11 @@ evidence, checkpoints compact state, and builds a ContextPackage.
 See `examples/workspace/workspace_shared_default_management.py` for the default
 session-scoped Workspace behavior: multiple Agents and TriggerFlow executions
 share one physical `workspace.db` while execution file roots stay isolated.
+
+See `examples/workspace/workspace_pluggable_vector_providers.py` for a runnable
+provider smoke: a callable embedding provider indexes records while
+`vector_store_provider="auto"` uses Chroma when available or the SQLite vector
+table fallback.
 
 See `examples/workspace/workspace_with_action_output.py` for the Action
 boundary: a file action writes into `workspace.files_root`, a shell action reads

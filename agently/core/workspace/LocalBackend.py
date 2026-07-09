@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, AsyncIterator, cast
 
@@ -39,7 +40,16 @@ from agently.types.data.workspace import (
 from agently.utils import DataFormatter
 
 from .Errors import WorkspaceConfigurationError, WorkspacePolicyError
-from .Stores import LocalContentStore, LocalWorkspacePolicyEngine, NoopVectorIndex
+from .Stores import (
+    ChromaVectorStoreProvider,
+    EmbeddingProviderUnavailableError,
+    LocalContentStore,
+    LocalWorkspacePolicyEngine,
+    NoopVectorIndex,
+    SQLiteVectorStoreProvider,
+    VectorIndexPipeline,
+    VectorStoreProviderUnavailableError,
+)
 from ._defaults import WORKSPACE_FILE_AREAS, WORKSPACE_GUIDE_FILENAME
 from ._utils import json_dumps, json_loads, slug, utc_now
 
@@ -48,6 +58,50 @@ class LocalWorkspaceBackend:
     """Local filesystem content plus SQLite metadata and FTS index."""
 
     DEFAULT_COLLECTIONS = ("dialogue", "observations", "decisions", "artifacts", "checkpoints", "runtime_events")
+    DB_STORE_PROVIDER_METHODS = frozenset(
+        {
+            "put_record",
+            "get_record",
+            "index_record",
+            "search",
+            "link",
+            "link_evidence",
+            "links",
+            "checkpoint",
+            "put_checkpoint",
+            "get_checkpoint",
+            "put_artifact_ref",
+            "claim_lease",
+            "heartbeat_lease",
+            "release_lease",
+            "put_snapshot",
+            "get_snapshot",
+            "latest_snapshot",
+            "latest_checkpoint",
+            "checkpoint_history",
+            "append_runtime_event",
+            "query_runtime_events",
+            "record_file_policy",
+            "get_file_policy",
+            "add_retention_anchor",
+            "retention_anchors",
+            "prune_scope",
+            "register_scratch_lease",
+            "get_scratch_lease",
+            "list_scratch_leases",
+            "close_scratch_lease",
+        }
+    )
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in object.__getattribute__(self, "DB_STORE_PROVIDER_METHODS"):
+            try:
+                provider = object.__getattribute__(self, "db_store_provider")
+            except AttributeError:
+                provider = None
+            if provider is not None and provider is not self:
+                return getattr(provider, name)
+        return object.__getattribute__(self, name)
 
     def __init__(
         self,
@@ -55,6 +109,7 @@ class LocalWorkspaceBackend:
         *,
         create: bool = True,
         mode: str = "read_write",
+        initialize_default_vector_store_provider: bool = True,
     ):
         self.root = Path(root).expanduser().resolve()
         self.content_root = self.root / "content"
@@ -65,6 +120,12 @@ class LocalWorkspaceBackend:
         self.workspace_id = self._default_workspace_id()
         self.policy = LocalWorkspacePolicyEngine(self.content_root, read_only=self.read_only)
         self.content = LocalContentStore(self.content_root, self.policy)
+        self.db_store_provider = self
+        self.db_store_provider_name = "sqlite"
+        self.embedding_provider = None
+        self.vector_store_fallback_reason: str | None = None
+        self.vector_store_provider = None
+        self.vector_store_provider_name = None
         self.metadata = self
         self.checkpoint_store = self
         self.runtime_event_store = self
@@ -79,6 +140,10 @@ class LocalWorkspaceBackend:
             raise WorkspaceConfigurationError(f"Workspace root does not exist: { self.root }")
         else:
             self.workspace_id = self._load_workspace_meta().get("workspace_id", self.workspace_id)
+        if initialize_default_vector_store_provider:
+            self.vector_store_provider = self._default_vector_store_provider(create=create)
+        self.vector_store_provider_name = getattr(self.vector_store_provider, "name", None)
+        self.vector_index = self._default_vector_index()
 
     def _initialize(self):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -144,8 +209,51 @@ class LocalWorkspaceBackend:
         digest = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()[:24]
         return f"ws_{ digest }"
 
+    def _default_vector_store_provider(self, *, create: bool):
+        try:
+            store = ChromaVectorStoreProvider(
+                self.root / "vectors" / "chroma",
+                create=create,
+                mode=self.mode,
+            )
+            self.vector_store_fallback_reason = None
+            return store
+        except Exception as error:
+            self.vector_store_fallback_reason = f"chroma_unavailable:{type(error).__name__}"
+            return SQLiteVectorStoreProvider(
+                self.db_path,
+                read_only=self.read_only,
+                create=create,
+            )
+
     def _default_vector_index(self):
-        return NoopVectorIndex()
+        if self.vector_store_provider is None:
+            return NoopVectorIndex()
+        return VectorIndexPipeline(
+            embedding_provider=self.embedding_provider,
+            vector_store_provider=self.vector_store_provider,
+        )
+
+    def configure_components(
+        self,
+        *,
+        db_store_provider: Any | None = None,
+        db_store_provider_name: str | None = None,
+        embedding_provider: Any | None = None,
+        vector_store_provider: Any | None = None,
+        vector_store_provider_name: str | None = None,
+        vector_store_fallback_reason: str | None = None,
+    ) -> None:
+        if db_store_provider is not None:
+            self.db_store_provider = db_store_provider
+        if db_store_provider_name is not None:
+            self.db_store_provider_name = db_store_provider_name
+        self.embedding_provider = embedding_provider
+        if vector_store_provider is not None:
+            self.vector_store_provider = vector_store_provider
+        self.vector_store_provider_name = vector_store_provider_name or getattr(self.vector_store_provider, "name", None)
+        self.vector_store_fallback_reason = vector_store_fallback_reason
+        self.vector_index = self._default_vector_index()
 
     def _load_workspace_meta(self):
         meta_path = self.root / "workspace.meta.json"
@@ -401,13 +509,16 @@ class LocalWorkspaceBackend:
 
     def _features(self) -> dict[str, bool]:
         vector_index = self.vector_index
+        vector_search = vector_index is not None and getattr(vector_index, "name", None) != "noop"
+        if isinstance(vector_index, VectorIndexPipeline):
+            vector_search = self.embedding_provider is not None and self.vector_store_provider is not None
         return {
             "structured_get_data": True,
             "links_query": True,
             "checkpoint_lookup": True,
             "metadata_filters": True,
             "text_search": True,
-            "vector_search": vector_index is not None and getattr(vector_index, "name", None) != "noop",
+            "vector_search": vector_search,
             "workspace_reference_envelopes": True,
             "bounded_read": True,
             "stream_read": True,
@@ -720,35 +831,6 @@ class LocalWorkspaceBackend:
         relative_path = await self.content.write_content(relative_path, content_bytes)
         created_at = utc_now()
         record_summary = summary or content_text[:240].replace("\n", " ").strip()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO records (
-                    id, collection, kind, path, sha256, size, summary,
-                    scope_json, source_json, meta_json, created_at, is_checkpoint
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record_id,
-                    collection,
-                    kind,
-                    relative_path,
-                    digest,
-                    len(content_bytes),
-                    record_summary,
-                    json_dumps(scope or {}),
-                    json_dumps(source or {}),
-                    json_dumps(meta or {}),
-                    created_at,
-                    1 if collection == "checkpoints" else 0,
-                ),
-            )
-            self._replace_scope_index_on_conn(conn, record_id, scope or {})
-            conn.execute(
-                "INSERT INTO records_fts(record_id, summary, content) VALUES (?, ?, ?)",
-                (record_id, record_summary, content_text),
-            )
-            conn.commit()
         ref: WorkspaceRecordRef = {
             "id": record_id,
             "collection": collection,
@@ -762,7 +844,12 @@ class LocalWorkspaceBackend:
             "created_at": created_at,
             "meta": meta or {},
         }
-        await self.vector_index.index_record(ref, content_text)
+        await self.put_record(ref)
+        await self.index_record(ref, content_text)
+        try:
+            await self.vector_index.index_record(ref, content_text)
+        except (EmbeddingProviderUnavailableError, VectorStoreProviderUnavailableError):
+            pass
         return ref
 
     async def put_record(self, ref: WorkspaceRecordRef) -> WorkspaceRecordRef:
@@ -1640,6 +1727,9 @@ class LocalWorkspaceBackend:
                     (execution_id,),
                 ).rowcount
             conn.commit()
+        delete_vectors = getattr(self.vector_store_provider, "delete_records", None)
+        if callable(delete_vectors):
+            await cast(Callable[[list[str]], Awaitable[None]], delete_vectors)(record_ids)
         content_files_deleted = 0
         for path in content_paths:
             target = self.content_root / path
@@ -1827,11 +1917,24 @@ class LocalWorkspaceBackend:
             "files_root": str(self.files_root),
             "read_only": self.read_only,
             "components": {
+                "db_store_provider": self.db_store_provider_name,
                 "content": type(self.content).__name__,
                 "metadata": type(self.metadata).__name__,
                 "checkpoint_store": type(self.checkpoint_store).__name__,
                 "text_index": type(self.text_index).__name__,
                 "policy": type(self.policy).__name__,
+                "embedding_provider": (
+                    getattr(self.embedding_provider, "name", None) or type(self.embedding_provider).__name__
+                    if self.embedding_provider is not None
+                    else None
+                ),
+                "vector_store_provider": (
+                    self.vector_store_provider_name
+                    or getattr(self.vector_store_provider, "name", None)
+                    or type(self.vector_store_provider).__name__
+                    if self.vector_store_provider is not None
+                    else None
+                ),
                 "vector_index": type(vector_index).__name__ if vector_index is not None else None,
                 "runtime_event_store": type(self.runtime_event_store).__name__,
                 "ref_resolver": type(self.ref_resolver).__name__,

@@ -773,6 +773,320 @@ def test_workspace_backend_provider_missing_registration_fails_fast():
         Agently.workspace.create(provider="missing-provider")
 
 
+def test_workspace_component_provider_registry_and_conflicts(tmp_path):
+    manager = WorkspaceManager()
+
+    assert "sqlite" in manager.list_db_store_providers()
+    assert {"agent", "callable"}.issubset(set(manager.list_embedding_providers()))
+    assert {"chroma", "sqlite"}.issubset(set(manager.list_vector_store_providers()))
+
+    with pytest.raises(WorkspaceConfigurationError, match="cannot be combined"):
+        manager.create(
+            tmp_path / "provider-conflict",
+            provider="missing-provider",
+            embedding_provider=lambda texts: [[1.0] for _ in texts],
+        )
+
+    manager.unregister_vector_store_provider("chroma")
+    fallback = manager.create(tmp_path / "auto-fallback", vector_store_provider="auto")
+    assert getattr(fallback.backend, "vector_store_provider_name") == "sqlite"
+    assert str(getattr(fallback.backend, "vector_store_fallback_reason")).startswith("chroma_unavailable")
+
+    seen_db_store_options: dict[str, Any] = {}
+
+    def sqlite_alias_provider(**options: Any) -> str:
+        seen_db_store_options.update(options)
+        return "sqlite"
+
+    manager.register_db_store_provider("sqlite-alias", sqlite_alias_provider)
+    aliased = manager.create(
+        tmp_path / "sqlite-alias",
+        db_store_provider="sqlite-alias",
+        db_store_options={"label": "db-store-options"},
+        vector_store_provider="sqlite",
+    )
+    assert seen_db_store_options["label"] == "db-store-options"
+    assert seen_db_store_options["root"] == tmp_path / "sqlite-alias"
+    assert aliased.capabilities()["components"]["db_store_provider"] == "sqlite-alias"
+
+    with pytest.raises(WorkspaceConfigurationError, match="Workspace vector store provider is not registered"):
+        manager.create(tmp_path / "explicit-chroma-missing", vector_store_provider="chroma")
+
+
+@pytest.mark.asyncio
+async def test_workspace_db_store_provider_delegates_record_behavior(tmp_path):
+    class CustomDBStoreProvider:
+        name = "custom-db"
+
+        def __init__(self):
+            self.records: list[WorkspaceRecordRef] = []
+            self.data: dict[str, Any] = {}
+
+        async def put(
+            self,
+            content: Any,
+            *,
+            collection: str,
+            kind: str | None = None,
+            summary: str | None = None,
+            scope: dict[str, Any] | None = None,
+            source: dict[str, Any] | None = None,
+            meta: dict[str, Any] | None = None,
+        ) -> WorkspaceRecordRef:
+            record_id = f"custom-{len(self.records) + 1}"
+            ref: WorkspaceRecordRef = {
+                "id": record_id,
+                "collection": collection,
+                "kind": kind,
+                "path": f"{collection}/{record_id}.json",
+                "sha256": "custom",
+                "size": 0,
+                "summary": summary or str(content),
+                "scope": scope or {},
+                "source": source or {},
+                "meta": meta or {},
+                "created_at": "2026-07-09T00:00:00Z",
+            }
+            self.records.append(ref)
+            self.data[record_id] = content
+            return ref
+
+        async def put_record(self, ref: WorkspaceRecordRef) -> WorkspaceRecordRef:
+            self.records.append(ref)
+            return ref
+
+        async def get_record(self, record_id: str) -> WorkspaceRecordRef | None:
+            return next((ref for ref in self.records if ref["id"] == record_id), None)
+
+        async def index_record(self, ref: WorkspaceRecordRef, content: str) -> None:
+            _ = ref, content
+
+        async def get(self, ref_or_path: WorkspaceRecordRef | str) -> Any:
+            return await self.get_data(ref_or_path)
+
+        async def get_data(self, ref_or_path: WorkspaceRecordRef | str) -> Any:
+            record_id = ref_or_path["id"] if isinstance(ref_or_path, dict) else str(ref_or_path)
+            return self.data[record_id]
+
+        async def ref_envelope(self, ref_or_id: WorkspaceRecordRef | str) -> dict[str, Any]:
+            record_id = ref_or_id["id"] if isinstance(ref_or_id, dict) else str(ref_or_id)
+            ref = await self.get_record(record_id)
+            assert ref is not None
+            return {"workspace_id": "custom", "kind": "record", "record_id": ref["id"], **ref}
+
+        async def search(
+            self,
+            query: str | None = None,
+            filters: dict[str, Any] | None = None,
+        ) -> list[WorkspaceRecordRef]:
+            _ = query
+            filters = filters or {}
+            results = list(self.records)
+            for key, value in filters.items():
+                if key == "collection":
+                    results = [ref for ref in results if ref["collection"] == value]
+                elif key == "kind":
+                    results = [ref for ref in results if ref["kind"] == value]
+            return results
+
+        async def link(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            _ = args, kwargs
+            return {"id": "link-empty"}
+
+        async def link_evidence(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return await self.link(*args, **kwargs)
+
+        async def links(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            _ = args, kwargs
+            return []
+
+        async def checkpoint(self, run_id: str, state: dict[str, Any], **kwargs: Any) -> WorkspaceRecordRef:
+            return await self.put(state, collection="checkpoints", kind="checkpoint", scope={"run_id": run_id})
+
+        async def put_checkpoint(self, run_id: str, state: dict[str, Any], **kwargs: Any) -> WorkspaceRecordRef:
+            return await self.checkpoint(run_id, state, **kwargs)
+
+        async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
+            _ = run_id
+            return None
+
+        async def put_artifact_ref(self, run_id: str, artifact: Any, **kwargs: Any) -> WorkspaceRecordRef:
+            return await self.put(
+                {"artifact": artifact, "metadata": kwargs.get("metadata") or {}},
+                collection="artifacts",
+                kind="artifact_ref",
+                scope={"run_id": run_id},
+            )
+
+        async def claim_lease(self, run_id: str, owner_id: str, **kwargs: Any) -> dict[str, Any]:
+            return {"run_id": run_id, "owner_id": owner_id, "lease_token": "empty", **kwargs}
+
+        async def heartbeat_lease(self, run_id: str, owner_id: str, lease_token: str) -> dict[str, Any]:
+            return {"run_id": run_id, "owner_id": owner_id, "lease_token": lease_token}
+
+        async def release_lease(self, run_id: str, owner_id: str, lease_token: str) -> dict[str, Any]:
+            return {"run_id": run_id, "owner_id": owner_id, "lease_token": lease_token}
+
+        async def put_snapshot(self, run_id: str, state: dict[str, Any], **kwargs: Any) -> WorkspaceRecordRef:
+            return await self.checkpoint(run_id, state, **kwargs)
+
+        async def get_snapshot(self, run_id: str) -> dict[str, Any] | None:
+            _ = run_id
+            return None
+
+        async def latest_snapshot(self, run_id: str) -> WorkspaceRecordRef | None:
+            _ = run_id
+            return None
+
+        async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
+            _ = run_id
+            return None
+
+        async def checkpoint_history(self, run_id: str, **kwargs: Any) -> list[WorkspaceRecordRef]:
+            _ = run_id, kwargs
+            return []
+
+        async def append_runtime_event(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            _ = args, kwargs
+            return {"id": "event-empty", "execution_id": "custom", "sequence": 1}
+
+        async def query_runtime_events(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            _ = args, kwargs
+            return []
+
+        async def record_file_policy(self, metadata: dict[str, Any]) -> dict[str, Any]:
+            return metadata
+
+        async def get_file_policy(self) -> dict[str, Any]:
+            return {}
+
+        async def add_retention_anchor(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            _ = args, kwargs
+            return {"id": "anchor-empty"}
+
+        async def retention_anchors(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            _ = args, kwargs
+            return []
+
+        async def prune_scope(self, scope: dict[str, Any], *, remove_files: bool = True) -> dict[str, Any]:
+            _ = remove_files
+            return {"scope": scope, "records_deleted": 0}
+
+        async def register_scratch_lease(self, lease: dict[str, Any]) -> dict[str, Any]:
+            return lease
+
+        async def get_scratch_lease(self, lease_id: str) -> None:
+            _ = lease_id
+            return None
+
+        async def list_scratch_leases(self, **kwargs: Any) -> list[dict[str, Any]]:
+            _ = kwargs
+            return []
+
+        async def close_scratch_lease(self, lease_id: str, **kwargs: Any) -> None:
+            _ = lease_id, kwargs
+            return None
+
+    manager = WorkspaceManager()
+    provider = CustomDBStoreProvider()
+    manager.register_db_store_provider("custom-db", lambda **options: provider)
+    workspace = manager.create(
+        tmp_path / "custom-db-provider",
+        db_store_provider="custom-db",
+        vector_store_provider="sqlite",
+    )
+
+    ref = await workspace.put(
+        {"memory": "custom db record"},
+        collection="memory",
+        kind="db_provider_probe",
+    )
+    hits = await workspace.search(None, filters={"collection": "memory", "kind": "db_provider_probe"})
+
+    assert ref["id"].startswith("rec_")
+    assert [stored["id"] for stored in provider.records] == [ref["id"]]
+    assert await workspace.get_data(ref) == {"memory": "custom db record"}
+    assert [hit["id"] for hit in hits] == [ref["id"]]
+    assert workspace.capabilities()["components"]["db_store_provider"] == "custom-db"
+
+
+@pytest.mark.asyncio
+async def test_workspace_embedding_and_vector_store_provider_factories_receive_options(tmp_path):
+    manager = WorkspaceManager()
+    seen_embedding_options: dict[str, Any] = {}
+    seen_vector_options: dict[str, Any] = {}
+    indexed: list[WorkspaceRecordRef] = []
+
+    class CustomEmbeddingProvider:
+        name = "custom-embedding"
+
+        def __init__(self, *, marker: str):
+            self.marker = marker
+
+        async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            seen_embedding_options["used_marker"] = self.marker
+            return [[1.0, 0.0] if "alpha" in text else [0.0, 1.0] for text in texts]
+
+    class CustomVectorStoreProvider:
+        name = "custom-vector"
+
+        def __init__(self, *, bucket: str):
+            self.bucket = bucket
+
+        async def index_record(self, ref: WorkspaceRecordRef, embedding: list[float]) -> None:
+            seen_vector_options["used_bucket"] = self.bucket
+            indexed.append(ref)
+
+        async def search_by_embedding(
+            self,
+            embedding: list[float],
+            *,
+            filters: dict[str, Any] | None = None,
+            limit: int | None = None,
+        ) -> list[WorkspaceRecordRef]:
+            _ = embedding, filters
+            return indexed[:limit]
+
+    def build_embedding_provider(**options: Any) -> CustomEmbeddingProvider:
+        seen_embedding_options.update(options)
+        return CustomEmbeddingProvider(marker=str(options["marker"]))
+
+    def build_vector_store_provider(**options: Any) -> CustomVectorStoreProvider:
+        seen_vector_options.update(options)
+        return CustomVectorStoreProvider(bucket=str(options["bucket"]))
+
+    manager.register_embedding_provider("custom-embedding", build_embedding_provider)
+    manager.register_vector_store_provider("custom-vector", build_vector_store_provider)
+
+    workspace = manager.create(
+        tmp_path / "custom-component-providers",
+        embedding_provider="custom-embedding",
+        embedding_options={"marker": "embed-options"},
+        vector_store_provider="custom-vector",
+        vector_store_options={"bucket": "vector-options"},
+    )
+    expected = await workspace.put(
+        {"memory": "alpha provider probe"},
+        collection="memory",
+        kind="provider_factory_probe",
+        summary="alpha provider probe",
+    )
+    package = await workspace.retrieve(
+        "alpha",
+        filters={"collection": "memory", "kind": "provider_factory_probe"},
+        method="vector",
+        rerank=False,
+    )
+
+    assert seen_embedding_options["marker"] == "embed-options"
+    assert seen_embedding_options["used_marker"] == "embed-options"
+    assert seen_vector_options["bucket"] == "vector-options"
+    assert seen_vector_options["used_bucket"] == "vector-options"
+    assert workspace.capabilities()["components"]["embedding_provider"] == "custom-embedding"
+    assert workspace.capabilities()["components"]["vector_store_provider"] == "custom-vector"
+    assert _retrieval_ref_id(package["items"][0]) == expected["id"]
+
+
 @pytest.mark.asyncio
 async def test_workspace_structured_data_links_and_capabilities(tmp_path):
     agent = Agently.create_agent("workspace-foundation-components").use_workspace(tmp_path / "run")
@@ -809,8 +1123,11 @@ async def test_workspace_structured_data_links_and_capabilities(tmp_path):
     capabilities = workspace.capabilities()
     assert capabilities["backend"] == "local"
     assert capabilities["files_root"] == str(workspace.files_root)
+    assert capabilities["components"]["db_store_provider"] == "sqlite"
     assert capabilities["components"]["content"] == "LocalContentStore"
-    assert capabilities["components"]["vector_index"] == "NoopVectorIndex"
+    assert capabilities["components"]["embedding_provider"] is None
+    assert capabilities["components"]["vector_store_provider"] in {"chroma", "sqlite"}
+    assert capabilities["components"]["vector_index"] == "VectorIndexPipeline"
     assert capabilities["features"]["structured_get_data"] is True
     assert capabilities["features"]["links_query"] is True
     assert capabilities["features"]["checkpoint_lookup"] is True
@@ -821,6 +1138,7 @@ async def test_workspace_structured_data_links_and_capabilities(tmp_path):
     assert capabilities["features"]["supports_lease"] is True
     assert capabilities["features"]["supports_artifact_refs"] is True
     assert capabilities["features"]["supports_event_sequence"] is True
+    assert capabilities["features"]["vector_search"] is False
     assert capabilities["features"]["supports_remote_backend"] is False
 
 
@@ -1400,7 +1718,7 @@ async def test_workspace_retrieve_vector_mode_uses_index_or_degrades(tmp_path):
         rerank=False,
     )
     assert degraded["diagnostics"]["vector"]["used"] is False
-    assert degraded["diagnostics"]["vector"]["reason"] == "vector_index_unavailable"
+    assert degraded["diagnostics"]["vector"]["reason"] == "embedding_provider_unavailable"
     assert first["id"] in [_retrieval_ref_id(item) for item in degraded["items"]]
 
     class FakeVectorIndex:
@@ -1424,6 +1742,66 @@ async def test_workspace_retrieve_vector_mode_uses_index_or_degrades(tmp_path):
 
     assert used["diagnostics"]["vector"]["used"] is True
     assert _retrieval_ref_id(used["items"][0]) == vector_only["id"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_sqlite_vector_store_uses_pluggable_embedding_provider(tmp_path):
+    def embed_texts(texts: str | list[str]) -> list[list[float]]:
+        values = [texts] if isinstance(texts, str) else texts
+        vectors: list[list[float]] = []
+        for text in values:
+            normalized = text.lower()
+            if "alpha" in normalized:
+                vectors.append([1.0, 0.0])
+            elif "beta" in normalized:
+                vectors.append([0.0, 1.0])
+            else:
+                vectors.append([1.0, 0.0])
+        return vectors
+
+    root = tmp_path / "workspace-sqlite-vector-store"
+    workspace = Agently.create_workspace(
+        root,
+        embedding_provider=embed_texts,
+        vector_store_provider="sqlite",
+    )
+    alpha = await workspace.put(
+        {"memory": "alpha vector candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="alpha vector candidate",
+    )
+    await workspace.put(
+        {"memory": "beta vector candidate"},
+        collection="memory",
+        kind="global_memory",
+        summary="beta vector candidate",
+    )
+
+    package = await workspace.retrieve(
+        "alpha query",
+        filters={"collection": "memory", "kind": "global_memory"},
+        method="vector",
+        rerank=False,
+    )
+
+    assert package["diagnostics"]["vector"]["used"] is True
+    assert package["diagnostics"]["vector"]["vector_store_provider"] == "sqlite"
+    assert _retrieval_ref_id(package["items"][0]) == alpha["id"]
+
+    reopened = Agently.create_workspace(
+        root,
+        create=False,
+        embedding_provider=embed_texts,
+        vector_store_provider="sqlite",
+    )
+    reopened_package = await reopened.retrieve(
+        "alpha query",
+        filters={"collection": "memory", "kind": "global_memory"},
+        method="vector",
+        rerank=False,
+    )
+    assert _retrieval_ref_id(reopened_package["items"][0]) == alpha["id"]
 
 
 @pytest.mark.asyncio

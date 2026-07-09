@@ -88,6 +88,9 @@ from .runtime import (
 )
 from .session import Session
 from .workspace import (
+    AgentEmbeddingProvider,
+    CallableEmbeddingProvider,
+    ChromaVectorStoreProvider,
     DefaultContextBuilder,
     LazyWorkspace,
     LocalVectorIndex,
@@ -100,12 +103,14 @@ from .workspace import (
     WorkspaceManager,
     WorkspacePolicyError,
     WorkspaceRetriever,
+    SQLiteVectorStoreProvider,
 )
 
 __all__ = [
     "Action",
     "ActionDispatcher",
     "ActionRegistry",
+    "AgentEmbeddingProvider",
     "AgentExecutionContext",
     "AgentExecutionLimitExceeded",
     "AgentExecutionResult",
@@ -114,6 +119,8 @@ __all__ = [
     "AttemptRunner",
     "BaseAgent",
     "Blocks",
+    "CallableEmbeddingProvider",
+    "ChromaVectorStoreProvider",
     "CompiledTaskDAG",
     "DefaultContextBuilder",
     "DynamicTask",
@@ -145,6 +152,7 @@ __all__ = [
     "Session",
     "SkillsExecutor",
     "SkillsManager",
+    "SQLiteVectorStoreProvider",
     "TaskDAG",
     "TaskDAGExecutor",
     "TaskDAGNode",

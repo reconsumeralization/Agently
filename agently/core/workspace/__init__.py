@@ -19,10 +19,23 @@ from .LocalBackend import LocalWorkspaceBackend
 from .Manager import WorkspaceManager
 from .Profiles import CheckpointIngestionProfile, FastIngestionProfile
 from .ContextBuilder import DefaultContextBuilder, ContextProfile, RuleContextPlanner, WorkspaceRetriever
-from .Stores import LocalContentStore, LocalVectorIndex, LocalWorkspacePolicyEngine, NoopVectorIndex
+from .Stores import (
+    AgentEmbeddingProvider,
+    CallableEmbeddingProvider,
+    ChromaVectorStoreProvider,
+    LocalContentStore,
+    LocalVectorIndex,
+    LocalWorkspacePolicyEngine,
+    NoopVectorIndex,
+    SQLiteVectorStoreProvider,
+    VectorIndexPipeline,
+)
 
 __all__ = [
     "CheckpointIngestionProfile",
+    "AgentEmbeddingProvider",
+    "CallableEmbeddingProvider",
+    "ChromaVectorStoreProvider",
     "DefaultContextBuilder",
     "FastIngestionProfile",
     "LocalContentStore",
@@ -31,6 +44,8 @@ __all__ = [
     "LazyWorkspace",
     "LocalWorkspacePolicyEngine",
     "NoopVectorIndex",
+    "SQLiteVectorStoreProvider",
+    "VectorIndexPipeline",
     "ContextProfile",
     "RuleContextPlanner",
     "Workspace",

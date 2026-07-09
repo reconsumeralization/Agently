@@ -122,6 +122,12 @@ class WorkspaceExtension(BaseAgent):
         mode: str = "read_write",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
+        db_store_provider: Any | None = None,
+        db_store_options: dict[str, Any] | None = None,
+        embedding_provider: Any | None = None,
+        embedding_options: dict[str, Any] | None = None,
+        vector_store_provider: Any | None = None,
+        vector_store_options: dict[str, Any] | None = None,
     ) -> Self:
         from agently.base import workspace as global_workspace
 
@@ -132,6 +138,12 @@ class WorkspaceExtension(BaseAgent):
             mode=mode,
             provider=provider,
             provider_options=provider_options,
+            db_store_provider=db_store_provider,
+            db_store_options=db_store_options,
+            embedding_provider=embedding_provider,
+            embedding_options=embedding_options,
+            vector_store_provider=vector_store_provider,
+            vector_store_options=vector_store_options,
         )
         self._sync_workspace_settings(
             self.workspace,
