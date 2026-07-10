@@ -20,6 +20,64 @@ Agently 把 prompt 拆成命名槽位。槽位可组合，所以 agent 级持久
 | `input` | user 消息 | 实际问题或 payload |
 | `output` | user 消息 + parser | 期望的返回结构 |
 
+## 严格的外部接口契约
+
+当模型输出会直接作为已定义 API 请求、模块接口或函数调用的参数时，模型必须
+看到该接口契约。Python signature、OpenAPI operation、JSON Schema、protobuf
+定义或权威 docstring 不会自动出现在普通模型请求中。
+
+把各槽位组合成一份集成契约：
+
+| 槽位 | 集成职责 |
+|---|---|
+| `input` | 本次请求的动态值与源事实。 |
+| `info` | 权威 API/schema 文档、signature、docstring、字段语义与已声明约束。 |
+| `instruct` | 输入如何转换、目标 callable/operation，以及缺失信息如何处理。 |
+| `output` | 下游接口要求的精确机器可消费类型与嵌套结构。 |
+
+每个会被下游消费的输出字段都应说明含义，并声明类型、必填性，以及适用的
+枚举、格式、范围、可空性或跨字段约束。复用这些权威接口事实属于必要的边界
+与输出控制，不是业务逻辑侵入。不属于接口契约的业务决策仍由应用策略层拥有；
+真实调用前，host 仍应执行确定性校验。
+
+```python
+from typing import Literal
+
+ticket_body = await (
+    agent
+    .input({
+        "request_text": request_text,
+        "requester_id": requester_id,
+    })
+    .info({
+        "target_operation": "POST /tickets",
+        "operation_contract": openapi_ticket_operation,
+    })
+    .instruct([
+        "根据输入事实生成一份 POST /tickets 请求 body。",
+        "严格遵守目标 operation 契约，不要增加字段。",
+    ])
+    .output({
+        "title": (
+            str,
+            "POST /tickets 接受的非空工单标题。",
+            "not_null",
+        ),
+        "priority": (
+            Literal["low", "normal", "high"],
+            "必填 API 枚举：low、normal 或 high。",
+            True,
+        ),
+        "requester_id": (
+            str,
+            "从 input 原样复制的必填请求人标识。",
+            "not_null",
+        ),
+    }, format="json")
+    .async_start()
+)
+```
+
 agent 级持久设置：
 
 ```python

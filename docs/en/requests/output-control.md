@@ -12,6 +12,22 @@ The validation pipeline runs the first time a structured response result is cons
 
 For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leaves directly in `.output(...)` with the third-slot `ensure` flag, then let the runtime compile those flags into `ensure_keys`. Pass `ensure_keys=` manually only when the required path is runtime-dependent, conditional, or easier to express outside the static schema. By default, tuple `True` and runtime `ensure_keys` check path/key presence only; the value may be `None`, a blank string, `False`, `0`, an empty list, or another intentionally empty value. Use the explicit tuple marker `"not_null"` when a required path must also contain a meaningful value; it rejects `None`, blank strings, empty lists or wildcard matches, and lists containing missing required values while still accepting `False` and `0`.
 
+## Direct downstream interface contracts
+
+If downstream code passes the parsed result to an API, SDK, module interface,
+or function, `.output(...)` should mirror the consumed request or argument
+shape instead of returning an opaque `dict` such as `{"args": (dict,
+"arguments", True)}`. Describe each consumed leaf with its contract meaning,
+not only a generic label. Include the exact type, requiredness, and any relevant
+enum, serialization format, range, unit, nullability, or field dependency.
+
+The complete integration contract also includes the authoritative API docs,
+signature, schema, or docstring in `info(...)`, the runtime facts in
+`input(...)`, and the transformation/call rules in `instruct(...)`. This is
+necessary output control rather than business-logic intrusion. Parsing and
+`ensure` checks do not replace deterministic DTO/Pydantic/SDK validation before
+a real call or side effect.
+
 ## Choosing An Output Format
 
 `.output(...)` reads its omitted format default from

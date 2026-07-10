@@ -12,6 +12,19 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 
 对 Agently `4.1.0.1+`，默认 authoring 路径是：在 `.output(...)` 里直接用第三槽 `ensure` 标记固定必填叶子，再由运行时把这些标记编译成 `ensure_keys`。只有当必填路径是运行时决定、条件分支决定，或用静态 schema 不好表达时，才手动传 `ensure_keys=`。默认情况下，第三槽 `True` 和手动 `ensure_keys` 只检查路径/key 是否出现；值可以是 `None`、空白字符串、`False`、`0`、空列表，或其他业务上合法的空值。若某个必填路径还必须包含可用值，显式写第三槽 `"not_null"`；它会拒绝 `None`、空白字符串、空列表或空 wildcard 匹配，以及列表中包含缺失的必填值，同时仍接受 `False` 和 `0`。
 
+## 直接下游接口契约
+
+如果下游代码会把解析结果传给 API、SDK、模块接口或函数，`.output(...)`
+应当对应真实消费的请求或参数结构，而不是返回 `{"args": (dict,
+"arguments", True)}` 这类不透明 `dict`。每个被消费的叶子都要写明契约语义，
+不能只有泛化标签；应包含精确类型、必填性，以及适用的枚举、序列化格式、
+范围、单位、可空性或字段依赖。
+
+完整集成契约还包括：在 `info(...)` 中提供权威 API 文档、signature、schema
+或 docstring，在 `input(...)` 中提供运行时事实，在 `instruct(...)` 中提供转换
+与调用规则。这是必要的输出控制，不是业务逻辑侵入。解析与 `ensure` 检查
+不能替代真实调用或副作用前的确定性 DTO/Pydantic/SDK 校验。
+
 ## 选择输出格式
 
 `.output(...)` 省略 `format` 时读取 `prompt.default_output_format`，全局默认值是

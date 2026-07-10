@@ -20,6 +20,68 @@ Agently splits a prompt into named slots. The slots compose, so you can set pers
 | `input` | user message | the actual question or payload |
 | `output` | user message + parser | the schema you want back |
 
+## Strict external interface contracts
+
+When model output will be passed directly to a documented API request, module
+interface, or function call, the interface contract must be visible to the
+model. A Python signature, OpenAPI operation, JSON Schema, protobuf definition,
+or authoritative docstring is not automatically available to an ordinary
+model request.
+
+Use the slots as one integration contract:
+
+| Slot | Integration responsibility |
+|---|---|
+| `input` | Request-specific values and source facts. |
+| `info` | The authoritative API/schema documentation, signature, docstring, field semantics, and declared constraints. |
+| `instruct` | How to transform the input, what callable or operation is being targeted, and how to handle missing information. |
+| `output` | The exact machine-consumable type and nested shape expected by the downstream interface. |
+
+For every downstream-consumed output field, describe its meaning and declare
+its type, requiredness, and any applicable enum, format, range, nullability, or
+cross-field constraint. Reusing these authoritative interface facts is boundary
+and output control, not business-logic intrusion. Business decisions that are
+not part of the interface contract still belong in the owning application
+policy, and the host should run deterministic validation before the real call.
+
+```python
+from typing import Literal
+
+ticket_body = await (
+    agent
+    .input({
+        "request_text": request_text,
+        "requester_id": requester_id,
+    })
+    .info({
+        "target_operation": "POST /tickets",
+        "operation_contract": openapi_ticket_operation,
+    })
+    .instruct([
+        "Build one POST /tickets request body from the input facts.",
+        "Follow the target operation contract exactly; do not add fields.",
+    ])
+    .output({
+        "title": (
+            str,
+            "Non-empty ticket title accepted by POST /tickets.",
+            "not_null",
+        ),
+        "priority": (
+            Literal["low", "normal", "high"],
+            "Required API enum: low, normal, or high.",
+            True,
+        ),
+        "requester_id": (
+            str,
+            "Required requester identifier copied from the input.",
+            "not_null",
+        ),
+    }, format="json")
+    .async_start()
+)
+```
+
 Setting a slot persistently:
 
 ```python

@@ -24,6 +24,14 @@ A leaf is a tuple:
 | 2. description | Soft hint to the model and to humans |
 | 3. ensure | `True` marks the path/key as required and adds it to `ensure_keys`; `"not_null"` also requires a meaningful value |
 
+At a strict API, SDK, module, or function boundary, the description is part of
+the model-facing integration contract. For every downstream-consumed leaf,
+state the field's contract meaning and any relevant enum, format, range, unit,
+nullability, or dependency instead of using labels such as `"value"` or
+`"arguments"`. Pair this output schema with the authoritative interface
+documentation in `info(...)`; field-level contract detail is necessary output
+control, not business-logic intrusion.
+
 > The third slot is the **ensure flag**, not a default value. The older "default value as third slot" convention is no longer supported, and YAML's `$default` is gone with it.
 
 Shorthand forms:
