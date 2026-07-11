@@ -317,3 +317,312 @@ async def test_inspect_retention_normalizes_child_file_ref_without_mutating_call
     assert normalized["path"] == "lineage/executions/exec-file/files/artifacts/final.txt"
     assert normalized["sha256"] == hashlib.sha256(b"deliverable").hexdigest()
     assert normalized["path"] not in preview["selected"]["file_paths"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_uses_one_exact_full_lineage_subtree(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-exact-lineage")
+    target = root.with_scope_lineage(
+        [
+            {"kind": "projects", "id": "project-1"},
+            {"kind": "tasks", "id": "task-1"},
+            {"kind": "executions", "id": "exec-target"},
+        ]
+    )
+    sibling = root.with_scope_lineage(
+        [
+            {"kind": "projects", "id": "project-1"},
+            {"kind": "tasks", "id": "task-1"},
+            {"kind": "executions", "id": "exec-sibling"},
+        ]
+    )
+    await target.write_file("reports/target.txt", "target file")
+    await sibling.write_file("reports/sibling.txt", "sibling file")
+    target_scratch = target.scratch_root() / "target.tmp"
+    sibling_scratch = sibling.scratch_root() / "sibling.tmp"
+    target_scratch.parent.mkdir(parents=True, exist_ok=True)
+    sibling_scratch.parent.mkdir(parents=True, exist_ok=True)
+    target_scratch.write_text("target scratch", encoding="utf-8")
+    sibling_scratch.write_text("sibling scratch", encoding="utf-8")
+
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-target"), "state_version": None},
+    )
+
+    assert preview["status"] == "ready"
+    assert any(path.endswith("target.txt") for path in preview["selected"]["file_paths"])
+    assert not any(path.endswith("sibling.txt") for path in preview["selected"]["file_paths"])
+    assert any(path.endswith("target.tmp") for path in preview["selected"]["scratch_paths"])
+    assert not any(path.endswith("sibling.tmp") for path in preview["selected"]["scratch_paths"])
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_compatibility_scope_is_independent_of_key_order(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-ordered-scope")
+    target = root.with_scope_lineage(
+        [
+            {"kind": "projects", "id": "project-order"},
+            {"kind": "tasks", "id": "task-order"},
+            {"kind": "executions", "id": "exec-order"},
+        ]
+    )
+    await target.write_file("reports/ordered.txt", "ordered target")
+
+    preview = await root.inspect_retention(
+        {"execution_id": "exec-order", "project_id": "project-order"},
+        lifecycle={**_terminal_lifecycle("exec-order"), "state_version": None},
+    )
+
+    assert preview["status"] == "ready"
+    assert any(path.endswith("ordered.txt") for path in preview["selected"]["file_paths"])
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_defers_authoritative_active_lease(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-persisted-lease")
+    await workspace.put_checkpoint("exec-lease", {"state_version": 4})
+    await workspace.claim_lease("exec-lease", "worker-1", ttl=60, expected_state_version=4)
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-lease"},
+        lifecycle={**_terminal_lifecycle("exec-lease"), "state_version": 4},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.lease_active" in {diagnostic.get("code") for diagnostic in preview["diagnostics"]}
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_defers_stale_or_ambiguous_persisted_state_version(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-persisted-version")
+    await workspace.put_checkpoint("exec-version", {"state_version": 4})
+
+    stale = await workspace.inspect_retention(
+        {"execution_id": "exec-version"},
+        lifecycle={**_terminal_lifecycle("exec-version"), "state_version": 3},
+    )
+    _assert_nothing_selected(stale)
+    assert "workspace.retention.state_version_mismatch" in {
+        diagnostic.get("code") for diagnostic in stale["diagnostics"]
+    }
+
+    await workspace.append_runtime_event(
+        "exec-version",
+        {"event_type": "execution.completed", "event_id": "evt-version"},
+        state_version=5,
+    )
+    ambiguous = await workspace.inspect_retention(
+        {"execution_id": "exec-version"},
+        lifecycle={**_terminal_lifecycle("exec-version"), "state_version": 4},
+    )
+    _assert_nothing_selected(ambiguous)
+    assert "workspace.retention.state_version_ambiguous" in {
+        diagnostic.get("code") for diagnostic in ambiguous["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_defers_persisted_nonterminal_recovery_fact(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-persisted-recovery")
+    await workspace.append_runtime_event(
+        "exec-recovery",
+        {"event_type": "triggerflow.execution_started", "event_id": "evt-started"},
+        state_version=3,
+    )
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-recovery"},
+        lifecycle=_terminal_lifecycle("exec-recovery"),
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.recovery_active" in {diagnostic.get("code") for diagnostic in preview["diagnostics"]}
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_hot_runtime_event_validates_every_reachable_ref(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-hot-event")
+    dangling = await workspace.put(
+        {"payload": "will disappear"},
+        collection="artifacts",
+        kind="event_artifact",
+        scope={"execution_id": "other-execution"},
+    )
+    await workspace.append_runtime_event(
+        "exec-hot",
+        {"event_type": "execution.completed", "event_id": "evt-hot"},
+        artifact_refs=[dangling],
+        state_version=3,
+    )
+    backend = cast(Any, workspace.backend)
+    with backend._connect() as conn:
+        conn.execute("DELETE FROM record_scope_index WHERE record_id = ?", (dangling["id"],))
+        conn.execute("DELETE FROM records_fts WHERE record_id = ?", (dangling["id"],))
+        conn.execute("DELETE FROM records WHERE id = ?", (dangling["id"],))
+        conn.commit()
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-hot"},
+        lifecycle=_terminal_lifecycle("exec-hot"),
+        policy=cast(
+            WorkspaceRetentionPolicy,
+            {"rules": [{"category": "runtime_events", "representation": "hot"}]},
+        ),
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.ref_missing" in {diagnostic.get("code") for diagnostic in preview["diagnostics"]}
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_preserves_transitive_workspace_link_closure(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-link-closure")
+    retained = await workspace.put(
+        {"root": True},
+        collection="artifacts",
+        kind="retained_root",
+        scope={"execution_id": "exec-links"},
+    )
+    linked = await workspace.put(
+        {"source": True},
+        collection="records",
+        kind="linked_source",
+        scope={"execution_id": "exec-links"},
+    )
+    await workspace.link(retained, linked, relation="depends_on")
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-links"},
+        lifecycle={**_terminal_lifecycle("exec-links"), "state_version": None},
+        retained_refs=[retained],
+    )
+
+    assert preview["status"] == "ready"
+    assert linked["id"] not in preview["selected"]["record_ids"]
+    retained_ids = {str(ref.get("id") or ref.get("record_id") or "") for ref in preview["retained_refs"]}
+    assert linked["id"] in retained_ids
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_selects_every_mutation_relevant_carrier(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-carriers")
+    workspace = root.with_scope_lineage(
+        [
+            {"kind": "projects", "id": "project-carriers"},
+            {"kind": "tasks", "id": "task-carriers"},
+            {"kind": "executions", "id": "exec-carriers"},
+        ]
+    )
+    ordinary = await workspace.put(
+        {"record": "discard"},
+        collection="observations",
+        kind="process",
+    )
+    first_checkpoint = await root.put_checkpoint(
+        "exec-carriers",
+        {"state_version": 1, "step": "first"},
+        expected_state_version=0,
+    )
+    second_checkpoint = await root.put_checkpoint(
+        "exec-carriers",
+        {"state_version": 2, "step": "second"},
+        expected_state_version=1,
+    )
+    await root.append_runtime_event(
+        "exec-carriers",
+        {"event_type": "execution.completed", "event_id": "evt-carriers"},
+        state_version=2,
+    )
+    lease = await root.claim_lease(
+        "exec-carriers",
+        "worker-carriers",
+        ttl=60,
+        expected_state_version=2,
+    )
+    await root.release_lease(
+        "exec-carriers",
+        cast(str, lease.get("owner_id")),
+        cast(str, lease.get("lease_token")),
+    )
+    await root.record_file_policy()
+    backend = cast(Any, root.backend)
+    await backend.vector_store_provider.index_record(ordinary, [1.0, 0.0])
+
+    preview = await workspace.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-carriers"), "state_version": 2},
+    )
+
+    with backend._connect() as conn:
+        checkpoint_identities = {
+            f"exec-carriers:{row['checkpoint_rowid']}:{row['record_id']}"
+            for row in conn.execute(
+                """
+                SELECT rowid AS checkpoint_rowid, record_id FROM checkpoints
+                WHERE run_id = ? ORDER BY checkpoint_rowid
+                """,
+                ("exec-carriers",),
+            ).fetchall()
+        }
+
+    assert preview["status"] == "ready"
+    required_keys = {
+        "record_ids",
+        "runtime_event_ids",
+        "checkpoint_row_ids",
+        "link_ids",
+        "retention_anchor_ids",
+        "scratch_lease_ids",
+        "content_paths",
+        "file_paths",
+        "scratch_paths",
+        "record_scope_index_ids",
+        "manifest_keys",
+        "fts_record_ids",
+        "vector_record_ids",
+    }
+    assert required_keys.issubset(preview["selected"])
+    assert set(preview["selected"]["checkpoint_row_ids"]) == checkpoint_identities
+    assert {first_checkpoint["id"], second_checkpoint["id"]}.issubset(preview["selected"]["record_ids"])
+    assert {
+        "checkpoint.latest.exec-carriers",
+        "lease.exec-carriers",
+    }.issubset(preview["selected"]["manifest_keys"])
+    assert "file_policy" not in preview["selected"]["manifest_keys"]
+    assert ordinary["id"] in preview["selected"]["fts_record_ids"]
+    assert ordinary["id"] in preview["selected"]["vector_record_ids"]
+    for key in required_keys:
+        assert preview["accounting"]["entities"][key] == len(preview["selected"][key])
+    assert preview["accounting"]["logical_bytes_deleted"] > sum(
+        ref["size"] for ref in (ordinary, first_checkpoint, second_checkpoint)
+    )
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_converts_readback_oserror_to_deferred(tmp_path, monkeypatch):
+    workspace = WorkspaceManager().create(tmp_path / "retention-readback-error")
+    ref = await workspace.put(
+        {"record": "unreadable"},
+        collection="observations",
+        kind="process",
+        scope={"execution_id": "exec-readback"},
+    )
+    target = (workspace.content_root / cast(str, ref["path"])).resolve()
+    original_read_bytes = Path.read_bytes
+
+    def fail_target_read(path: Path) -> bytes:
+        if path.resolve() == target:
+            raise OSError("simulated readback failure")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_target_read)
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-readback"},
+        lifecycle={**_terminal_lifecycle("exec-readback"), "state_version": None},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.ref_readback_failed" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }

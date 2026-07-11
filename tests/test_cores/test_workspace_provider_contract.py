@@ -1111,6 +1111,16 @@ def test_workspace_manager_requires_terminal_retention_provider_methods():
     assert "apply_retention" in WorkspaceManager._DB_STORE_REQUIRED_METHODS
 
 
+def test_workspace_vector_provider_contract_requires_deterministic_deletion():
+    delete_method = getattr(workspace_plugin_types.VectorStoreProvider, "delete_records", None)
+    assert delete_method is not None
+    assert get_type_hints(delete_method) == {
+        "record_ids": Sequence[str],
+        "return": type(None),
+    }
+    assert "delete_records" in WorkspaceManager._VECTOR_STORE_REQUIRED_METHODS
+
+
 @pytest.mark.asyncio
 async def test_remote_audit_workspace_backend_proves_provider_contract_across_consumers():
     provider = RemoteAuditWorkspaceBackend()

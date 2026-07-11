@@ -1078,6 +1078,10 @@ async def test_workspace_embedding_and_vector_store_provider_factories_receive_o
             _ = embedding, filters
             return indexed[:limit]
 
+        async def delete_records(self, record_ids: Sequence[str]) -> None:
+            selected = set(record_ids)
+            indexed[:] = [ref for ref in indexed if ref["id"] not in selected]
+
     def build_embedding_provider(**options: Any) -> CustomEmbeddingProvider:
         seen_embedding_options.update(options)
         return CustomEmbeddingProvider(marker=str(options["marker"]))

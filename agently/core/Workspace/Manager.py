@@ -96,7 +96,7 @@ class WorkspaceManager:
         "list_scratch_leases",
         "close_scratch_lease",
     )
-    _VECTOR_STORE_REQUIRED_METHODS = ("index_record", "search_by_embedding")
+    _VECTOR_STORE_REQUIRED_METHODS = ("index_record", "search_by_embedding", "delete_records")
 
     def __init__(self):
         self._profiles: dict[str, IngestionProfile] = {}

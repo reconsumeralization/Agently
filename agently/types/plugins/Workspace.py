@@ -570,6 +570,8 @@ class VectorStoreProvider(Protocol):
         limit: int | None = None,
     ) -> list[WorkspaceRecordRef]: ...
 
+    async def delete_records(self, record_ids: Sequence[str]) -> None: ...
+
 
 @runtime_checkable
 class WorkspaceProviderFactory(Protocol):
