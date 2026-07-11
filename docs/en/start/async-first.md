@@ -19,6 +19,48 @@ Agently is async-native at the runtime layer. Sync methods are convenience wrapp
 - Streaming UI where you want to react to field deltas instead of waiting for the full response.
 - Combining model output with TriggerFlow events, runtime stream, or external pubsub.
 
+## Plan dependencies before choosing the execution shape
+
+For a complex AI service or script, do not begin with an all-serial loop. First
+map the business stages and mark:
+
+- real data or ordering dependencies that must remain serial;
+- independent branches that can run concurrently;
+- reversible or idempotent preparation that can use provisional structured progress;
+- side effects and external systems that impose safety or capacity limits.
+
+Use async Agently APIs for work that can overlap. Use `instant` when structured
+fields should reach a UI or another consumer progressively, then read the final
+parsed object with `async_get_data()` and apply configured validation before
+durable writes or business decisions. `instant` updates are provisional and
+may be invalidated by a retry; they may drive UI state or explicitly
+cancelable/idempotent preparation, not irreversible side effects. Use
+TriggerFlow `batch(...)`, `for_each(...)`, or signal-driven
+`when(...)` + `async_emit(...)` / `async_emit_nowait(...)` to keep application-
+owned fan-out, joins, and dependencies visible in the workflow graph.
+
+Serial execution is valid when a real dependency, ordering guarantee,
+side-effect safety rule, or external limit requires it. Choosing serial
+execution without first doing this dependency analysis is an anti-pattern.
+
+## Expose pressure controls
+
+Production services should expose bounded settings at their actual owner:
+
+| Pressure boundary | Control |
+|---|---|
+| Service admission | maximum active executions/coroutines and a bounded queue |
+| One TriggerFlow execution | `create_execution(concurrency=N)` or `execution.set_concurrency(N)` |
+| One fan-out operator | `batch(..., concurrency=N)` or `for_each(concurrency=N)` |
+| Model provider | `model_request.scheduler.max_concurrency`, `model_request.scheduler.rate_per_second`, and `model_request.scheduler.providers.<provider>` overrides |
+| Blocking I/O SDK | host-owned thread-pool size and queue limit |
+| CPU-bound work | host-owned process-pool/worker size and queue limit |
+
+The effective throughput is bounded by all of these layers and the downstream
+systems they protect. TriggerFlow does not provide one universal thread-count
+setting: thread and process pools belong to the application host when blocking
+work must be isolated from the event loop.
+
 ## Recommended pairing
 
 The combination worth learning first:
