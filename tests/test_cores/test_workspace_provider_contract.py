@@ -7,9 +7,10 @@ import inspect
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from typing import Any, Literal, cast, get_args, get_type_hints
+from typing import Any, Literal, cast, get_args
 
 import pytest
+from typing_extensions import get_type_hints
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.core import PluginManager, WorkspaceManager
@@ -1061,12 +1062,12 @@ def test_workspace_retention_protocols_and_fake_provider_use_exact_signatures():
         assert inspect_signature.parameters["policy"].default is None
 
         inspect_hints = get_type_hints(inspect_method)
-        assert inspect_method.__annotations__["inline_result"] == "Any"
-        inspect_hints.pop("inline_result")
+        assert inspect_hints["inline_result"] is Any
         assert inspect_hints == {
             "scope": dict[str, Any],
             "lifecycle": workspace_types.WorkspaceRetentionLifecycle,
             "retained_refs": Sequence[workspace_types.WorkspaceRetainedReference],
+            "inline_result": Any,
             "policy": workspace_types.WorkspaceRetentionPolicy | None,
             "return": workspace_types.WorkspaceRetentionPreview,
         }

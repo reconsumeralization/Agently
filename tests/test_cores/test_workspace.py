@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+from collections.abc import Sequence
 from importlib import import_module
 from numbers import Real
 from pathlib import Path
@@ -19,7 +20,18 @@ from agently.core import (
 from agently.core.application import AgentTask
 from agently.core.workspace._defaults import WORKSPACE_GUIDE_FILENAME, script_scope
 from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_records, project_runtime_event_record
-from agently.types.data import RuntimeEvent, RunContext, WorkspaceContextPackage, WorkspaceContextPlan, WorkspaceRecordRef
+from agently.types.data import (
+    RuntimeEvent,
+    RunContext,
+    WorkspaceContextPackage,
+    WorkspaceContextPlan,
+    WorkspaceRecordRef,
+    WorkspaceRetainedReference,
+    WorkspaceRetentionLifecycle,
+    WorkspaceRetentionPolicy,
+    WorkspaceRetentionPreview,
+    WorkspaceRetentionResult,
+)
 
 
 def _retrieval_ref_id(item: Any) -> str:
@@ -967,6 +979,23 @@ async def test_workspace_db_store_provider_delegates_record_behavior(tmp_path):
         async def retention_anchors(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             _ = args, kwargs
             return []
+
+        async def inspect_retention(
+            self,
+            scope: dict[str, Any],
+            *,
+            lifecycle: WorkspaceRetentionLifecycle,
+            retained_refs: Sequence[WorkspaceRetainedReference] = (),
+            inline_result: Any = None,
+            policy: WorkspaceRetentionPolicy | None = None,
+        ) -> WorkspaceRetentionPreview:
+            raise NotImplementedError
+
+        async def apply_retention(
+            self,
+            preview: WorkspaceRetentionPreview,
+        ) -> WorkspaceRetentionResult:
+            raise NotImplementedError
 
         async def prune_scope(self, scope: dict[str, Any], *, remove_files: bool = True) -> dict[str, Any]:
             _ = remove_files
