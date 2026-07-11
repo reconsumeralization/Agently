@@ -1773,6 +1773,7 @@ class Workspace:
                 scope=normalized_scope,
                 lifecycle=lifecycle,
                 policy=resolved_policy,
+                declared_retained_refs=normalized_refs,
                 inline_result=inline_result,
             )
         except (KeyError, TypeError, ValueError) as error:

@@ -1337,6 +1337,92 @@ async def test_workspace_facade_rejects_untrusted_delegated_preview(tmp_path, in
 
 
 @pytest.mark.asyncio
+async def test_workspace_facade_rejects_provider_that_drops_declared_retained_root(tmp_path):
+    class DroppedRootDBProvider(RemoteAuditWorkspaceBackend):
+        async def inspect_retention(
+            self,
+            scope: dict[str, Any],
+            *,
+            lifecycle: workspace_types.WorkspaceRetentionLifecycle,
+            retained_refs: Sequence[workspace_types.WorkspaceRetainedReference] = (),
+            inline_result: Any = None,
+            policy: workspace_types.WorkspaceRetentionPolicy | None = None,
+        ) -> workspace_types.WorkspaceRetentionPreview:
+            assert len(retained_refs) == 1
+            declared = retained_refs[0]
+            assert "id" in declared
+            selected = empty_retention_selection()
+            selected["record_ids"] = [str(declared["id"])]
+            selected["content_paths"] = [str(declared["path"])]
+            resolved_policy = cast(workspace_types.WorkspaceRetentionPolicy, policy)
+            return cast(workspace_types.WorkspaceRetentionPreview, {
+                "status": "ready",
+                "plan_fingerprint": canonical_retention_fingerprint(
+                    scope,
+                    lifecycle,
+                    resolved_policy,
+                    [],
+                    selected,
+                ),
+                "scope": dict(scope),
+                "lifecycle": dict(lifecycle),
+                "policy": dict(resolved_policy),
+                "retained_refs": [],
+                "inline_result": inline_result,
+                "selected": selected,
+                "accounting": {
+                    "entities": {key: len(values) for key, values in selected.items()},
+                    "logical_bytes_deleted": 1,
+                    "physical_bytes_reclaimed": 0,
+                    "physical_bytes_pending": 0,
+                },
+                "diagnostics": [],
+            })
+
+        async def prune_scope(
+            self,
+            scope: dict[str, Any],
+            *,
+            remove_files: bool = True,
+        ) -> dict[str, Any]:
+            _ = scope, remove_files
+            return {}
+
+    provider = DroppedRootDBProvider("dropped-retained-root")
+    workspace = WorkspaceManager().create(
+        tmp_path / "dropped-retained-root",
+        db_store_provider=provider,
+        vector_store_provider="sqlite",
+    )
+    artifact = await workspace.put(
+        {"artifact": "must remain retained"},
+        collection="artifacts",
+        kind="final_artifact",
+        scope={"execution_id": "exec-dropped-root"},
+    )
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-dropped-root"},
+        lifecycle={
+            "execution_id": "exec-dropped-root",
+            "status": "completed",
+            "terminal_at": "2026-07-12T00:00:00Z",
+            "state_version": None,
+            "recovery_active": False,
+            "lease_active": False,
+        },
+        retained_refs=[artifact],
+    )
+
+    assert preview["status"] == "deferred"
+    assert all(values == [] for values in preview["selected"].values())
+    assert artifact in preview["retained_refs"]
+    assert "workspace.retention.provider_capability_missing" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
 async def test_remote_audit_workspace_backend_proves_provider_contract_across_consumers():
     provider = RemoteAuditWorkspaceBackend()
     agent = _create_agent("remote-provider-proof").use_workspace(provider)

@@ -704,6 +704,7 @@ def validate_retention_preview(
     scope: Mapping[str, Any],
     lifecycle: WorkspaceRetentionLifecycle,
     policy: WorkspaceRetentionPolicy,
+    declared_retained_refs: Sequence[WorkspaceRetainedReference],
     inline_result: Any,
 ) -> WorkspaceRetentionPreview:
     """Validate untrusted provider preview data against original request facts."""
@@ -746,6 +747,18 @@ def validate_retention_preview(
         validate_retained_reference_shape(ref, field=f"provider_preview.retained_refs[{index}]")
         for index, ref in enumerate(retained_values)
     ]
+    declared_refs = [
+        validate_retained_reference_shape(ref, field=f"request.retained_refs[{index}]")
+        for index, ref in enumerate(declared_retained_refs)
+    ]
+    for declared_ref in declared_refs:
+        if not any(
+            _retained_ref_equivalent(declared_ref, canonical_ref)
+            for canonical_ref in canonical_refs
+        ):
+            raise ValueError(
+                "Workspace retention provider preview dropped a declared retained root."
+            )
 
     selected_value = value["selected"]
     if not isinstance(selected_value, dict) or set(selected_value) != set(RETENTION_SELECTION_KEYS):
@@ -764,6 +777,40 @@ def validate_retention_preview(
                 f"Workspace retention provider preview selection '{key}' is not canonical."
             )
         selected[key] = list(carrier_values)
+
+    retained_facts = [_retained_ref_facts(ref) for ref in [*declared_refs, *canonical_refs]]
+    retained_record_ids = {
+        str(facts[0]) for facts in retained_facts if facts[0]
+    }
+    retained_content_paths = {
+        str(facts[1]) for facts in retained_facts if facts[1]
+    }
+    retained_file_paths = {
+        str(facts[2]) for facts in retained_facts if facts[2]
+    }
+    selected_record_ids = set().union(
+        selected["record_ids"],
+        selected["checkpoint_ids"],
+        selected["fts_record_ids"],
+        selected["vector_record_ids"],
+    )
+    retained_scope_selected = any(
+        scope_identity.startswith(f"{record_id}:")
+        for record_id in retained_record_ids
+        for scope_identity in selected["record_scope_index_ids"]
+    )
+    if retained_record_ids & selected_record_ids or retained_scope_selected:
+        raise ValueError(
+            "Workspace retention provider preview selects a retained record identity."
+        )
+    if retained_content_paths & set(selected["content_paths"]):
+        raise ValueError(
+            "Workspace retention provider preview selects a retained managed-content path."
+        )
+    if retained_file_paths & set(selected["file_paths"]):
+        raise ValueError(
+            "Workspace retention provider preview selects a retained editable-file path."
+        )
 
     accounting = value["accounting"]
     accounting_keys = {
@@ -850,6 +897,56 @@ def _retained_ref_identity(ref: WorkspaceRetainedReference) -> dict[str, Any]:
         "digest": str(ref.get("sha256") or ""),
         "size": int(ref.get("bytes") or 0),
     }
+
+
+def _retained_ref_facts(
+    ref: WorkspaceRetainedReference,
+) -> tuple[str | None, str | None, str | None, str | None, int]:
+    if "workspace_id" in ref:
+        return (
+            str(ref.get("record_id") or "") or None,
+            str(ref.get("content_ref") or "") or None,
+            None,
+            cast(str | None, ref.get("digest")),
+            int(ref.get("size") or 0),
+        )
+    if "id" in ref:
+        return (
+            str(ref.get("id") or "") or None,
+            str(ref.get("path") or "") or None,
+            None,
+            cast(str | None, ref.get("sha256")),
+            int(ref.get("size") or 0),
+        )
+    return (
+        None,
+        None,
+        str(ref.get("path") or "") or None,
+        str(ref.get("sha256") or "") or None,
+        int(ref.get("bytes") or 0),
+    )
+
+
+def _retained_ref_equivalent(
+    declared: WorkspaceRetainedReference,
+    canonical: WorkspaceRetainedReference,
+) -> bool:
+    declared_record, declared_content, declared_file, declared_digest, declared_size = (
+        _retained_ref_facts(declared)
+    )
+    canonical_record, canonical_content, canonical_file, canonical_digest, canonical_size = (
+        _retained_ref_facts(canonical)
+    )
+    if declared_digest != canonical_digest or declared_size != canonical_size:
+        return False
+    if declared_record is not None:
+        return (
+            canonical_record == declared_record
+            and (declared_content is None or canonical_content == declared_content)
+        )
+    if declared_content is not None:
+        return canonical_content == declared_content
+    return declared_file is not None and canonical_file == declared_file
 
 
 def canonical_retention_fingerprint(
