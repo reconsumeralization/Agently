@@ -56,6 +56,7 @@ from agently.types.data.workspace import (
     WorkspaceScratchLease,
 )
 from agently.types.plugins import WorkspaceBackend
+from .Errors import WorkspaceConfigurationError, WorkspacePolicyError
 from .Retrieval import RerankHandler, retrieve_workspace
 from .Retention import (
     canonical_retention_fingerprint,
@@ -1705,24 +1706,36 @@ class Workspace:
         for index, ref in enumerate(retained_refs):
             try:
                 normalized_refs.append(self._normalize_retention_file_ref(ref))
-            except (OSError, ValueError) as error:
-                unresolved_refs = [
-                    cast(WorkspaceRetainedReference, dict(item))
-                    for item in retained_refs[index:]
-                ]
-                return self._retention_deferred_preview(
-                    normalized_scope,
-                    lifecycle=lifecycle,
-                    retained_refs=[*normalized_refs, *unresolved_refs],
-                    inline_result=inline_result,
-                    policy=resolved_policy,
-                    diagnostic={
-                        "code": "workspace.retention.file_ref_invalid",
-                        "message": str(error),
-                        "retryable": True,
-                        "entity": str(ref.get("path") or ""),
-                    },
-                )
+            except ValueError as error:
+                diagnostic_code = "workspace.retention.file_ref_invalid"
+                diagnostic_message = str(error)
+            except (
+                OSError,
+                RuntimeError,
+                WorkspaceConfigurationError,
+                WorkspacePolicyError,
+            ) as error:
+                diagnostic_code = "workspace.retention.ref_readback_failed"
+                diagnostic_message = str(error)
+            else:
+                continue
+            unresolved_refs = [
+                cast(WorkspaceRetainedReference, dict(item))
+                for item in retained_refs[index:]
+            ]
+            return self._retention_deferred_preview(
+                normalized_scope,
+                lifecycle=lifecycle,
+                retained_refs=[*normalized_refs, *unresolved_refs],
+                inline_result=inline_result,
+                policy=resolved_policy,
+                diagnostic={
+                    "code": diagnostic_code,
+                    "message": diagnostic_message,
+                    "retryable": True,
+                    "entity": str(ref.get("path") or ""),
+                },
+            )
         inline_limit = int(resolved_policy.get("inline_result_limit", 4096))
         if inline_result is not None and serialized_size(inline_result) > inline_limit:
             return self._retention_deferred_preview(

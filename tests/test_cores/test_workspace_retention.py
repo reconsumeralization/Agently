@@ -321,6 +321,45 @@ async def test_inspect_retention_normalizes_child_file_ref_without_mutating_call
 
 
 @pytest.mark.asyncio
+async def test_inspect_retention_defers_child_file_ref_resolve_runtimeerror(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-child-resolve-error")
+    child = root.with_scope_node("executions", "exec-child-resolve-error")
+    written = await child.write_file("artifacts/final.txt", "deliverable")
+    file_ref = written["file_refs"][0]
+    target = child.files_root / str(file_ref["path"])
+    original_resolve = Path.resolve
+
+    def fail_target_resolve(path: Path, *args: Any, **kwargs: Any) -> Path:
+        if path == target:
+            raise RuntimeError("Symlink loop from pathlib on Python 3.10")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fail_target_resolve)
+    preview = await child.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-child-resolve-error"),
+            "state_version": None,
+        },
+        retained_refs=[file_ref],
+    )
+
+    _assert_nothing_selected(preview)
+    assert file_ref["path"] == "artifacts/final.txt"
+    assert preview["diagnostics"] == [
+        {
+            "code": "workspace.retention.ref_readback_failed",
+            "message": "Symlink loop from pathlib on Python 3.10",
+            "retryable": True,
+            "entity": "artifacts/final.txt",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_inspect_retention_uses_one_exact_full_lineage_subtree(tmp_path):
     root = WorkspaceManager().create(tmp_path / "retention-exact-lineage")
     target = root.with_scope_lineage(
