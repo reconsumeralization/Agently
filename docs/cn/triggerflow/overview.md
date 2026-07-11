@@ -102,7 +102,10 @@ snapshot = await flow.async_start("World")
 print(snapshot["greeting"])
 ```
 
-脚本里用这个。flow 会暂停等待人工输入或依赖外部事件时**不要**用 —— 见 [Lifecycle](lifecycle.md)。
+调用方只需要 close snapshot、且运行有限并能自闭合时使用。它可以位于脚本、测试或
+有界 request handler；判断依据是生命周期控制需要，而不是代码是否运行在服务中。
+需要 pause/resume、外部事件、save/load、intervention、inspection、cancellation 或
+宿主控制 close 时，使用显式 execution —— 见 [Lifecycle](lifecycle.md)。
 
 ## chunk 能做什么
 

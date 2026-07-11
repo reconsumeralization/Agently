@@ -135,7 +135,12 @@ emits a structured `ReplanSignal`, Blocks cancels only the named affected
 ExecutionBlocks and their downstream blocks; AgentTask still owns the next
 repair/replan decision.
 
-## TaskDAG Through Blocks
+## Optional TaskDAG Through Blocks
+
+The default `TaskDAGExecutor.async_run(...)` path validates and compiles the DAG
+directly to TriggerFlow; it does not pass through Blocks. Blocks is opt-in for
+callers that need an `ExecutionBlockGraph`, Blocks lifecycle evidence, or
+evidence/result adapters.
 
 `TaskDAGExecutor.compile_blocks(...)` validates the TaskDAG with the TaskDAG
 validator, then lowers validated DAG nodes into an `ExecutionBlockGraph`.

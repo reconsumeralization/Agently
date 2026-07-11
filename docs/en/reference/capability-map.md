@@ -46,7 +46,7 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Not sure whether to use ModelRequest, AgentExecution, TaskDAG, or TriggerFlow | [Execution Layer Selection](execution-layer-selection.md) |
 | Need one Agent turn to choose between model response, Actions, or Skills | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
 | Single business task needs plan → bounded execution → evidence → verification → replan | [Agent Auto-Orchestration](../start/auto-orchestration.md#agenttask-strategy), start with `agent.create_task(...)` and consume it as an `AgentExecution` result |
-| Need to inspect how task frames, Skills, or TaskDAG segments lower into TriggerFlow-backed blocks | [Blocks Lifecycle](blocks-lifecycle.md) |
+| Need to inspect task-frame/Skill lowering, or the optional TaskDAG Blocks carrier | [Blocks Lifecycle](blocks-lifecycle.md) |
 | Model-generated or app-generated DAG that must be planned, validated, customized, and executed | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
 | Multi-stage workflow with branching | [TriggerFlow Overview](../triggerflow/overview.md) → [Patterns](../triggerflow/patterns.md) |
 | Long-running flow with human approval / interrupt | [Pause and Resume](../triggerflow/pause-and-resume.md) |
@@ -58,7 +58,11 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 - "Do I need TriggerFlow?" — Only when there are explicit stages, branching, concurrency, or wait/resume. A single request with retries does not need TriggerFlow.
 - "Which execution layer?" — Use [Execution Layer Selection](execution-layer-selection.md) when the question is whether to intervene at ModelRequest, AgentExecution, TaskDAG, TriggerFlow, or Workspace.
 - "TaskDAG, Dynamic Task, or TriggerFlow?" — Use TaskDAG modules when the graph is submitted as data and must be planned, validated, pruned, resolved to handlers, customized, and executed. Use the DynamicTask facade when ordinary app code wants one compact compatibility entrypoint. Use TriggerFlow directly when you own the workflow topology in code.
-- "Where do Blocks fit?" — Blocks are the lowering bridge from `ExecutionPlan` / `PlanBlock` instances and validated TaskDAG nodes to TriggerFlow-backed `ExecutionBlockGraph`, not a second task lifecycle. See [Blocks Lifecycle](blocks-lifecycle.md).
+- "Where do Blocks fit?" — Blocks lower `ExecutionPlan` / `PlanBlock` instances
+  to TriggerFlow-backed `ExecutionBlockGraph`. Validated TaskDAG nodes use that
+  bridge only through explicit `compile_blocks(...)` / `async_run_blocks(...)`;
+  the default TaskDAG path goes directly to TriggerFlow. See
+  [Blocks Lifecycle](blocks-lifecycle.md).
 - "Sync or async?" — Sync for scripts and demos. Async for services, streaming UI, and TriggerFlow. See [Async First](../start/async-first.md).
 - "Action or tool API?" — New code: `Agently.action` / `agent.use_actions(...)`, built-in packages from `agently.builtins.actions`, plus scenario helpers such as `agent.enable_python(...)`, `agent.enable_shell(...)`, and `agent.enable_workspace_file_actions(...)`. Existing `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` keep working but are positioned as a compatibility surface; see [Action Runtime](../actions/action-runtime.md).
 - "Agent start or explicit API?" — Use `agent.start()` for candidate-driven model/Action/Skills auto-orchestration and `agent.create_execution()` when the caller needs route diagnostics or process streaming. Use TaskDAG / DynamicTask directly when the application or visual automation surface owns a submitted DAG.

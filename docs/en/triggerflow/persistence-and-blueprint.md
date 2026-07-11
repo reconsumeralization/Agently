@@ -255,11 +255,13 @@ pause, wait for an external callback, or be saved and loaded later, create an
 explicit execution with `flow.create_execution(auto_close=False)` so the service
 can save the snapshot and resume through the execution handle.
 
-For model applications that generate a To-Do List or dependency graph at runtime,
-keep that graph per plan or per request. Reusable templates such as extract /
-analyze sub-flows belong at module scope; the per-plan executor should use task
-ids as dynamic stage identities, write task results to execution state, and avoid
-mutating the main flow definition.
+For model-generated or application-submitted To-Do/DAG data at runtime, use
+TaskDAG / DynamicTask so the graph is validated before execution. Do not compile
+that runtime data directly into new TriggerFlow definitions. TriggerFlow remains
+the execution substrate under `TaskDAGExecutor`; stable reusable workflow
+templates owned in trusted application source code remain module-level
+TriggerFlow definitions. Keep each submitted graph and its results scoped to
+the owning TaskDAG run, not shared `flow_data` or mutations of the main flow.
 
 ### When to use blueprints
 

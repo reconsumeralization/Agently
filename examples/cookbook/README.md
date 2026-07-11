@@ -14,7 +14,7 @@ available, otherwise local Ollama.
 |---|---|---|
 | `01_action_loop_math_model.py` | Action loop | Model plans real Action calls, then replies from action results. |
 | `02_router_branching_model.py` | Router | Model classifies intent, stores route in execution state, dispatches to a focused model-backed branch. |
-| `03_todo_concurrent_model.py` | To-do decomposition and concurrency | Model decomposes work, then TriggerFlow runs independent items with `for_each(concurrency=...)`. |
+| `03_todo_concurrent_model.py` | Submitted model-task DAG and bounded concurrency | Dynamic Task validates an application-submitted TaskDAG, then TaskDAGExecutor runs independent model tasks with bounded execution concurrency. |
 | `04_reflection_loop_model.py` | Reflection | Model generates, evaluates, and revises content with a max-round safety boundary. |
 | `05_safe_shell_policy_model.py` | Action policy and sandbox | Model calls `agent.enable_shell(...)` and observes a blocked command. |
 

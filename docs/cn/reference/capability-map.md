@@ -48,7 +48,7 @@ keywords: Agently, 能力地图, 学习路径, request, TaskDAG, Dynamic Task, T
 | 不确定该用 ModelRequest、AgentExecution、TaskDAG 还是 TriggerFlow | [执行层选择](execution-layer-selection.md) |
 | 需要一次 Agent turn 在模型响应、Actions 或 Skills 中选路线 | [Agent 自动编排](../start/auto-orchestration.md) |
 | 单个业务任务需要计划 → 有边界执行 → 证据 → 验证 → replan | [Agent 自动编排](../start/auto-orchestration.md#agenttask-策略)，从 `agent.create_task(...)` 开始，并按 `AgentExecution` result 消费 |
-| 需要查看 task frame、Skills 或 TaskDAG segment 如何降低到 TriggerFlow-backed blocks | [Blocks 生命周期](blocks-lifecycle.md) |
+| 需要查看 task frame / Skill lowering，或可选的 TaskDAG Blocks carrier | [Blocks 生命周期](blocks-lifecycle.md) |
 | 模型生成或应用提交的 DAG 需要规划、校验、定制并执行 | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
 | 多阶段带分支的工作流 | [TriggerFlow 概览](../triggerflow/overview.md) → [模式](../triggerflow/patterns.md) |
 | 长跑流程带人工审批 / 中断 | [Pause 与 Resume](../triggerflow/pause-and-resume.md) |
@@ -60,7 +60,10 @@ keywords: Agently, 能力地图, 学习路径, request, TaskDAG, Dynamic Task, T
 - 「我需要 TriggerFlow 吗？」——只在有明确的阶段、分支、并发或暂停恢复时才需要。带重试的单次请求不需要 TriggerFlow。
 - 「应该介入哪一层？」——当问题是该从 ModelRequest、AgentExecution、TaskDAG、TriggerFlow 还是 Workspace 入手时，看 [执行层选择](execution-layer-selection.md)。
 - 「TaskDAG、Dynamic Task 还是 TriggerFlow？」——当图本身是提交上来的数据，需要规划、校验、裁剪、解析 handler、定制并执行时，用 TaskDAG 模块；普通应用代码想要紧凑兼容入口时，用 DynamicTask facade；当你在代码里掌握稳定工作流拓扑时，直接用 TriggerFlow。
-- 「Blocks 放在哪里？」——Blocks 是从 `ExecutionPlan` / `PlanBlock` instances 和已校验 TaskDAG nodes 到 TriggerFlow-backed `ExecutionBlockGraph` 的 lowering bridge，不是第二套 task lifecycle。见 [Blocks 生命周期](blocks-lifecycle.md)。
+- 「Blocks 放在哪里？」——Blocks 把 `ExecutionPlan` / `PlanBlock` instances
+  降低为 TriggerFlow-backed `ExecutionBlockGraph`。已校验 TaskDAG nodes 只有显式
+  调用 `compile_blocks(...)` / `async_run_blocks(...)` 才走该 bridge；默认 TaskDAG
+  路径直接进入 TriggerFlow。见 [Blocks 生命周期](blocks-lifecycle.md)。
 - 「Sync 还是 async？」——脚本和 demo 用 sync。服务、流式 UI 与 TriggerFlow 用 async。见 [Async First](../start/async-first.md)。
 - 「Action 还是 tool API？」——新代码：`Agently.action` / `agent.use_actions(...)`、来自 `agently.builtins.actions` 的内置 package，以及 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)` 等场景 helper。已有的 `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` 仍可用，但定位为兼容入口；见 [Action Runtime](../actions/action-runtime.md)。
 - 「Agent start 还是显式 API？」——模型/Action/Skills 候选驱动的自动编排用 `agent.start()`；需要路线诊断或过程流式输出时，用 `agent.create_execution()`。当应用或可视化自动化界面拥有提交式 DAG 时，直接使用 TaskDAG / DynamicTask。

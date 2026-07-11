@@ -103,7 +103,12 @@ snapshot = await flow.async_start("World")
 print(snapshot["greeting"])
 ```
 
-Use this for scripts. Don't use it when the flow pauses for human input or expects external events — see [Lifecycle](lifecycle.md).
+Use this for a finite, self-closing run when the caller only needs the close
+snapshot. That can be a script, test, or bounded request handler; the deciding
+factor is lifecycle control, not whether the code runs in a service. Use an
+explicit execution when the caller needs pause/resume, external events,
+save/load, intervention, inspection, cancellation, or host-controlled close —
+see [Lifecycle](lifecycle.md).
 
 ## What chunks can do
 

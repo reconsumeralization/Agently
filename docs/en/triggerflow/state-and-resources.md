@@ -17,7 +17,7 @@ A TriggerFlow execution carries three distinct storage layers. They look similar
 | Scope | execution-local | flow-shared (across all executions) | execution-local |
 | Serializable | yes | yes | **no** |
 | Goes into close snapshot | yes | no | no, only `resource_keys` recorded |
-| Goes into execution snapshots | yes | no | no, must be re-injected after `load()` |
+| Goes into execution snapshots | yes | **yes, as one flow-shared copy** | no, must be re-injected after `load()` |
 | Recommended for | business state, intermediate values, anything you want back from `close()` | legacy compatibility / explicitly intentional flow-wide sharing | live clients, sockets, callbacks, file handles, cache references |
 | Status | **recommended primary path** | risky-default — emits `RuntimeWarning` on every call | new concept — use this for anything that can't be serialized |
 
@@ -47,7 +47,9 @@ Whatever you put in state at the time of `close()` shows up in the close snapsho
 `flow_data` is shared across **every** execution of the same flow. That sounds convenient until you have:
 
 - Two executions running in parallel — they overwrite each other.
-- save/load — the value at save time may not be there at load time on a new process.
+- save/load — `save()` captures the current flow-shared value and `load()`
+  replaces the target flow object's current shared value, so restoring one
+  execution can affect every other execution using that flow object.
 - Distributed scheduling — the value lives on whichever process loaded the flow.
 
 Because of this, every call emits a `RuntimeWarning`:
@@ -58,6 +60,14 @@ flow.set_flow_data("counter", 0, no_warning=True)   # silenced
 ```
 
 If you really mean shared scope (read-only config, a long-running cache that all executions are intentionally sharing), pass `no_warning=True`. For execution-local data — which is what 99% of code wants — use `state` instead.
+
+`flow_data` is serialized in an execution save snapshot for compatibility, but
+it is not an execution-local snapshot. Loading that snapshot clears and restores
+the owning flow object's shared `flow_data`. This can overwrite newer values or
+interfere with concurrent executions; save/load does not add isolation, CAS, or
+merge semantics. Do not use `flow_data` as a recovery boundary. Put per-run
+state in execution `state`, and put durable shared state in a host/Workspace
+provider with the required consistency policy.
 
 API (each emits the warning unless suppressed):
 

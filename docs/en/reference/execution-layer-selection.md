@@ -30,7 +30,8 @@ flowchart TD
     business -->|"submitted dependency graph"| task_dag
     agent_execution -->|"direct route"| model_request
     agent_execution -->|"bounded task frame"| blocks
-    task_dag -->|"validated DAG segment"| blocks
+    task_dag -->|"default async_run"| triggerflow
+    task_dag -.->|"explicit compile_blocks / async_run_blocks"| blocks
     blocks -->|"compiled execution block graph"| triggerflow
     agent_execution -->|"task evidence"| workspace
     task_dag -.->|"snapshot evidence handoff"| agent_execution
@@ -49,8 +50,11 @@ Contract behind the edges:
   TaskDAG snapshot as evidence, but it does not select TaskDAG / DynamicTask as
   a route or bounded-step strategy.
 - `Blocks` owns the lowering bridge from bounded ExecutionPlan / PlanBlock
-  instances or validated TaskDAG nodes into TriggerFlow-backed
-  ExecutionBlocks, plus evidence/result mapping.
+  instances into TriggerFlow-backed ExecutionBlocks. For TaskDAG it is an
+  explicit opt-in carrier used by `compile_blocks(...)` /
+  `async_run_blocks(...)` when `ExecutionBlockGraph` and evidence/result mapping
+  are needed; ordinary `TaskDAGExecutor.async_run(...)` goes directly to the
+  TriggerFlow substrate.
 - `TriggerFlow` owns the lower-level workflow substrate: execution state,
   signals, concurrency, stream, pause/resume, persistence, and lifecycle.
 - `Workspace` stores evidence and context; it does not decide completion.
@@ -180,9 +184,9 @@ sequenceDiagram
   criteria, task options, or Skill selectors.
 - Use `TaskDAG` when the plan is data and needs validation, dependency
   execution, handlers, and result collection.
-- Use [Blocks Lifecycle](blocks-lifecycle.md) when you need to understand how a
-  bounded AgentTask step, Skill activation, or TaskDAG segment is lowered into
-  TriggerFlow and mapped back to evidence.
+- Use [Blocks Lifecycle](blocks-lifecycle.md) for bounded AgentTask steps and
+  Skill activation, or when a TaskDAG caller explicitly chooses the Blocks
+  carrier to obtain `ExecutionBlockGraph` plus evidence/result mapping.
 - Use `TriggerFlow` when the application owns stable workflow topology,
   waits, joins, concurrency, or durable execution.
 - Use `Workspace` to persist evidence and context, not to decide what to do.

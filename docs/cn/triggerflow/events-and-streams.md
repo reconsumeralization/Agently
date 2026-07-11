@@ -160,7 +160,13 @@ stream timeout 设 `None` 意味着消费者等到 stream 真正关（即 `close
 
 ## 隐式 stream 语法糖
 
-`flow.get_async_runtime_stream(...)` 与 `flow.get_runtime_stream(...)` 在内部建一个隐式 execution 并 stream。和 `flow.start()` 一样，仅适用于自闭合 flow（无 `pause_for`、无外部 `emit`）。如果隐式 stream execution 走到 `pause_for(...)`，TriggerFlow 会 fail fast，因为外部没有可恢复 execution handle；需要等待/恢复时应创建显式 execution，再调用 `execution.get_async_runtime_stream(...)`。
+`flow.get_async_runtime_stream(...)` 与 `flow.get_runtime_stream(...)` 在内部建一个隐式
+execution 并 stream。和 `flow.start()` 一样，它只用于有限、自闭合（无 `pause_for`、
+无外部 `emit`）且调用方不需要 execution handle 的 flow；有界 streaming request
+可以使用。宿主需要断连取消、save/load、intervention、inspection、外部事件或控制
+close 时，应创建显式 execution，再调用 `execution.get_async_runtime_stream(...)`。
+如果隐式 stream execution 走到 `pause_for(...)`，TriggerFlow 会因没有可恢复 handle
+而 fail fast。
 
 ## 不要把 live item 放进 state
 

@@ -50,6 +50,9 @@ snapshot = await flow.async_start("input value")
 - `wait_for_result=` 的值被**忽略**并 warn。返回类型固定为 close snapshot。
 - `timeout=` 当作 `auto_close_timeout` —— 最后一次活动后多久自动关闭。
 - flow 用了 `pause_for(...)` 时**不要**用 `flow.start()` —— 外部没有 handle 来恢复。隐式 execution 走到 `pause_for(...)` 时 TriggerFlow 会 fail fast。改用 `flow.start_execution(...)` 或 `flow.create_execution(...)`。
+- 隐式语法糖只用于有限、自闭合且调用方只需要 close snapshot 的运行；有界 async
+  request handler 也可以使用。宿主需要外部 emit、save/load、intervention、
+  inspection、cancellation、pause/resume 或控制 close 时机时，使用显式 execution。
 
 ### `flow.start_execution(...)` —— 显式启动
 
@@ -59,7 +62,9 @@ execution = await flow.async_start_execution("input value")
 snapshot = await execution.async_close()
 ```
 
-返回 execution，你决定何时 close。适合服务、SSE/WebSocket 流、人工介入、外部 `emit()`。
+返回 execution，由你决定何时 close。适用于长生命周期或外部控制的服务、需要处理
+断连或取消的 SSE/WebSocket 流、人工介入、外部 `emit()`，以及宿主需要 execution
+handle 的任何运行。
 
 `wait_for_result=` 在这里也被忽略。
 
@@ -469,8 +474,8 @@ lineage 问题。
 
 | 场景 | 用 |
 |---|---|
-| 快速脚本，输入都已知 | `flow.start(...)` / `flow.async_start(...)` |
-| 持续 emit / 消费 runtime stream 的服务 | `flow.start_execution(...)` |
+| 有限、自闭合、输入已知，调用方只需要 close snapshot | `flow.start(...)` / `flow.async_start(...)` |
+| 服务/request 路径需要 execution handle、外部事件、取消或控制 close | `flow.start_execution(...)` |
 | 需要 `pause_for(...)`（人工审批、异步 webhook） | `flow.create_execution(auto_close=False)` + `execution.async_start(...)` + 手动 `close()` |
 | 跨重启 save/load | `create_execution(...)` + `execution.save()` / `load()` |
 

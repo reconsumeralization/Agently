@@ -30,7 +30,8 @@ flowchart TD
     business -->|"提交式依赖图"| task_dag
     agent_execution -->|"direct route"| model_request
     agent_execution -->|"bounded task frame"| blocks
-    task_dag -->|"validated DAG segment"| blocks
+    task_dag -->|"默认 async_run"| triggerflow
+    task_dag -.->|"显式 compile_blocks / async_run_blocks"| blocks
     blocks -->|"compiled execution block graph"| triggerflow
     agent_execution -->|"任务证据"| workspace
     task_dag -.->|"snapshot evidence handoff"| agent_execution
@@ -46,9 +47,11 @@ flowchart TD
 - `TaskDAG` 是独立的提交式 DAG API。`AgentExecution` 可以把 TaskDAG snapshot
   当作 evidence 消费，但不会把 TaskDAG / DynamicTask 选成 route 或 bounded-step
   strategy。
-- `Blocks` 负责把有边界的 ExecutionPlan / PlanBlock instances 或已校验的
-  TaskDAG nodes 降低为 TriggerFlow-backed ExecutionBlocks，并做 evidence/result
-  mapping。
+- `Blocks` 负责把有边界的 ExecutionPlan / PlanBlock instances 降低为
+  TriggerFlow-backed ExecutionBlocks。对 TaskDAG，Blocks 是显式 opt-in carrier；
+  只有调用 `compile_blocks(...)` / `async_run_blocks(...)`、需要
+  `ExecutionBlockGraph` 与 evidence/result mapping 时才介入。普通
+  `TaskDAGExecutor.async_run(...)` 直接进入 TriggerFlow substrate。
 - `TriggerFlow` 负责更底层的 workflow substrate：execution state、signals、
   concurrency、stream、pause/resume、persistence 和 lifecycle。
 - `Workspace` 保存 evidence 和 context；它不负责判断任务是否完成。
@@ -173,8 +176,9 @@ sequenceDiagram
   普通 prompt/action run 保持 direct；只有 goals、success criteria、task options
   或 Skill selectors 等结构化 task signals 才进入 AgentTask。
 - 当计划本身是数据，需要校验、依赖执行、handler 和结果收集时，用 `TaskDAG`。
-- 需要理解 bounded AgentTask step、Skill activation 或 TaskDAG segment 如何降低到
-  TriggerFlow 并映射回 evidence 时，看 [Blocks 生命周期](blocks-lifecycle.md)。
+- bounded AgentTask step、Skill activation，或 TaskDAG 调用方显式选择 Blocks
+  carrier 获取 `ExecutionBlockGraph` 与 evidence/result mapping 时，看
+  [Blocks 生命周期](blocks-lifecycle.md)。
 - 当应用拥有稳定 workflow topology、等待、join、并发或 durable execution 时，用
   `TriggerFlow`。
 - 用 `Workspace` 持久化 evidence 和 context，不要让它决定下一步做什么。

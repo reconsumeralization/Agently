@@ -129,11 +129,17 @@ asyncio.run(main())
 
 For event-driven orchestration, prefer:
 
-- `flow.async_start(...)` for hidden execution sugar (returns the close snapshot).
+- `flow.async_start(...)` for a finite, self-closing run when the caller only
+  needs the close snapshot; this may be a bounded async request handler.
 - `flow.async_start_execution(...)` for explicit, long-lived executions you want to control yourself.
 - `data.async_emit(...)` and `data.async_put_into_stream(...)` inside chunks.
 
 See [TriggerFlow Lifecycle](../triggerflow/lifecycle.md).
+
+Use an explicit execution, rather than hidden sugar, when the host needs an
+execution handle for pause/resume, external events, save/load, intervention,
+inspection, cancellation, runtime-stream disconnect handling, or controlled
+close.
 
 ## Don't oversell async
 

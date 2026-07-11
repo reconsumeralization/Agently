@@ -190,6 +190,11 @@ DAG 能力拆成四段：
 - `TaskDAGResolver` 按 `task.binding`、`task.id`、`task.kind` 的顺序解析可执行 handler。
 - `TaskDAGExecutor` 把校验后的 DAG 编译为普通 TriggerFlow chunk，并复用 TriggerFlow lifecycle、stream、pause/resume、result 和 runtime resources。
 
+`TaskDAGExecutor.async_run(...)` 是默认的 TaskDAG→TriggerFlow 直接路径，Blocks
+不是必经层。只有调用方需要 `ExecutionBlockGraph`、Blocks lifecycle evidence 或
+evidence/result adapter 输出时，才显式选择 `compile_blocks(...)` 或
+`async_run_blocks(...)`；该路径上仍由 TaskDAG 拥有 validation 与依赖语义。
+
 `bindings` 不再是 public facade。自定义本地函数使用 `handlers`。任务确实需要资源时再显式传入 `planner`、`model`、`actions`、`skills`；
 `actions` 和 `skills` 不会在调用方未传入时暴露给 planner。
 
