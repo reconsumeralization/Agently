@@ -18,6 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from agently.types.data import WorkspaceRetentionPreview, WorkspaceRetentionResult
 from agently.types.plugins import WorkspaceBackend
 
 from ._defaults import (
@@ -135,6 +136,15 @@ class LazyWorkspace:
 
     async def append_runtime_event(self, *args: Any, **kwargs: Any):
         return await self._materialize().append_runtime_event(*args, **kwargs)
+
+    async def inspect_retention(self, *args: Any, **kwargs: Any) -> WorkspaceRetentionPreview:
+        return await self._materialize().inspect_retention(*args, **kwargs)
+
+    async def apply_retention(
+        self,
+        preview: WorkspaceRetentionPreview,
+    ) -> WorkspaceRetentionResult:
+        return await self._materialize().apply_retention(preview)
 
     def _bind_child_lazy(
         self,

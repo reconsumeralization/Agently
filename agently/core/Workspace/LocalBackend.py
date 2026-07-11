@@ -28,6 +28,7 @@ from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.workspace import (
     WorkspaceBackendCapabilities,
     WorkspaceContentSegment,
+    WorkspaceFileRef,
     WorkspaceFilePolicyMetadata,
     WorkspaceLeaseRef,
     WorkspaceLinkRef,
@@ -35,6 +36,7 @@ from agently.types.data.workspace import (
     WorkspaceReferenceEnvelope,
     WorkspaceRetainedReference,
     WorkspaceRetentionAnchor,
+    WorkspaceRetentionDiagnostic,
     WorkspaceRetentionLifecycle,
     WorkspaceRetentionPolicy,
     WorkspaceRetentionPreview,
@@ -54,6 +56,12 @@ from .Stores import (
     SQLiteVectorStoreProvider,
     VectorIndexPipeline,
     VectorStoreProviderUnavailableError,
+)
+from .Retention import (
+    canonical_retention_fingerprint,
+    empty_retention_selection,
+    resolve_retention_policy,
+    serialized_size,
 )
 from ._defaults import WORKSPACE_FILE_AREAS, WORKSPACE_GUIDE_FILENAME
 from ._utils import json_dumps, json_loads, slug, utc_now
@@ -90,6 +98,8 @@ class LocalWorkspaceBackend:
             "get_file_policy",
             "add_retention_anchor",
             "retention_anchors",
+            "inspect_retention",
+            "apply_retention",
             "prune_scope",
             "register_scratch_lease",
             "get_scratch_lease",
@@ -1677,6 +1687,309 @@ class LocalWorkspaceBackend:
             ).fetchall()
         return [self._row_to_retention_anchor(row) for row in rows]
 
+    @staticmethod
+    def _retention_diagnostic(
+        code: str,
+        message: str,
+        *,
+        entity: str,
+        detail: dict[str, Any] | None = None,
+    ) -> WorkspaceRetentionDiagnostic:
+        diagnostic: WorkspaceRetentionDiagnostic = {
+            "code": code,
+            "message": message,
+            "retryable": True,
+            "entity": entity,
+        }
+        if detail:
+            diagnostic["detail"] = detail
+        return diagnostic
+
+    @staticmethod
+    def _deduplicate_retained_refs(
+        retained_refs: Sequence[WorkspaceRetainedReference],
+    ) -> list[WorkspaceRetainedReference]:
+        canonical = {json_dumps(ref): ref for ref in retained_refs}
+        return [canonical[key] for key in sorted(canonical)]
+
+    def _retention_preview(
+        self,
+        *,
+        status: str,
+        scope: dict[str, Any],
+        lifecycle: WorkspaceRetentionLifecycle,
+        policy: WorkspaceRetentionPolicy,
+        retained_refs: list[WorkspaceRetainedReference],
+        inline_result: Any,
+        diagnostics: list[WorkspaceRetentionDiagnostic] | None = None,
+        selected: dict[str, list[str]] | None = None,
+        logical_bytes: int = 0,
+    ) -> WorkspaceRetentionPreview:
+        resolved_selected = selected if status == "ready" and selected is not None else empty_retention_selection()
+        for key in resolved_selected:
+            resolved_selected[key] = sorted(set(resolved_selected[key]))
+        resolved_diagnostics = sorted(
+            diagnostics or [],
+            key=lambda item: (
+                str(item.get("code") or ""),
+                str(item.get("entity") or ""),
+                str(item.get("message") or ""),
+            ),
+        )
+        plan_fingerprint = canonical_retention_fingerprint(
+            scope,
+            lifecycle,
+            policy,
+            retained_refs,
+            resolved_selected,
+        )
+        return cast(
+            WorkspaceRetentionPreview,
+            {
+                "status": status,
+                "plan_fingerprint": plan_fingerprint,
+                "scope": scope,
+                "lifecycle": lifecycle,
+                "policy": policy,
+                "retained_refs": retained_refs,
+                "inline_result": inline_result,
+                "selected": resolved_selected,
+                "accounting": {
+                    "entities": {
+                        key: len(values) for key, values in sorted(resolved_selected.items())
+                    },
+                    "logical_bytes_deleted": logical_bytes if status == "ready" else 0,
+                    "physical_bytes_reclaimed": 0,
+                    "physical_bytes_pending": 0,
+                },
+                "diagnostics": resolved_diagnostics,
+            },
+        )
+
+    async def _verified_record_envelope(
+        self,
+        ref: WorkspaceRecordRef,
+    ) -> tuple[WorkspaceReferenceEnvelope, WorkspaceRetentionDiagnostic | None]:
+        envelope = await self.ref_envelope(ref)
+        path = ref.get("path")
+        if not path:
+            if int(ref.get("size") or 0) != 0 or ref.get("sha256") is not None:
+                return envelope, self._retention_diagnostic(
+                    "workspace.retention.ref_readback_failed",
+                    "Workspace record has content facts but no contained content path.",
+                    entity=ref["id"],
+                )
+            return envelope, None
+        target = (self.content_root / str(path)).expanduser().resolve()
+        try:
+            target.relative_to(self.content_root)
+        except ValueError:
+            return envelope, self._retention_diagnostic(
+                "workspace.retention.ref_readback_failed",
+                "Workspace record content path is outside the Workspace content root.",
+                entity=ref["id"],
+            )
+        if not target.is_file():
+            return envelope, self._retention_diagnostic(
+                "workspace.retention.ref_missing",
+                "Workspace record content is missing.",
+                entity=ref["id"],
+            )
+        raw = target.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if len(raw) != int(ref.get("size") or 0):
+            return envelope, self._retention_diagnostic(
+                "workspace.retention.ref_size_mismatch",
+                "Workspace record content size does not match its persisted ref.",
+                entity=ref["id"],
+            )
+        if ref.get("sha256") != digest:
+            return envelope, self._retention_diagnostic(
+                "workspace.retention.ref_digest_mismatch",
+                "Workspace record content digest does not match its persisted ref.",
+                entity=ref["id"],
+            )
+        return envelope, None
+
+    async def _verify_retained_ref(
+        self,
+        ref: WorkspaceRetainedReference,
+    ) -> tuple[
+        WorkspaceRetainedReference | None,
+        str | None,
+        str | None,
+        WorkspaceRetentionDiagnostic | None,
+    ]:
+        if "workspace_id" in ref:
+            envelope_ref = cast(WorkspaceReferenceEnvelope, ref)
+            if str(envelope_ref.get("workspace_id") or "") != self.workspace_id:
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_workspace_mismatch",
+                    "Retained ref belongs to another Workspace.",
+                    entity=str(envelope_ref.get("record_id") or envelope_ref.get("content_ref") or ""),
+                )
+            record_id = str(envelope_ref.get("record_id") or "")
+            if record_id:
+                actual = await self.get_record(record_id)
+                if actual is None:
+                    return None, None, None, self._retention_diagnostic(
+                        "workspace.retention.ref_missing",
+                        "Retained Workspace record does not exist.",
+                        entity=record_id,
+                    )
+                actual_envelope, diagnostic = await self._verified_record_envelope(actual)
+                if diagnostic is not None:
+                    return None, None, None, diagnostic
+                if envelope_ref.get("digest") != actual_envelope.get("digest"):
+                    return None, None, None, self._retention_diagnostic(
+                        "workspace.retention.ref_digest_mismatch",
+                        "Retained Workspace envelope digest does not match readback.",
+                        entity=record_id,
+                    )
+                if int(envelope_ref.get("size") or 0) != int(actual_envelope.get("size") or 0):
+                    return None, None, None, self._retention_diagnostic(
+                        "workspace.retention.ref_size_mismatch",
+                        "Retained Workspace envelope size does not match readback.",
+                        entity=record_id,
+                    )
+                if envelope_ref.get("content_ref") != actual_envelope.get("content_ref"):
+                    return None, None, None, self._retention_diagnostic(
+                        "workspace.retention.ref_path_mismatch",
+                        "Retained Workspace envelope content path does not match readback.",
+                        entity=record_id,
+                    )
+                return actual_envelope, record_id, None, None
+            content_ref = str(envelope_ref.get("content_ref") or "")
+            if not content_ref:
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_missing",
+                    "Retained Workspace envelope has no record or content identity.",
+                    entity="retained_ref",
+                )
+            target = (self.content_root / content_ref).expanduser().resolve()
+            try:
+                target.relative_to(self.content_root)
+            except ValueError:
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_readback_failed",
+                    "Retained content ref is outside the Workspace content root.",
+                    entity=content_ref,
+                )
+            if not target.is_file():
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_missing",
+                    "Retained Workspace content does not exist.",
+                    entity=content_ref,
+                )
+            actual_envelope = await self.ref_envelope(content_ref)
+            if envelope_ref.get("digest") != actual_envelope.get("digest"):
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_digest_mismatch",
+                    "Retained content envelope digest does not match readback.",
+                    entity=content_ref,
+                )
+            if int(envelope_ref.get("size") or 0) != int(actual_envelope.get("size") or 0):
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_size_mismatch",
+                    "Retained content envelope size does not match readback.",
+                    entity=content_ref,
+                )
+            return actual_envelope, None, None, None
+
+        if "id" in ref:
+            record_ref = cast(WorkspaceRecordRef, ref)
+            record_id = str(record_ref.get("id") or "")
+            actual = await self.get_record(record_id)
+            if actual is None:
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_missing",
+                    "Retained Workspace record does not exist.",
+                    entity=record_id,
+                )
+            _, diagnostic = await self._verified_record_envelope(actual)
+            if diagnostic is not None:
+                return None, None, None, diagnostic
+            if record_ref.get("sha256") != actual.get("sha256"):
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_digest_mismatch",
+                    "Retained Workspace record digest does not match readback.",
+                    entity=record_id,
+                )
+            if int(record_ref.get("size") or 0) != int(actual.get("size") or 0):
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_size_mismatch",
+                    "Retained Workspace record size does not match readback.",
+                    entity=record_id,
+                )
+            if record_ref.get("path") != actual.get("path"):
+                return None, None, None, self._retention_diagnostic(
+                    "workspace.retention.ref_path_mismatch",
+                    "Retained Workspace record path does not match readback.",
+                    entity=record_id,
+                )
+            return actual, record_id, None, None
+
+        file_ref = cast(WorkspaceFileRef, ref)
+        relative_path = str(file_ref.get("path") or "")
+        candidate = Path(relative_path)
+        target = candidate if candidate.is_absolute() else self.files_root / candidate
+        target = target.expanduser().resolve()
+        try:
+            normalized_path = target.relative_to(self.files_root).as_posix()
+        except ValueError:
+            return None, None, None, self._retention_diagnostic(
+                "workspace.retention.file_ref_invalid",
+                "Retained file ref is outside the Workspace file root.",
+                entity=relative_path,
+            )
+        if not target.is_file():
+            return None, None, None, self._retention_diagnostic(
+                "workspace.retention.ref_missing",
+                "Retained Workspace file does not exist.",
+                entity=normalized_path,
+            )
+        raw = target.read_bytes()
+        if int(file_ref.get("bytes") or 0) != len(raw):
+            return None, None, None, self._retention_diagnostic(
+                "workspace.retention.ref_size_mismatch",
+                "Retained Workspace file size does not match readback.",
+                entity=normalized_path,
+            )
+        digest = hashlib.sha256(raw).hexdigest()
+        if str(file_ref.get("sha256") or "") != digest:
+            return None, None, None, self._retention_diagnostic(
+                "workspace.retention.ref_digest_mismatch",
+                "Retained Workspace file digest does not match readback.",
+                entity=normalized_path,
+            )
+        canonical_file_ref = dict(file_ref)
+        canonical_file_ref["path"] = normalized_path
+        return cast(WorkspaceFileRef, canonical_file_ref), None, normalized_path, None
+
+    def _scoped_area_files(self, scope: dict[str, Any], area: str) -> list[str]:
+        from ._defaults import scope_filter_path_nodes
+
+        area_root = (self.root / area).resolve()
+        lineage_root = area_root / "lineage"
+        if not lineage_root.is_dir():
+            return []
+        paths: set[str] = set()
+        for node in scope_filter_path_nodes(scope):
+            kind = slug(node["kind"], "scope")
+            node_id = slug(node["id"], "default")
+            for candidate in lineage_root.rglob(node_id):
+                if not candidate.is_dir() or candidate.parent.name != kind:
+                    continue
+                for path in candidate.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    resolved = path.resolve()
+                    try:
+                        paths.add(resolved.relative_to(area_root).as_posix())
+                    except ValueError:
+                        continue
+        return sorted(paths)
+
     async def inspect_retention(
         self,
         scope: dict[str, Any],
@@ -1686,7 +1999,348 @@ class LocalWorkspaceBackend:
         inline_result: Any = None,
         policy: WorkspaceRetentionPolicy | None = None,
     ) -> WorkspaceRetentionPreview:
-        raise NotImplementedError
+        normalized_scope = {
+            str(key): value for key, value in dict(scope or {}).items() if value is not None
+        }
+        if not normalized_scope:
+            raise ValueError("Workspace inspect_retention requires at least one scope value.")
+
+        requested_policy = resolve_retention_policy(policy, supports_cold=True)
+        supports_cold = bool(self._features().get("supports_cold_retention", False))
+        try:
+            resolved_policy = resolve_retention_policy(
+                requested_policy,
+                supports_cold=supports_cold,
+            )
+        except ValueError as error:
+            return self._retention_preview(
+                status="deferred",
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=requested_policy,
+                retained_refs=list(retained_refs),
+                inline_result=inline_result,
+                diagnostics=[
+                    self._retention_diagnostic(
+                        "workspace.retention.policy_unsupported",
+                        str(error),
+                        entity="policy",
+                    )
+                ],
+            )
+
+        lifecycle_diagnostics: list[WorkspaceRetentionDiagnostic] = []
+        execution_id = str(lifecycle.get("execution_id") or "")
+        scope_execution_id = normalized_scope.get("execution_id")
+        if not execution_id or (
+            scope_execution_id is not None and str(scope_execution_id) != execution_id
+        ):
+            lifecycle_diagnostics.append(
+                self._retention_diagnostic(
+                    "workspace.retention.lifecycle_scope_mismatch",
+                    "Retention lifecycle execution_id does not match the cleanup scope.",
+                    entity=execution_id or "execution_id",
+                )
+            )
+        if lifecycle.get("status") not in {"completed", "failed", "cancelled"}:
+            lifecycle_diagnostics.append(
+                self._retention_diagnostic(
+                    "workspace.retention.lifecycle_not_terminal",
+                    "Workspace retention requires a terminal lifecycle status.",
+                    entity=execution_id,
+                )
+            )
+        if lifecycle.get("recovery_active"):
+            lifecycle_diagnostics.append(
+                self._retention_diagnostic(
+                    "workspace.retention.recovery_active",
+                    "Workspace recovery remains active for the cleanup scope.",
+                    entity=execution_id,
+                )
+            )
+        if lifecycle.get("lease_active"):
+            lifecycle_diagnostics.append(
+                self._retention_diagnostic(
+                    "workspace.retention.lease_active",
+                    "Workspace execution lease remains active for the cleanup scope.",
+                    entity=execution_id,
+                )
+            )
+        if lifecycle_diagnostics:
+            return self._retention_preview(
+                status="deferred",
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=resolved_policy,
+                retained_refs=list(retained_refs),
+                inline_result=inline_result,
+                diagnostics=lifecycle_diagnostics,
+            )
+
+        with self._connect() as conn:
+            clauses: list[str] = []
+            scope_params: list[Any] = []
+            for index, (key, value) in enumerate(normalized_scope.items()):
+                alias = f"ret_scope_{ index }"
+                clauses.append(
+                    f"""
+                    EXISTS (
+                        SELECT 1 FROM record_scope_index { alias }
+                        WHERE { alias }.record_id = r.id
+                        AND { alias }.scope_key = ?
+                        AND { alias }.scope_value = ?
+                    )
+                    """
+                )
+                scope_params.extend([key, self._scope_index_value(value)])
+            record_rows = conn.execute(
+                f"SELECT r.* FROM records r WHERE {' AND '.join(clauses)} ORDER BY r.id",
+                scope_params,
+            ).fetchall()
+            scoped_record_ids = {str(row["id"]) for row in record_rows}
+            if scoped_record_ids:
+                placeholders = ",".join("?" for _ in scoped_record_ids)
+                link_rows = conn.execute(
+                    f"""
+                    SELECT * FROM links
+                    WHERE source_id IN ({ placeholders }) OR target_id IN ({ placeholders })
+                    ORDER BY id
+                    """,
+                    [*sorted(scoped_record_ids), *sorted(scoped_record_ids)],
+                ).fetchall()
+                checkpoint_rows = conn.execute(
+                    f"SELECT * FROM checkpoints WHERE record_id IN ({ placeholders }) ORDER BY record_id",
+                    sorted(scoped_record_ids),
+                ).fetchall()
+            else:
+                link_rows = []
+                checkpoint_rows = []
+            runtime_event_rows = conn.execute(
+                "SELECT * FROM runtime_events WHERE execution_id = ? ORDER BY id",
+                (execution_id,),
+            ).fetchall()
+            anchor_rows = conn.execute(
+                "SELECT * FROM retention_anchors WHERE execution_id = ? ORDER BY id",
+                (execution_id,),
+            ).fetchall()
+            scratch_rows = conn.execute("SELECT * FROM scratch_leases ORDER BY lease_id").fetchall()
+
+        diagnostics: list[WorkspaceRetentionDiagnostic] = []
+        canonical_records: dict[str, WorkspaceRecordRef] = {}
+        for row in record_rows:
+            ref = self._row_to_ref(row)
+            _, diagnostic = await self._verified_record_envelope(ref)
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+                continue
+            canonical_records[ref["id"]] = ref
+
+        canonical_retained_refs: list[WorkspaceRetainedReference] = []
+        retained_record_ids: set[str] = set()
+        retained_file_paths: set[str] = set()
+        for ref in retained_refs:
+            canonical, record_id, file_path, diagnostic = await self._verify_retained_ref(ref)
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+                canonical_retained_refs.append(ref)
+                continue
+            if canonical is not None:
+                canonical_retained_refs.append(canonical)
+            if record_id:
+                retained_record_ids.add(record_id)
+            if file_path:
+                retained_file_paths.add(file_path)
+
+        preserved_event_ids: set[str] = set()
+        anchors = [self._row_to_retention_anchor(row) for row in anchor_rows]
+        for anchor in anchors:
+            for anchor_ref in (anchor.get("record_ref"), anchor.get("summary_ref")):
+                if anchor_ref is None:
+                    continue
+                canonical, record_id, file_path, diagnostic = await self._verify_retained_ref(
+                    anchor_ref
+                )
+                if diagnostic is not None:
+                    diagnostics.append(diagnostic)
+                    canonical_retained_refs.append(anchor_ref)
+                    continue
+                if canonical is not None:
+                    canonical_retained_refs.append(canonical)
+                if record_id:
+                    retained_record_ids.add(record_id)
+                if file_path:
+                    retained_file_paths.add(file_path)
+            preserved_event_ids.update(str(value) for value in anchor["preserved_event_ids"])
+
+        runtime_events = [self._row_to_runtime_event_record(row) for row in runtime_event_rows]
+        known_runtime_event_ids = {event["event_id"] for event in runtime_events}
+        for preserved_event_id in sorted(preserved_event_ids - known_runtime_event_ids):
+            diagnostics.append(
+                self._retention_diagnostic(
+                    "workspace.retention.ref_missing",
+                    "A retention anchor references a RuntimeEvent that does not exist.",
+                    entity=preserved_event_id,
+                )
+            )
+        for event in runtime_events:
+            if event["event_id"] not in preserved_event_ids:
+                continue
+            event_refs: list[WorkspaceReferenceEnvelope] = list(event["artifact_refs"])
+            if event["snapshot_ref"] is not None:
+                event_refs.append(event["snapshot_ref"])
+            for event_ref in event_refs:
+                canonical, record_id, file_path, diagnostic = await self._verify_retained_ref(
+                    event_ref
+                )
+                if diagnostic is not None:
+                    diagnostics.append(diagnostic)
+                    canonical_retained_refs.append(event_ref)
+                    continue
+                if canonical is not None:
+                    canonical_retained_refs.append(canonical)
+                if record_id:
+                    retained_record_ids.add(record_id)
+                if file_path:
+                    retained_file_paths.add(file_path)
+
+        links = [self._row_to_link(row) for row in link_rows]
+        for link in links:
+            if link["target_id"] in scoped_record_ids and link["source_id"] not in scoped_record_ids:
+                diagnostics.append(
+                    self._retention_diagnostic(
+                        "workspace.retention.incoming_reference",
+                        "A record in the cleanup scope has an incoming link from outside the scope.",
+                        entity=link["id"],
+                        detail={
+                            "source_id": link["source_id"],
+                            "target_id": link["target_id"],
+                        },
+                    )
+                )
+
+        scoped_scratch_leases = []
+        for row in scratch_rows:
+            lease = self._row_to_scratch_lease(row)
+            lease_scope = lease.get("scope")
+            if not isinstance(lease_scope, dict) or not all(
+                lease_scope.get(key) == value for key, value in normalized_scope.items()
+            ):
+                continue
+            scoped_scratch_leases.append(lease)
+            if lease.get("closed_at") is None:
+                diagnostics.append(
+                    self._retention_diagnostic(
+                        "workspace.retention.lease_active",
+                        "A scratch lease remains active for the cleanup scope.",
+                        entity=str(lease.get("lease_id") or ""),
+                    )
+                )
+
+        if diagnostics:
+            return self._retention_preview(
+                status="deferred",
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=resolved_policy,
+                retained_refs=self._deduplicate_retained_refs(canonical_retained_refs or list(retained_refs)),
+                inline_result=inline_result,
+                diagnostics=diagnostics,
+            )
+
+        representation_by_category = {
+            rule["category"]: rule["representation"]
+            for rule in resolved_policy.get("rules", [])
+        }
+        selected = empty_retention_selection()
+        selected_record_sizes: dict[str, int] = {}
+        for record_id in sorted(scoped_record_ids):
+            ref = canonical_records[record_id]
+            if record_id in retained_record_ids:
+                continue
+            if ref.get("collection") == "checkpoints" or ref.get("meta", {}).get("checkpoint"):
+                category = "checkpoints"
+            elif ref.get("collection") == "artifacts":
+                category = "artifacts"
+            else:
+                category = "records"
+            if representation_by_category[category] == "hot":
+                continue
+            selected["record_ids"].append(record_id)
+            selected_record_sizes[record_id] = int(ref.get("size") or 0)
+            if ref.get("path"):
+                selected["content_paths"].append(str(ref["path"]))
+
+        selected_record_id_set = set(selected["record_ids"])
+        selected["checkpoint_ids"] = sorted(
+            {
+                str(row["record_id"])
+                for row in checkpoint_rows
+                if str(row["record_id"]) in selected_record_id_set
+            }
+        )
+        selected["link_ids"] = sorted(
+            link["id"]
+            for link in links
+            if link["source_id"] in selected_record_id_set
+            or link["target_id"] in selected_record_id_set
+        )
+        if representation_by_category["runtime_events"] != "hot":
+            selected["runtime_event_ids"] = sorted(
+                event["id"]
+                for event in runtime_events
+                if event["event_id"] not in preserved_event_ids
+            )
+        selected["retention_anchor_ids"] = sorted(anchor["id"] for anchor in anchors)
+        if representation_by_category["scratch"] != "hot":
+            selected["scratch_lease_ids"] = sorted(
+                str(lease.get("lease_id") or "")
+                for lease in scoped_scratch_leases
+                if lease.get("closed_at") is not None
+            )
+            selected["scratch_paths"] = self._scoped_area_files(normalized_scope, "scratch")
+        if representation_by_category["files"] != "hot":
+            selected["file_paths"] = [
+                path
+                for path in self._scoped_area_files(normalized_scope, "files")
+                if path not in retained_file_paths
+            ]
+        for key in selected:
+            selected[key] = sorted(set(selected[key]))
+
+        logical_bytes = sum(selected_record_sizes.values())
+        logical_bytes += sum(
+            serialized_size(event)
+            for event in runtime_events
+            if event["id"] in set(selected["runtime_event_ids"])
+        )
+        logical_bytes += sum(
+            serialized_size(link)
+            for link in links
+            if link["id"] in set(selected["link_ids"])
+        )
+        logical_bytes += sum(
+            serialized_size(anchor)
+            for anchor in anchors
+            if anchor["id"] in set(selected["retention_anchor_ids"])
+        )
+        for area, key in (("files", "file_paths"), ("scratch", "scratch_paths")):
+            area_root = self.root / area
+            for relative_path in selected[key]:
+                target = (area_root / relative_path).resolve()
+                if target.is_file():
+                    logical_bytes += target.stat().st_size
+
+        canonical_retained_refs = self._deduplicate_retained_refs(canonical_retained_refs)
+        return self._retention_preview(
+            status="ready",
+            scope=normalized_scope,
+            lifecycle=lifecycle,
+            policy=resolved_policy,
+            retained_refs=canonical_retained_refs,
+            inline_result=inline_result,
+            selected=selected,
+            logical_bytes=logical_bytes,
+        )
 
     async def apply_retention(
         self,

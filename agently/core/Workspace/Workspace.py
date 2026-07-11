@@ -21,7 +21,7 @@ import re
 import shutil
 import subprocess
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
@@ -42,7 +42,13 @@ from agently.types.data.workspace import (
     WorkspaceLinkRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
+    WorkspaceRetainedReference,
     WorkspaceRetentionAnchor,
+    WorkspaceRetentionDiagnostic,
+    WorkspaceRetentionLifecycle,
+    WorkspaceRetentionPolicy,
+    WorkspaceRetentionPreview,
+    WorkspaceRetentionResult,
     WorkspaceRetrievalMethod,
     WorkspaceRetrievalPackage,
     WorkspaceRetrievalSelection,
@@ -51,6 +57,12 @@ from agently.types.data.workspace import (
 )
 from agently.types.plugins import WorkspaceBackend
 from .Retrieval import RerankHandler, retrieve_workspace
+from .Retention import (
+    canonical_retention_fingerprint,
+    empty_retention_selection,
+    resolve_retention_policy,
+    serialized_size,
+)
 from ._defaults import (
     ScopeNode,
     WORKSPACE_FILE_AREAS,
@@ -67,7 +79,7 @@ from ._defaults import (
 from ._utils import utc_now
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
     from .Manager import WorkspaceManager
 
@@ -1617,6 +1629,132 @@ class Workspace:
         limit: int | None = None,
     ) -> list[WorkspaceRetentionAnchor]:
         return await self.backend.retention_anchors(execution_id, anchor_type=anchor_type, limit=limit)
+
+    @staticmethod
+    def _retention_deferred_preview(
+        scope: dict[str, Any],
+        *,
+        lifecycle: WorkspaceRetentionLifecycle,
+        retained_refs: list[WorkspaceRetainedReference],
+        inline_result: Any,
+        policy: WorkspaceRetentionPolicy,
+        diagnostic: WorkspaceRetentionDiagnostic,
+    ) -> WorkspaceRetentionPreview:
+        selected = empty_retention_selection()
+        return {
+            "status": "deferred",
+            "plan_fingerprint": canonical_retention_fingerprint(
+                scope,
+                lifecycle,
+                policy,
+                retained_refs,
+                selected,
+            ),
+            "scope": scope,
+            "lifecycle": lifecycle,
+            "policy": policy,
+            "retained_refs": retained_refs,
+            "inline_result": inline_result,
+            "selected": selected,
+            "accounting": {
+                "entities": {key: 0 for key in selected},
+                "logical_bytes_deleted": 0,
+                "physical_bytes_reclaimed": 0,
+                "physical_bytes_pending": 0,
+            },
+            "diagnostics": [diagnostic],
+        }
+
+    def _normalize_retention_file_ref(
+        self,
+        ref: WorkspaceRetainedReference,
+    ) -> WorkspaceRetainedReference:
+        if "workspace_id" in ref or "id" in ref:
+            return dict(ref)  # type: ignore[return-value]
+        backend_files_root = Path(str(getattr(self.backend, "files_root"))).expanduser().resolve()
+        facade_files_root = self.files_root.expanduser().resolve()
+        try:
+            facade_files_root.relative_to(backend_files_root)
+        except ValueError as error:
+            raise ValueError(
+                "Workspace facade file root is outside the backend file root."
+            ) from error
+        target = self.resolve_file_path(str(ref.get("path") or ""))
+        try:
+            backend_relative = target.relative_to(backend_files_root)
+        except ValueError as error:
+            raise ValueError("Retained file ref is outside the backend file root.") from error
+        normalized = dict(ref)
+        normalized["path"] = backend_relative.as_posix()
+        return cast(WorkspaceRetainedReference, normalized)
+
+    async def inspect_retention(
+        self,
+        scope: dict[str, Any],
+        *,
+        lifecycle: WorkspaceRetentionLifecycle,
+        retained_refs: Sequence[WorkspaceRetainedReference] = (),
+        inline_result: Any = None,
+        policy: WorkspaceRetentionPolicy | None = None,
+    ) -> WorkspaceRetentionPreview:
+        normalized_scope = merge_scope(self.default_scope, scope)
+        if not normalized_scope:
+            raise ValueError("Workspace inspect_retention requires at least one scope value.")
+        resolved_policy = resolve_retention_policy(policy, supports_cold=True)
+        normalized_refs: list[WorkspaceRetainedReference] = []
+        for index, ref in enumerate(retained_refs):
+            try:
+                normalized_refs.append(self._normalize_retention_file_ref(ref))
+            except (OSError, ValueError) as error:
+                unresolved_refs = [
+                    cast(WorkspaceRetainedReference, dict(item))
+                    for item in retained_refs[index:]
+                ]
+                return self._retention_deferred_preview(
+                    normalized_scope,
+                    lifecycle=lifecycle,
+                    retained_refs=[*normalized_refs, *unresolved_refs],
+                    inline_result=inline_result,
+                    policy=resolved_policy,
+                    diagnostic={
+                        "code": "workspace.retention.file_ref_invalid",
+                        "message": str(error),
+                        "retryable": True,
+                        "entity": str(ref.get("path") or ""),
+                    },
+                )
+        inline_limit = int(resolved_policy.get("inline_result_limit", 4096))
+        if inline_result is not None and serialized_size(inline_result) > inline_limit:
+            return self._retention_deferred_preview(
+                normalized_scope,
+                lifecycle=lifecycle,
+                retained_refs=normalized_refs,
+                inline_result=inline_result,
+                policy=resolved_policy,
+                diagnostic={
+                    "code": "workspace.retention.inline_result_too_large",
+                    "message": (
+                        "Serialized inline result exceeds the Workspace retention limit "
+                        f"of { inline_limit } bytes."
+                    ),
+                    "retryable": True,
+                    "entity": "inline_result",
+                    "detail": {"serialized_bytes": serialized_size(inline_result)},
+                },
+            )
+        return await self.backend.inspect_retention(
+            normalized_scope,
+            lifecycle=lifecycle,
+            retained_refs=normalized_refs,
+            inline_result=inline_result,
+            policy=resolved_policy,
+        )
+
+    async def apply_retention(
+        self,
+        preview: WorkspaceRetentionPreview,
+    ) -> WorkspaceRetentionResult:
+        return await self.backend.apply_retention(preview)
 
     def capabilities(self) -> WorkspaceBackendCapabilities:
         capabilities = dict(self.backend.capabilities())

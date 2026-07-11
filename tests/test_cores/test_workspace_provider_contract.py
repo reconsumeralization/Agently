@@ -1083,7 +1083,7 @@ def test_workspace_retention_protocols_and_fake_provider_use_exact_signatures():
 
 
 @pytest.mark.asyncio
-async def test_local_workspace_backend_retention_contract_is_explicitly_unimplemented(tmp_path):
+async def test_local_workspace_backend_retention_inspection_is_implemented_before_apply(tmp_path):
     backend = LocalWorkspaceBackend(tmp_path / "retention-contract")
     assert hasattr(backend, "inspect_retention")
     assert hasattr(backend, "apply_retention")
@@ -1096,29 +1096,12 @@ async def test_local_workspace_backend_retention_contract_is_explicitly_unimplem
         "recovery_active": False,
         "lease_active": False,
     }
-    preview: workspace_types.WorkspaceRetentionPreview = {
-        "status": "ready",
-        "plan_fingerprint": "contract-only",
-        "scope": {"execution_id": "exec-contract"},
-        "lifecycle": lifecycle,
-        "policy": {},
-        "retained_refs": [],
-        "inline_result": None,
-        "selected": {},
-        "accounting": {
-            "entities": {},
-            "logical_bytes_deleted": 0,
-            "physical_bytes_reclaimed": 0,
-            "physical_bytes_pending": 0,
-        },
-        "diagnostics": [],
-    }
-
-    with pytest.raises(NotImplementedError):
-        await backend.inspect_retention(
-            {"execution_id": "exec-contract"},
-            lifecycle=lifecycle,
-        )
+    preview = await backend.inspect_retention(
+        {"execution_id": "exec-contract"},
+        lifecycle=lifecycle,
+    )
+    assert preview["status"] == "ready"
+    assert all(values == [] for values in preview["selected"].values())
     with pytest.raises(NotImplementedError):
         await backend.apply_retention(preview)
 
