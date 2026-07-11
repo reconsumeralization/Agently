@@ -1121,6 +1121,44 @@ def test_workspace_vector_provider_contract_requires_deterministic_deletion():
     assert "delete_records" in WorkspaceManager._VECTOR_STORE_REQUIRED_METHODS
 
 
+def test_workspace_manager_requires_provider_methods_to_be_callable():
+    provider = RemoteAuditWorkspaceBackend()
+    provider.prune_scope = lambda *_args, **_kwargs: {}  # type: ignore[attr-defined]
+    provider.inspect_retention = None  # type: ignore[method-assign]
+
+    with pytest.raises(TypeError, match="inspect_retention"):
+        WorkspaceManager()._validate_db_store_provider(provider)
+
+
+def test_workspace_manager_proves_vector_delete_is_async_without_calling_it():
+    delete_called = False
+
+    class SyncDeleteVectorProvider:
+        name = "sync-delete"
+
+        async def index_record(self, ref: WorkspaceRecordRef, embedding: list[float]) -> None:
+            _ = ref, embedding
+
+        async def search_by_embedding(
+            self,
+            embedding: list[float],
+            *,
+            filters: dict[str, Any] | None = None,
+            limit: int | None = None,
+        ) -> list[WorkspaceRecordRef]:
+            _ = embedding, filters, limit
+            return []
+
+        def delete_records(self, record_ids: Sequence[str]) -> None:
+            nonlocal delete_called
+            delete_called = True
+            _ = record_ids
+
+    with pytest.raises(TypeError, match="async.*delete_records"):
+        WorkspaceManager()._validate_vector_store_provider(SyncDeleteVectorProvider())
+    assert delete_called is False
+
+
 @pytest.mark.asyncio
 async def test_remote_audit_workspace_backend_proves_provider_contract_across_consumers():
     provider = RemoteAuditWorkspaceBackend()

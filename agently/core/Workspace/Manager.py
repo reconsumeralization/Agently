@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -97,6 +98,10 @@ class WorkspaceManager:
         "close_scratch_lease",
     )
     _VECTOR_STORE_REQUIRED_METHODS = ("index_record", "search_by_embedding", "delete_records")
+
+    @staticmethod
+    def _missing_required_callables(candidate: Any, required: Sequence[str]) -> list[str]:
+        return [name for name in required if not callable(getattr(candidate, name, None))]
 
     def __init__(self):
         self._profiles: dict[str, IngestionProfile] = {}
@@ -303,7 +308,7 @@ class WorkspaceManager:
 
     def _validate_db_store_provider(self, candidate: Any, *, label: str | None = None) -> DBStoreProvider:
         provider_label = label or getattr(candidate, "name", None) or type(candidate).__name__
-        missing = [name for name in self._DB_STORE_REQUIRED_METHODS if not hasattr(candidate, name)]
+        missing = self._missing_required_callables(candidate, self._DB_STORE_REQUIRED_METHODS)
         if missing:
             raise TypeError(
                 f"Workspace DB store provider '{ provider_label }' must implement DBStoreProvider; "
@@ -318,7 +323,7 @@ class WorkspaceManager:
     ) -> EmbeddingProvider | None:
         if provider is None:
             return None
-        if hasattr(provider, "embed_texts"):
+        if callable(getattr(provider, "embed_texts", None)):
             return cast(EmbeddingProvider, provider)
         if callable(provider) and not isinstance(provider, str):
             return CallableEmbeddingProvider(cast(EmbeddingFunction, provider))
@@ -326,7 +331,7 @@ class WorkspaceManager:
         if normalized not in self._embedding_providers:
             raise WorkspaceConfigurationError(f"Workspace embedding provider is not registered: { normalized }")
         resolved = self._embedding_providers[normalized](**dict(options or {}))
-        if not hasattr(resolved, "embed_texts"):
+        if not callable(getattr(resolved, "embed_texts", None)):
             raise TypeError(f"Workspace embedding provider '{ normalized }' must implement embed_texts(...).")
         return cast(EmbeddingProvider, resolved)
 
@@ -398,17 +403,21 @@ class WorkspaceManager:
 
     def _validate_vector_store_provider(self, candidate: Any, *, label: str | None = None) -> VectorStoreProvider:
         provider_label = label or getattr(candidate, "name", None) or type(candidate).__name__
-        missing = [name for name in self._VECTOR_STORE_REQUIRED_METHODS if not hasattr(candidate, name)]
+        missing = self._missing_required_callables(candidate, self._VECTOR_STORE_REQUIRED_METHODS)
         if missing:
             raise TypeError(
                 f"Workspace vector store provider '{ provider_label }' must implement VectorStoreProvider; "
                 f"missing: {', '.join(missing)}."
             )
+        if not inspect.iscoroutinefunction(getattr(candidate, "delete_records")):
+            raise TypeError(
+                f"Workspace vector store provider '{ provider_label }' must implement async delete_records(...)."
+            )
         return cast(VectorStoreProvider, candidate)
 
     def _validate_backend(self, backend: Any, *, provider: str | None = None) -> WorkspaceBackend:
         required = ("put", "search", "get_data", "capabilities")
-        missing = [name for name in required if not hasattr(backend, name)]
+        missing = self._missing_required_callables(backend, required)
         if missing:
             detail = f" from provider '{provider}'" if provider else ""
             raise TypeError(

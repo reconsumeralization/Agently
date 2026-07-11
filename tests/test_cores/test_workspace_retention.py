@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -620,6 +621,261 @@ async def test_inspect_retention_converts_readback_oserror_to_deferred(tmp_path,
     preview = await workspace.inspect_retention(
         {"execution_id": "exec-readback"},
         lifecycle={**_terminal_lifecycle("exec-readback"), "state_version": None},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.ref_readback_failed" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symlink_component", ["project", "task", "execution"])
+async def test_inspect_retention_rejects_symlink_in_every_candidate_ancestor(
+    tmp_path,
+    symlink_component,
+):
+    root = WorkspaceManager().create(tmp_path / f"retention-symlink-{symlink_component}")
+    workspace = root.with_scope_lineage(
+        [
+            {"kind": "projects", "id": "project-symlink"},
+            {"kind": "tasks", "id": "task-symlink"},
+            {"kind": "executions", "id": "exec-symlink"},
+        ]
+    )
+    await workspace.write_file("reports/result.txt", "result")
+    lineage_root = root.root / "files" / "lineage"
+    components = {
+        "project": lineage_root / "projects" / "project-symlink",
+        "task": lineage_root / "projects" / "project-symlink" / "tasks" / "task-symlink",
+        "execution": (
+            lineage_root
+            / "projects"
+            / "project-symlink"
+            / "tasks"
+            / "task-symlink"
+            / "executions"
+            / "exec-symlink"
+        ),
+    }
+    lexical = components[symlink_component]
+    actual = lexical.with_name(f"{lexical.name}-actual")
+    lexical.rename(actual)
+    lexical.symlink_to(actual, target_is_directory=True)
+
+    preview = await workspace.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-symlink"), "state_version": None},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.lineage_ambiguous" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_only_component", ["workspace", "db_store", "vector_store"])
+async def test_inspect_retention_defers_nonempty_read_only_plan_without_record_ids(
+    tmp_path,
+    read_only_component,
+):
+    root = tmp_path / "retention-read-only-plan"
+    writable = WorkspaceManager().create(root)
+    await writable.append_runtime_event(
+        "exec-read-only",
+        {"event_type": "execution.completed", "event_id": "evt-read-only"},
+    )
+    if read_only_component == "workspace":
+        inspected = WorkspaceManager().create(root, mode="read_only")
+    else:
+        inspected = writable
+        backend = cast(Any, inspected.backend)
+        setattr(backend, f"{read_only_component}_provider", SimpleNamespace(read_only=True))
+
+    inspect = inspected.inspect_retention
+    if read_only_component == "db_store":
+        backend = cast(Any, inspected.backend)
+        inspect = type(backend).inspect_retention.__get__(backend, type(backend))
+    preview = await inspect(
+        {"execution_id": "exec-read-only"},
+        lifecycle={**_terminal_lifecycle("exec-read-only"), "state_version": None},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.provider_capability_missing" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_selects_orphan_checkpoint_manifest(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-orphan-manifest")
+    backend = cast(Any, workspace.backend)
+    backend._set_manifest(
+        "checkpoint.latest.exec-orphan",
+        {
+            "id": "rec_orphan",
+            "collection": "checkpoints",
+            "kind": "checkpoint",
+            "path": "checkpoints/missing.json",
+            "sha256": "0" * 64,
+            "size": 1,
+            "summary": "orphan",
+            "scope": {"run_id": "exec-orphan"},
+            "source": {},
+            "created_at": "2026-07-12T00:00:00Z",
+            "meta": {"checkpoint": True},
+        },
+    )
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-orphan"},
+        lifecycle={**_terminal_lifecycle("exec-orphan"), "state_version": None},
+    )
+
+    assert preview["status"] == "ready"
+    assert "checkpoint.latest.exec-orphan" in preview["selected"]["manifest_keys"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_hot_checkpoint_validates_manifest_ref(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-hot-manifest")
+    checkpoint = await workspace.put_checkpoint(
+        "exec-hot-manifest",
+        {"state_version": 2},
+        expected_state_version=0,
+    )
+    backend = cast(Any, workspace.backend)
+    with backend._connect() as conn:
+        conn.execute("DELETE FROM checkpoints WHERE run_id = ?", ("exec-hot-manifest",))
+        conn.execute("DELETE FROM record_scope_index WHERE record_id = ?", (checkpoint["id"],))
+        conn.execute("DELETE FROM records_fts WHERE record_id = ?", (checkpoint["id"],))
+        conn.execute("DELETE FROM records WHERE id = ?", (checkpoint["id"],))
+        conn.commit()
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-hot-manifest"},
+        lifecycle={**_terminal_lifecycle("exec-hot-manifest"), "state_version": None},
+        policy=cast(
+            WorkspaceRetentionPolicy,
+            {"rules": [{"category": "checkpoints", "representation": "hot"}]},
+        ),
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.ref_missing" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_accounts_record_metadata_and_scratch_lease_rows(tmp_path):
+    workspace = WorkspaceManager().create(
+        tmp_path / "retention-row-bytes",
+        vector_store_provider="sqlite",
+    )
+    record = await workspace.put(
+        "",
+        collection="observations",
+        kind="empty_process",
+        summary="",
+        scope={"execution_id": "exec-row-bytes"},
+    )
+    lease = await workspace.open_scratch(
+        scope={"execution_id": "exec-row-bytes"},
+        cleanup_policy="on_scope_prune",
+    )
+    lease_id = cast(str, lease.get("lease_id"))
+    await workspace.close_scratch(lease_id, remove=False)
+    backend = cast(Any, workspace.backend)
+    with backend._connect() as conn:
+        record_row = conn.execute("SELECT * FROM records WHERE id = ?", (record["id"],)).fetchone()
+        scope_rows = conn.execute(
+            "SELECT record_id, scope_key, scope_value FROM record_scope_index WHERE record_id = ?",
+            (record["id"],),
+        ).fetchall()
+        fts_row = conn.execute(
+            "SELECT summary, content FROM records_fts WHERE record_id = ?",
+            (record["id"],),
+        ).fetchone()
+        scratch_row = conn.execute(
+            "SELECT * FROM scratch_leases WHERE lease_id = ?",
+            (lease_id,),
+        ).fetchone()
+    assert record_row is not None
+    assert fts_row is not None
+    assert scratch_row is not None
+    expected_bytes = (
+        record["size"]
+        + serialized_size(dict(record_row))
+        + sum(serialized_size(dict(row)) for row in scope_rows)
+        + len(str(fts_row["summary"] or "").encode("utf-8"))
+        + len(str(fts_row["content"] or "").encode("utf-8"))
+        + serialized_size(dict(scratch_row))
+    )
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-row-bytes"},
+        lifecycle={**_terminal_lifecycle("exec-row-bytes"), "state_version": None},
+    )
+
+    assert preview["status"] == "ready"
+    assert preview["accounting"]["logical_bytes_deleted"] == expected_bytes
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_catches_directory_iterator_oserror(tmp_path, monkeypatch):
+    root = WorkspaceManager().create(tmp_path / "retention-walk-error")
+    workspace = root.with_scope_lineage(
+        [{"kind": "executions", "id": "exec-walk-error"}]
+    )
+    await workspace.write_file("reports/result.txt", "result")
+    candidate = root.root / "files" / "lineage" / "executions" / "exec-walk-error"
+    original_rglob = Path.rglob
+
+    def broken_rglob(path: Path, pattern: str):
+        if path == candidate and pattern == "*":
+            def broken_iterator():
+                yield path / "files" / "reports" / "result.txt"
+                raise OSError("simulated iterator advancement failure")
+
+            return broken_iterator()
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", broken_rglob)
+    preview = await workspace.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-walk-error"), "state_version": None},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.ref_readback_failed" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_catches_resolve_runtimeerror(tmp_path, monkeypatch):
+    workspace = WorkspaceManager().create(tmp_path / "retention-resolve-error")
+    record = await workspace.put(
+        {"record": "resolve failure"},
+        collection="observations",
+        kind="process",
+        scope={"execution_id": "exec-resolve-error"},
+    )
+    target = workspace.content_root / cast(str, record["path"])
+    original_resolve = Path.resolve
+
+    def broken_resolve(path: Path, *args: Any, **kwargs: Any) -> Path:
+        if str(path) == str(target):
+            raise RuntimeError("Symlink loop from pathlib on Python 3.10")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", broken_resolve)
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-resolve-error"},
+        lifecycle={**_terminal_lifecycle("exec-resolve-error"), "state_version": None},
     )
 
     _assert_nothing_selected(preview)

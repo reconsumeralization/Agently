@@ -18,6 +18,7 @@ import hashlib
 import re
 import shutil
 import sqlite3
+import stat
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -1711,6 +1712,91 @@ class LocalWorkspaceBackend:
             diagnostic["detail"] = detail
         return diagnostic
 
+    def _safe_resolve_path(
+        self,
+        path: Path,
+        *,
+        entity: str,
+        operation: str,
+        code: str = "workspace.retention.ref_readback_failed",
+    ) -> tuple[Path | None, WorkspaceRetentionDiagnostic | None]:
+        try:
+            return path.expanduser().resolve(), None
+        except (OSError, RuntimeError) as error:
+            return None, self._retention_diagnostic(
+                code,
+                f"Workspace { operation } failed: { error }",
+                entity=entity,
+            )
+
+    def _safe_walk_paths(
+        self,
+        root: Path,
+        pattern: str,
+        *,
+        entity: str,
+        operation: str,
+        code: str = "workspace.retention.ref_readback_failed",
+    ) -> tuple[list[Path] | None, WorkspaceRetentionDiagnostic | None]:
+        try:
+            return list(root.rglob(pattern)), None
+        except (OSError, RuntimeError) as error:
+            return None, self._retention_diagnostic(
+                code,
+                f"Workspace { operation } failed: { error }",
+                entity=entity,
+            )
+
+    def _safe_stat_path(
+        self,
+        path: Path,
+        *,
+        entity: str,
+        operation: str,
+        follow_symlinks: bool = True,
+        code: str = "workspace.retention.ref_readback_failed",
+        missing_message: str | None = None,
+        missing_ok: bool = False,
+    ) -> tuple[Any | None, WorkspaceRetentionDiagnostic | None]:
+        try:
+            return (path.stat() if follow_symlinks else path.lstat()), None
+        except FileNotFoundError as error:
+            if missing_ok:
+                return None, None
+            if missing_message is not None:
+                return None, self._retention_diagnostic(
+                    "workspace.retention.ref_missing",
+                    missing_message,
+                    entity=entity,
+                )
+            return None, self._retention_diagnostic(
+                code,
+                f"Workspace { operation } failed: { error }",
+                entity=entity,
+            )
+        except (OSError, RuntimeError) as error:
+            return None, self._retention_diagnostic(
+                code,
+                f"Workspace { operation } failed: { error }",
+                entity=entity,
+            )
+
+    def _safe_read_path(
+        self,
+        path: Path,
+        *,
+        entity: str,
+        operation: str,
+    ) -> tuple[bytes | None, WorkspaceRetentionDiagnostic | None]:
+        try:
+            return path.read_bytes(), None
+        except (OSError, RuntimeError) as error:
+            return None, self._retention_diagnostic(
+                "workspace.retention.ref_readback_failed",
+                f"Workspace { operation } failed: { error }",
+                entity=entity,
+            )
+
     @staticmethod
     def _deduplicate_retained_refs(
         retained_refs: Sequence[WorkspaceRetainedReference],
@@ -1786,7 +1872,13 @@ class LocalWorkspaceBackend:
                     entity=ref["id"],
                 )
             return envelope, None
-        target = (self.content_root / str(path)).expanduser().resolve()
+        target, diagnostic = self._safe_resolve_path(
+            self.content_root / str(path),
+            entity=ref["id"],
+            operation="record content resolution",
+        )
+        if diagnostic is not None or target is None:
+            return envelope, diagnostic
         try:
             target.relative_to(self.content_root)
         except ValueError:
@@ -1795,13 +1887,27 @@ class LocalWorkspaceBackend:
                 "Workspace record content path is outside the Workspace content root.",
                 entity=ref["id"],
             )
-        if not target.is_file():
+        target_stat, diagnostic = self._safe_stat_path(
+            target,
+            entity=ref["id"],
+            operation="record content stat",
+            missing_message="Workspace record content is missing.",
+        )
+        if diagnostic is not None:
+            return envelope, diagnostic
+        if target_stat is None or not stat.S_ISREG(target_stat.st_mode):
             return envelope, self._retention_diagnostic(
                 "workspace.retention.ref_missing",
                 "Workspace record content is missing.",
                 entity=ref["id"],
             )
-        raw = target.read_bytes()
+        raw, diagnostic = self._safe_read_path(
+            target,
+            entity=ref["id"],
+            operation="record content readback",
+        )
+        if diagnostic is not None or raw is None:
+            return envelope, diagnostic
         digest = hashlib.sha256(raw).hexdigest()
         if len(raw) != int(ref.get("size") or 0):
             return envelope, self._retention_diagnostic(
@@ -1823,7 +1929,7 @@ class LocalWorkspaceBackend:
     ) -> tuple[WorkspaceReferenceEnvelope, WorkspaceRetentionDiagnostic | None]:
         try:
             return await self._verified_record_envelope_unchecked(ref)
-        except (OSError, WorkspaceConfigurationError, WorkspacePolicyError) as error:
+        except (OSError, RuntimeError, WorkspaceConfigurationError, WorkspacePolicyError) as error:
             return self._record_ref_envelope(ref), self._retention_diagnostic(
                 "workspace.retention.ref_readback_failed",
                 f"Workspace record readback failed: { error }",
@@ -1891,7 +1997,13 @@ class LocalWorkspaceBackend:
                     "Retained Workspace envelope has no record or content identity.",
                     entity="retained_ref",
                 )
-            target = (self.content_root / content_ref).expanduser().resolve()
+            target, diagnostic = self._safe_resolve_path(
+                self.content_root / content_ref,
+                entity=content_ref,
+                operation="retained content resolution",
+            )
+            if diagnostic is not None or target is None:
+                return None, None, None, diagnostic
             try:
                 target.relative_to(self.content_root)
             except ValueError:
@@ -1900,7 +2012,15 @@ class LocalWorkspaceBackend:
                     "Retained content ref is outside the Workspace content root.",
                     entity=content_ref,
                 )
-            if not target.is_file():
+            target_stat, diagnostic = self._safe_stat_path(
+                target,
+                entity=content_ref,
+                operation="retained content stat",
+                missing_message="Retained Workspace content does not exist.",
+            )
+            if diagnostic is not None:
+                return None, None, None, diagnostic
+            if target_stat is None or not stat.S_ISREG(target_stat.st_mode):
                 return None, None, None, self._retention_diagnostic(
                     "workspace.retention.ref_missing",
                     "Retained Workspace content does not exist.",
@@ -1962,7 +2082,13 @@ class LocalWorkspaceBackend:
         relative_path = str(file_ref.get("path") or "")
         candidate = Path(relative_path)
         target = candidate if candidate.is_absolute() else self.files_root / candidate
-        target = target.expanduser().resolve()
+        target, diagnostic = self._safe_resolve_path(
+            target,
+            entity=relative_path,
+            operation="retained file resolution",
+        )
+        if diagnostic is not None or target is None:
+            return None, None, None, diagnostic
         try:
             normalized_path = target.relative_to(self.files_root).as_posix()
         except ValueError:
@@ -1971,13 +2097,27 @@ class LocalWorkspaceBackend:
                 "Retained file ref is outside the Workspace file root.",
                 entity=relative_path,
             )
-        if not target.is_file():
+        target_stat, diagnostic = self._safe_stat_path(
+            target,
+            entity=normalized_path,
+            operation="retained file stat",
+            missing_message="Retained Workspace file does not exist.",
+        )
+        if diagnostic is not None:
+            return None, None, None, diagnostic
+        if target_stat is None or not stat.S_ISREG(target_stat.st_mode):
             return None, None, None, self._retention_diagnostic(
                 "workspace.retention.ref_missing",
                 "Retained Workspace file does not exist.",
                 entity=normalized_path,
             )
-        raw = target.read_bytes()
+        raw, diagnostic = self._safe_read_path(
+            target,
+            entity=normalized_path,
+            operation="retained file readback",
+        )
+        if diagnostic is not None or raw is None:
+            return None, None, None, diagnostic
         if int(file_ref.get("bytes") or 0) != len(raw):
             return None, None, None, self._retention_diagnostic(
                 "workspace.retention.ref_size_mismatch",
@@ -2011,7 +2151,7 @@ class LocalWorkspaceBackend:
                 ref,
                 records_by_id=records_by_id,
             )
-        except (OSError, WorkspaceConfigurationError, WorkspacePolicyError) as error:
+        except (OSError, RuntimeError, WorkspaceConfigurationError, WorkspacePolicyError) as error:
             entity = str(
                 ref.get("id")
                 or ref.get("record_id")
@@ -2030,10 +2170,32 @@ class LocalWorkspaceBackend:
         scope: dict[str, Any],
         area: str,
     ) -> tuple[list[str], WorkspaceRetentionDiagnostic | None]:
-        area_root = (self.root / area).resolve()
+        area_root, diagnostic = self._safe_resolve_path(
+            self.root / area,
+            entity=area,
+            operation="lineage area resolution",
+        )
+        if diagnostic is not None or area_root is None:
+            return [], diagnostic
         lineage_root = area_root / "lineage"
-        if not lineage_root.is_dir():
+        lineage_stat, diagnostic = self._safe_stat_path(
+            lineage_root,
+            entity=str(lineage_root),
+            operation="lineage root stat",
+            follow_symlinks=False,
+            code="workspace.retention.lineage_ambiguous",
+            missing_ok=True,
+        )
+        if diagnostic is not None:
+            return [], diagnostic
+        if lineage_stat is None:
             return [], None
+        if stat.S_ISLNK(lineage_stat.st_mode) or not stat.S_ISDIR(lineage_stat.st_mode):
+            return [], self._retention_diagnostic(
+                "workspace.retention.lineage_ambiguous",
+                "Workspace lineage root must be a real directory, not a symlink.",
+                entity=str(lineage_root),
+            )
         candidate_roots: list[Path] = []
         raw_lineage = scope.get("scope_lineage")
         if raw_lineage is not None:
@@ -2079,8 +2241,31 @@ class LocalWorkspaceBackend:
             for leaf in nodes:
                 leaf_kind = slug(leaf["kind"], "scope")
                 leaf_id = slug(leaf["id"], "default")
-                for candidate in lineage_root.rglob(leaf_id):
-                    if not candidate.is_dir() or candidate.parent.name != leaf_kind:
+                candidates, diagnostic = self._safe_walk_paths(
+                    lineage_root,
+                    leaf_id,
+                    entity=str(lineage_root),
+                    operation="lineage discovery",
+                )
+                if diagnostic is not None or candidates is None:
+                    return [], diagnostic
+                for candidate in candidates:
+                    candidate_stat, diagnostic = self._safe_stat_path(
+                        candidate,
+                        entity=str(candidate),
+                        operation="lineage candidate stat",
+                        follow_symlinks=False,
+                        code="workspace.retention.lineage_ambiguous",
+                        missing_ok=True,
+                    )
+                    if diagnostic is not None:
+                        return [], diagnostic
+                    if (
+                        candidate_stat is None
+                        or stat.S_ISLNK(candidate_stat.st_mode)
+                        or not stat.S_ISDIR(candidate_stat.st_mode)
+                        or candidate.parent.name != leaf_kind
+                    ):
                         continue
                     parts = candidate.relative_to(lineage_root).parts
                     lineage_pairs = set(zip(parts[0::2], parts[1::2]))
@@ -2098,29 +2283,87 @@ class LocalWorkspaceBackend:
 
         paths: set[str] = set()
         for candidate in candidate_roots:
-            if not candidate.exists():
+            lexical_parts = (lineage_root,) + tuple(
+                lineage_root.joinpath(*candidate.relative_to(lineage_root).parts[:index])
+                for index in range(1, len(candidate.relative_to(lineage_root).parts) + 1)
+            )
+            candidate_missing = False
+            for lexical_path in lexical_parts:
+                lexical_stat, diagnostic = self._safe_stat_path(
+                    lexical_path,
+                    entity=str(lexical_path),
+                    operation="lineage lexical-component stat",
+                    follow_symlinks=False,
+                    code="workspace.retention.lineage_ambiguous",
+                    missing_ok=True,
+                )
+                if diagnostic is not None:
+                    return [], diagnostic
+                if lexical_stat is None:
+                    candidate_missing = True
+                    break
+                if stat.S_ISLNK(lexical_stat.st_mode):
+                    return [], self._retention_diagnostic(
+                        "workspace.retention.lineage_ambiguous",
+                        "Workspace cleanup does not traverse symlinks in a lineage path.",
+                        entity=str(lexical_path),
+                    )
+            if candidate_missing:
                 continue
+            resolved_candidate, diagnostic = self._safe_resolve_path(
+                candidate,
+                entity=str(candidate),
+                operation="lineage subtree resolution",
+                code="workspace.retention.lineage_ambiguous",
+            )
+            if diagnostic is not None or resolved_candidate is None:
+                return [], diagnostic
             try:
-                candidate.resolve().relative_to(lineage_root)
-            except (OSError, ValueError) as error:
+                resolved_candidate.relative_to(lineage_root)
+            except ValueError as error:
                 return [], self._retention_diagnostic(
                     "workspace.retention.lineage_ambiguous",
                     f"Workspace lineage subtree is not contained: { error }",
                     entity=str(candidate),
                 )
-            for path in candidate.rglob("*"):
+            descendants, diagnostic = self._safe_walk_paths(
+                candidate,
+                "*",
+                entity=str(candidate),
+                operation="lineage readback",
+            )
+            if diagnostic is not None or descendants is None:
+                return [], diagnostic
+            for path in descendants:
+                path_stat, diagnostic = self._safe_stat_path(
+                    path,
+                    entity=str(path),
+                    operation="lineage descendant stat",
+                    follow_symlinks=False,
+                    missing_ok=True,
+                )
+                if diagnostic is not None:
+                    return [], diagnostic
+                if path_stat is None:
+                    continue
+                if stat.S_ISLNK(path_stat.st_mode):
+                    return [], self._retention_diagnostic(
+                        "workspace.retention.lineage_ambiguous",
+                        "Workspace cleanup does not traverse symlinks in a lineage subtree.",
+                        entity=str(path),
+                    )
+                if not stat.S_ISREG(path_stat.st_mode):
+                    continue
+                resolved, diagnostic = self._safe_resolve_path(
+                    path,
+                    entity=str(path),
+                    operation="lineage file resolution",
+                )
+                if diagnostic is not None or resolved is None:
+                    return [], diagnostic
                 try:
-                    if path.is_symlink():
-                        return [], self._retention_diagnostic(
-                            "workspace.retention.lineage_ambiguous",
-                            "Workspace cleanup does not traverse symlinks in a lineage subtree.",
-                            entity=str(path),
-                        )
-                    if not path.is_file():
-                        continue
-                    resolved = path.resolve()
                     paths.add(resolved.relative_to(area_root).as_posix())
-                except (OSError, ValueError) as error:
+                except ValueError as error:
                     return [], self._retention_diagnostic(
                         "workspace.retention.ref_readback_failed",
                         f"Workspace lineage readback failed: { error }",
@@ -2460,6 +2703,19 @@ class LocalWorkspaceBackend:
         for ref in retained_refs:
             await retain_ref(ref)
 
+        checkpoint_manifest = manifest_values.get(checkpoint_manifest_key)
+        if checkpoint_manifest_key in manifest_values:
+            if not isinstance(checkpoint_manifest, dict):
+                diagnostics.append(
+                    self._retention_diagnostic(
+                        "workspace.retention.ref_readback_failed",
+                        "Persisted Workspace checkpoint manifest is unreadable.",
+                        entity=checkpoint_manifest_key,
+                    )
+                )
+            elif representation_by_category["checkpoints"] == "hot":
+                await retain_ref(cast(WorkspaceRetainedReference, checkpoint_manifest))
+
         preserved_event_ids: set[str] = set()
         for anchor in anchors:
             for anchor_ref in (anchor.get("record_ref"), anchor.get("summary_ref")):
@@ -2615,10 +2871,44 @@ class LocalWorkspaceBackend:
             for row in fts_rows
             if str(row["record_id"]) in selected_record_id_set
         )
-        if selected_checkpoint_rows and checkpoint_manifest_key in manifest_values:
+        if (
+            representation_by_category["checkpoints"] != "hot"
+            and checkpoint_manifest_key in manifest_values
+        ):
             selected["manifest_keys"].append(checkpoint_manifest_key)
         if lease_manifest_key in manifest_values:
             selected["manifest_keys"].append(lease_manifest_key)
+
+        for key in selected:
+            selected[key] = sorted(set(selected[key]))
+
+        if any(selected.values()):
+            read_only_components = [
+                name
+                for name, component in (
+                    ("backend", self),
+                    ("db_store", self.db_store_provider),
+                    ("vector_store", self.vector_store_provider),
+                )
+                if component is not None and bool(getattr(component, "read_only", False))
+            ]
+            if read_only_components:
+                return self._retention_preview(
+                    status="deferred",
+                    scope=normalized_scope,
+                    lifecycle=lifecycle,
+                    policy=resolved_policy,
+                    retained_refs=self._deduplicate_retained_refs(canonical_retained_refs),
+                    inline_result=inline_result,
+                    diagnostics=[
+                        self._retention_diagnostic(
+                            "workspace.retention.provider_capability_missing",
+                            "Workspace retention cannot apply a non-empty plan through read-only components.",
+                            entity=type(self).__name__,
+                            detail={"read_only_components": read_only_components},
+                        )
+                    ],
+                )
 
         vector_provider = self.vector_store_provider
         if vector_provider is not None and selected_record_id_set:
@@ -2653,6 +2943,11 @@ class LocalWorkspaceBackend:
             selected[key] = sorted(set(selected[key]))
 
         logical_bytes = sum(selected_record_sizes.values())
+        logical_bytes += sum(
+            serialized_size(dict(row))
+            for row in all_record_rows
+            if str(row["id"]) in selected_record_id_set
+        )
         selected_event_ids = set(selected["runtime_event_ids"])
         logical_bytes += sum(
             serialized_size(event) for event in runtime_events if event["id"] in selected_event_ids
@@ -2688,6 +2983,12 @@ class LocalWorkspaceBackend:
             for row in scope_index_rows
             if f"{ row['record_id'] }:{ row['scope_key'] }" in selected_scope_index_ids
         )
+        selected_scratch_lease_ids = set(selected["scratch_lease_ids"])
+        logical_bytes += sum(
+            serialized_size(dict(row))
+            for row in scratch_rows
+            if str(row["lease_id"]) in selected_scratch_lease_ids
+        )
         selected_manifest_keys = set(selected["manifest_keys"])
         logical_bytes += sum(
             len(key.encode("utf-8")) + len(manifest_raw[key].encode("utf-8"))
@@ -2715,10 +3016,12 @@ class LocalWorkspaceBackend:
         for area, key in (("files", "file_paths"), ("scratch", "scratch_paths")):
             area_root = self.root / area
             for relative_path in selected[key]:
-                target = (area_root / relative_path).resolve()
-                try:
-                    logical_bytes += target.stat().st_size
-                except OSError as error:
+                target, diagnostic = self._safe_resolve_path(
+                    area_root / relative_path,
+                    entity=relative_path,
+                    operation="selected-path resolution",
+                )
+                if diagnostic is not None or target is None:
                     return self._retention_preview(
                         status="deferred",
                         scope=normalized_scope,
@@ -2726,14 +3029,24 @@ class LocalWorkspaceBackend:
                         policy=resolved_policy,
                         retained_refs=self._deduplicate_retained_refs(canonical_retained_refs),
                         inline_result=inline_result,
-                        diagnostics=[
-                            self._retention_diagnostic(
-                                "workspace.retention.ref_readback_failed",
-                                f"Workspace selected-path readback failed: { error }",
-                                entity=str(target),
-                            )
-                        ],
+                        diagnostics=[cast(WorkspaceRetentionDiagnostic, diagnostic)],
                     )
+                target_stat, diagnostic = self._safe_stat_path(
+                    target,
+                    entity=str(target),
+                    operation="selected-path stat",
+                )
+                if diagnostic is not None or target_stat is None:
+                    return self._retention_preview(
+                        status="deferred",
+                        scope=normalized_scope,
+                        lifecycle=lifecycle,
+                        policy=resolved_policy,
+                        retained_refs=self._deduplicate_retained_refs(canonical_retained_refs),
+                        inline_result=inline_result,
+                        diagnostics=[cast(WorkspaceRetentionDiagnostic, diagnostic)],
+                    )
+                logical_bytes += target_stat.st_size
 
         return self._retention_preview(
             status="ready",
