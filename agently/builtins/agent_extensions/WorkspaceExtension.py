@@ -19,7 +19,7 @@ from typing import Any
 from typing_extensions import Self
 
 from agently.core import BaseAgent, LazyWorkspace, Workspace
-from agently.core.workspace._defaults import (
+from agently.core.Workspace._defaults import (
     ScopeNode,
     default_physical_root,
     lineage_files_root,

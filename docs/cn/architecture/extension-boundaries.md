@@ -132,7 +132,7 @@ manager、默认实现、registry、adapter、policy 或 validation 等多个架
 才保持单文件。
 
 已落地案例包括 `core/Action`、`core/TriggerFlow`、`core/orchestration/TaskDAG`、
-`core/workspace`、`builtins/plugins/ExecutionResourceProvider` 和
+`core/Workspace`、`builtins/plugins/ExecutionResourceProvider` 和
 `builtins/plugins/SkillsManager`；`builtins/plugins/SkillsExecutor` 仅作为兼容
 facade 保留。公开 import 通过 package `__init__.py` 和顶层 re-export 保持稳定。
 

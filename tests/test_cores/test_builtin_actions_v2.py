@@ -13,7 +13,7 @@ from agently.builtins.tools import Cmd as LegacyCmd
 from agently.builtins.tools import Search as LegacySearch
 from agently.core.application.AgentExecution.Context import AgentExecutionContext
 from agently.core.runtime.RuntimeContext import bind_runtime_context
-from agently.core.workspace._defaults import WORKSPACE_GUIDE_FILENAME
+from agently.core.Workspace._defaults import WORKSPACE_GUIDE_FILENAME
 
 
 def test_builtins_actions_is_preferred_import_path_and_tools_is_facade():

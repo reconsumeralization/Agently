@@ -51,7 +51,7 @@ Embeddings 仍然属于应用或插件逻辑。backend 有真实 `vector_index` 
 可以使用它；没有真实索引时，vector retrieval 会带 diagnostics 降级。
 
 ```python
-from agently.core.workspace import LocalVectorIndex
+from agently.core.Workspace import LocalVectorIndex
 
 vector_index = LocalVectorIndex(embedder, similarity="cosine")
 ```

@@ -18,7 +18,7 @@ from agently.core import (
     WorkspacePolicyError,
 )
 from agently.core.application import AgentTask
-from agently.core.workspace._defaults import WORKSPACE_GUIDE_FILENAME, script_scope
+from agently.core.Workspace._defaults import WORKSPACE_GUIDE_FILENAME, script_scope
 from agently.core.orchestration.TriggerFlow import diagnose_runtime_event_records, project_runtime_event_record
 from agently.types.data import (
     RuntimeEvent,
@@ -642,13 +642,15 @@ async def test_workspace_file_io_handler_registry_and_dispatch(tmp_path):
 
 @pytest.mark.asyncio
 async def test_workspace_file_io_optional_dependencies_fail_closed(tmp_path, monkeypatch):
+    from agently.core.Workspace import FileIO
+
     workspace = Agently.create_workspace(tmp_path / "optional-deps")
 
     def missing_dependency(name: str, *args: Any, **kwargs: Any):
         _ = (args, kwargs)
         raise ImportError(name)
 
-    monkeypatch.setattr("agently.core.workspace.FileIO.LazyImport.import_package", missing_dependency)
+    monkeypatch.setattr(FileIO.LazyImport, "import_package", missing_dependency)
 
     (workspace.files_root / "scan.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
     pdf = await workspace.read_file("scan.pdf")

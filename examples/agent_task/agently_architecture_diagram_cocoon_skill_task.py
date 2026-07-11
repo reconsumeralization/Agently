@@ -83,7 +83,7 @@ SOURCE_PATHS = [
     "agently/core/application/AgentExecution/Result.py",
     "agently/core/orchestration/TaskDAG/TaskDAGExecutor.py",
     "agently/core/orchestration/TriggerFlow/TriggerFlow.py",
-    "agently/core/workspace/Workspace.py",
+    "agently/core/Workspace/Workspace.py",
     "agently/core/application/SkillsExecutor/SkillsExecutor.py",
     "agently/builtins/plugins/ActionRuntime/AgentlyActionRuntime.py",
 ]
@@ -110,7 +110,7 @@ ARCHITECTURE_STATUS_FACTS = [
     {
         "component": "Workspace",
         "status": "current foundation",
-        "source": "docs/en/reference/execution-layer-selection.md; agently/core/workspace/Workspace.py",
+        "source": "docs/en/reference/execution-layer-selection.md; agently/core/Workspace/Workspace.py",
         "evidence": "Workspace stores evidence and context; it does not decide completion.",
     },
     {

@@ -7,7 +7,7 @@ import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowEventData, TriggerFlowRuntimeData
 from agently.base import execution_resource
-from agently.core.workspace._defaults import script_scope
+from agently.core.Workspace._defaults import script_scope
 from agently.types.data import RunContext
 from agently.types.plugins import ExecutionSnapshotStore, RuntimeEventStore
 from agently.types.trigger_flow import AGGREGATION_SCOPE_META_KEY

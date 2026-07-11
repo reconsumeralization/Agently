@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import subprocess
 from pathlib import Path
 from typing import get_args
 
@@ -95,7 +96,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.model import AttemptRunner
     from agently.core.runtime import EventCenter, RuntimeEvent, bind_runtime_context
     from agently.core.session import Session
-    from agently.core.workspace import ContextProfile, Workspace
+    from agently.core.Workspace import ContextProfile, Workspace
 
     assert importlib.import_module("agently.core.Agent").BaseAgent is BaseAgent
     assert importlib.import_module("agently.core.application.AgentExecution.Stream").AgentExecutionStream is AgentExecutionStream
@@ -120,8 +121,29 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.operation.Action").Tool is Tool
     assert importlib.import_module("agently.core.application.SkillsManager.SkillsManager").SkillsManager is SkillsManager
     assert importlib.import_module("agently.core.application.SkillsExecutor.SkillsExecutor").SkillsExecutor is SkillsExecutor
-    assert importlib.import_module("agently.core.workspace.Workspace").Workspace is Workspace
-    assert importlib.import_module("agently.core.workspace.ContextBuilder").ContextProfile is ContextProfile
+    assert importlib.import_module("agently.core.Workspace.Workspace").Workspace is Workspace
+    assert importlib.import_module("agently.core.Workspace.ContextBuilder").ContextProfile is ContextProfile
+
+
+def test_workspace_package_uses_class_owned_canonical_name_with_released_alias():
+    canonical_package = importlib.import_module("agently.core.Workspace")
+    assert canonical_package.__file__ is not None
+    canonical_root = Path(canonical_package.__file__).resolve().parent
+    repository_root = canonical_root.parents[2]
+    tracked_paths = subprocess.run(
+        ["git", "ls-files"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+    assert canonical_root.name == "Workspace"
+    assert not any(path.startswith("agently/core/workspace/") for path in tracked_paths)
+
+    from agently.core.workspace import LocalVectorIndex as ReleasedLocalVectorIndex  # pyright: ignore[reportMissingImports]
+
+    assert ReleasedLocalVectorIndex is canonical_package.LocalVectorIndex
 
 
 def test_core_layout_keeps_only_classified_root_packages():
@@ -132,6 +154,7 @@ def test_core_layout_keeps_only_classified_root_packages():
 
     assert root_files == ["Agent.py", "__init__.py"]
     assert root_dirs == [
+        "Workspace",
         "application",
         "extension",
         "model",
@@ -139,16 +162,15 @@ def test_core_layout_keeps_only_classified_root_packages():
         "orchestration",
         "runtime",
         "session",
-        "workspace",
     ]
     assert (core_root / "application" / "AgentExecution").is_dir()
     assert (core_root / "application" / "SkillsManager").is_dir()
     assert (core_root / "application" / "SkillsExecutor").is_dir()
     assert (core_root / "operation" / "Action").is_dir()
     assert (core_root / "operation" / "ExecutionResource").is_dir()
-    assert (core_root / "workspace").is_dir()
-    assert (core_root / "workspace" / "ContextBuilder").is_dir()
-    assert not (core_root / "workspace" / "Recall").exists()
+    assert (core_root / "Workspace").is_dir()
+    assert (core_root / "Workspace" / "ContextBuilder").is_dir()
+    assert not (core_root / "Workspace" / "Recall").exists()
     assert not (core_root / "session" / "Workspace").exists()
     assert not (core_root / "session" / "Recall").exists()
     assert (core_root / "orchestration" / "TriggerFlow").is_dir()

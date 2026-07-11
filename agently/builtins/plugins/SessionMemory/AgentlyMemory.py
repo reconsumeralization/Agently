@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from agently.core.workspace.Retrieval import _default_model_unavailable_reason
+from agently.core.Workspace.Retrieval import _default_model_unavailable_reason
 from agently.types.data.workspace import WorkspaceRetrievalPackage
 from agently.types.plugins import SessionMemory
 from agently.utils import Settings, SettingsNamespace
