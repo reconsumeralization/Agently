@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
@@ -146,13 +147,11 @@ class Workspace:
             self.files_root = Path(str(getattr(self.backend, "files_root", self.content_root)))
         else:
             self.files_root = Path(str(files_root)).expanduser().resolve()
-            if mode not in {"read", "read_only", "readonly"}:
-                self.files_root.mkdir(parents=True, exist_ok=True)
         self.scope_lineage: list[ScopeNode] = normalize_lineage(scope_lineage)
         self.default_scope = dict(default_scope or {})
         self.default_search_scope = dict(default_search_scope or self.default_scope)
         if not getattr(self.backend, "read_only", False):
-            self.ensure_files_guide()
+            self._ensure_files_guide_if_mutation_available()
 
     def _bind_child(
         self,
@@ -174,6 +173,38 @@ class Workspace:
             ),
             scope_lineage=child_lineage,
         )
+
+    @asynccontextmanager
+    async def _backend_mutation_guard(self) -> AsyncIterator[None]:
+        guard = getattr(self.backend, "_mutation_guard", None)
+        if callable(guard):
+            typed_guard = cast(
+                Callable[[], AbstractAsyncContextManager[None]],
+                guard,
+            )
+            async with typed_guard():
+                yield
+            return
+        yield
+
+    def _try_backend_sync_mutation_guard(self) -> AbstractContextManager[bool] | None:
+        guard = getattr(self.backend, "_try_sync_mutation_guard", None)
+        if not callable(guard):
+            return None
+        typed_guard = cast(
+            Callable[[], AbstractContextManager[bool]],
+            guard,
+        )
+        return typed_guard()
+
+    def _ensure_files_guide_if_mutation_available(self) -> Path:
+        guard = self._try_backend_sync_mutation_guard()
+        if guard is None:
+            return self._ensure_files_guide_unlocked()
+        with guard as acquired:
+            if acquired:
+                return self._ensure_files_guide_unlocked()
+        return self.files_root / WORKSPACE_GUIDE_FILENAME
 
     def with_scope_node(
         self,
@@ -240,6 +271,15 @@ class Workspace:
         and cloned repositories can keep their own README semantics.
         """
 
+        guard = self._try_backend_sync_mutation_guard()
+        if guard is None:
+            return self._ensure_files_guide_unlocked()
+        with guard as acquired:
+            if not acquired:
+                raise RuntimeError("Workspace file mutation is busy.")
+            return self._ensure_files_guide_unlocked()
+
+    def _ensure_files_guide_unlocked(self) -> Path:
         self.files_root.mkdir(parents=True, exist_ok=True)
         guide_path = self.files_root / WORKSPACE_GUIDE_FILENAME
         if guide_path.exists():
@@ -320,7 +360,14 @@ class Workspace:
             if self.capabilities().get("read_only"):
                 raise PermissionError("Workspace is read-only; file_area_path(..., create=True) is blocked.")
             directory = target if not parts else target.parent
-            directory.mkdir(parents=True, exist_ok=True)
+            guard = self._try_backend_sync_mutation_guard()
+            if guard is None:
+                directory.mkdir(parents=True, exist_ok=True)
+            else:
+                with guard as acquired:
+                    if not acquired:
+                        raise RuntimeError("Workspace file mutation is busy.")
+                    directory.mkdir(parents=True, exist_ok=True)
         return target
 
     def _scoped_record_scope(self, scope: dict[str, Any] | None) -> dict[str, Any]:
@@ -1391,8 +1438,27 @@ class Workspace:
         handler: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> WorkspaceFileWriteResult:
+        async with self._backend_mutation_guard():
+            return await self._write_file_unlocked(
+                path,
+                content,
+                append=append,
+                handler=handler,
+                options=options,
+            )
+
+    async def _write_file_unlocked(
+        self,
+        path: str | Path,
+        content: str,
+        *,
+        append: bool = False,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileWriteResult:
         if self.capabilities().get("read_only"):
             raise PermissionError("Workspace is read-only; write_file(...) is blocked.")
+        self._ensure_files_guide_unlocked()
         target = self.resolve_file_path(path)
         return await self.manager.write_file_path(
             target,
@@ -1414,6 +1480,28 @@ class Workspace:
         handler: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> WorkspaceFileWriteResult:
+        async with self._backend_mutation_guard():
+            return await self._edit_file_unlocked(
+                path,
+                old_string,
+                new_string,
+                replace_all=replace_all,
+                expected_sha256=expected_sha256,
+                handler=handler,
+                options=options,
+            )
+
+    async def _edit_file_unlocked(
+        self,
+        path: str | Path,
+        old_string: str,
+        new_string: str,
+        *,
+        replace_all: bool = False,
+        expected_sha256: str | None = None,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileWriteResult:
         if old_string == new_string:
             raise ValueError("old_string and new_string are identical; no edit was applied.")
         info = self.inspect_file(path)
@@ -1422,7 +1510,13 @@ class Workspace:
         if not info.get("exists"):
             if old_string != "":
                 raise FileNotFoundError(f"Workspace file not found: { path }")
-            return await self.write_file(path, new_string, append=False, handler=handler, options=options)
+            return await self._write_file_unlocked(
+                path,
+                new_string,
+                append=False,
+                handler=handler,
+                options=options,
+            )
         read_result = await self.read_file(path, max_bytes=int(info.get("bytes") or 0) + 1)
         if not read_result.get("readable") or read_result.get("content_kind") != "text":
             raise ValueError(f"Workspace file is not editable text: { path }")
@@ -1441,7 +1535,15 @@ class Workspace:
             if replacement_count > 1 and not replace_all:
                 raise ValueError("old_string matched multiple locations; set replace_all=True or provide more context.")
             new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
-        result = dict(await self.write_file(path, new_content, append=False, handler=handler, options=options))
+        result = dict(
+            await self._write_file_unlocked(
+                path,
+                new_content,
+                append=False,
+                handler=handler,
+                options=options,
+            )
+        )
         result["replacements"] = replacement_count
         return cast(WorkspaceFileWriteResult, result)
 
@@ -1451,8 +1553,21 @@ class Workspace:
         *,
         expected_files: list[str] | None = None,
     ) -> dict[str, Any]:
+        async with self._backend_mutation_guard():
+            return await self._apply_patch_unlocked(
+                patch,
+                expected_files=expected_files,
+            )
+
+    async def _apply_patch_unlocked(
+        self,
+        patch: str,
+        *,
+        expected_files: list[str] | None = None,
+    ) -> dict[str, Any]:
         if self.capabilities().get("read_only"):
             raise PermissionError("Workspace is read-only; apply_patch(...) is blocked.")
+        self._ensure_files_guide_unlocked()
         patch_text = str(patch or "")
         paths = self._paths_from_unified_patch(patch_text)
         if not paths:
@@ -1524,6 +1639,24 @@ class Workspace:
         media_type: str | None = None,
         overwrite: bool = False,
     ) -> WorkspaceFileWriteResult:
+        async with self._backend_mutation_guard():
+            return await self._materialize_file_unlocked(
+                path,
+                content,
+                source=source,
+                media_type=media_type,
+                overwrite=overwrite,
+            )
+
+    async def _materialize_file_unlocked(
+        self,
+        path: str | Path,
+        content: bytes,
+        *,
+        source: dict[str, Any] | None = None,
+        media_type: str | None = None,
+        overwrite: bool = False,
+    ) -> WorkspaceFileWriteResult:
         """Materialize trusted bytes into the Workspace file boundary.
 
         This is intentionally separate from write_file(...), whose public
@@ -1534,6 +1667,7 @@ class Workspace:
             raise PermissionError("Workspace is read-only; materialize_file(...) is blocked.")
         if not isinstance(content, (bytes, bytearray)):
             raise TypeError("Workspace.materialize_file(...) requires bytes content.")
+        self._ensure_files_guide_unlocked()
         target = self.resolve_file_path(path)
         if target.exists() and not overwrite:
             raise FileExistsError(f"Workspace file already exists: { path }")
@@ -1588,8 +1722,27 @@ class Workspace:
         handler: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> WorkspaceFileExportResult:
+        async with self._backend_mutation_guard():
+            return await self._export_file_unlocked(
+                source_path,
+                output_path,
+                export_kind=export_kind,
+                handler=handler,
+                options=options,
+            )
+
+    async def _export_file_unlocked(
+        self,
+        source_path: str | Path,
+        output_path: str | Path,
+        *,
+        export_kind: str,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileExportResult:
         if self.capabilities().get("read_only"):
             raise PermissionError("Workspace is read-only; export_file(...) is blocked.")
+        self._ensure_files_guide_unlocked()
         source = self.resolve_file_path(source_path)
         if not source.is_file():
             raise FileNotFoundError(f"Workspace source file not found: { source_path }")

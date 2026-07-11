@@ -14,17 +14,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import shutil
 import sqlite3
 import stat
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, cast
+from typing import Any, AsyncIterator, Iterator, cast
 
 from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.workspace import (
@@ -58,6 +61,8 @@ from .Stores import (
     SQLiteVectorStoreProvider,
     VectorIndexPipeline,
     VectorStoreProviderUnavailableError,
+    delete_owned_file_descriptor_relative,
+    supports_descriptor_relative_delete,
 )
 from .Retention import (
     NormalizedRetainedRoot,
@@ -124,6 +129,22 @@ class _ResolvedRetentionRoots:
     diagnostics: list[WorkspaceRetentionDiagnostic]
 
 
+class _TerminalManifestPlanConflict(RuntimeError):
+    def __init__(self, current: WorkspaceRecordRef):
+        super().__init__("Workspace terminal manifest plan changed during derived cleanup.")
+        self.current = current
+
+
+class _TerminalManifestLedgerError(RuntimeError):
+    pass
+
+
+class _DerivedCleanupOperationalError(RuntimeError):
+    def __init__(self, error: Exception):
+        super().__init__(str(error))
+        self.error = error
+
+
 class LocalWorkspaceBackend:
     """Local filesystem content plus SQLite metadata and FTS index."""
 
@@ -187,6 +208,7 @@ class LocalWorkspaceBackend:
         self.content_root = self.root / "content"
         self.files_root = self.root / "files"
         self.db_path = self.root / "workspace.db"
+        self._mutation_lock = threading.Lock()
         self.mode = mode
         self.read_only = mode in {"read", "read_only", "readonly"}
         self.workspace_id = self._default_workspace_id()
@@ -216,6 +238,30 @@ class LocalWorkspaceBackend:
             self.vector_store_provider = self._default_vector_store_provider(create=create)
         self.vector_store_provider_name = getattr(self.vector_store_provider, "name", None)
         self.vector_index = self._default_vector_index()
+
+    @asynccontextmanager
+    async def _mutation_guard(self) -> AsyncIterator[None]:
+        """Serialize cooperative mutations without binding the lock to an event loop."""
+
+        while not self._mutation_lock.acquire(blocking=False):
+            await asyncio.sleep(0.001)
+        try:
+            yield
+        finally:
+            self._mutation_lock.release()
+
+    @contextmanager
+    def _try_sync_mutation_guard(self) -> Iterator[bool]:
+        acquired = self._mutation_lock.acquire(blocking=False)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self._mutation_lock.release()
+
+    @staticmethod
+    def _supports_descriptor_relative_delete() -> bool:
+        return supports_descriptor_relative_delete()
 
     def _initialize(self):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -1055,6 +1101,28 @@ class LocalWorkspaceBackend:
         return cast(WorkspaceLeaseRef, lease)
 
     async def put(
+        self,
+        content: Any,
+        *,
+        collection: str,
+        kind: str | None = None,
+        summary: str | None = None,
+        scope: dict[str, Any] | None = None,
+        source: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> WorkspaceRecordRef:
+        async with self._mutation_guard():
+            return await self._put_unlocked(
+                content,
+                collection=collection,
+                kind=kind,
+                summary=summary,
+                scope=scope,
+                source=source,
+                meta=meta,
+            )
+
+    async def _put_unlocked(
         self,
         content: Any,
         *,
@@ -3165,6 +3233,22 @@ class LocalWorkspaceBackend:
                     )
                 ],
             )
+        if not self._supports_descriptor_relative_delete():
+            diagnostic = self._retention_diagnostic(
+                "workspace.retention.derived_delete_unsupported",
+                "Workspace retention requires descriptor-relative no-follow deletion support.",
+                entity=str(normalized_scope.get("execution_id") or "workspace"),
+            )
+            diagnostic["retryable"] = False
+            return self._retention_preview(
+                status="deferred",
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=resolved_policy,
+                retained_refs=list(retained_refs),
+                inline_result=inline_result,
+                diagnostics=[diagnostic],
+            )
 
         representation_by_category = {
             rule["category"]: rule["representation"] for rule in resolved_policy.get("rules", [])
@@ -3258,20 +3342,13 @@ class LocalWorkspaceBackend:
                 )
 
         checkpoint_manifest = manifest_values.get(checkpoint_manifest_key)
-        effective_retained_refs = list(retained_refs)
         terminal_manifest = all_records.get(
             self._terminal_manifest_record_id(execution_id)
         )
-        if (
-            terminal_manifest is not None
-            and terminal_manifest.get("collection") == "artifacts"
-            and terminal_manifest.get("kind") == "workspace_terminal_manifest"
-        ):
-            effective_retained_refs.append(terminal_manifest)
         roots = await self._resolve_retention_roots(
             owned_record_ids=owned_record_ids,
             all_records=all_records,
-            retained_refs=effective_retained_refs,
+            retained_refs=retained_refs,
             checkpoint_manifest=(
                 cast(WorkspaceRetainedReference, checkpoint_manifest)
                 if isinstance(checkpoint_manifest, dict)
@@ -3287,6 +3364,12 @@ class LocalWorkspaceBackend:
         canonical_records = roots.canonical_records
         canonical_retained_refs = roots.canonical_refs
         retained_record_ids = roots.record_ids
+        if (
+            terminal_manifest is not None
+            and terminal_manifest.get("collection") == "artifacts"
+            and terminal_manifest.get("kind") == "workspace_terminal_manifest"
+        ):
+            retained_record_ids.add(str(terminal_manifest["id"]))
         retained_file_paths = roots.file_paths
         retained_content_paths = roots.content_paths
         retained_event_ids = roots.event_ids
@@ -3446,6 +3529,18 @@ class LocalWorkspaceBackend:
                 "diagnostics": list(diagnostics),
             },
         )
+
+    @staticmethod
+    def _zero_retention_accounting(
+        accounting: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        entities = cast(Mapping[str, Any], accounting.get("entities") or {})
+        return {
+            "entities": {str(key): 0 for key in entities},
+            "logical_bytes_deleted": 0,
+            "physical_bytes_reclaimed": 0,
+            "physical_bytes_pending": 0,
+        }
 
     def _terminal_manifest_ref_from_row(
         self,
@@ -3610,24 +3705,119 @@ class LocalWorkspaceBackend:
         meta: Mapping[str, Any],
     ) -> WorkspaceRecordRef:
         execution_id = str(meta.get("lifecycle", {}).get("execution_id") or "")
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            current = self._terminal_manifest_from_conn(
-                conn,
-                execution_id=execution_id,
+        expected_meta = cast(Mapping[str, Any], manifest_ref.get("meta") or {})
+        expected_fingerprint = str(expected_meta.get("plan_fingerprint") or "")
+        if (
+            not execution_id
+            or str(meta.get("plan_fingerprint") or "") != expected_fingerprint
+        ):
+            raise ValueError("Workspace terminal manifest update contract is invalid.")
+        expected_raw = json_dumps(expected_meta)
+        for _ in range(4):
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    row = conn.execute(
+                        "SELECT * FROM records WHERE id = ?",
+                        (manifest_ref["id"],),
+                    ).fetchone()
+                    if row is None:
+                        raise _TerminalManifestLedgerError(
+                            "Workspace terminal manifest disappeared during derived cleanup."
+                        )
+                    try:
+                        current = self._terminal_manifest_ref_from_row(
+                            row,
+                            execution_id=execution_id,
+                        )
+                    except (TypeError, ValueError) as error:
+                        raise _TerminalManifestLedgerError(str(error)) from error
+                    current_meta = cast(Mapping[str, Any], current["meta"])
+                    current_fingerprint = str(current_meta["plan_fingerprint"])
+                    if current_fingerprint != expected_fingerprint:
+                        raise _TerminalManifestPlanConflict(current)
+                    current_raw = str(row["meta_json"])
+                    next_meta = self._merge_terminal_manifest_meta(
+                        current_meta,
+                        meta,
+                    )
+                    updated_raw = json_dumps(next_meta)
+                    compare_raw = (
+                        expected_raw if current_raw == expected_raw else current_raw
+                    )
+                    cursor = conn.execute(
+                        "UPDATE records SET meta_json = ? WHERE id = ? AND meta_json = ?",
+                        (updated_raw, manifest_ref["id"], compare_raw),
+                    )
+                    if cursor.rowcount != 1:
+                        conn.rollback()
+                        continue
+                    conn.commit()
+                    updated = cast(WorkspaceRecordRef, dict(current))
+                    updated["meta"] = next_meta
+                    return updated
+                except Exception:
+                    if conn.in_transaction:
+                        conn.rollback()
+                    raise
+        raise sqlite3.OperationalError(
+            "Workspace terminal manifest compare-and-swap retry limit was exceeded."
+        )
+
+    @staticmethod
+    def _merge_terminal_manifest_meta(
+        current: Mapping[str, Any],
+        proposed: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if str(current.get("plan_fingerprint") or "") != str(
+            proposed.get("plan_fingerprint") or ""
+        ):
+            raise ValueError("Cannot merge different Workspace retention plans.")
+        current_derived = cast(Mapping[str, Any], current["derived_cleanup"])
+        proposed_derived = cast(Mapping[str, Any], proposed["derived_cleanup"])
+        current_pending = cast(
+            Mapping[str, Sequence[str]], current_derived["pending"]
+        )
+        proposed_pending = cast(
+            Mapping[str, Sequence[str]], proposed_derived["pending"]
+        )
+        merged_pending = {
+            key: sorted(set(current_pending[key]) & set(proposed_pending[key]))
+            for key in (
+                "vector_record_ids",
+                "content_paths",
+                "file_paths",
+                "scratch_paths",
             )
-            if current is None or current["id"] != manifest_ref["id"]:
-                conn.rollback()
-                raise RuntimeError("Workspace terminal manifest disappeared during derived cleanup.")
-            updated = self._write_terminal_manifest_on_conn(
-                conn,
-                execution_id=execution_id,
-                scope=current["scope"],
-                meta=meta,
-                created_at=current["created_at"],
+        }
+        current_attempts = int(current_derived["attempts"])
+        proposed_attempts = int(proposed_derived["attempts"])
+        current_state = str(current["state"])
+        proposed_state = str(proposed["state"])
+        if "applied" in {current_state, proposed_state}:
+            state = "applied"
+            merged_pending = {key: [] for key in merged_pending}
+            last_error = None
+        else:
+            state = (
+                "derived_pending"
+                if "derived_pending" in {current_state, proposed_state}
+                else "db_committed"
             )
-            conn.commit()
-        return updated
+            preferred = (
+                proposed_derived
+                if proposed_attempts >= current_attempts
+                else current_derived
+            )
+            last_error = preferred.get("last_error")
+        merged = dict(current)
+        merged["state"] = state
+        merged["derived_cleanup"] = {
+            "pending": merged_pending,
+            "attempts": max(current_attempts, proposed_attempts),
+            "last_error": last_error,
+        }
+        return merged
 
     @staticmethod
     def _delete_ids_on_conn(
@@ -3717,75 +3907,91 @@ class LocalWorkspaceBackend:
             )
         if area_root is None:
             return False
-        target = area_root.joinpath(*relative.parts)
-        current = area_root
-        target_stat = None
-        for index, part in enumerate(relative.parts):
-            current = current / part
-            try:
-                current_stat = current.lstat()
-            except FileNotFoundError:
-                return False
-            if stat.S_ISLNK(current_stat.st_mode):
-                raise WorkspacePolicyError(
-                    f"Workspace retention cleanup does not traverse symlinks: {relative_path}"
-                )
-            if index < len(relative.parts) - 1 and not stat.S_ISDIR(current_stat.st_mode):
-                raise WorkspacePolicyError(
-                    f"Workspace retention cleanup parent is not a directory: {relative_path}"
-                )
-            target_stat = current_stat
-        if target_stat is None:
-            return False
-        if not stat.S_ISREG(target_stat.st_mode):
-            raise WorkspacePolicyError(
-                f"Workspace retention cleanup target is not a regular file: {relative_path}"
-            )
-        resolved_target = target.resolve()
-        try:
-            resolved_target.relative_to(area_root)
-        except ValueError as error:
-            raise WorkspacePolicyError(
-                f"Workspace retention cleanup path is not contained: {relative_path}"
-            ) from error
-        if resolved_target != target:
-            raise WorkspacePolicyError(
-                f"Workspace retention cleanup path changed during resolution: {relative_path}"
-            )
-        confirmed_stat = target.lstat()
-        if (
-            stat.S_ISLNK(confirmed_stat.st_mode)
-            or (confirmed_stat.st_dev, confirmed_stat.st_ino)
-            != (target_stat.st_dev, target_stat.st_ino)
-        ):
-            raise WorkspacePolicyError(
-                f"Workspace retention cleanup target changed before deletion: {relative_path}"
-            )
-        try:
-            target.unlink()
-        except FileNotFoundError:
-            return False
-        self._prune_empty_retention_directories(target.parent, area_root / "lineage")
-        return True
-
-    @staticmethod
-    def _prune_empty_retention_directories(start: Path, stop: Path) -> None:
-        current = start
-        while current != stop and stop in current.parents:
-            try:
-                current_stat = current.lstat()
-            except FileNotFoundError:
-                current = current.parent
-                continue
-            if stat.S_ISLNK(current_stat.st_mode) or not stat.S_ISDIR(current_stat.st_mode):
-                return
-            try:
-                current.rmdir()
-            except OSError:
-                return
-            current = current.parent
+        return delete_owned_file_descriptor_relative(
+            area_root,
+            relative,
+            protected_parent_depth=1,
+        )
 
     async def _resume_retention_derived_cleanup(
+        self,
+        manifest_ref: WorkspaceRecordRef,
+    ) -> WorkspaceRetentionResult:
+        try:
+            return await self._resume_retention_derived_cleanup_unhandled(
+                manifest_ref
+            )
+        except _TerminalManifestPlanConflict as error:
+            current_meta = cast(Mapping[str, Any], error.current["meta"])
+            diagnostic = retention_diagnostic(
+                "workspace.retention.plan_conflict",
+                "A newer Workspace retention plan replaced this cleanup ledger.",
+                entity=str(error.current["id"]),
+                detail={
+                    "existing_plan_fingerprint": str(
+                        current_meta["plan_fingerprint"]
+                    ),
+                    "requested_plan_fingerprint": str(
+                        manifest_ref["meta"]["plan_fingerprint"]
+                    ),
+                },
+            )
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=str(manifest_ref["meta"]["plan_fingerprint"]),
+                manifest_ref=error.current,
+                retained_refs=cast(
+                    Sequence[WorkspaceRetainedReference],
+                    current_meta["retained_refs"],
+                ),
+                accounting=self._zero_retention_accounting(
+                    cast(Mapping[str, Any], manifest_ref["meta"]["accounting"])
+                ),
+                diagnostics=[diagnostic],
+            )
+        except _TerminalManifestLedgerError as error:
+            diagnostic = retention_diagnostic(
+                "workspace.retention.ledger_invalid",
+                f"Workspace terminal retention ledger is invalid: {error}",
+                entity=str(manifest_ref["id"]),
+                detail={"error_type": type(error).__name__},
+            )
+            diagnostic["retryable"] = False
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=str(manifest_ref["meta"]["plan_fingerprint"]),
+                manifest_ref=manifest_ref,
+                retained_refs=cast(
+                    Sequence[WorkspaceRetainedReference],
+                    manifest_ref["meta"]["retained_refs"],
+                ),
+                accounting=cast(
+                    Mapping[str, Any], manifest_ref["meta"]["accounting"]
+                ),
+                diagnostics=[diagnostic],
+            )
+        except (sqlite3.Error, OSError) as error:
+            diagnostic = retention_diagnostic(
+                "workspace.retention.ledger_update_failed",
+                f"Workspace terminal retention ledger update failed: {error}",
+                entity=str(manifest_ref["id"]),
+                detail={"error_type": type(error).__name__},
+            )
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=str(manifest_ref["meta"]["plan_fingerprint"]),
+                manifest_ref=manifest_ref,
+                retained_refs=cast(
+                    Sequence[WorkspaceRetainedReference],
+                    manifest_ref["meta"]["retained_refs"],
+                ),
+                accounting=cast(
+                    Mapping[str, Any], manifest_ref["meta"]["accounting"]
+                ),
+                diagnostics=[diagnostic],
+            )
+
+    async def _resume_retention_derived_cleanup_unhandled(
         self,
         manifest_ref: WorkspaceRecordRef,
     ) -> WorkspaceRetentionResult:
@@ -3801,39 +4007,78 @@ class LocalWorkspaceBackend:
         meta["state"] = "derived_pending"
         meta["derived_cleanup"] = derived
         manifest_ref = self._update_terminal_manifest_meta(manifest_ref, meta)
+        if manifest_ref["meta"]["state"] == "applied":
+            return self._retention_result(
+                status="noop",
+                plan_fingerprint=str(meta["plan_fingerprint"]),
+                manifest_ref=manifest_ref,
+                retained_refs=cast(
+                    Sequence[WorkspaceRetainedReference],
+                    manifest_ref["meta"]["retained_refs"],
+                ),
+                accounting=self._zero_retention_accounting(
+                    cast(Mapping[str, Any], manifest_ref["meta"]["accounting"])
+                ),
+            )
 
         try:
             vector_ids = list(pending["vector_record_ids"])
             if vector_ids:
                 delete_vectors = getattr(self.vector_store_provider, "delete_records", None)
                 if not callable(delete_vectors):
-                    raise WorkspaceConfigurationError(
-                        "Configured vector provider cannot delete derived record entries."
+                    raise _DerivedCleanupOperationalError(
+                        WorkspaceConfigurationError(
+                            "Configured vector provider cannot delete derived record entries."
+                        )
                     )
-                await cast(
-                    Callable[[Sequence[str]], Awaitable[None]],
-                    delete_vectors,
-                )(vector_ids)
+                try:
+                    await cast(
+                        Callable[[Sequence[str]], Awaitable[None]], delete_vectors
+                    )(vector_ids)
+                except (
+                    OSError,
+                    sqlite3.Error,
+                    WorkspaceConfigurationError,
+                    WorkspacePolicyError,
+                ) as error:
+                    raise _DerivedCleanupOperationalError(error) from error
                 pending["vector_record_ids"] = []
                 manifest_ref = self._update_terminal_manifest_meta(manifest_ref, meta)
 
             for key in ("content_paths", "file_paths", "scratch_paths"):
                 for relative_path in list(pending[key]):
-                    if key == "content_paths":
-                        await self.content.delete_content(relative_path)
-                    elif key == "file_paths":
-                        self._delete_retention_lineage_file("files", relative_path)
-                    else:
-                        self._delete_retention_lineage_file("scratch", relative_path)
+                    try:
+                        if key == "content_paths":
+                            await self.content.delete_content(relative_path)
+                        elif key == "file_paths":
+                            self._delete_retention_lineage_file("files", relative_path)
+                        else:
+                            self._delete_retention_lineage_file("scratch", relative_path)
+                    except (
+                        OSError,
+                        sqlite3.Error,
+                        WorkspaceConfigurationError,
+                        WorkspacePolicyError,
+                    ) as error:
+                        raise _DerivedCleanupOperationalError(error) from error
                     pending[key].remove(relative_path)
                     manifest_ref = self._update_terminal_manifest_meta(manifest_ref, meta)
-        except Exception as error:
+        except (
+            _TerminalManifestPlanConflict,
+            _TerminalManifestLedgerError,
+            sqlite3.Error,
+        ):
+            raise
+        except _DerivedCleanupOperationalError as failure:
+            error = failure.error
             diagnostic = retention_diagnostic(
                 "workspace.retention.derived_cleanup_failed",
                 f"Workspace derived retention cleanup failed: {error}",
                 entity=str(manifest_ref["id"]),
                 detail={"error_type": type(error).__name__},
             )
+            if isinstance(error, (WorkspaceConfigurationError, WorkspacePolicyError)):
+                diagnostic["retryable"] = False
             meta["state"] = "derived_pending"
             derived["last_error"] = diagnostic
             manifest_ref = self._update_terminal_manifest_meta(manifest_ref, meta)
@@ -3867,6 +4112,31 @@ class LocalWorkspaceBackend:
         self,
         preview: WorkspaceRetentionPreview,
     ) -> WorkspaceRetentionResult:
+        async with self._mutation_guard():
+            try:
+                return await self._apply_retention_unlocked(preview)
+            except (sqlite3.Error, OSError) as error:
+                diagnostic = retention_diagnostic(
+                    "workspace.retention.apply_failed",
+                    f"Workspace retention transaction failed and was rolled back: {error}",
+                    entity=str(preview["scope"].get("execution_id") or "workspace"),
+                    detail={"error_type": type(error).__name__},
+                )
+                return self._retention_result(
+                    status="deferred",
+                    plan_fingerprint=preview["plan_fingerprint"],
+                    manifest_ref=None,
+                    retained_refs=preview["retained_refs"],
+                    accounting=self._zero_retention_accounting(
+                        preview["accounting"]
+                    ),
+                    diagnostics=[diagnostic],
+                )
+
+    async def _apply_retention_unlocked(
+        self,
+        preview: WorkspaceRetentionPreview,
+    ) -> WorkspaceRetentionResult:
         self._ensure_writable()
         validated = validate_retention_preview(
             preview,
@@ -3887,7 +4157,7 @@ class LocalWorkspaceBackend:
                 plan_fingerprint=validated["plan_fingerprint"],
                 manifest_ref=None,
                 retained_refs=validated["retained_refs"],
-                accounting=validated["accounting"],
+                accounting=self._zero_retention_accounting(validated["accounting"]),
                 diagnostics=[diagnostic],
             )
 
@@ -3899,10 +4169,30 @@ class LocalWorkspaceBackend:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                existing = self._terminal_manifest_from_conn(
-                    conn,
-                    execution_id=execution_id,
-                )
+                try:
+                    existing = self._terminal_manifest_from_conn(
+                        conn,
+                        execution_id=execution_id,
+                    )
+                except (TypeError, ValueError) as error:
+                    conn.rollback()
+                    diagnostic = retention_diagnostic(
+                        "workspace.retention.ledger_invalid",
+                        f"Workspace terminal retention ledger is invalid: {error}",
+                        entity=self._terminal_manifest_record_id(execution_id),
+                        detail={"error_type": type(error).__name__},
+                    )
+                    diagnostic["retryable"] = False
+                    return self._retention_result(
+                        status="deferred",
+                        plan_fingerprint=validated["plan_fingerprint"],
+                        manifest_ref=None,
+                        retained_refs=validated["retained_refs"],
+                        accounting=self._zero_retention_accounting(
+                            validated["accounting"]
+                        ),
+                        diagnostics=[diagnostic],
+                    )
                 if existing is not None:
                     existing_meta = cast(Mapping[str, Any], existing["meta"])
                     existing_fingerprint = str(existing_meta["plan_fingerprint"])
@@ -3918,9 +4208,11 @@ class LocalWorkspaceBackend:
                                     Sequence[WorkspaceRetainedReference],
                                     existing_meta["retained_refs"],
                                 ),
-                                accounting=cast(
-                                    Mapping[str, Any],
-                                    existing_meta["accounting"],
+                                accounting=self._zero_retention_accounting(
+                                    cast(
+                                        Mapping[str, Any],
+                                        existing_meta["accounting"],
+                                    )
                                 ),
                             )
                         manifest_ref = existing
@@ -3941,7 +4233,9 @@ class LocalWorkspaceBackend:
                             plan_fingerprint=validated["plan_fingerprint"],
                             manifest_ref=existing,
                             retained_refs=validated["retained_refs"],
-                            accounting=validated["accounting"],
+                            accounting=self._zero_retention_accounting(
+                                validated["accounting"]
+                            ),
                             diagnostics=[diagnostic],
                         )
 
@@ -3974,7 +4268,9 @@ class LocalWorkspaceBackend:
                             plan_fingerprint=validated["plan_fingerprint"],
                             manifest_ref=None,
                             retained_refs=validated["retained_refs"],
-                            accounting=validated["accounting"],
+                            accounting=self._zero_retention_accounting(
+                                validated["accounting"]
+                            ),
                             diagnostics=[diagnostic],
                         )
                     pending = {
@@ -4021,6 +4317,25 @@ class LocalWorkspaceBackend:
                             retained_refs=validated["retained_refs"],
                             accounting=validated["accounting"],
                         )
+            except (sqlite3.Error, OSError) as error:
+                if conn.in_transaction:
+                    conn.rollback()
+                diagnostic = retention_diagnostic(
+                    "workspace.retention.apply_failed",
+                    f"Workspace retention transaction failed and was rolled back: {error}",
+                    entity=execution_id,
+                    detail={"error_type": type(error).__name__},
+                )
+                return self._retention_result(
+                    status="deferred",
+                    plan_fingerprint=validated["plan_fingerprint"],
+                    manifest_ref=None,
+                    retained_refs=validated["retained_refs"],
+                    accounting=self._zero_retention_accounting(
+                        validated["accounting"]
+                    ),
+                    diagnostics=[diagnostic],
+                )
             except Exception:
                 if conn.in_transaction:
                     conn.rollback()

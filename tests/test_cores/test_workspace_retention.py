@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 import shutil
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,6 +19,7 @@ from agently.core.Workspace.Retention import (
     serialized_size,
     stable_checkpoint_row_identities,
 )
+from agently.core.Workspace.Stores import delete_owned_file_descriptor_relative
 from agently.types.data import (
     WorkspaceRetentionLifecycle,
     WorkspaceRetentionPolicy,
@@ -47,6 +51,14 @@ def _assert_nothing_selected(preview: WorkspaceRetentionPreview) -> None:
 
 def _storage_snapshot(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def _assert_zero_actual_accounting(result: dict[str, Any]) -> None:
+    accounting = cast(dict[str, Any], result["accounting"])
+    assert accounting["logical_bytes_deleted"] == 0
+    assert accounting["physical_bytes_reclaimed"] == 0
+    assert accounting["physical_bytes_pending"] == 0
+    assert all(count == 0 for count in accounting["entities"].values())
 
 
 def test_inspect_retention_default_policy_and_helpers_are_canonical():
@@ -1482,6 +1494,7 @@ async def test_apply_retention_atomically_cleans_all_selected_carriers_and_is_id
     assert repeated["status"] == "noop"
     assert repeated["manifest_ref"] == manifest_ref
     assert repeated["diagnostics"] == []
+    _assert_zero_actual_accounting(cast(dict[str, Any], repeated))
 
     successor_preview = await target.inspect_retention(
         {},
@@ -1535,6 +1548,7 @@ async def test_apply_retention_stale_plan_defers_without_partial_deletion(tmp_pa
     assert [diagnostic.get("code") for diagnostic in result["diagnostics"]] == [
         "workspace.retention.plan_stale"
     ]
+    _assert_zero_actual_accounting(cast(dict[str, Any], result))
     assert await backend.get_record(original["id"]) == original
     assert await backend.get_record(added_after_inspection["id"]) == added_after_inspection
     assert await root.query_runtime_events("exec-stale") == [event]
@@ -1581,16 +1595,20 @@ async def test_apply_retention_rolls_back_manifest_and_all_logical_deletes_on_db
             "id",
             selected["runtime_event_ids"],
         )
-        raise RuntimeError("injected logical delete failure")
+        raise sqlite3.OperationalError("injected logical delete failure")
 
     monkeypatch.setattr(
         backend,
         "_delete_retention_logical_selection_on_conn",
         fail_after_first_delete,
     )
-    with pytest.raises(RuntimeError, match="injected logical delete failure"):
-        await target.apply_retention(preview)
+    result = await target.apply_retention(preview)
 
+    assert result["status"] == "deferred"
+    assert [diagnostic.get("code") for diagnostic in result["diagnostics"]] == [
+        "workspace.retention.apply_failed"
+    ]
+    _assert_zero_actual_accounting(cast(dict[str, Any], result))
     assert await backend.get_record(discarded["id"]) == discarded
     assert await root.query_runtime_events("exec-rollback") == [event]
     with backend._connect() as conn:
@@ -1647,17 +1665,17 @@ async def test_apply_retention_resumes_only_pending_derived_cleanup_after_partia
     assert conflicting_preview["status"] == "ready"
     assert conflicting_preview["plan_fingerprint"] != preview["plan_fingerprint"]
     content_target = root.content_root / cast(str, discarded["path"])
-    original_unlink = Path.unlink
+    original_delete_content = backend.content.delete_content
     failed_once = False
 
-    def fail_content_once(path: Path, *args: Any, **kwargs: Any):
+    async def fail_content_once(relative_path: str):
         nonlocal failed_once
-        if path == content_target and not failed_once:
+        if relative_path == discarded["path"] and not failed_once:
             failed_once = True
             raise OSError("injected content delete failure")
-        return original_unlink(path, *args, **kwargs)
+        return await original_delete_content(relative_path)
 
-    monkeypatch.setattr(Path, "unlink", fail_content_once)
+    monkeypatch.setattr(backend.content, "delete_content", fail_content_once)
     first = await target.apply_retention(preview)
 
     assert first["status"] == "deferred"
@@ -1686,6 +1704,7 @@ async def test_apply_retention_resumes_only_pending_derived_cleanup_after_partia
     assert [diagnostic.get("code") for diagnostic in conflict["diagnostics"]] == [
         "workspace.retention.plan_conflict"
     ]
+    _assert_zero_actual_accounting(cast(dict[str, Any], conflict))
     assert vector_delete_calls == [[discarded["id"]]]
 
     resumed = await target.apply_retention(preview)
@@ -1708,6 +1727,515 @@ async def test_apply_retention_resumes_only_pending_derived_cleanup_after_partia
         "attempts": 2,
         "last_error": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_apply_retention_descriptor_delete_cannot_follow_swapped_content_parent(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-parent-swap")
+    target = root.with_scope_node("executions", "exec-parent-swap")
+    discarded = await target.put(
+        {"process": "parent swap"},
+        collection="observations",
+        kind="process",
+    )
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-parent-swap"), "state_version": None},
+    )
+    assert preview["status"] == "ready"
+    content_target = root.content_root / cast(str, discarded["path"])
+    original_parent = content_target.parent
+    displaced_parent = root.content_root / "observations-displaced"
+    outside_parent = tmp_path / "outside-content"
+    outside_parent.mkdir()
+    outside_file = outside_parent / content_target.name
+    outside_file.write_text("must survive", encoding="utf-8")
+    original_unlink = os.unlink
+    original_path_unlink = Path.unlink
+    swapped = False
+
+    def swap_parent() -> None:
+        nonlocal swapped
+        if swapped:
+            return
+        original_parent.rename(displaced_parent)
+        original_parent.symlink_to(outside_parent, target_is_directory=True)
+        swapped = True
+
+    def swap_parent_before_unlink(path: os.PathLike[str] | str, *, dir_fd: int | None = None) -> None:
+        path_text = str(path)
+        targets_selected_name = (
+            (dir_fd is None and Path(path_text).name == content_target.name)
+            or (dir_fd is not None and path_text == content_target.name)
+        )
+        if targets_selected_name and not swapped:
+            swap_parent()
+        if dir_fd is None:
+            original_unlink(path)
+        else:
+            original_unlink(path, dir_fd=dir_fd)
+
+    def swap_parent_before_path_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.name == content_target.name and not swapped:
+            swap_parent()
+        original_path_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", swap_parent_before_unlink)
+    monkeypatch.setattr(Path, "unlink", swap_parent_before_path_unlink)
+    result = await target.apply_retention(preview)
+
+    assert result["status"] == "applied", result["diagnostics"]
+    assert swapped is True
+    assert outside_file.read_text(encoding="utf-8") == "must survive"
+    assert (displaced_parent / content_target.name).exists() is False
+
+
+def test_descriptor_delete_pruning_does_not_remove_replacement_directory(
+    tmp_path,
+    monkeypatch,
+):
+    owned_root = tmp_path / "owned"
+    original_parent = owned_root / "parent"
+    original_parent.mkdir(parents=True)
+    (original_parent / "selected.txt").write_text("selected", encoding="utf-8")
+    displaced_parent = owned_root / "parent-displaced"
+    original_stat = os.stat
+    swapped = False
+
+    def replace_before_prune_stat(
+        path: os.PathLike[str] | str,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ):
+        nonlocal swapped
+        if str(path) == "parent" and dir_fd is not None and not swapped:
+            original_parent.rename(displaced_parent)
+            original_parent.mkdir()
+            swapped = True
+        return original_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(os, "stat", replace_before_prune_stat)
+    deleted = delete_owned_file_descriptor_relative(
+        owned_root,
+        "parent/selected.txt",
+    )
+
+    assert deleted is True
+    assert swapped is True
+    assert original_parent.is_dir()
+    assert displaced_parent.is_dir()
+    assert (displaced_parent / "selected.txt").exists() is False
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_defers_when_descriptor_relative_delete_is_unsupported(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-dirfd-unsupported")
+    target = root.with_scope_node("executions", "exec-dirfd-unsupported")
+    await target.put(
+        {"process": "requires safe delete"},
+        collection="observations",
+        kind="process",
+    )
+    backend = cast(Any, root.backend)
+    monkeypatch.setattr(
+        backend,
+        "_supports_descriptor_relative_delete",
+        lambda: False,
+        raising=False,
+    )
+
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-dirfd-unsupported"),
+            "state_version": None,
+        },
+    )
+
+    _assert_nothing_selected(preview)
+    assert [diagnostic.get("code") for diagnostic in preview["diagnostics"]] == [
+        "workspace.retention.derived_delete_unsupported"
+    ]
+    assert preview["diagnostics"][0].get("retryable") is False
+
+
+@pytest.mark.asyncio
+async def test_backend_mutation_lock_serializes_content_and_file_writes_with_retention(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(
+        tmp_path / "retention-mutation-lock",
+        vector_store_provider="sqlite",
+    )
+    target = root.with_scope_node("executions", "exec-mutation-lock")
+    discarded = await target.put(
+        {"process": "lock holder"},
+        collection="observations",
+        kind="process",
+    )
+    backend = cast(Any, root.backend)
+    provider = backend.vector_store_provider
+    await provider.index_record(discarded, [1.0])
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-mutation-lock"), "state_version": None},
+    )
+    entered_delete = asyncio.Event()
+    release_delete = asyncio.Event()
+    original_delete_records = provider.delete_records
+
+    async def pause_vector_delete(record_ids):
+        entered_delete.set()
+        await release_delete.wait()
+        await original_delete_records(record_ids)
+
+    monkeypatch.setattr(provider, "delete_records", pause_vector_delete)
+    apply_task = asyncio.create_task(target.apply_retention(preview))
+    await asyncio.wait_for(entered_delete.wait(), timeout=2)
+    guide_path = target.files_root / "AGENTLY_WORKSPACE.md"
+    guide_path.unlink()
+    rebound = root.with_scope_node("executions", "exec-mutation-lock")
+    guide_recreated_while_locked = (
+        rebound.files_root / "AGENTLY_WORKSPACE.md"
+    ).exists()
+    content_write = asyncio.create_task(
+        target.put(
+            {"process": "late content"},
+            collection="observations",
+            kind="process",
+        )
+    )
+    file_write = asyncio.create_task(
+        target.write_file("reports/late.txt", "late file")
+    )
+    await asyncio.sleep(0.05)
+    writes_waited = not content_write.done() and not file_write.done()
+    release_delete.set()
+    applied, late_record, late_file = await asyncio.gather(
+        apply_task,
+        content_write,
+        file_write,
+    )
+
+    assert writes_waited is True
+    assert guide_recreated_while_locked is False
+    assert applied["status"] == "applied"
+    assert await backend.get_record(late_record["id"]) == late_record
+    assert (target.files_root / late_file["file_refs"][0]["path"]).read_text(
+        encoding="utf-8"
+    ) == "late file"
+
+
+@pytest.mark.asyncio
+async def test_apply_retention_does_not_convert_programming_errors_to_deferred(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-programming-error")
+    target = root.with_scope_node("executions", "exec-programming-error")
+    await target.put(
+        {"process": "programming error"},
+        collection="observations",
+        kind="process",
+    )
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-programming-error"),
+            "state_version": None,
+        },
+    )
+    backend = cast(Any, root.backend)
+
+    async def fail_with_programming_error(_relative_path: str) -> bool:
+        raise AssertionError("injected programming error")
+
+    monkeypatch.setattr(backend.content, "delete_content", fail_with_programming_error)
+    with pytest.raises(AssertionError, match="injected programming error"):
+        await target.apply_retention(preview)
+
+
+@pytest.mark.asyncio
+async def test_stale_old_worker_cannot_overwrite_new_fingerprint_manifest(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(
+        tmp_path / "retention-stale-worker-cas",
+        vector_store_provider="sqlite",
+    )
+    target = root.with_scope_node("executions", "exec-stale-worker-cas")
+    discarded = await target.put(
+        {"process": "old worker"},
+        collection="observations",
+        kind="process",
+    )
+    backend = cast(Any, root.backend)
+    provider = backend.vector_store_provider
+    await provider.index_record(discarded, [1.0])
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-stale-worker-cas"),
+            "state_version": None,
+        },
+    )
+    second_root = WorkspaceManager().create(
+        root.root,
+        create=False,
+        vector_store_provider="sqlite",
+    )
+    second_target = second_root.with_scope_node(
+        "executions",
+        "exec-stale-worker-cas",
+    )
+    entered_delete = asyncio.Event()
+    release_delete = asyncio.Event()
+    original_delete_records = provider.delete_records
+
+    async def pause_old_worker(record_ids):
+        entered_delete.set()
+        await release_delete.wait()
+        await original_delete_records(record_ids)
+
+    monkeypatch.setattr(provider, "delete_records", pause_old_worker)
+    old_task = asyncio.create_task(target.apply_retention(preview))
+    await asyncio.wait_for(entered_delete.wait(), timeout=2)
+    same_plan = await second_target.apply_retention(preview)
+    assert same_plan["status"] == "applied"
+    successor_preview = await second_target.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-stale-worker-cas"),
+            "state_version": None,
+            "terminal_at": "2026-07-11T00:01:00+00:00",
+        },
+    )
+    assert successor_preview["plan_fingerprint"] != preview["plan_fingerprint"]
+    successor = await second_target.apply_retention(successor_preview)
+    assert successor["status"] == "applied"
+    release_delete.set()
+    old_result = await old_task
+
+    assert old_result["status"] == "deferred"
+    assert [diagnostic.get("code") for diagnostic in old_result["diagnostics"]] == [
+        "workspace.retention.plan_conflict"
+    ]
+    _assert_zero_actual_accounting(cast(dict[str, Any], old_result))
+    with cast(Any, second_root.backend)._connect() as conn:
+        persisted = cast(Any, second_root.backend)._terminal_manifest_from_conn(
+            conn,
+            execution_id="exec-stale-worker-cas",
+        )
+    assert persisted["meta"]["plan_fingerprint"] == successor_preview["plan_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_same_fingerprint_stale_manifest_updates_merge_monotonically(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-same-plan-cas")
+    backend = cast(Any, root.backend)
+    lifecycle = cast(
+        WorkspaceRetentionLifecycle,
+        {
+            **_terminal_lifecycle("exec-same-plan-cas"),
+            "state_version": None,
+        },
+    )
+    preview = await root.inspect_retention(
+        {"execution_id": "exec-same-plan-cas"},
+        lifecycle=lifecycle,
+    )
+    base_meta = {
+        "schema_version": "agently.workspace.terminal_manifest.v1",
+        "plan_fingerprint": preview["plan_fingerprint"],
+        "state": "derived_pending",
+        "lifecycle": lifecycle,
+        "retained_refs": [],
+        "inline_result": None,
+        "accounting": preview["accounting"],
+        "derived_cleanup": {
+            "pending": {
+                "vector_record_ids": [],
+                "content_paths": ["observations/content.json"],
+                "file_paths": ["lineage/executions/exec-same-plan-cas/file.txt"],
+                "scratch_paths": [],
+            },
+            "attempts": 0,
+            "last_error": None,
+        },
+    }
+    with backend._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        base_ref = backend._write_terminal_manifest_on_conn(
+            conn,
+            execution_id="exec-same-plan-cas",
+            scope={"execution_id": "exec-same-plan-cas"},
+            meta=base_meta,
+        )
+        conn.commit()
+
+    first_meta = json.loads(json.dumps(base_meta))
+    first_meta["derived_cleanup"]["pending"]["content_paths"] = []
+    first_meta["derived_cleanup"]["attempts"] = 2
+    stale_meta = json.loads(json.dumps(base_meta))
+    stale_meta["derived_cleanup"]["pending"]["file_paths"] = []
+    stale_meta["derived_cleanup"]["attempts"] = 1
+    second_root = WorkspaceManager().create(root.root, create=False)
+    second_backend = cast(Any, second_root.backend)
+    await asyncio.gather(
+        asyncio.to_thread(
+            backend._update_terminal_manifest_meta,
+            base_ref,
+            first_meta,
+        ),
+        asyncio.to_thread(
+            second_backend._update_terminal_manifest_meta,
+            base_ref,
+            stale_meta,
+        ),
+    )
+    with backend._connect() as conn:
+        merged = backend._terminal_manifest_from_conn(
+            conn,
+            execution_id="exec-same-plan-cas",
+        )
+
+    assert merged is not None
+    assert merged["meta"]["derived_cleanup"]["pending"] == {
+        "vector_record_ids": [],
+        "content_paths": [],
+        "file_paths": [],
+        "scratch_paths": [],
+    }
+    assert merged["meta"]["derived_cleanup"]["attempts"] == 2
+    applied_meta = json.loads(json.dumps(merged["meta"]))
+    applied_meta["state"] = "applied"
+    applied_meta["derived_cleanup"]["attempts"] = 3
+    await asyncio.gather(
+        asyncio.to_thread(
+            backend._update_terminal_manifest_meta,
+            merged,
+            applied_meta,
+        ),
+        asyncio.to_thread(
+            second_backend._update_terminal_manifest_meta,
+            base_ref,
+            base_meta,
+        ),
+    )
+    with backend._connect() as conn:
+        final = backend._terminal_manifest_from_conn(
+            conn,
+            execution_id="exec-same-plan-cas",
+        )
+    assert final is not None
+    assert final["meta"]["state"] == "applied"
+    assert final["meta"]["derived_cleanup"]["pending"] == {
+        "vector_record_ids": [],
+        "content_paths": [],
+        "file_paths": [],
+        "scratch_paths": [],
+    }
+    assert final["meta"]["derived_cleanup"]["attempts"] == 3
+
+
+@pytest.mark.asyncio
+async def test_successive_fingerprints_do_not_embed_terminal_manifest_ledgers(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-ledger-bounds")
+    target = root.with_scope_node("executions", "exec-ledger-bounds")
+    retained = await target.put(
+        {"deliverable": "bounded"},
+        collection="artifacts",
+        kind="report",
+    )
+    await target.put(
+        {"process": "discard"},
+        collection="observations",
+        kind="process",
+    )
+    initial_preview = await target.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-ledger-bounds"),
+            "state_version": None,
+        },
+        retained_refs=[retained],
+    )
+    initial = await target.apply_retention(initial_preview)
+    assert initial["status"] == "applied"
+    manifest_sizes: list[int] = []
+    terminal_refs_seen: list[bool] = []
+    for index in range(1, 7):
+        preview = await target.inspect_retention(
+            {},
+            lifecycle={
+                **_terminal_lifecycle("exec-ledger-bounds"),
+                "state_version": index,
+            },
+            retained_refs=[retained],
+        )
+        terminal_refs_seen.append(
+            any(
+                ref.get("kind") == "workspace_terminal_manifest"
+                for ref in cast(list[dict[str, Any]], preview["retained_refs"])
+            )
+        )
+        result = await target.apply_retention(preview)
+        assert result["status"] == "applied"
+        manifest = cast(dict[str, Any], result["manifest_ref"])
+        manifest_sizes.append(len(json.dumps(manifest["meta"], sort_keys=True)))
+
+    assert terminal_refs_seen == [False] * 6
+    assert max(manifest_sizes) - min(manifest_sizes) < 512
+
+
+@pytest.mark.asyncio
+async def test_corrupt_terminal_manifest_returns_typed_nonretryable_deferred(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-ledger-corrupt")
+    target = root.with_scope_node("executions", "exec-ledger-corrupt")
+    await target.put(
+        {"process": "corrupt ledger"},
+        collection="observations",
+        kind="process",
+    )
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-ledger-corrupt"),
+            "state_version": None,
+        },
+    )
+    applied = await target.apply_retention(preview)
+    assert applied["status"] == "applied"
+    manifest_id = cast(dict[str, Any], applied["manifest_ref"])["id"]
+    backend = cast(Any, root.backend)
+    with backend._connect() as conn:
+        conn.execute(
+            "UPDATE records SET meta_json = ? WHERE id = ?",
+            (json.dumps({"schema_version": "broken"}), manifest_id),
+        )
+        conn.commit()
+
+    result = await target.apply_retention(preview)
+
+    assert result["status"] == "deferred"
+    assert [diagnostic.get("code") for diagnostic in result["diagnostics"]] == [
+        "workspace.retention.ledger_invalid"
+    ]
+    assert result["diagnostics"][0].get("retryable") is False
+    _assert_zero_actual_accounting(cast(dict[str, Any], result))
 
 
 @pytest.mark.asyncio

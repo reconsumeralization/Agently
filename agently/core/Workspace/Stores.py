@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import math
+import os
 import sqlite3
 import stat
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -42,6 +43,124 @@ class EmbeddingProviderUnavailableError(RuntimeError):
 
 class VectorStoreProviderUnavailableError(RuntimeError):
     """Raised when a vector pipeline has an embedder but no vector store."""
+
+
+_DESCRIPTOR_RELATIVE_DELETE_SUPPORTED = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+    and os.unlink in os.supports_dir_fd
+    and os.rmdir in os.supports_dir_fd
+)
+
+
+def supports_descriptor_relative_delete() -> bool:
+    """Return whether the host can delete owned files without pathname traversal."""
+
+    return _DESCRIPTOR_RELATIVE_DELETE_SUPPORTED
+
+
+def delete_owned_file_descriptor_relative(
+    root: Path,
+    relative_path: str | Path,
+    *,
+    protected_parent_depth: int = 0,
+) -> bool:
+    """Delete one regular file below an owned root using held directory fds.
+
+    ``protected_parent_depth`` counts path components below ``root`` that must
+    remain (for example, the ``lineage`` area root). Missing paths are an
+    idempotent no-op. Every opened descriptor is closed on every exit path.
+    """
+
+    if not supports_descriptor_relative_delete():
+        raise WorkspaceConfigurationError(
+            "Descriptor-relative no-follow Workspace deletion is unavailable on this platform."
+        )
+    relative = Path(relative_path)
+    parts = relative.parts
+    if (
+        relative.is_absolute()
+        or not parts
+        or any(part in {"", ".", ".."} for part in parts)
+        or protected_parent_depth < 0
+        or protected_parent_depth > len(parts) - 1
+    ):
+        raise WorkspacePolicyError(
+            f"Path is outside the owned Workspace root: {relative_path}"
+        )
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+    descriptors: list[int] = []
+    try:
+        try:
+            descriptors.append(os.open(root, directory_flags))
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise WorkspacePolicyError(
+                f"Workspace owned root is not a directly owned directory: {root}"
+            ) from error
+
+        for part in parts[:-1]:
+            try:
+                descriptors.append(
+                    os.open(part, directory_flags, dir_fd=descriptors[-1])
+                )
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                raise WorkspacePolicyError(
+                    f"Workspace cleanup parent is not a directly owned directory: {relative_path}"
+                ) from error
+
+        parent_fd = descriptors[-1]
+        final_name = parts[-1]
+        try:
+            target_stat = os.stat(
+                final_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(target_stat.st_mode):
+            raise WorkspacePolicyError(
+                f"Workspace cleanup target is not a regular file: {relative_path}"
+            )
+        try:
+            os.unlink(final_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return False
+
+        for depth in range(len(parts) - 1, protected_parent_depth, -1):
+            try:
+                held_child = os.fstat(descriptors[depth])
+                named_child = os.stat(
+                    parts[depth - 1],
+                    dir_fd=descriptors[depth - 1],
+                    follow_symlinks=False,
+                )
+            except OSError:
+                break
+            if (
+                not stat.S_ISDIR(named_child.st_mode)
+                or (held_child.st_dev, held_child.st_ino)
+                != (named_child.st_dev, named_child.st_ino)
+            ):
+                break
+            try:
+                os.rmdir(parts[depth - 1], dir_fd=descriptors[depth - 1])
+            except OSError:
+                break
+        return True
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _coerce_embedding_vector(value: Sequence[float] | Sequence[Sequence[float]]) -> list[float]:
@@ -173,88 +292,12 @@ class LocalContentStore:
         return target.read_text(encoding="utf-8", errors="replace")
 
     async def delete_content(self, relative_path: str) -> bool:
-        """Idempotently delete one directly owned content file.
-
-        Retention passes paths selected from the authoritative record snapshot.
-        Re-check every lexical component here so a symlink swap cannot broaden
-        that selection into another content object or an outside path.
-        """
-
+        """Idempotently delete one directly owned content file."""
         self.policy.ensure_writable()
-        relative = Path(relative_path)
-        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-            raise WorkspacePolicyError(
-                f"Path is outside workspace content root: { relative_path }"
-            )
-        root_stat = self.content_root.lstat()
-        if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
-            raise WorkspacePolicyError("Workspace content root must be a directly owned directory.")
-        target = self.content_root.joinpath(*relative.parts)
-        current = self.content_root
-        target_stat = None
-        for index, part in enumerate(relative.parts):
-            current = current / part
-            try:
-                current_stat = current.lstat()
-            except FileNotFoundError:
-                return False
-            if stat.S_ISLNK(current_stat.st_mode):
-                raise WorkspacePolicyError(
-                    f"Workspace content cleanup does not traverse symlinks: {relative_path}"
-                )
-            if index < len(relative.parts) - 1 and not stat.S_ISDIR(current_stat.st_mode):
-                raise WorkspacePolicyError(
-                    f"Workspace content cleanup parent is not a directory: {relative_path}"
-                )
-            target_stat = current_stat
-        if target_stat is None:
-            return False
-        if not stat.S_ISREG(target_stat.st_mode):
-            raise WorkspacePolicyError(
-                f"Workspace content cleanup target is not a regular file: {relative_path}"
-            )
-        resolved_target = target.resolve()
-        try:
-            resolved_target.relative_to(self.content_root)
-        except ValueError as error:
-            raise WorkspacePolicyError(
-                f"Path is outside workspace content root: {relative_path}"
-            ) from error
-        if resolved_target != target:
-            raise WorkspacePolicyError(
-                f"Workspace content cleanup path changed during resolution: {relative_path}"
-            )
-        confirmed_stat = target.lstat()
-        if (
-            stat.S_ISLNK(confirmed_stat.st_mode)
-            or (confirmed_stat.st_dev, confirmed_stat.st_ino)
-            != (target_stat.st_dev, target_stat.st_ino)
-        ):
-            raise WorkspacePolicyError(
-                f"Workspace content cleanup target changed before deletion: {relative_path}"
-            )
-        try:
-            target.unlink()
-        except FileNotFoundError:
-            return False
-        self._prune_empty_parents(target.parent)
-        return True
-
-    def _prune_empty_parents(self, start: Path) -> None:
-        current = start
-        while current != self.content_root:
-            try:
-                current_stat = current.lstat()
-            except FileNotFoundError:
-                current = current.parent
-                continue
-            if stat.S_ISLNK(current_stat.st_mode) or not stat.S_ISDIR(current_stat.st_mode):
-                return
-            try:
-                current.rmdir()
-            except OSError:
-                return
-            current = current.parent
+        return delete_owned_file_descriptor_relative(
+            self.content_root,
+            relative_path,
+        )
 
     async def read_content_segment(
         self,
