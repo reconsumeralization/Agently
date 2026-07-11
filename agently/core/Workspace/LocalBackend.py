@@ -2361,11 +2361,10 @@ class LocalWorkspaceBackend:
                 entity=entity,
             )
 
-    def _scoped_area_files(
+    def _retention_area_root(
         self,
-        scope: dict[str, Any],
         area: str,
-    ) -> tuple[list[str], WorkspaceRetentionDiagnostic | None]:
+    ) -> tuple[Path | None, Any | None, WorkspaceRetentionDiagnostic | None]:
         lexical_area_root = self.root / area
         lexical_area_stat, diagnostic = self._safe_stat_path(
             lexical_area_root,
@@ -2376,14 +2375,20 @@ class LocalWorkspaceBackend:
             missing_ok=True,
         )
         if diagnostic is not None:
-            return [], diagnostic
+            return None, None, diagnostic
         if lexical_area_stat is None:
-            return [], None
+            if area == "scratch":
+                return None, None, None
+            return None, None, self._retention_diagnostic(
+                "workspace.retention.lineage_ambiguous",
+                "Workspace files area root is required for retention inspection.",
+                entity=str(lexical_area_root),
+            )
         if (
             stat.S_ISLNK(lexical_area_stat.st_mode)
             or not stat.S_ISDIR(lexical_area_stat.st_mode)
         ):
-            return [], self._retention_diagnostic(
+            return None, None, self._retention_diagnostic(
                 "workspace.retention.lineage_ambiguous",
                 "Workspace retention area root must be a directly owned non-symlink directory.",
                 entity=str(lexical_area_root),
@@ -2394,13 +2399,45 @@ class LocalWorkspaceBackend:
             operation="lineage area resolution",
         )
         if diagnostic is not None or area_root is None:
-            return [], diagnostic
+            return None, None, diagnostic
         if area_root != lexical_area_root or area_root.parent != self.root:
-            return [], self._retention_diagnostic(
+            return None, None, self._retention_diagnostic(
                 "workspace.retention.lineage_ambiguous",
                 "Workspace retention area root is not directly contained by the Workspace root.",
                 entity=str(lexical_area_root),
             )
+        confirmed_area_stat, diagnostic = self._safe_stat_path(
+            lexical_area_root,
+            entity=str(lexical_area_root),
+            operation="lineage area-root confirmation stat",
+            follow_symlinks=False,
+        )
+        if diagnostic is not None or confirmed_area_stat is None:
+            return None, None, diagnostic
+        if (
+            stat.S_ISLNK(confirmed_area_stat.st_mode)
+            or not stat.S_ISDIR(confirmed_area_stat.st_mode)
+            or (confirmed_area_stat.st_dev, confirmed_area_stat.st_ino)
+            != (lexical_area_stat.st_dev, lexical_area_stat.st_ino)
+        ):
+            return None, None, self._retention_diagnostic(
+                "workspace.retention.ref_readback_failed",
+                "Workspace retention area root changed during inspection.",
+                entity=str(lexical_area_root),
+            )
+        return area_root, lexical_area_stat, None
+
+    def _scoped_area_files(
+        self,
+        scope: dict[str, Any],
+        area: str,
+    ) -> tuple[list[str], WorkspaceRetentionDiagnostic | None]:
+        lexical_area_root = self.root / area
+        area_root, lexical_area_stat, diagnostic = self._retention_area_root(area)
+        if diagnostic is not None:
+            return [], diagnostic
+        if area_root is None or lexical_area_stat is None:
+            return [], None
         lineage_root = area_root / "lineage"
         lineage_stat, diagnostic = self._safe_stat_path(
             lineage_root,
@@ -2413,6 +2450,23 @@ class LocalWorkspaceBackend:
         if diagnostic is not None:
             return [], diagnostic
         if lineage_stat is None:
+            current_area_stat, area_diagnostic = self._safe_stat_path(
+                lexical_area_root,
+                entity=str(lexical_area_root),
+                operation="lineage empty-area confirmation stat",
+                follow_symlinks=False,
+            )
+            if area_diagnostic is not None or current_area_stat is None:
+                return [], area_diagnostic
+            if (current_area_stat.st_dev, current_area_stat.st_ino) != (
+                lexical_area_stat.st_dev,
+                lexical_area_stat.st_ino,
+            ):
+                return [], self._retention_diagnostic(
+                    "workspace.retention.ref_readback_failed",
+                    "Workspace retention area root changed during inspection.",
+                    entity=str(lexical_area_root),
+                )
             return [], None
         if stat.S_ISLNK(lineage_stat.st_mode) or not stat.S_ISDIR(lineage_stat.st_mode):
             return [], self._retention_diagnostic(
@@ -2542,6 +2596,24 @@ class LocalWorkspaceBackend:
             )
             if diagnostic is not None or resolved_candidate is None:
                 return [], diagnostic
+            confirmed_candidate_stat, diagnostic = self._safe_stat_path(
+                candidate,
+                entity=str(candidate),
+                operation="lineage subtree confirmation stat",
+                follow_symlinks=False,
+            )
+            if diagnostic is not None or confirmed_candidate_stat is None:
+                return [], diagnostic
+            if (
+                lexical_stat is None
+                or (confirmed_candidate_stat.st_dev, confirmed_candidate_stat.st_ino)
+                != (lexical_stat.st_dev, lexical_stat.st_ino)
+            ):
+                return [], self._retention_diagnostic(
+                    "workspace.retention.ref_readback_failed",
+                    "Workspace lineage subtree changed during inspection.",
+                    entity=str(candidate),
+                )
             try:
                 resolved_candidate.relative_to(lineage_root)
             except ValueError as error:
@@ -2564,12 +2636,15 @@ class LocalWorkspaceBackend:
                     entity=str(path),
                     operation="lineage descendant stat",
                     follow_symlinks=False,
-                    missing_ok=True,
                 )
                 if diagnostic is not None:
                     return [], diagnostic
                 if path_stat is None:
-                    continue
+                    return [], self._retention_diagnostic(
+                        "workspace.retention.ref_readback_failed",
+                        "Workspace lineage entry disappeared during inspection.",
+                        entity=str(path),
+                    )
                 if stat.S_ISLNK(path_stat.st_mode):
                     return [], self._retention_diagnostic(
                         "workspace.retention.lineage_ambiguous",
@@ -2765,10 +2840,24 @@ class LocalWorkspaceBackend:
                         "has an invalid state_version."
                     )
             manifest_values[key] = value
+        actual_scope_index: dict[tuple[str, str], str] = {}
         for row in snapshot.scope_index_rows:
-            strict_retention_json_value(
+            scope_value = strict_retention_json_value(
                 row["scope_value"],
                 field=f"record_scope_index.{row['record_id']}.{row['scope_key']}.scope_value",
+            )
+            actual_scope_index[(str(row["record_id"]), str(row["scope_key"]))] = json_dumps(
+                scope_value
+            )
+        expected_scope_index = {
+            (record_id, str(scope_key)): json_dumps(scope_value)
+            for record_id, record in all_records.items()
+            for scope_key, scope_value in record["scope"].items()
+            if scope_value is not None
+        }
+        if actual_scope_index != expected_scope_index:
+            raise ValueError(
+                "Persisted Workspace record_scope_index does not match authoritative record scope data."
             )
         for row in snapshot.vector_rows:
             record_id = str(row["record_id"])
@@ -3155,6 +3244,10 @@ class LocalWorkspaceBackend:
         selected_scratch_paths: list[str] = []
         if representation_by_category["files"] != "hot":
             selected_file_paths, diagnostic = self._scoped_area_files(normalized_scope, "files")
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+        else:
+            _, _, diagnostic = self._retention_area_root("files")
             if diagnostic is not None:
                 diagnostics.append(diagnostic)
         if representation_by_category["scratch"] != "hot":

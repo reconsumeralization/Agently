@@ -14,7 +14,10 @@ from typing_extensions import get_type_hints
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.core import LocalWorkspaceBackend, PluginManager, WorkspaceManager
-from agently.core.Workspace.Retention import empty_retention_selection
+from agently.core.Workspace.Retention import (
+    canonical_retention_fingerprint,
+    empty_retention_selection,
+)
 import agently.types.data as data_types
 import agently.types.data.workspace as workspace_types
 from agently.types.data import (
@@ -1179,12 +1182,22 @@ async def test_workspace_facade_defers_ready_plan_from_read_only_delegated_db_pr
             self.operations.append("inspect_retention")
             selected = empty_retention_selection()
             selected["runtime_event_ids"] = ["remote-event-ready"]
+            resolved_policy = cast(
+                workspace_types.WorkspaceRetentionPolicy,
+                policy or {"rules": []},
+            )
             return {
                 "status": "ready",
-                "plan_fingerprint": "remote-ready-plan",
+                "plan_fingerprint": canonical_retention_fingerprint(
+                    scope,
+                    lifecycle,
+                    resolved_policy,
+                    list(retained_refs),
+                    selected,
+                ),
                 "scope": scope,
                 "lifecycle": lifecycle,
-                "policy": cast(workspace_types.WorkspaceRetentionPolicy, policy or {"rules": []}),
+                "policy": resolved_policy,
                 "retained_refs": list(retained_refs),
                 "inline_result": inline_result,
                 "selected": selected,
@@ -1227,6 +1240,96 @@ async def test_workspace_facade_defers_ready_plan_from_read_only_delegated_db_pr
 
     assert provider.operations[-1] == "inspect_retention"
     assert preview["status"] == "deferred"
+    assert all(values == [] for values in preview["selected"].values())
+    assert "workspace.retention.provider_capability_missing" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_preview", ["shape", "echo", "fingerprint"])
+async def test_workspace_facade_rejects_untrusted_delegated_preview(tmp_path, invalid_preview):
+    class InvalidPreviewDBProvider(RemoteAuditWorkspaceBackend):
+        async def inspect_retention(
+            self,
+            scope: dict[str, Any],
+            *,
+            lifecycle: workspace_types.WorkspaceRetentionLifecycle,
+            retained_refs: Sequence[workspace_types.WorkspaceRetainedReference] = (),
+            inline_result: Any = None,
+            policy: workspace_types.WorkspaceRetentionPolicy | None = None,
+        ) -> workspace_types.WorkspaceRetentionPreview:
+            resolved_policy = cast(workspace_types.WorkspaceRetentionPolicy, policy)
+            selected = empty_retention_selection()
+            selected["runtime_event_ids"] = ["provider-event"]
+            preview: dict[str, Any] = {
+                "status": "ready",
+                "plan_fingerprint": canonical_retention_fingerprint(
+                    scope,
+                    lifecycle,
+                    resolved_policy,
+                    list(retained_refs),
+                    selected,
+                ),
+                "scope": dict(scope),
+                "lifecycle": dict(lifecycle),
+                "policy": dict(resolved_policy),
+                "retained_refs": list(retained_refs),
+                "inline_result": inline_result,
+                "selected": selected,
+                "accounting": {
+                    "entities": {key: len(values) for key, values in selected.items()},
+                    "logical_bytes_deleted": 1,
+                    "physical_bytes_reclaimed": 0,
+                    "physical_bytes_pending": 0,
+                },
+                "diagnostics": [],
+            }
+            if invalid_preview == "shape":
+                preview.pop("accounting")
+            elif invalid_preview == "echo":
+                preview["scope"] = {"execution_id": "provider-substituted"}
+                preview["plan_fingerprint"] = canonical_retention_fingerprint(
+                    preview["scope"],
+                    lifecycle,
+                    resolved_policy,
+                    list(retained_refs),
+                    selected,
+                )
+            else:
+                preview["plan_fingerprint"] = "0" * 64
+            return cast(workspace_types.WorkspaceRetentionPreview, preview)
+
+        async def prune_scope(
+            self,
+            scope: dict[str, Any],
+            *,
+            remove_files: bool = True,
+        ) -> dict[str, Any]:
+            _ = scope, remove_files
+            return {}
+
+    provider = InvalidPreviewDBProvider("untrusted-preview")
+    workspace = WorkspaceManager().create(
+        tmp_path / f"untrusted-preview-{invalid_preview}",
+        db_store_provider=provider,
+        vector_store_provider="sqlite",
+    )
+    scope = {"execution_id": "exec-untrusted-preview"}
+    lifecycle: workspace_types.WorkspaceRetentionLifecycle = {
+        "execution_id": "exec-untrusted-preview",
+        "status": "completed",
+        "terminal_at": "2026-07-12T00:00:00Z",
+        "state_version": None,
+        "recovery_active": False,
+        "lease_active": False,
+    }
+
+    preview = await workspace.inspect_retention(scope, lifecycle=lifecycle)
+
+    assert preview["status"] == "deferred"
+    assert preview["scope"] == scope
+    assert preview["lifecycle"] == lifecycle
     assert all(values == [] for values in preview["selected"].values())
     assert "workspace.retention.provider_capability_missing" in {
         diagnostic.get("code") for diagnostic in preview["diagnostics"]

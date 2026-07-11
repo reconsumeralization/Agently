@@ -698,6 +698,134 @@ def build_retention_preview(
     )
 
 
+def validate_retention_preview(
+    value: Any,
+    *,
+    scope: Mapping[str, Any],
+    lifecycle: WorkspaceRetentionLifecycle,
+    policy: WorkspaceRetentionPolicy,
+    inline_result: Any,
+) -> WorkspaceRetentionPreview:
+    """Validate untrusted provider preview data against original request facts."""
+
+    if not isinstance(value, dict):
+        raise ValueError("Workspace retention provider preview must be an object.")
+    required_keys = {
+        "status",
+        "plan_fingerprint",
+        "scope",
+        "lifecycle",
+        "policy",
+        "retained_refs",
+        "inline_result",
+        "selected",
+        "accounting",
+        "diagnostics",
+    }
+    missing = sorted(required_keys - set(value))
+    if missing:
+        raise ValueError(
+            f"Workspace retention provider preview is missing fields: {', '.join(missing)}."
+        )
+    status = value["status"]
+    if status not in {"ready", "deferred"}:
+        raise ValueError("Workspace retention provider preview has an invalid status.")
+    if not isinstance(value["scope"], dict) or value["scope"] != dict(scope):
+        raise ValueError("Workspace retention provider preview scope does not match the request.")
+    if not isinstance(value["lifecycle"], dict) or value["lifecycle"] != dict(lifecycle):
+        raise ValueError("Workspace retention provider preview lifecycle does not match the request.")
+    if not isinstance(value["policy"], dict) or value["policy"] != dict(policy):
+        raise ValueError("Workspace retention provider preview policy does not match the request.")
+    if value["inline_result"] != inline_result:
+        raise ValueError("Workspace retention provider preview inline result does not match the request.")
+
+    retained_values = value["retained_refs"]
+    if not isinstance(retained_values, list):
+        raise ValueError("Workspace retention provider preview retained refs must be a list.")
+    canonical_refs = [
+        validate_retained_reference_shape(ref, field=f"provider_preview.retained_refs[{index}]")
+        for index, ref in enumerate(retained_values)
+    ]
+
+    selected_value = value["selected"]
+    if not isinstance(selected_value, dict) or set(selected_value) != set(RETENTION_SELECTION_KEYS):
+        raise ValueError("Workspace retention provider preview selection has invalid carrier keys.")
+    selected: dict[str, list[str]] = {}
+    for key in RETENTION_SELECTION_KEYS:
+        carrier_values = selected_value[key]
+        if not isinstance(carrier_values, list) or not all(
+            isinstance(item, str) and item for item in carrier_values
+        ):
+            raise ValueError(
+                f"Workspace retention provider preview selection '{key}' must contain strings."
+            )
+        if carrier_values != sorted(set(carrier_values)):
+            raise ValueError(
+                f"Workspace retention provider preview selection '{key}' is not canonical."
+            )
+        selected[key] = list(carrier_values)
+
+    accounting = value["accounting"]
+    accounting_keys = {
+        "entities",
+        "logical_bytes_deleted",
+        "physical_bytes_reclaimed",
+        "physical_bytes_pending",
+    }
+    if not isinstance(accounting, dict) or set(accounting) != accounting_keys:
+        raise ValueError("Workspace retention provider preview accounting has invalid fields.")
+    entities = accounting["entities"]
+    if not isinstance(entities, dict) or set(entities) != set(RETENTION_SELECTION_KEYS):
+        raise ValueError("Workspace retention provider preview accounting entities are incomplete.")
+    if any(
+        isinstance(entities[key], bool)
+        or not isinstance(entities[key], int)
+        or entities[key] != len(selected[key])
+        for key in RETENTION_SELECTION_KEYS
+    ):
+        raise ValueError("Workspace retention provider preview accounting counts do not match selection.")
+    for byte_field in (
+        "logical_bytes_deleted",
+        "physical_bytes_reclaimed",
+        "physical_bytes_pending",
+    ):
+        byte_value = accounting[byte_field]
+        if isinstance(byte_value, bool) or not isinstance(byte_value, int) or byte_value < 0:
+            raise ValueError(
+                f"Workspace retention provider preview accounting '{byte_field}' is invalid."
+            )
+
+    diagnostics = value["diagnostics"]
+    if not isinstance(diagnostics, list):
+        raise ValueError("Workspace retention provider preview diagnostics must be a list.")
+    for diagnostic in diagnostics:
+        if (
+            not isinstance(diagnostic, dict)
+            or not isinstance(diagnostic.get("code"), str)
+            or not isinstance(diagnostic.get("message"), str)
+            or not isinstance(diagnostic.get("retryable"), bool)
+            or not isinstance(diagnostic.get("entity"), str)
+            or ("detail" in diagnostic and not isinstance(diagnostic["detail"], dict))
+        ):
+            raise ValueError("Workspace retention provider preview contains an invalid diagnostic.")
+    if status == "deferred" and (
+        retention_selection_nonempty(selected) or accounting["logical_bytes_deleted"] != 0
+    ):
+        raise ValueError("Workspace deferred retention preview must have an empty zero-byte selection.")
+
+    fingerprint = value["plan_fingerprint"]
+    expected_fingerprint = canonical_retention_fingerprint(
+        dict(scope),
+        lifecycle,
+        policy,
+        canonical_refs,
+        selected,
+    )
+    if not isinstance(fingerprint, str) or fingerprint != expected_fingerprint:
+        raise ValueError("Workspace retention provider preview fingerprint is invalid.")
+    return cast(WorkspaceRetentionPreview, value)
+
+
 def _retained_ref_identity(ref: WorkspaceRetainedReference) -> dict[str, Any]:
     if "workspace_id" in ref:
         return {

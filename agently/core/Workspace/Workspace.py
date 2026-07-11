@@ -65,6 +65,7 @@ from .Retention import (
     retention_selection_nonempty,
     resolve_retention_policy,
     serialized_size,
+    validate_retention_preview,
 )
 from ._defaults import (
     ScopeNode,
@@ -1759,13 +1760,35 @@ class Workspace:
                     "detail": {"serialized_bytes": serialized_size(inline_result)},
                 },
             )
-        preview = await self.backend.inspect_retention(
+        provider_preview = await self.backend.inspect_retention(
             normalized_scope,
             lifecycle=lifecycle,
             retained_refs=normalized_refs,
             inline_result=inline_result,
             policy=resolved_policy,
         )
+        try:
+            preview = validate_retention_preview(
+                provider_preview,
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=resolved_policy,
+                inline_result=inline_result,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            return self._retention_deferred_preview(
+                normalized_scope,
+                lifecycle=lifecycle,
+                retained_refs=normalized_refs,
+                inline_result=inline_result,
+                policy=resolved_policy,
+                diagnostic=retention_diagnostic(
+                    "workspace.retention.provider_capability_missing",
+                    f"Workspace retention provider returned an invalid preview: {error}",
+                    entity=type(self.backend).__name__,
+                    detail={"invalid_preview": True},
+                ),
+            )
         if preview["status"] == "ready" and retention_selection_nonempty(preview["selected"]):
             capabilities = self.backend.capabilities()
             read_only_components = read_only_retention_components(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1190,3 +1191,109 @@ async def test_inspect_retention_treats_missing_lazy_scratch_area_as_empty(tmp_p
 
     assert preview["status"] == "ready"
     assert preview["selected"]["scratch_paths"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", ["missing", "extra", "contradictory"])
+async def test_inspect_retention_requires_scope_index_to_match_record_scope(tmp_path, mismatch):
+    execution_id = "exec-scope-index-match"
+    workspace = WorkspaceManager().create(tmp_path / f"retention-scope-index-{mismatch}")
+    record = await workspace.put(
+        {"record": "scope index authority"},
+        collection="observations",
+        kind="process",
+        scope={"execution_id": execution_id, "project_id": "project-authoritative"},
+    )
+    backend = cast(Any, workspace.backend)
+    with backend._connect() as conn:
+        if mismatch == "missing":
+            conn.execute(
+                "DELETE FROM record_scope_index WHERE record_id = ? AND scope_key = 'project_id'",
+                (record["id"],),
+            )
+        elif mismatch == "extra":
+            conn.execute(
+                "INSERT INTO record_scope_index(record_id, scope_key, scope_value) VALUES (?, ?, ?)",
+                (record["id"], "task_id", json.dumps("task-extra")),
+            )
+        else:
+            conn.execute(
+                "UPDATE record_scope_index SET scope_value = ? WHERE record_id = ? AND scope_key = 'execution_id'",
+                (json.dumps("exec-contradictory"), record["id"]),
+            )
+        conn.commit()
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": execution_id},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.ref_readback_failed" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("files_representation", ["discard", "hot"])
+async def test_inspect_retention_requires_files_area_root(tmp_path, files_representation):
+    execution_id = "exec-required-files"
+    workspace = WorkspaceManager().create(tmp_path / "retention-required-files")
+    await workspace.put(
+        {"record": "files root required"},
+        collection="observations",
+        kind="process",
+        scope={"execution_id": execution_id},
+    )
+    shutil.rmtree(workspace.root / "files")
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": execution_id},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+        policy=cast(
+            WorkspaceRetentionPolicy,
+            {"rules": [{"category": "files", "representation": files_representation}]},
+        ),
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.lineage_ambiguous" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("area", ["files", "scratch"])
+async def test_inspect_retention_defers_area_disappearance_after_observation(
+    tmp_path,
+    monkeypatch,
+    area,
+):
+    execution_id = f"exec-{area}-race"
+    root = WorkspaceManager().create(tmp_path / f"retention-{area}-race")
+    workspace = root.with_scope_node("executions", execution_id)
+    await workspace.write_file("reports/result.txt", "result")
+    if area == "scratch":
+        lease = await workspace.open_scratch(cleanup_policy="on_scope_prune")
+        await workspace.close_scratch(cast(str, lease.get("lease_id")), remove=False)
+    area_root = root.root / area
+    original_resolve = Path.resolve
+    removed = False
+
+    def remove_after_observation(path: Path, *args: Any, **kwargs: Any) -> Path:
+        nonlocal removed
+        if path == area_root and not removed:
+            removed = True
+            shutil.rmtree(area_root)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", remove_after_observation)
+    preview = await workspace.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.ref_readback_failed" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
