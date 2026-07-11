@@ -939,13 +939,26 @@ def _retained_ref_equivalent(
     )
     if declared_digest != canonical_digest or declared_size != canonical_size:
         return False
-    if declared_record is not None:
+    if "workspace_id" in declared:
+        if "workspace_id" not in canonical:
+            return False
+        if declared.get("workspace_id") != canonical.get("workspace_id"):
+            return False
+        if declared_record is not None:
+            return (
+                canonical_record == declared_record
+                and (declared_content is None or canonical_content == declared_content)
+            )
+        return declared_content is not None and canonical_content == declared_content
+    if "id" in declared:
+        if "workspace_id" not in canonical and "id" not in canonical:
+            return False
         return (
             canonical_record == declared_record
             and (declared_content is None or canonical_content == declared_content)
         )
-    if declared_content is not None:
-        return canonical_content == declared_content
+    if "workspace_id" in canonical or "id" in canonical:
+        return False
     return declared_file is not None and canonical_file == declared_file
 
 
