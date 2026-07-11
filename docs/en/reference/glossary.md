@@ -34,11 +34,11 @@ A single run of a TriggerFlow. Created by `flow.create_execution(...)`. Has life
 
 ## flow_data
 
-Flow-scoped shared data. Calling `get_flow_data(...)` / `set_flow_data(...)` and friends emits a `RuntimeWarning` because the value is shared across all executions of the flow, which causes problems for concurrency, save/load, and distributed runs. Pass `no_warning=True` to suppress the warning when the shared scope is intentional. Prefer `state` for execution-local data.
+Flow-scoped shared data. Calling `get_flow_data(...)` / `set_flow_data(...)` and friends emits a `RuntimeWarning` because the value is shared across all executions of the flow. `execution.save()` includes a serialized copy, and `load()` replaces the target flow object's current shared value with that copy; this does not provide execution-local isolation, CAS, merge behavior, or concurrency safety. Pass `no_warning=True` to suppress the warning when the shared scope is intentional. Prefer `state` for execution-local data.
 
 ## Hidden execution sugar
 
-`flow.start()` / `flow.async_start()` create a temporary execution under the hood, run it to close, and return the close snapshot. Convenient for scripts and one-shot runs. Not appropriate for flows that pause for human input, expect external `emit()`s, or otherwise need an externally-controlled execution handle — use `flow.start_execution(...)` for those.
+`flow.start()` / `flow.async_start()` create a temporary execution under the hood, run it to close, and return the close snapshot. Use them for a finite, self-closing run when the caller does not need the execution handle; this can be a script, test, or bounded service request. Use an explicit execution for pause/resume, external emits, save/load, intervention, inspection, cancellation, or host-controlled close. The boundary is lifecycle control, not script versus service.
 
 ## OpenAICompatible / AnthropicCompatible
 

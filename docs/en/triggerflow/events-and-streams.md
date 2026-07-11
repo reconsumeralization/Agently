@@ -169,7 +169,7 @@ Setting the stream timeout to `None` makes the consumer wait until the stream ac
 
 ## Hidden execution sugar for streams
 
-`flow.get_async_runtime_stream(...)` and `flow.get_runtime_stream(...)` create a hidden execution under the hood and stream from it. As with `flow.start()`, this only works for self-closing flows (no `pause_for`, no external `emit`). If a hidden stream execution reaches `pause_for(...)`, TriggerFlow fails fast because there is no resumable execution handle; use `execution.get_async_runtime_stream(...)` on an explicit execution instead.
+`flow.get_async_runtime_stream(...)` and `flow.get_runtime_stream(...)` create a hidden execution under the hood and stream from it. As with `flow.start()`, this is for finite, self-closing flows (no `pause_for`, no external `emit`) when the caller does not need an execution handle. A bounded streaming request may use it; use `execution.get_async_runtime_stream(...)` on an explicit execution when the host needs disconnect cancellation, save/load, intervention, inspection, external events, or controlled close. If a hidden stream execution reaches `pause_for(...)`, TriggerFlow fails fast because there is no resumable handle.
 
 ## Don't put live items in state
 

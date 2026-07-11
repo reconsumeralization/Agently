@@ -50,6 +50,10 @@ Rules:
 - `wait_for_result=` value is **ignored** with a warning. Return type is fixed to the close snapshot.
 - `timeout=` is treated as `auto_close_timeout` — how long to wait after the last activity before auto-closing.
 - If your flow uses `pause_for(...)`, do **not** use `flow.start()` — there is no handle for the outside to resume against. TriggerFlow fails fast when hidden execution sugar reaches `pause_for(...)`. Use `flow.start_execution(...)` or `flow.create_execution(...)`.
+- Hidden sugar is for finite, self-closing runs when the caller only needs the
+  close snapshot. A bounded async request handler may use it. Use an explicit
+  execution whenever the host needs external emits, save/load, intervention,
+  inspection, cancellation, pause/resume, or control over when close happens.
 
 ### `flow.start_execution(...)` — explicit launch
 
@@ -59,7 +63,10 @@ execution = await flow.async_start_execution("input value")
 snapshot = await execution.async_close()
 ```
 
-Returns the execution. You decide when to close. Suited for services, SSE/WebSocket streams, human-in-the-loop, external `emit()` callers.
+Returns the execution. You decide when to close. Use it for long-lived or
+externally controlled services, SSE/WebSocket streams that need disconnect or
+cancellation handling, human-in-the-loop, external `emit()` callers, and any
+run whose host needs the execution handle.
 
 `wait_for_result=` is ignored here too.
 
@@ -497,8 +504,8 @@ lineage problems when event records are inspected.
 
 | Situation | Use |
 |---|---|
-| Quick script, all inputs known up front | `flow.start(...)` / `flow.async_start(...)` |
-| Service that needs to keep emitting / consuming runtime stream | `flow.start_execution(...)` |
+| Finite, self-closing run; all inputs known; caller only needs close snapshot | `flow.start(...)` / `flow.async_start(...)` |
+| Service/request path that needs an execution handle, external events, cancellation, or controlled close | `flow.start_execution(...)` |
 | Need `pause_for(...)` (human approval, async webhook) | `flow.create_execution(auto_close=False)` + `execution.async_start(...)` + manual `close()` |
 | Need to save and resume across restarts | `create_execution(...)` + `execution.save()` / `load()` |
 

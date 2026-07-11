@@ -123,11 +123,16 @@ asyncio.run(main())
 
 事件驱动编排时优先用：
 
-- `flow.async_start(...)`——hidden execution 语法糖，直接返回 close snapshot。
+- `flow.async_start(...)`——调用方只需要 close snapshot 的有限、自闭合运行；有界
+  async request handler 也可以使用。
 - `flow.async_start_execution(...)`——显式启动长生命周期 execution，由你自己控制。
 - chunk 内部使用 `data.async_emit(...)` 与 `data.async_put_into_stream(...)`。
 
 详见 [TriggerFlow Lifecycle](../triggerflow/lifecycle.md)。
+
+宿主需要 execution handle 来完成 pause/resume、外部事件、save/load、intervention、
+inspection、cancellation、runtime-stream 断连处理或控制 close 时机时，应使用显式
+execution，而不是 hidden sugar。
 
 ## 不要过度宣传 async
 

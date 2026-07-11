@@ -245,9 +245,11 @@ snapshot = await policy_flow.async_start(
 或需要之后 save/load，应使用 `flow.create_execution(auto_close=False)` 创建显式 execution，
 让服务可以保存 snapshot 并通过 execution handle 恢复。
 
-对于运行时由模型生成 To-Do List 或依赖图的模型应用，动态图应按 plan 或 request 局部生成。
-extract / analyze 这类可复用 sub-flow template 可以放在模块级；per-plan executor 应用 task id
-作为动态 stage identity，把 task 结果写入 execution state，并避免修改 main flow definition。
+运行时由模型生成或应用提交的 To-Do/DAG data 应使用 TaskDAG / DynamicTask，先校验图
+再执行；不要把这些运行时数据直接编译成新的 TriggerFlow definitions。TriggerFlow
+仍是 `TaskDAGExecutor` 下层的执行基座；由可信应用源码拥有的稳定可复用 workflow
+template 仍然是模块级 TriggerFlow definition。每个提交图及其结果应限定在所属 TaskDAG
+run 内，不要放入共享 `flow_data`，也不要修改 main flow definition。
 
 ### 何时用 blueprint
 

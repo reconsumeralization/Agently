@@ -215,6 +215,12 @@ The DAG capability is split into four stages:
   and runs it through TriggerFlow lifecycle, stream, pause/resume, result, and
   runtime resource mechanics.
 
+`TaskDAGExecutor.async_run(...)` is the default direct TaskDAG-to-TriggerFlow
+path. Blocks is not mandatory. Choose `compile_blocks(...)` or
+`async_run_blocks(...)` explicitly only when the caller needs an
+`ExecutionBlockGraph`, Blocks lifecycle evidence, or evidence/result adapter
+output; TaskDAG still owns validation and dependency semantics on that path.
+
 `bindings` is not part of the public facade. Use `handlers` for custom local
 functions. Use explicit resource slots such as `planner`, `model`, `actions`,
 and `skills` when a task may use them; `actions` and `skills` are not exposed to
