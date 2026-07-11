@@ -21,6 +21,42 @@ Agently 在运行时层是 async-native。Sync 方法是通过 `FunctionShifter.
 - 流式 UI——希望字段 delta 先反应到界面，而不是等整个响应。
 - 把模型输出和 TriggerFlow 事件、runtime stream 或外部 pubsub 结合起来。
 
+## 先分析依赖，再选择执行形态
+
+构建复杂 AI 服务或脚本时，不要从「全部串行」的循环起步。先画出业务阶段并标记：
+
+- 必须串行的真实数据依赖或顺序约束；
+- 可以并发执行的独立分支；
+- 哪些可取消或幂等的准备工作可以安全使用 provisional 结构化进度；
+- 哪些副作用和外部系统带来安全或容量限制。
+
+可重叠的工作使用 Agently async API。结构化字段需要渐进到达 UI 或其他消费者时
+使用 `instant`，但持久化写入或业务决策仍以 `async_get_data()` 返回的最终解析对象
+并完成已配置校验后为准。`instant` 更新是 provisional，retry 可能使其失效；它们
+只能驱动 UI 状态或明确可取消/幂等的准备工作，不能直接驱动不可逆副作用。应用拥有
+的 fan-out、join 和依赖关系应通过 TriggerFlow 的 `batch(...)`、
+`for_each(...)`，或信号驱动的 `when(...)` + `async_emit(...)` /
+`async_emit_nowait(...)` 表达，让流程关系在图中可见。
+
+只有真实依赖、顺序保证、副作用安全规则或外部容量限制要求时，才应使用串行。
+完全不做这项依赖分析就直接选择串行，是反模式。
+
+## 暴露压力控制参数
+
+生产服务应在真正拥有压力边界的层级暴露有界参数：
+
+| 压力边界 | 控制方式 |
+|---|---|
+| 服务入口 | 最大活跃 execution/协程数与有界队列 |
+| 单个 TriggerFlow execution | `create_execution(concurrency=N)` 或 `execution.set_concurrency(N)` |
+| 单个 fan-out operator | `batch(..., concurrency=N)` 或 `for_each(concurrency=N)` |
+| 模型 provider | `model_request.scheduler.max_concurrency`、`model_request.scheduler.rate_per_second` 与 `model_request.scheduler.providers.<provider>` override |
+| 阻塞 I/O SDK | 宿主拥有的 thread-pool 数量与队列上限 |
+| CPU-bound 工作 | 宿主拥有的 process-pool/worker 数量与队列上限 |
+
+有效吞吐取决于上述所有层级以及它们保护的下游系统。TriggerFlow 没有一个通用的
+「线程数」设置；阻塞工作需要与 event loop 隔离时，线程池和进程池由应用宿主负责。
+
 ## 推荐组合
 
 最值得先掌握的组合：
