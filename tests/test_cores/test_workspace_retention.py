@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,6 +13,7 @@ from agently.core.Workspace.Retention import (
     canonical_retention_fingerprint,
     resolve_retention_policy,
     serialized_size,
+    stable_checkpoint_row_identities,
 )
 from agently.types.data import (
     WorkspaceRetentionLifecycle,
@@ -595,16 +597,23 @@ async def test_inspect_retention_selects_every_mutation_relevant_carrier(tmp_pat
     )
 
     with backend._connect() as conn:
-        checkpoint_identities = {
-            f"exec-carriers:{row['checkpoint_rowid']}:{row['record_id']}"
+        checkpoint_facts = [
+            {
+                "run_id": str(row["run_id"]),
+                "step_id": row["step_id"],
+                "record_id": str(row["record_id"]),
+                "state": json.loads(str(row["state_json"])),
+                "created_at": str(row["created_at"]),
+            }
             for row in conn.execute(
                 """
-                SELECT rowid AS checkpoint_rowid, record_id FROM checkpoints
-                WHERE run_id = ? ORDER BY checkpoint_rowid
+                SELECT run_id, step_id, record_id, state_json, created_at FROM checkpoints
+                WHERE run_id = ? ORDER BY created_at, rowid
                 """,
                 ("exec-carriers",),
             ).fetchall()
-        }
+        ]
+        checkpoint_identities = set(stable_checkpoint_row_identities(checkpoint_facts))
 
     assert preview["status"] == "ready"
     required_keys = {
@@ -921,3 +930,263 @@ async def test_inspect_retention_catches_resolve_runtimeerror(tmp_path, monkeypa
     assert "workspace.retention.ref_readback_failed" in {
         diagnostic.get("code") for diagnostic in preview["diagnostics"]
     }
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_preserves_content_only_root_and_owning_record(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-content-root")
+    owner = await workspace.put(
+        {"artifact": "managed content"},
+        collection="artifacts",
+        kind="managed_content",
+        scope={"execution_id": "exec-content-root"},
+    )
+    content_root = await workspace.ref_envelope(cast(str, owner["path"]))
+    assert content_root["record_id"] == ""
+    assert content_root["content_ref"] == owner["path"]
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-content-root"},
+        lifecycle={**_terminal_lifecycle("exec-content-root"), "state_version": None},
+        retained_refs=[content_root],
+    )
+
+    assert preview["status"] == "ready"
+    assert owner["id"] not in preview["selected"]["record_ids"]
+    assert owner["path"] not in preview["selected"]["content_paths"]
+    retained_owner_ids = {
+        str(ref.get("id") or ref.get("record_id") or "")
+        for ref in preview["retained_refs"]
+    }
+    assert owner["id"] in retained_owner_ids
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_rejects_broad_scope_without_execution_id(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-execution-exact")
+    for execution_id in ("exec-target", "exec-sibling"):
+        await workspace.put(
+            {"execution": execution_id},
+            collection="observations",
+            kind="process",
+            scope={"project_id": "project-shared", "execution_id": execution_id},
+        )
+
+    preview = await workspace.inspect_retention(
+        {"project_id": "project-shared"},
+        lifecycle={**_terminal_lifecycle("exec-target"), "state_version": None},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.lifecycle_scope_mismatch" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("area", ["files", "scratch"])
+async def test_inspect_retention_rejects_symlinked_area_root(tmp_path, area):
+    root = WorkspaceManager().create(tmp_path / f"retention-area-root-{area}")
+    workspace = root.with_scope_node("executions", "exec-area-root")
+    await workspace.write_file("reports/result.txt", "result")
+    lease = await workspace.open_scratch(cleanup_policy="on_scope_prune")
+    await workspace.close_scratch(cast(str, lease.get("lease_id")), remove=False)
+    lexical_root = root.root / area
+    actual_root = lexical_root.with_name(f"{area}-actual")
+    lexical_root.rename(actual_root)
+    lexical_root.symlink_to(actual_root, target_is_directory=True)
+
+    preview = await workspace.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-area-root"), "state_version": None},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.lineage_ambiguous" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("corruption_case", "corrupt_json"),
+    [
+        ("record_scope", "[]"),
+        ("record_meta", "[]"),
+        ("runtime_snapshot", "[]"),
+        ("runtime_artifacts", "{}"),
+        ("anchor_ref", "[]"),
+        ("anchor_preserved_events", "{}"),
+        ("checkpoint_state", "[]"),
+        ("scratch_scope", "[]"),
+        ("checkpoint_manifest", "{}"),
+        ("scope_index_value", "{"),
+        ("vector_ref", "[]"),
+        ("vector_embedding", "{}"),
+    ],
+)
+async def test_inspect_retention_strictly_validates_persisted_json(
+    tmp_path,
+    corruption_case,
+    corrupt_json,
+):
+    execution_id = "exec-strict-json"
+    workspace = WorkspaceManager().create(
+        tmp_path / f"retention-json-{corruption_case}",
+        vector_store_provider="sqlite",
+    )
+    record = await workspace.put(
+        {"record": "strict JSON"},
+        collection="observations",
+        kind="process",
+        scope={"execution_id": execution_id},
+        meta={"source": "test"},
+    )
+    checkpoint = await workspace.put_checkpoint(
+        execution_id,
+        {"state_version": 1},
+        expected_state_version=0,
+    )
+    event = await workspace.append_runtime_event(
+        execution_id,
+        {"event_type": "execution.completed", "event_id": "evt-strict-json"},
+        snapshot_ref=record,
+        artifact_refs=[record],
+        state_version=1,
+    )
+    anchor = await workspace.add_retention_anchor(
+        execution_id,
+        anchor_type="final",
+        record_ref=record,
+        preserved_event_ids=[event["event_id"]],
+    )
+    lease = await workspace.open_scratch(
+        scope={"execution_id": execution_id},
+        cleanup_policy="on_scope_prune",
+    )
+    await workspace.close_scratch(cast(str, lease.get("lease_id")), remove=False)
+    backend = cast(Any, workspace.backend)
+    await backend.vector_store_provider.index_record(record, [1.0, 0.0])
+    statements = {
+        "record_scope": ("UPDATE records SET scope_json = ? WHERE id = ?", (record["id"],)),
+        "record_meta": ("UPDATE records SET meta_json = ? WHERE id = ?", (record["id"],)),
+        "runtime_snapshot": (
+            "UPDATE runtime_events SET snapshot_ref_json = ? WHERE id = ?",
+            (event["id"],),
+        ),
+        "runtime_artifacts": (
+            "UPDATE runtime_events SET artifact_refs_json = ? WHERE id = ?",
+            (event["id"],),
+        ),
+        "anchor_ref": (
+            "UPDATE retention_anchors SET record_ref_json = ? WHERE id = ?",
+            (anchor["id"],),
+        ),
+        "anchor_preserved_events": (
+            "UPDATE retention_anchors SET preserved_event_ids_json = ? WHERE id = ?",
+            (anchor["id"],),
+        ),
+        "checkpoint_state": (
+            "UPDATE checkpoints SET state_json = ? WHERE run_id = ?",
+            (execution_id,),
+        ),
+        "scratch_scope": (
+            "UPDATE scratch_leases SET scope_json = ? WHERE lease_id = ?",
+            (lease.get("lease_id"),),
+        ),
+        "checkpoint_manifest": (
+            "UPDATE manifests SET value_json = ? WHERE key = ?",
+            (f"checkpoint.latest.{execution_id}",),
+        ),
+        "scope_index_value": (
+            "UPDATE record_scope_index SET scope_value = ? WHERE record_id = ? AND scope_key = 'execution_id'",
+            (record["id"],),
+        ),
+        "vector_ref": (
+            "UPDATE workspace_vectors SET ref_json = ? WHERE record_id = ?",
+            (record["id"],),
+        ),
+        "vector_embedding": (
+            "UPDATE workspace_vectors SET embedding_json = ? WHERE record_id = ?",
+            (record["id"],),
+        ),
+    }
+    statement, tail_params = statements[corruption_case]
+    with backend._connect() as conn:
+        conn.execute(statement, (corrupt_json, *tail_params))
+        conn.commit()
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": execution_id},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": 1},
+    )
+
+    _assert_nothing_selected(preview)
+    assert "workspace.retention.ref_readback_failed" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
+    assert checkpoint["id"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_checkpoint_identity_survives_rowid_rebuild(tmp_path):
+    execution_id = "exec-stable-checkpoint"
+    workspace = WorkspaceManager().create(tmp_path / "retention-stable-checkpoint")
+    await workspace.put_checkpoint(
+        execution_id,
+        {"state_version": 1},
+        expected_state_version=0,
+    )
+    lifecycle = cast(
+        WorkspaceRetentionLifecycle,
+        {**_terminal_lifecycle(execution_id), "state_version": 1},
+    )
+    first = await workspace.inspect_retention(
+        {"execution_id": execution_id},
+        lifecycle=lifecycle,
+    )
+    backend = cast(Any, workspace.backend)
+    with backend._connect() as conn:
+        rows = conn.execute(
+            "SELECT run_id, step_id, record_id, state_json, created_at FROM checkpoints WHERE run_id = ?",
+            (execution_id,),
+        ).fetchall()
+        conn.execute("DELETE FROM checkpoints WHERE run_id = ?", (execution_id,))
+        conn.execute(
+            "INSERT INTO checkpoints(run_id, step_id, record_id, state_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("other-run", None, "other-record", "{}", "2026-07-12T00:00:00Z"),
+        )
+        conn.executemany(
+            "INSERT INTO checkpoints(run_id, step_id, record_id, state_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            [tuple(row) for row in rows],
+        )
+        conn.commit()
+
+    second = await workspace.inspect_retention(
+        {"execution_id": execution_id},
+        lifecycle=lifecycle,
+    )
+
+    assert first["status"] == second["status"] == "ready"
+    assert first["selected"]["checkpoint_row_ids"] == second["selected"]["checkpoint_row_ids"]
+    assert first["plan_fingerprint"] == second["plan_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_retention_treats_missing_lazy_scratch_area_as_empty(tmp_path):
+    workspace = WorkspaceManager().create(tmp_path / "retention-no-scratch")
+    await workspace.put(
+        {"record": "no scratch required"},
+        collection="observations",
+        kind="process",
+        scope={"execution_id": "exec-no-scratch"},
+    )
+    assert not (workspace.root / "scratch").exists()
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-no-scratch"},
+        lifecycle={**_terminal_lifecycle("exec-no-scratch"), "state_version": None},
+    )
+
+    assert preview["status"] == "ready"
+    assert preview["selected"]["scratch_paths"] == []

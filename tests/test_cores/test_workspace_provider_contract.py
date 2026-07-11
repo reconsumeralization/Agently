@@ -14,6 +14,7 @@ from typing_extensions import get_type_hints
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.core import LocalWorkspaceBackend, PluginManager, WorkspaceManager
+from agently.core.Workspace.Retention import empty_retention_selection
 import agently.types.data as data_types
 import agently.types.data.workspace as workspace_types
 from agently.types.data import (
@@ -1157,6 +1158,79 @@ def test_workspace_manager_proves_vector_delete_is_async_without_calling_it():
     with pytest.raises(TypeError, match="async.*delete_records"):
         WorkspaceManager()._validate_vector_store_provider(SyncDeleteVectorProvider())
     assert delete_called is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_facade_defers_ready_plan_from_read_only_delegated_db_provider(tmp_path):
+    class ReadOnlyReadyDBProvider(RemoteAuditWorkspaceBackend):
+        def __init__(self):
+            super().__init__("read-only-retention")
+            self.read_only = True
+
+        async def inspect_retention(
+            self,
+            scope: dict[str, Any],
+            *,
+            lifecycle: workspace_types.WorkspaceRetentionLifecycle,
+            retained_refs: Sequence[workspace_types.WorkspaceRetainedReference] = (),
+            inline_result: Any = None,
+            policy: workspace_types.WorkspaceRetentionPolicy | None = None,
+        ) -> workspace_types.WorkspaceRetentionPreview:
+            self.operations.append("inspect_retention")
+            selected = empty_retention_selection()
+            selected["runtime_event_ids"] = ["remote-event-ready"]
+            return {
+                "status": "ready",
+                "plan_fingerprint": "remote-ready-plan",
+                "scope": scope,
+                "lifecycle": lifecycle,
+                "policy": cast(workspace_types.WorkspaceRetentionPolicy, policy or {"rules": []}),
+                "retained_refs": list(retained_refs),
+                "inline_result": inline_result,
+                "selected": selected,
+                "accounting": {
+                    "entities": {key: len(values) for key, values in selected.items()},
+                    "logical_bytes_deleted": 1,
+                    "physical_bytes_reclaimed": 0,
+                    "physical_bytes_pending": 0,
+                },
+                "diagnostics": [],
+            }
+
+        async def prune_scope(
+            self,
+            scope: dict[str, Any],
+            *,
+            remove_files: bool = True,
+        ) -> dict[str, Any]:
+            _ = scope, remove_files
+            return {}
+
+    provider = ReadOnlyReadyDBProvider()
+    workspace = WorkspaceManager().create(
+        tmp_path / "read-only-delegated-db",
+        db_store_provider=provider,
+        vector_store_provider="sqlite",
+    )
+
+    preview = await workspace.inspect_retention(
+        {"execution_id": "exec-read-only-delegated"},
+        lifecycle={
+            "execution_id": "exec-read-only-delegated",
+            "status": "completed",
+            "terminal_at": "2026-07-12T00:00:00Z",
+            "state_version": None,
+            "recovery_active": False,
+            "lease_active": False,
+        },
+    )
+
+    assert provider.operations[-1] == "inspect_retention"
+    assert preview["status"] == "deferred"
+    assert all(values == [] for values in preview["selected"].values())
+    assert "workspace.retention.provider_capability_missing" in {
+        diagnostic.get("code") for diagnostic in preview["diagnostics"]
+    }
 
 
 @pytest.mark.asyncio

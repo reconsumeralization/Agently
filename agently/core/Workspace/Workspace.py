@@ -59,8 +59,10 @@ from agently.types.plugins import WorkspaceBackend
 from .Errors import WorkspaceConfigurationError, WorkspacePolicyError
 from .Retrieval import RerankHandler, retrieve_workspace
 from .Retention import (
-    canonical_retention_fingerprint,
-    empty_retention_selection,
+    build_retention_preview,
+    read_only_retention_components,
+    retention_diagnostic,
+    retention_selection_nonempty,
     resolve_retention_policy,
     serialized_size,
 )
@@ -1641,30 +1643,15 @@ class Workspace:
         policy: WorkspaceRetentionPolicy,
         diagnostic: WorkspaceRetentionDiagnostic,
     ) -> WorkspaceRetentionPreview:
-        selected = empty_retention_selection()
-        return {
-            "status": "deferred",
-            "plan_fingerprint": canonical_retention_fingerprint(
-                scope,
-                lifecycle,
-                policy,
-                retained_refs,
-                selected,
-            ),
-            "scope": scope,
-            "lifecycle": lifecycle,
-            "policy": policy,
-            "retained_refs": retained_refs,
-            "inline_result": inline_result,
-            "selected": selected,
-            "accounting": {
-                "entities": {key: 0 for key in selected},
-                "logical_bytes_deleted": 0,
-                "physical_bytes_reclaimed": 0,
-                "physical_bytes_pending": 0,
-            },
-            "diagnostics": [diagnostic],
-        }
+        return build_retention_preview(
+            status="deferred",
+            scope=scope,
+            lifecycle=lifecycle,
+            policy=policy,
+            retained_refs=retained_refs,
+            inline_result=inline_result,
+            diagnostics=[diagnostic],
+        )
 
     def _normalize_retention_file_ref(
         self,
@@ -1702,6 +1689,23 @@ class Workspace:
         if not normalized_scope:
             raise ValueError("Workspace inspect_retention requires at least one scope value.")
         resolved_policy = resolve_retention_policy(policy, supports_cold=True)
+        execution_id = str(lifecycle.get("execution_id") or "")
+        scope_execution_id = normalized_scope.get("execution_id")
+        if not execution_id or str(scope_execution_id or "") != execution_id:
+            return self._retention_deferred_preview(
+                normalized_scope,
+                lifecycle=lifecycle,
+                retained_refs=[
+                    cast(WorkspaceRetainedReference, dict(ref)) for ref in retained_refs
+                ],
+                inline_result=inline_result,
+                policy=resolved_policy,
+                diagnostic=retention_diagnostic(
+                    "workspace.retention.lifecycle_scope_mismatch",
+                    "Workspace retention requires scope.execution_id to match the lifecycle execution_id.",
+                    entity=execution_id or "execution_id",
+                ),
+            )
         normalized_refs: list[WorkspaceRetainedReference] = []
         for index, ref in enumerate(retained_refs):
             try:
@@ -1755,13 +1759,47 @@ class Workspace:
                     "detail": {"serialized_bytes": serialized_size(inline_result)},
                 },
             )
-        return await self.backend.inspect_retention(
+        preview = await self.backend.inspect_retention(
             normalized_scope,
             lifecycle=lifecycle,
             retained_refs=normalized_refs,
             inline_result=inline_result,
             policy=resolved_policy,
         )
+        if preview["status"] == "ready" and retention_selection_nonempty(preview["selected"]):
+            capabilities = self.backend.capabilities()
+            read_only_components = read_only_retention_components(
+                {
+                    "backend": bool(
+                        capabilities.get("read_only", False)
+                        or getattr(self.backend, "read_only", False)
+                    ),
+                    "db_store": bool(
+                        getattr(getattr(self.backend, "db_store_provider", None), "read_only", False)
+                    ),
+                    "vector_store": bool(
+                        getattr(getattr(self.backend, "vector_store_provider", None), "read_only", False)
+                    ),
+                }
+            )
+            if read_only_components:
+                return build_retention_preview(
+                    status="deferred",
+                    scope=preview["scope"],
+                    lifecycle=preview["lifecycle"],
+                    policy=preview["policy"],
+                    retained_refs=preview["retained_refs"],
+                    inline_result=preview["inline_result"],
+                    diagnostics=[
+                        retention_diagnostic(
+                            "workspace.retention.provider_capability_missing",
+                            "Workspace retention cannot apply a non-empty plan through read-only components.",
+                            entity=type(self.backend).__name__,
+                            detail={"read_only_components": read_only_components},
+                        )
+                    ],
+                )
+        return preview
 
     async def apply_retention(
         self,

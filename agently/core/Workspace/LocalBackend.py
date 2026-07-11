@@ -22,6 +22,7 @@ import stat
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, cast
 
@@ -59,10 +60,20 @@ from .Stores import (
     VectorStoreProviderUnavailableError,
 )
 from .Retention import (
-    canonical_retention_fingerprint,
-    empty_retention_selection,
+    NormalizedRetainedRoot,
+    build_retention_selection,
+    build_retention_preview,
+    calculate_retention_logical_bytes,
+    deduplicate_retained_refs,
+    normalized_retained_root,
+    read_only_retention_components,
+    retention_diagnostic,
+    retention_lifecycle_diagnostics,
+    retention_selection_nonempty,
     resolve_retention_policy,
-    serialized_size,
+    strict_retention_json,
+    strict_retention_json_value,
+    validate_retained_reference_shape,
 )
 from ._defaults import (
     SCOPE_LINEAGE_KINDS,
@@ -72,6 +83,44 @@ from ._defaults import (
     scope_filter_path_nodes,
 )
 from ._utils import json_dumps, json_loads, slug, utc_now
+
+
+@dataclass(frozen=True)
+class _RetentionSQLiteSnapshot:
+    all_record_rows: list[sqlite3.Row]
+    scoped_rows: list[sqlite3.Row]
+    checkpoint_rows: list[sqlite3.Row]
+    runtime_event_rows: list[sqlite3.Row]
+    anchor_rows: list[sqlite3.Row]
+    scratch_rows: list[sqlite3.Row]
+    link_rows: list[sqlite3.Row]
+    scope_index_rows: list[sqlite3.Row]
+    fts_rows: list[sqlite3.Row]
+    manifest_rows: list[sqlite3.Row]
+    vector_rows: list[sqlite3.Row]
+
+
+@dataclass(frozen=True)
+class _DecodedRetentionSnapshot:
+    all_records: dict[str, WorkspaceRecordRef]
+    runtime_events: list[WorkspaceRuntimeEventRecord]
+    anchors: list[WorkspaceRetentionAnchor]
+    links: list[WorkspaceLinkRef]
+    scratch_leases: list[WorkspaceScratchLease]
+    checkpoint_facts: list[dict[str, Any]]
+    manifest_values: dict[str, Any]
+    manifest_raw: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _ResolvedRetentionRoots:
+    canonical_records: dict[str, WorkspaceRecordRef]
+    canonical_refs: list[WorkspaceRetainedReference]
+    record_ids: set[str]
+    file_paths: set[str]
+    content_paths: set[str]
+    event_ids: set[str]
+    diagnostics: list[WorkspaceRetentionDiagnostic]
 
 
 class LocalWorkspaceBackend:
@@ -706,6 +755,170 @@ class LocalWorkspaceBackend:
             "created_at": str(row["created_at"]),
             "meta": json_loads(row["meta_json"], {}),
         }
+
+    @staticmethod
+    def _strict_retention_record_row(row: sqlite3.Row) -> WorkspaceRecordRef:
+        scope = strict_retention_json(
+            row["scope_json"], dict, field=f"records.{row['id']}.scope_json"
+        )
+        source = strict_retention_json(
+            row["source_json"], dict, field=f"records.{row['id']}.source_json"
+        )
+        meta = strict_retention_json(
+            row["meta_json"], dict, field=f"records.{row['id']}.meta_json"
+        )
+        return cast(
+            WorkspaceRecordRef,
+            {
+                "id": str(row["id"]),
+                "collection": str(row["collection"]),
+                "kind": row["kind"],
+                "path": row["path"],
+                "sha256": row["sha256"],
+                "size": int(row["size"] or 0),
+                "summary": str(row["summary"] or ""),
+                "scope": scope,
+                "source": source,
+                "created_at": str(row["created_at"]),
+                "meta": meta,
+            },
+        )
+
+    def _strict_retention_runtime_event_row(
+        self,
+        row: sqlite3.Row,
+    ) -> WorkspaceRuntimeEventRecord:
+        field_root = f"runtime_events.{row['id']}"
+        snapshot_value = strict_retention_json(
+            row["snapshot_ref_json"],
+            dict,
+            field=f"{field_root}.snapshot_ref_json",
+            nullable=True,
+        )
+        snapshot_ref = (
+            validate_retained_reference_shape(
+                snapshot_value,
+                field=f"{field_root}.snapshot_ref_json",
+            )
+            if snapshot_value is not None
+            else None
+        )
+        if snapshot_ref is not None and "workspace_id" not in snapshot_ref:
+            raise ValueError(f"Persisted Workspace retention field '{field_root}.snapshot_ref_json' must be an envelope.")
+        artifact_values = strict_retention_json(
+            row["artifact_refs_json"], list, field=f"{field_root}.artifact_refs_json"
+        )
+        artifact_refs: list[WorkspaceReferenceEnvelope] = []
+        for index, value in enumerate(artifact_values or []):
+            ref = validate_retained_reference_shape(
+                value,
+                field=f"{field_root}.artifact_refs_json[{index}]",
+            )
+            if "workspace_id" not in ref:
+                raise ValueError(
+                    f"Persisted Workspace retention field '{field_root}.artifact_refs_json[{index}]' "
+                    "must be an envelope."
+                )
+            artifact_refs.append(cast(WorkspaceReferenceEnvelope, ref))
+        event = strict_retention_json(
+            row["event_json"], dict, field=f"{field_root}.event_json"
+        )
+        record = self._row_to_runtime_event_record(row)
+        record["snapshot_ref"] = cast(WorkspaceReferenceEnvelope | None, snapshot_ref)
+        record["artifact_refs"] = artifact_refs
+        record["event"] = event or {}
+        return record
+
+    def _strict_retention_anchor_row(
+        self,
+        row: sqlite3.Row,
+    ) -> WorkspaceRetentionAnchor:
+        field_root = f"retention_anchors.{row['id']}"
+
+        def optional_envelope(column: str) -> WorkspaceReferenceEnvelope | None:
+            value = strict_retention_json(
+                row[column], dict, field=f"{field_root}.{column}", nullable=True
+            )
+            if value is None:
+                return None
+            ref = validate_retained_reference_shape(value, field=f"{field_root}.{column}")
+            if "workspace_id" not in ref:
+                raise ValueError(
+                    f"Persisted Workspace retention field '{field_root}.{column}' must be an envelope."
+                )
+            return cast(WorkspaceReferenceEnvelope, ref)
+
+        preserved_event_ids = strict_retention_json(
+            row["preserved_event_ids_json"],
+            list,
+            field=f"{field_root}.preserved_event_ids_json",
+        )
+        if not all(isinstance(value, str) and value for value in preserved_event_ids or []):
+            raise ValueError(
+                f"Persisted Workspace retention field '{field_root}.preserved_event_ids_json' "
+                "must contain non-empty strings."
+            )
+        meta = strict_retention_json(
+            row["meta_json"], dict, field=f"{field_root}.meta_json"
+        )
+        return {
+            "id": str(row["id"]),
+            "execution_id": str(row["execution_id"]),
+            "anchor_type": str(row["anchor_type"]),
+            "sequence": row["sequence"],
+            "record_ref": optional_envelope("record_ref_json"),
+            "summary_ref": optional_envelope("summary_ref_json"),
+            "preserved_event_ids": cast(list[str], preserved_event_ids),
+            "created_at": str(row["created_at"]),
+            "meta": meta or {},
+        }
+
+    @staticmethod
+    def _strict_retention_link_row(row: sqlite3.Row) -> WorkspaceLinkRef:
+        meta = strict_retention_json(
+            row["meta_json"], dict, field=f"links.{row['id']}.meta_json"
+        )
+        return {
+            "id": str(row["id"]),
+            "source_id": str(row["source_id"]),
+            "target_id": str(row["target_id"]),
+            "relation": str(row["relation"]),
+            "created_at": str(row["created_at"]),
+            "meta": meta or {},
+        }
+
+    @staticmethod
+    def _strict_retention_scratch_row(row: sqlite3.Row) -> WorkspaceScratchLease:
+        field_root = f"scratch_leases.{row['lease_id']}"
+        scope = strict_retention_json(
+            row["scope_json"], dict, field=f"{field_root}.scope_json"
+        )
+        mount = strict_retention_json(
+            row["mount_json"], dict, field=f"{field_root}.mount_json", nullable=True
+        )
+        policy_labels = strict_retention_json(
+            row["policy_labels_json"], list, field=f"{field_root}.policy_labels_json"
+        )
+        if not all(isinstance(value, str) for value in policy_labels or []):
+            raise ValueError(
+                f"Persisted Workspace retention field '{field_root}.policy_labels_json' must contain strings."
+            )
+        return cast(
+            WorkspaceScratchLease,
+            {
+                "lease_id": row["lease_id"],
+                "scope": scope,
+                "local_path": row["local_path"],
+                "mount": mount,
+                "purpose": row["purpose"],
+                "cleanup_policy": row["cleanup_policy"],
+                "expires_at": row["expires_at"],
+                "read_only": bool(row["read_only"]),
+                "policy_labels": policy_labels,
+                "created_at": row["created_at"],
+                "closed_at": row["closed_at"],
+            },
+        )
 
     @staticmethod
     def _scope_index_value(value: Any) -> str:
@@ -1702,15 +1915,7 @@ class LocalWorkspaceBackend:
         entity: str,
         detail: dict[str, Any] | None = None,
     ) -> WorkspaceRetentionDiagnostic:
-        diagnostic: WorkspaceRetentionDiagnostic = {
-            "code": code,
-            "message": message,
-            "retryable": True,
-            "entity": entity,
-        }
-        if detail:
-            diagnostic["detail"] = detail
-        return diagnostic
+        return retention_diagnostic(code, message, entity=entity, detail=detail)
 
     def _safe_resolve_path(
         self,
@@ -1801,8 +2006,7 @@ class LocalWorkspaceBackend:
     def _deduplicate_retained_refs(
         retained_refs: Sequence[WorkspaceRetainedReference],
     ) -> list[WorkspaceRetainedReference]:
-        canonical = {json_dumps(ref): ref for ref in retained_refs}
-        return [canonical[key] for key in sorted(canonical)]
+        return deduplicate_retained_refs(retained_refs)
 
     def _retention_preview(
         self,
@@ -1817,45 +2021,16 @@ class LocalWorkspaceBackend:
         selected: dict[str, list[str]] | None = None,
         logical_bytes: int = 0,
     ) -> WorkspaceRetentionPreview:
-        resolved_selected = selected if status == "ready" and selected is not None else empty_retention_selection()
-        for key in resolved_selected:
-            resolved_selected[key] = sorted(set(resolved_selected[key]))
-        resolved_diagnostics = sorted(
-            diagnostics or [],
-            key=lambda item: (
-                str(item.get("code") or ""),
-                str(item.get("entity") or ""),
-                str(item.get("message") or ""),
-            ),
-        )
-        plan_fingerprint = canonical_retention_fingerprint(
-            scope,
-            lifecycle,
-            policy,
-            retained_refs,
-            resolved_selected,
-        )
-        return cast(
-            WorkspaceRetentionPreview,
-            {
-                "status": status,
-                "plan_fingerprint": plan_fingerprint,
-                "scope": scope,
-                "lifecycle": lifecycle,
-                "policy": policy,
-                "retained_refs": retained_refs,
-                "inline_result": inline_result,
-                "selected": resolved_selected,
-                "accounting": {
-                    "entities": {
-                        key: len(values) for key, values in sorted(resolved_selected.items())
-                    },
-                    "logical_bytes_deleted": logical_bytes if status == "ready" else 0,
-                    "physical_bytes_reclaimed": 0,
-                    "physical_bytes_pending": 0,
-                },
-                "diagnostics": resolved_diagnostics,
-            },
+        return build_retention_preview(
+            status=status,
+            scope=scope,
+            lifecycle=lifecycle,
+            policy=policy,
+            retained_refs=retained_refs,
+            inline_result=inline_result,
+            diagnostics=diagnostics,
+            selected=selected,
+            logical_bytes=logical_bytes,
         )
 
     async def _verified_record_envelope_unchecked(
@@ -1941,16 +2116,11 @@ class LocalWorkspaceBackend:
         ref: WorkspaceRetainedReference,
         *,
         records_by_id: Mapping[str, WorkspaceRecordRef] | None = None,
-    ) -> tuple[
-        WorkspaceRetainedReference | None,
-        str | None,
-        str | None,
-        WorkspaceRetentionDiagnostic | None,
-    ]:
+    ) -> tuple[NormalizedRetainedRoot | None, WorkspaceRetentionDiagnostic | None]:
         if "workspace_id" in ref:
             envelope_ref = cast(WorkspaceReferenceEnvelope, ref)
             if str(envelope_ref.get("workspace_id") or "") != self.workspace_id:
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_workspace_mismatch",
                     "Retained ref belongs to another Workspace.",
                     entity=str(envelope_ref.get("record_id") or envelope_ref.get("content_ref") or ""),
@@ -1963,36 +2133,40 @@ class LocalWorkspaceBackend:
                     else await self.get_record(record_id)
                 )
                 if actual is None:
-                    return None, None, None, self._retention_diagnostic(
+                    return None, self._retention_diagnostic(
                         "workspace.retention.ref_missing",
                         "Retained Workspace record does not exist.",
                         entity=record_id,
                     )
                 actual_envelope, diagnostic = await self._verified_record_envelope(actual)
                 if diagnostic is not None:
-                    return None, None, None, diagnostic
+                    return None, diagnostic
                 if envelope_ref.get("digest") != actual_envelope.get("digest"):
-                    return None, None, None, self._retention_diagnostic(
+                    return None, self._retention_diagnostic(
                         "workspace.retention.ref_digest_mismatch",
                         "Retained Workspace envelope digest does not match readback.",
                         entity=record_id,
                     )
                 if int(envelope_ref.get("size") or 0) != int(actual_envelope.get("size") or 0):
-                    return None, None, None, self._retention_diagnostic(
+                    return None, self._retention_diagnostic(
                         "workspace.retention.ref_size_mismatch",
                         "Retained Workspace envelope size does not match readback.",
                         entity=record_id,
                     )
                 if envelope_ref.get("content_ref") != actual_envelope.get("content_ref"):
-                    return None, None, None, self._retention_diagnostic(
+                    return None, self._retention_diagnostic(
                         "workspace.retention.ref_path_mismatch",
                         "Retained Workspace envelope content path does not match readback.",
                         entity=record_id,
                     )
-                return actual_envelope, record_id, None, None
+                return normalized_retained_root(
+                    [actual_envelope],
+                    record_ids=[record_id],
+                    content_paths=[str(actual.get("path") or "")],
+                ), None
             content_ref = str(envelope_ref.get("content_ref") or "")
             if not content_ref:
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_missing",
                     "Retained Workspace envelope has no record or content identity.",
                     entity="retained_ref",
@@ -2003,11 +2177,11 @@ class LocalWorkspaceBackend:
                 operation="retained content resolution",
             )
             if diagnostic is not None or target is None:
-                return None, None, None, diagnostic
+                return None, diagnostic
             try:
                 target.relative_to(self.content_root)
             except ValueError:
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_readback_failed",
                     "Retained content ref is outside the Workspace content root.",
                     entity=content_ref,
@@ -2019,27 +2193,47 @@ class LocalWorkspaceBackend:
                 missing_message="Retained Workspace content does not exist.",
             )
             if diagnostic is not None:
-                return None, None, None, diagnostic
+                return None, diagnostic
             if target_stat is None or not stat.S_ISREG(target_stat.st_mode):
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_missing",
                     "Retained Workspace content does not exist.",
                     entity=content_ref,
                 )
             actual_envelope = await self.ref_envelope(content_ref)
             if envelope_ref.get("digest") != actual_envelope.get("digest"):
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_digest_mismatch",
                     "Retained content envelope digest does not match readback.",
                     entity=content_ref,
                 )
             if int(envelope_ref.get("size") or 0) != int(actual_envelope.get("size") or 0):
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_size_mismatch",
                     "Retained content envelope size does not match readback.",
                     entity=content_ref,
                 )
-            return actual_envelope, None, None, None
+            owners = sorted(
+                (
+                    owner
+                    for owner in (records_by_id or {}).values()
+                    if str(owner.get("path") or "") == content_ref
+                ),
+                key=lambda owner: str(owner.get("id") or ""),
+            )
+            canonical_refs: list[WorkspaceRetainedReference] = [actual_envelope]
+            owner_ids: list[str] = []
+            for owner in owners:
+                _, owner_diagnostic = await self._verified_record_envelope(owner)
+                if owner_diagnostic is not None:
+                    return None, owner_diagnostic
+                canonical_refs.append(owner)
+                owner_ids.append(str(owner["id"]))
+            return normalized_retained_root(
+                canonical_refs,
+                record_ids=owner_ids,
+                content_paths=[content_ref],
+            ), None
 
         if "id" in ref:
             record_ref = cast(WorkspaceRecordRef, ref)
@@ -2050,33 +2244,37 @@ class LocalWorkspaceBackend:
                 else await self.get_record(record_id)
             )
             if actual is None:
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_missing",
                     "Retained Workspace record does not exist.",
                     entity=record_id,
                 )
             _, diagnostic = await self._verified_record_envelope(actual)
             if diagnostic is not None:
-                return None, None, None, diagnostic
+                return None, diagnostic
             if record_ref.get("sha256") != actual.get("sha256"):
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_digest_mismatch",
                     "Retained Workspace record digest does not match readback.",
                     entity=record_id,
                 )
             if int(record_ref.get("size") or 0) != int(actual.get("size") or 0):
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_size_mismatch",
                     "Retained Workspace record size does not match readback.",
                     entity=record_id,
                 )
             if record_ref.get("path") != actual.get("path"):
-                return None, None, None, self._retention_diagnostic(
+                return None, self._retention_diagnostic(
                     "workspace.retention.ref_path_mismatch",
                     "Retained Workspace record path does not match readback.",
                     entity=record_id,
                 )
-            return actual, record_id, None, None
+            return normalized_retained_root(
+                [actual],
+                record_ids=[record_id],
+                content_paths=[str(actual.get("path") or "")],
+            ), None
 
         file_ref = cast(WorkspaceFileRef, ref)
         relative_path = str(file_ref.get("path") or "")
@@ -2088,11 +2286,11 @@ class LocalWorkspaceBackend:
             operation="retained file resolution",
         )
         if diagnostic is not None or target is None:
-            return None, None, None, diagnostic
+            return None, diagnostic
         try:
             normalized_path = target.relative_to(self.files_root).as_posix()
         except ValueError:
-            return None, None, None, self._retention_diagnostic(
+            return None, self._retention_diagnostic(
                 "workspace.retention.file_ref_invalid",
                 "Retained file ref is outside the Workspace file root.",
                 entity=relative_path,
@@ -2104,9 +2302,9 @@ class LocalWorkspaceBackend:
             missing_message="Retained Workspace file does not exist.",
         )
         if diagnostic is not None:
-            return None, None, None, diagnostic
+            return None, diagnostic
         if target_stat is None or not stat.S_ISREG(target_stat.st_mode):
-            return None, None, None, self._retention_diagnostic(
+            return None, self._retention_diagnostic(
                 "workspace.retention.ref_missing",
                 "Retained Workspace file does not exist.",
                 entity=normalized_path,
@@ -2117,35 +2315,33 @@ class LocalWorkspaceBackend:
             operation="retained file readback",
         )
         if diagnostic is not None or raw is None:
-            return None, None, None, diagnostic
+            return None, diagnostic
         if int(file_ref.get("bytes") or 0) != len(raw):
-            return None, None, None, self._retention_diagnostic(
+            return None, self._retention_diagnostic(
                 "workspace.retention.ref_size_mismatch",
                 "Retained Workspace file size does not match readback.",
                 entity=normalized_path,
             )
         digest = hashlib.sha256(raw).hexdigest()
         if str(file_ref.get("sha256") or "") != digest:
-            return None, None, None, self._retention_diagnostic(
+            return None, self._retention_diagnostic(
                 "workspace.retention.ref_digest_mismatch",
                 "Retained Workspace file digest does not match readback.",
                 entity=normalized_path,
             )
         canonical_file_ref = dict(file_ref)
         canonical_file_ref["path"] = normalized_path
-        return cast(WorkspaceFileRef, canonical_file_ref), None, normalized_path, None
+        return normalized_retained_root(
+            [cast(WorkspaceFileRef, canonical_file_ref)],
+            file_paths=[normalized_path],
+        ), None
 
     async def _verify_retained_ref(
         self,
         ref: WorkspaceRetainedReference,
         *,
         records_by_id: Mapping[str, WorkspaceRecordRef] | None = None,
-    ) -> tuple[
-        WorkspaceRetainedReference | None,
-        str | None,
-        str | None,
-        WorkspaceRetentionDiagnostic | None,
-    ]:
+    ) -> tuple[NormalizedRetainedRoot | None, WorkspaceRetentionDiagnostic | None]:
         try:
             return await self._verify_retained_ref_unchecked(
                 ref,
@@ -2159,7 +2355,7 @@ class LocalWorkspaceBackend:
                 or ref.get("path")
                 or "retained_ref"
             )
-            return None, None, None, self._retention_diagnostic(
+            return None, self._retention_diagnostic(
                 "workspace.retention.ref_readback_failed",
                 f"Workspace retained-ref readback failed: { error }",
                 entity=entity,
@@ -2170,13 +2366,41 @@ class LocalWorkspaceBackend:
         scope: dict[str, Any],
         area: str,
     ) -> tuple[list[str], WorkspaceRetentionDiagnostic | None]:
+        lexical_area_root = self.root / area
+        lexical_area_stat, diagnostic = self._safe_stat_path(
+            lexical_area_root,
+            entity=str(lexical_area_root),
+            operation="lineage area-root stat",
+            follow_symlinks=False,
+            code="workspace.retention.lineage_ambiguous",
+            missing_ok=True,
+        )
+        if diagnostic is not None:
+            return [], diagnostic
+        if lexical_area_stat is None:
+            return [], None
+        if (
+            stat.S_ISLNK(lexical_area_stat.st_mode)
+            or not stat.S_ISDIR(lexical_area_stat.st_mode)
+        ):
+            return [], self._retention_diagnostic(
+                "workspace.retention.lineage_ambiguous",
+                "Workspace retention area root must be a directly owned non-symlink directory.",
+                entity=str(lexical_area_root),
+            )
         area_root, diagnostic = self._safe_resolve_path(
-            self.root / area,
+            lexical_area_root,
             entity=area,
             operation="lineage area resolution",
         )
         if diagnostic is not None or area_root is None:
             return [], diagnostic
+        if area_root != lexical_area_root or area_root.parent != self.root:
+            return [], self._retention_diagnostic(
+                "workspace.retention.lineage_ambiguous",
+                "Workspace retention area root is not directly contained by the Workspace root.",
+                entity=str(lexical_area_root),
+            )
         lineage_root = area_root / "lineage"
         lineage_stat, diagnostic = self._safe_stat_path(
             lineage_root,
@@ -2371,6 +2595,414 @@ class LocalWorkspaceBackend:
                     )
         return sorted(paths), None
 
+    def _read_retention_snapshot(
+        self,
+        scope: Mapping[str, Any],
+        *,
+        execution_id: str,
+        checkpoint_manifest_key: str,
+        lease_manifest_key: str,
+    ) -> _RetentionSQLiteSnapshot:
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            all_record_rows = conn.execute("SELECT * FROM records ORDER BY id").fetchall()
+            clauses: list[str] = []
+            scope_params: list[Any] = []
+            for index, (key, value) in enumerate(scope.items()):
+                alias = f"ret_scope_{index}"
+                clauses.append(
+                    f"""
+                    EXISTS (
+                        SELECT 1 FROM record_scope_index {alias}
+                        WHERE {alias}.record_id = r.id
+                        AND {alias}.scope_key = ?
+                        AND {alias}.scope_value = ?
+                    )
+                    """
+                )
+                scope_params.extend([key, self._scope_index_value(value)])
+            scoped_rows = conn.execute(
+                f"SELECT r.id FROM records r WHERE {' AND '.join(clauses)} ORDER BY r.id",
+                scope_params,
+            ).fetchall()
+            checkpoint_rows = conn.execute(
+                """
+                SELECT * FROM checkpoints
+                WHERE run_id = ? ORDER BY created_at ASC, rowid ASC
+                """,
+                (execution_id,),
+            ).fetchall()
+            runtime_event_rows = conn.execute(
+                "SELECT * FROM runtime_events WHERE execution_id = ? ORDER BY sequence ASC, id ASC",
+                (execution_id,),
+            ).fetchall()
+            anchor_rows = conn.execute(
+                "SELECT * FROM retention_anchors WHERE execution_id = ? ORDER BY id",
+                (execution_id,),
+            ).fetchall()
+            scratch_rows = conn.execute("SELECT * FROM scratch_leases ORDER BY lease_id").fetchall()
+            link_rows = conn.execute("SELECT * FROM links ORDER BY id").fetchall()
+            scope_index_rows = conn.execute(
+                "SELECT record_id, scope_key, scope_value FROM record_scope_index ORDER BY record_id, scope_key"
+            ).fetchall()
+            fts_rows = conn.execute(
+                "SELECT record_id, summary, content FROM records_fts ORDER BY record_id"
+            ).fetchall()
+            manifest_rows = conn.execute(
+                "SELECT key, value_json FROM manifests WHERE key IN (?, ?) ORDER BY key",
+                (checkpoint_manifest_key, lease_manifest_key),
+            ).fetchall()
+            vector_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_vectors'"
+            ).fetchone()
+            vector_rows = (
+                conn.execute(
+                    "SELECT record_id, ref_json, embedding_json FROM workspace_vectors ORDER BY record_id"
+                ).fetchall()
+                if vector_table is not None
+                else []
+            )
+            conn.rollback()
+        return _RetentionSQLiteSnapshot(
+            all_record_rows=all_record_rows,
+            scoped_rows=scoped_rows,
+            checkpoint_rows=checkpoint_rows,
+            runtime_event_rows=runtime_event_rows,
+            anchor_rows=anchor_rows,
+            scratch_rows=scratch_rows,
+            link_rows=link_rows,
+            scope_index_rows=scope_index_rows,
+            fts_rows=fts_rows,
+            manifest_rows=manifest_rows,
+            vector_rows=vector_rows,
+        )
+
+    def _decode_retention_snapshot(
+        self,
+        snapshot: _RetentionSQLiteSnapshot,
+        *,
+        checkpoint_manifest_key: str,
+        lease_manifest_key: str,
+    ) -> _DecodedRetentionSnapshot:
+        all_records = {
+            str(row["id"]): self._strict_retention_record_row(row)
+            for row in snapshot.all_record_rows
+        }
+        runtime_events = [
+            self._strict_retention_runtime_event_row(row)
+            for row in snapshot.runtime_event_rows
+        ]
+        anchors = [self._strict_retention_anchor_row(row) for row in snapshot.anchor_rows]
+        links = [self._strict_retention_link_row(row) for row in snapshot.link_rows]
+        scratch_leases = [
+            self._strict_retention_scratch_row(row) for row in snapshot.scratch_rows
+        ]
+        checkpoint_facts = [
+            {
+                "run_id": str(row["run_id"]),
+                "step_id": row["step_id"],
+                "record_id": str(row["record_id"]),
+                "state": strict_retention_json(
+                    row["state_json"],
+                    dict,
+                    field=f"checkpoints.{row['run_id']}.{row['record_id']}.state_json",
+                ),
+                "created_at": str(row["created_at"]),
+            }
+            for row in snapshot.checkpoint_rows
+        ]
+        manifest_values: dict[str, Any] = {}
+        for row in snapshot.manifest_rows:
+            key = str(row["key"])
+            value = strict_retention_json(
+                row["value_json"], dict, field=f"manifests.{key}.value_json"
+            )
+            if key == checkpoint_manifest_key:
+                value = validate_retained_reference_shape(
+                    value,
+                    field=f"manifests.{key}.value_json",
+                )
+            elif key == lease_manifest_key:
+                required_strings = ("run_id", "owner_id", "lease_token")
+                if value is None or any(
+                    not isinstance(value.get(field), str) or not value[field]
+                    for field in required_strings
+                ):
+                    raise ValueError(
+                        f"Persisted Workspace retention field 'manifests.{key}.value_json' "
+                        "has an invalid lease identity."
+                    )
+                if isinstance(value.get("lease_until"), bool) or not isinstance(
+                    value.get("lease_until"), (int, float)
+                ):
+                    raise ValueError(
+                        f"Persisted Workspace retention field 'manifests.{key}.value_json' "
+                        "has an invalid lease deadline."
+                    )
+                if isinstance(value.get("lease_ttl"), bool) or not isinstance(
+                    value.get("lease_ttl"), (int, float)
+                ):
+                    raise ValueError(
+                        f"Persisted Workspace retention field 'manifests.{key}.value_json' "
+                        "has an invalid lease TTL."
+                    )
+                for timestamp_field in ("claimed_at", "heartbeat_at"):
+                    if not isinstance(value.get(timestamp_field), str):
+                        raise ValueError(
+                            f"Persisted Workspace retention field 'manifests.{key}.value_json' "
+                            f"has an invalid {timestamp_field}."
+                        )
+                if not isinstance(value.get("released_at"), (str, type(None))):
+                    raise ValueError(
+                        f"Persisted Workspace retention field 'manifests.{key}.value_json' "
+                        "has an invalid released_at."
+                    )
+                if isinstance(value.get("state_version"), bool) or not isinstance(
+                    value.get("state_version"), (int, type(None))
+                ):
+                    raise ValueError(
+                        f"Persisted Workspace retention field 'manifests.{key}.value_json' "
+                        "has an invalid state_version."
+                    )
+            manifest_values[key] = value
+        for row in snapshot.scope_index_rows:
+            strict_retention_json_value(
+                row["scope_value"],
+                field=f"record_scope_index.{row['record_id']}.{row['scope_key']}.scope_value",
+            )
+        for row in snapshot.vector_rows:
+            record_id = str(row["record_id"])
+            vector_ref = strict_retention_json(
+                row["ref_json"],
+                dict,
+                field=f"workspace_vectors.{record_id}.ref_json",
+            )
+            validate_retained_reference_shape(
+                vector_ref,
+                field=f"workspace_vectors.{record_id}.ref_json",
+            )
+            embedding = strict_retention_json(
+                row["embedding_json"],
+                list,
+                field=f"workspace_vectors.{record_id}.embedding_json",
+            )
+            if not all(
+                not isinstance(value, bool) and isinstance(value, (int, float))
+                for value in embedding or []
+            ):
+                raise ValueError(
+                    f"Persisted Workspace retention field 'workspace_vectors.{record_id}.embedding_json' "
+                    "must contain numbers."
+                )
+        return _DecodedRetentionSnapshot(
+            all_records=all_records,
+            runtime_events=runtime_events,
+            anchors=anchors,
+            links=links,
+            scratch_leases=scratch_leases,
+            checkpoint_facts=checkpoint_facts,
+            manifest_values=manifest_values,
+            manifest_raw={
+                str(row["key"]): str(row["value_json"]) for row in snapshot.manifest_rows
+            },
+        )
+
+    async def _resolve_retention_roots(
+        self,
+        *,
+        owned_record_ids: set[str],
+        all_records: Mapping[str, WorkspaceRecordRef],
+        retained_refs: Sequence[WorkspaceRetainedReference],
+        checkpoint_manifest: WorkspaceRetainedReference | None,
+        retain_checkpoint_manifest: bool,
+        anchors: Sequence[WorkspaceRetentionAnchor],
+        runtime_events: Sequence[WorkspaceRuntimeEventRecord],
+        retain_all_runtime_events: bool,
+        links: Sequence[WorkspaceLinkRef],
+    ) -> _ResolvedRetentionRoots:
+        diagnostics: list[WorkspaceRetentionDiagnostic] = []
+        canonical_records: dict[str, WorkspaceRecordRef] = {}
+        for record_id in sorted(owned_record_ids):
+            ref = all_records.get(record_id)
+            if ref is None:
+                diagnostics.append(
+                    retention_diagnostic(
+                        "workspace.retention.ref_missing",
+                        "A Workspace checkpoint row references a missing record.",
+                        entity=record_id,
+                    )
+                )
+                continue
+            _, diagnostic = await self._verified_record_envelope(ref)
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+                continue
+            canonical_records[record_id] = ref
+
+        canonical_refs: list[WorkspaceRetainedReference] = []
+        record_ids: set[str] = set()
+        file_paths: set[str] = set()
+        content_paths: set[str] = set()
+
+        async def retain(ref: WorkspaceRetainedReference) -> None:
+            root, diagnostic = await self._verify_retained_ref(ref, records_by_id=all_records)
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+                canonical_refs.append(ref)
+                return
+            if root is not None:
+                canonical_refs.extend(root.canonical_refs)
+                record_ids.update(root.record_ids)
+                file_paths.update(root.file_paths)
+                content_paths.update(root.content_paths)
+
+        for ref in retained_refs:
+            await retain(ref)
+        if retain_checkpoint_manifest and checkpoint_manifest is not None:
+            await retain(checkpoint_manifest)
+
+        preserved_event_ids: set[str] = set()
+        for anchor in anchors:
+            for anchor_ref in (anchor.get("record_ref"), anchor.get("summary_ref")):
+                if anchor_ref is not None:
+                    await retain(anchor_ref)
+            preserved_event_ids.update(str(value) for value in anchor["preserved_event_ids"])
+
+        known_event_ids = {event["event_id"] for event in runtime_events}
+        for preserved_event_id in sorted(preserved_event_ids - known_event_ids):
+            diagnostics.append(
+                retention_diagnostic(
+                    "workspace.retention.ref_missing",
+                    "A retention anchor references a RuntimeEvent that does not exist.",
+                    entity=preserved_event_id,
+                )
+            )
+        event_ids = known_event_ids if retain_all_runtime_events else preserved_event_ids
+        for event in runtime_events:
+            if event["event_id"] not in event_ids:
+                continue
+            event_refs: list[WorkspaceReferenceEnvelope] = list(event["artifact_refs"])
+            if event["snapshot_ref"] is not None:
+                event_refs.append(event["snapshot_ref"])
+            for event_ref in event_refs:
+                await retain(event_ref)
+
+        adjacency: dict[str, list[tuple[str, str]]] = {}
+        for link in links:
+            adjacency.setdefault(link["source_id"], []).append((link["target_id"], link["id"]))
+            adjacency.setdefault(link["target_id"], []).append((link["source_id"], link["id"]))
+            if link["target_id"] in owned_record_ids and link["source_id"] not in owned_record_ids:
+                diagnostics.append(
+                    retention_diagnostic(
+                        "workspace.retention.incoming_reference",
+                        "A record in the cleanup scope has an incoming link from outside the scope.",
+                        entity=link["id"],
+                        detail={"source_id": link["source_id"], "target_id": link["target_id"]},
+                    )
+                )
+        closure_queue = sorted(record_ids)
+        closure_seen = set(record_ids)
+        while closure_queue:
+            current = closure_queue.pop(0)
+            for neighbor, _ in sorted(adjacency.get(current, [])):
+                if neighbor in closure_seen:
+                    continue
+                closure_seen.add(neighbor)
+                neighbor_ref = all_records.get(neighbor)
+                if neighbor_ref is None:
+                    diagnostics.append(
+                        retention_diagnostic(
+                            "workspace.retention.ref_missing",
+                            "A retained Workspace link reaches a missing record.",
+                            entity=neighbor,
+                        )
+                    )
+                    continue
+                _, diagnostic = await self._verified_record_envelope(neighbor_ref)
+                if diagnostic is not None:
+                    diagnostics.append(diagnostic)
+                    continue
+                record_ids.add(neighbor)
+                canonical_refs.append(neighbor_ref)
+                closure_queue.append(neighbor)
+        return _ResolvedRetentionRoots(
+            canonical_records=canonical_records,
+            canonical_refs=canonical_refs,
+            record_ids=record_ids,
+            file_paths=file_paths,
+            content_paths=content_paths,
+            event_ids=event_ids,
+            diagnostics=diagnostics,
+        )
+
+    def _retention_provider_selection(
+        self,
+        selected: Mapping[str, Sequence[str]],
+        *,
+        selected_record_ids: set[str],
+        vector_rows: Sequence[sqlite3.Row],
+    ) -> tuple[list[str], Any | None, WorkspaceRetentionDiagnostic | None]:
+        if retention_selection_nonempty(selected):
+            read_only_components = read_only_retention_components(
+                {
+                    "backend": bool(self.read_only),
+                    "db_store": bool(getattr(self.db_store_provider, "read_only", False)),
+                    "vector_store": bool(getattr(self.vector_store_provider, "read_only", False)),
+                }
+            )
+            if read_only_components:
+                return [], None, retention_diagnostic(
+                    "workspace.retention.provider_capability_missing",
+                    "Workspace retention cannot apply a non-empty plan through read-only components.",
+                    entity=type(self).__name__,
+                    detail={"read_only_components": read_only_components},
+                )
+
+        vector_provider = self.vector_store_provider
+        if vector_provider is None or not selected_record_ids:
+            return [], vector_provider, None
+        if not callable(getattr(vector_provider, "delete_records", None)):
+            return [], vector_provider, retention_diagnostic(
+                "workspace.retention.provider_capability_missing",
+                "Configured vector provider cannot delete derived record entries.",
+                entity=type(vector_provider).__name__,
+                detail={"missing_method": "delete_records"},
+            )
+        if isinstance(vector_provider, SQLiteVectorStoreProvider):
+            vector_ids = sorted(
+                str(row["record_id"])
+                for row in vector_rows
+                if str(row["record_id"]) in selected_record_ids
+            )
+        else:
+            vector_ids = sorted(selected_record_ids)
+        return vector_ids, vector_provider, None
+
+    def _selected_retention_path_sizes(
+        self,
+        selected: Mapping[str, Sequence[str]],
+    ) -> tuple[list[int], WorkspaceRetentionDiagnostic | None]:
+        sizes: list[int] = []
+        for area, key in (("files", "file_paths"), ("scratch", "scratch_paths")):
+            area_root = self.root / area
+            for relative_path in selected[key]:
+                target, diagnostic = self._safe_resolve_path(
+                    area_root / relative_path,
+                    entity=relative_path,
+                    operation="selected-path resolution",
+                )
+                if diagnostic is not None or target is None:
+                    return [], diagnostic
+                target_stat, diagnostic = self._safe_stat_path(
+                    target,
+                    entity=str(target),
+                    operation="selected-path stat",
+                )
+                if diagnostic is not None or target_stat is None:
+                    return [], diagnostic
+                sizes.append(int(target_stat.st_size))
+        return sizes, None
+
     async def inspect_retention(
         self,
         scope: dict[str, Any],
@@ -2412,241 +3044,74 @@ class LocalWorkspaceBackend:
         checkpoint_manifest_key = f"checkpoint.latest.{ execution_id }"
         lease_manifest_key = self._lease_manifest_key(execution_id)
 
-        with self._connect() as conn:
-            conn.execute("BEGIN")
-            all_record_rows = conn.execute("SELECT * FROM records ORDER BY id").fetchall()
-            clauses: list[str] = []
-            scope_params: list[Any] = []
-            for index, (key, value) in enumerate(normalized_scope.items()):
-                alias = f"ret_scope_{ index }"
-                clauses.append(
-                    f"""
-                    EXISTS (
-                        SELECT 1 FROM record_scope_index { alias }
-                        WHERE { alias }.record_id = r.id
-                        AND { alias }.scope_key = ?
-                        AND { alias }.scope_value = ?
-                    )
-                    """
-                )
-                scope_params.extend([key, self._scope_index_value(value)])
-            scoped_rows = conn.execute(
-                f"SELECT r.id FROM records r WHERE {' AND '.join(clauses)} ORDER BY r.id",
-                scope_params,
-            ).fetchall()
-            checkpoint_rows = conn.execute(
-                """
-                SELECT rowid AS checkpoint_rowid, * FROM checkpoints
-                WHERE run_id = ? ORDER BY created_at ASC, checkpoint_rowid ASC
-                """,
-                (execution_id,),
-            ).fetchall()
-            runtime_event_rows = conn.execute(
-                "SELECT * FROM runtime_events WHERE execution_id = ? ORDER BY sequence ASC, id ASC",
-                (execution_id,),
-            ).fetchall()
-            anchor_rows = conn.execute(
-                "SELECT * FROM retention_anchors WHERE execution_id = ? ORDER BY id",
-                (execution_id,),
-            ).fetchall()
-            scratch_rows = conn.execute("SELECT * FROM scratch_leases ORDER BY lease_id").fetchall()
-            link_rows = conn.execute("SELECT * FROM links ORDER BY id").fetchall()
-            scope_index_rows = conn.execute(
-                "SELECT record_id, scope_key, scope_value FROM record_scope_index ORDER BY record_id, scope_key"
-            ).fetchall()
-            fts_rows = conn.execute(
-                "SELECT record_id, summary, content FROM records_fts ORDER BY record_id"
-            ).fetchall()
-            manifest_rows = conn.execute(
-                "SELECT key, value_json FROM manifests WHERE key IN (?, ?) ORDER BY key",
-                (checkpoint_manifest_key, lease_manifest_key),
-            ).fetchall()
-            vector_table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_vectors'"
-            ).fetchone()
-            vector_rows = (
-                conn.execute(
-                    "SELECT record_id, ref_json, embedding_json FROM workspace_vectors ORDER BY record_id"
-                ).fetchall()
-                if vector_table is not None
-                else []
-            )
-            conn.rollback()
-
-        all_records = {str(row["id"]): self._row_to_ref(row) for row in all_record_rows}
-        scoped_record_ids = {str(row["id"]) for row in scoped_rows}
-        checkpoint_record_ids = {str(row["record_id"]) for row in checkpoint_rows}
-        owned_record_ids = scoped_record_ids | checkpoint_record_ids
-        runtime_events = [self._row_to_runtime_event_record(row) for row in runtime_event_rows]
-        anchors = [self._row_to_retention_anchor(row) for row in anchor_rows]
-        links = [self._row_to_link(row) for row in link_rows]
-        manifest_values = {
-            str(row["key"]): json_loads(row["value_json"], None) for row in manifest_rows
-        }
-        manifest_raw = {str(row["key"]): str(row["value_json"]) for row in manifest_rows}
-
+        snapshot = self._read_retention_snapshot(
+            normalized_scope,
+            execution_id=execution_id,
+            checkpoint_manifest_key=checkpoint_manifest_key,
+            lease_manifest_key=lease_manifest_key,
+        )
         diagnostics: list[WorkspaceRetentionDiagnostic] = []
-        scope_execution_id = normalized_scope.get("execution_id")
-        if not execution_id or (scope_execution_id is not None and str(scope_execution_id) != execution_id):
-            diagnostics.append(
-                self._retention_diagnostic(
-                    "workspace.retention.lifecycle_scope_mismatch",
-                    "Retention lifecycle execution_id does not match the cleanup scope.",
-                    entity=execution_id or "execution_id",
-                )
+        try:
+            decoded = self._decode_retention_snapshot(
+                snapshot,
+                checkpoint_manifest_key=checkpoint_manifest_key,
+                lease_manifest_key=lease_manifest_key,
             )
-        if lifecycle.get("status") not in {"completed", "failed", "cancelled"}:
-            diagnostics.append(
-                self._retention_diagnostic(
-                    "workspace.retention.lifecycle_not_terminal",
-                    "Workspace retention requires a terminal lifecycle status.",
-                    entity=execution_id,
-                )
-            )
-        if lifecycle.get("recovery_active"):
-            diagnostics.append(
-                self._retention_diagnostic(
-                    "workspace.retention.recovery_active",
-                    "Workspace recovery remains active for the cleanup scope.",
-                    entity=execution_id,
-                )
-            )
-        if lifecycle.get("lease_active"):
-            diagnostics.append(
-                self._retention_diagnostic(
-                    "workspace.retention.lease_active",
-                    "Workspace execution lease remains active for the cleanup scope.",
-                    entity=execution_id,
-                )
-            )
-
-        persisted_lease = manifest_values.get(lease_manifest_key)
-        if lease_manifest_key in manifest_values and not isinstance(persisted_lease, dict):
-            diagnostics.append(
-                self._retention_diagnostic(
-                    "workspace.retention.ref_readback_failed",
-                    "Persisted Workspace execution lease is unreadable.",
-                    entity=lease_manifest_key,
-                )
-            )
-        elif isinstance(persisted_lease, dict):
-            try:
-                persisted_lease_active = (
-                    persisted_lease.get("released_at") is None
-                    and float(persisted_lease.get("lease_until") or 0) > time.time()
-                )
-            except (TypeError, ValueError) as error:
-                diagnostics.append(
+        except (TypeError, ValueError) as error:
+            return self._retention_preview(
+                status="deferred",
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=resolved_policy,
+                retained_refs=list(retained_refs),
+                inline_result=inline_result,
+                diagnostics=[
                     self._retention_diagnostic(
                         "workspace.retention.ref_readback_failed",
-                        f"Persisted Workspace execution lease is invalid: { error }",
-                        entity=lease_manifest_key,
+                        str(error),
+                        entity="persisted_json",
                     )
-                )
-            else:
-                if persisted_lease_active:
-                    diagnostics.append(
-                        self._retention_diagnostic(
-                            "workspace.retention.lease_active",
-                            "Persisted Workspace execution lease remains active.",
-                            entity=lease_manifest_key,
-                        )
-                    )
+                ],
+            )
 
+        all_records = decoded.all_records
+        runtime_events = decoded.runtime_events
+        anchors = decoded.anchors
+        links = decoded.links
+        scratch_leases = decoded.scratch_leases
+        checkpoint_facts = decoded.checkpoint_facts
+        manifest_values = decoded.manifest_values
+        manifest_raw = decoded.manifest_raw
+        scoped_record_ids = {str(row["id"]) for row in snapshot.scoped_rows}
+        checkpoint_record_ids = {
+            str(row["record_id"]) for row in snapshot.checkpoint_rows
+        }
+        owned_record_ids = scoped_record_ids | checkpoint_record_ids
+        persisted_lease = manifest_values.get(lease_manifest_key)
         checkpoint_version = None
-        for row in reversed(checkpoint_rows):
-            checkpoint_version = self._checkpoint_state_version(json_loads(row["state_json"], {}))
+        for row in reversed(checkpoint_facts):
+            checkpoint_version = self._checkpoint_state_version(row["state"])
             if checkpoint_version is not None:
                 break
-        runtime_version = next(
-            (
-                event["state_version"]
-                for event in reversed(runtime_events)
-                if event["state_version"] is not None
-            ),
-            None,
-        )
-        authoritative_versions = {
-            int(value) for value in (checkpoint_version, runtime_version) if value is not None
-        }
-        if len(authoritative_versions) > 1:
-            diagnostics.append(
-                self._retention_diagnostic(
-                    "workspace.retention.state_version_ambiguous",
-                    "Persisted checkpoint and RuntimeEvent state versions disagree.",
-                    entity=execution_id,
-                    detail={"versions": sorted(authoritative_versions)},
-                )
+        diagnostics.extend(
+            retention_lifecycle_diagnostics(
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                execution_id=execution_id,
+                lease_manifest_key=lease_manifest_key,
+                persisted_lease=(
+                    cast(Mapping[str, Any], persisted_lease)
+                    if isinstance(persisted_lease, dict)
+                    else None
+                ),
+                checkpoint_version=checkpoint_version,
+                runtime_events=runtime_events,
+                now=time.time(),
             )
-        elif authoritative_versions:
-            authoritative_version = next(iter(authoritative_versions))
-            if lifecycle.get("state_version") != authoritative_version:
-                diagnostics.append(
-                    self._retention_diagnostic(
-                        "workspace.retention.state_version_mismatch",
-                        "Supplied lifecycle state version is stale against persisted Workspace facts.",
-                        entity=execution_id,
-                        detail={
-                            "supplied": lifecycle.get("state_version"),
-                            "persisted": authoritative_version,
-                        },
-                    )
-                )
-
-        persisted_lifecycle: tuple[str, str | None] | None = None
-        for event in reversed(runtime_events):
-            event_type = event["event_type"].lower()
-            if event_type.endswith(("execution_completed", "execution.completed")):
-                persisted_lifecycle = ("terminal", "completed")
-            elif event_type.endswith(("execution_failed", "execution.failed")):
-                persisted_lifecycle = ("terminal", "failed")
-            elif event_type.endswith(
-                ("execution_cancelled", "execution.cancelled", "execution_canceled", "execution.canceled")
-            ):
-                persisted_lifecycle = ("terminal", "cancelled")
-            elif event_type.endswith(("execution_closed", "execution.closed")):
-                persisted_lifecycle = ("terminal", None)
-            elif event_type.endswith(
-                (
-                    "execution_started",
-                    "execution.started",
-                    "execution_resumed",
-                    "execution.resumed",
-                    "execution_sealed",
-                    "execution.sealed",
-                    "execution_unsealed",
-                    "execution.unsealed",
-                    "execution_waiting",
-                    "execution.waiting",
-                    "execution_paused",
-                    "execution.paused",
-                )
-            ):
-                persisted_lifecycle = ("active", None)
-            if persisted_lifecycle is not None:
-                break
-        if persisted_lifecycle is not None:
-            persisted_state, persisted_status = persisted_lifecycle
-            if persisted_state == "active":
-                diagnostics.append(
-                    self._retention_diagnostic(
-                        "workspace.retention.recovery_active",
-                        "Persisted Workspace lifecycle facts remain nonterminal.",
-                        entity=execution_id,
-                    )
-                )
-            elif persisted_status is not None and lifecycle.get("status") != persisted_status:
-                diagnostics.append(
-                    self._retention_diagnostic(
-                        "workspace.retention.lifecycle_state_mismatch",
-                        "Supplied lifecycle status disagrees with persisted Workspace facts.",
-                        entity=execution_id,
-                    )
-                )
+        )
 
         scoped_scratch_leases: list[WorkspaceScratchLease] = []
-        for row in scratch_rows:
-            lease = self._row_to_scratch_lease(row)
+        for lease in scratch_leases:
             lease_scope = lease.get("scope")
             if not isinstance(lease_scope, dict) or not all(
                 lease_scope.get(key) == value for key, value in normalized_scope.items()
@@ -2662,128 +3127,29 @@ class LocalWorkspaceBackend:
                     )
                 )
 
-        canonical_records: dict[str, WorkspaceRecordRef] = {}
-        for record_id in sorted(owned_record_ids):
-            ref = all_records.get(record_id)
-            if ref is None:
-                diagnostics.append(
-                    self._retention_diagnostic(
-                        "workspace.retention.ref_missing",
-                        "A Workspace checkpoint row references a missing record.",
-                        entity=record_id,
-                    )
-                )
-                continue
-            _, diagnostic = await self._verified_record_envelope(ref)
-            if diagnostic is not None:
-                diagnostics.append(diagnostic)
-                continue
-            canonical_records[record_id] = ref
-
-        canonical_retained_refs: list[WorkspaceRetainedReference] = []
-        retained_record_ids: set[str] = set()
-        retained_file_paths: set[str] = set()
-
-        async def retain_ref(ref: WorkspaceRetainedReference) -> None:
-            canonical, record_id, file_path, diagnostic = await self._verify_retained_ref(
-                ref,
-                records_by_id=all_records,
-            )
-            if diagnostic is not None:
-                diagnostics.append(diagnostic)
-                canonical_retained_refs.append(ref)
-                return
-            if canonical is not None:
-                canonical_retained_refs.append(canonical)
-            if record_id:
-                retained_record_ids.add(record_id)
-            if file_path:
-                retained_file_paths.add(file_path)
-
-        for ref in retained_refs:
-            await retain_ref(ref)
-
         checkpoint_manifest = manifest_values.get(checkpoint_manifest_key)
-        if checkpoint_manifest_key in manifest_values:
-            if not isinstance(checkpoint_manifest, dict):
-                diagnostics.append(
-                    self._retention_diagnostic(
-                        "workspace.retention.ref_readback_failed",
-                        "Persisted Workspace checkpoint manifest is unreadable.",
-                        entity=checkpoint_manifest_key,
-                    )
-                )
-            elif representation_by_category["checkpoints"] == "hot":
-                await retain_ref(cast(WorkspaceRetainedReference, checkpoint_manifest))
-
-        preserved_event_ids: set[str] = set()
-        for anchor in anchors:
-            for anchor_ref in (anchor.get("record_ref"), anchor.get("summary_ref")):
-                if anchor_ref is not None:
-                    await retain_ref(anchor_ref)
-            preserved_event_ids.update(str(value) for value in anchor["preserved_event_ids"])
-
-        known_runtime_event_ids = {event["event_id"] for event in runtime_events}
-        for preserved_event_id in sorted(preserved_event_ids - known_runtime_event_ids):
-            diagnostics.append(
-                self._retention_diagnostic(
-                    "workspace.retention.ref_missing",
-                    "A retention anchor references a RuntimeEvent that does not exist.",
-                    entity=preserved_event_id,
-                )
-            )
-        retained_event_ids = (
-            known_runtime_event_ids
-            if representation_by_category["runtime_events"] == "hot"
-            else preserved_event_ids
+        roots = await self._resolve_retention_roots(
+            owned_record_ids=owned_record_ids,
+            all_records=all_records,
+            retained_refs=retained_refs,
+            checkpoint_manifest=(
+                cast(WorkspaceRetainedReference, checkpoint_manifest)
+                if isinstance(checkpoint_manifest, dict)
+                else None
+            ),
+            retain_checkpoint_manifest=representation_by_category["checkpoints"] == "hot",
+            anchors=anchors,
+            runtime_events=runtime_events,
+            retain_all_runtime_events=representation_by_category["runtime_events"] == "hot",
+            links=links,
         )
-        for event in runtime_events:
-            if event["event_id"] not in retained_event_ids:
-                continue
-            event_refs: list[WorkspaceReferenceEnvelope] = list(event["artifact_refs"])
-            if event["snapshot_ref"] is not None:
-                event_refs.append(event["snapshot_ref"])
-            for event_ref in event_refs:
-                await retain_ref(event_ref)
-
-        adjacency: dict[str, list[tuple[str, str]]] = {}
-        for link in links:
-            adjacency.setdefault(link["source_id"], []).append((link["target_id"], link["id"]))
-            adjacency.setdefault(link["target_id"], []).append((link["source_id"], link["id"]))
-            if link["target_id"] in owned_record_ids and link["source_id"] not in owned_record_ids:
-                diagnostics.append(
-                    self._retention_diagnostic(
-                        "workspace.retention.incoming_reference",
-                        "A record in the cleanup scope has an incoming link from outside the scope.",
-                        entity=link["id"],
-                        detail={"source_id": link["source_id"], "target_id": link["target_id"]},
-                    )
-                )
-        closure_queue = sorted(retained_record_ids)
-        closure_seen = set(retained_record_ids)
-        while closure_queue:
-            current = closure_queue.pop(0)
-            for neighbor, _ in sorted(adjacency.get(current, [])):
-                if neighbor in closure_seen:
-                    continue
-                closure_seen.add(neighbor)
-                neighbor_ref = all_records.get(neighbor)
-                if neighbor_ref is None:
-                    diagnostics.append(
-                        self._retention_diagnostic(
-                            "workspace.retention.ref_missing",
-                            "A retained Workspace link reaches a missing record.",
-                            entity=neighbor,
-                        )
-                    )
-                    continue
-                _, diagnostic = await self._verified_record_envelope(neighbor_ref)
-                if diagnostic is not None:
-                    diagnostics.append(diagnostic)
-                    continue
-                retained_record_ids.add(neighbor)
-                canonical_retained_refs.append(neighbor_ref)
-                closure_queue.append(neighbor)
+        diagnostics.extend(roots.diagnostics)
+        canonical_records = roots.canonical_records
+        canonical_retained_refs = roots.canonical_refs
+        retained_record_ids = roots.record_ids
+        retained_file_paths = roots.file_paths
+        retained_content_paths = roots.content_paths
+        retained_event_ids = roots.event_ids
 
         selected_file_paths: list[str] = []
         selected_scratch_paths: list[str] = []
@@ -2809,244 +3175,83 @@ class LocalWorkspaceBackend:
                 diagnostics=diagnostics,
             )
 
-        selected = empty_retention_selection()
-        selected_record_sizes: dict[str, int] = {}
-        for record_id in sorted(owned_record_ids):
-            ref = canonical_records[record_id]
-            if record_id in retained_record_ids:
-                continue
-            if record_id in checkpoint_record_ids or ref.get("collection") == "checkpoints":
-                category = "checkpoints"
-            elif ref.get("collection") == "artifacts":
-                category = "artifacts"
-            else:
-                category = "records"
-            if representation_by_category[category] == "hot":
-                continue
-            selected["record_ids"].append(record_id)
-            selected_record_sizes[record_id] = int(ref.get("size") or 0)
-            if ref.get("path"):
-                selected["content_paths"].append(str(ref["path"]))
-
+        scope_index_facts = [dict(row) for row in snapshot.scope_index_rows]
+        fts_facts = [dict(row) for row in snapshot.fts_rows]
+        selection_result = build_retention_selection(
+            owned_record_ids=owned_record_ids,
+            records_by_id=canonical_records,
+            retained_record_ids=retained_record_ids,
+            retained_content_paths=retained_content_paths,
+            checkpoint_record_ids=checkpoint_record_ids,
+            checkpoint_rows=checkpoint_facts,
+            runtime_events=runtime_events,
+            retained_event_ids=retained_event_ids,
+            links=links,
+            anchors=anchors,
+            scratch_leases=cast(Sequence[Mapping[str, Any]], scoped_scratch_leases),
+            selected_scratch_paths=selected_scratch_paths,
+            selected_file_paths=selected_file_paths,
+            retained_file_paths=retained_file_paths,
+            scope_index_rows=scope_index_facts,
+            fts_rows=fts_facts,
+            manifest_keys=set(manifest_values),
+            checkpoint_manifest_key=checkpoint_manifest_key,
+            lease_manifest_key=lease_manifest_key,
+            representation_by_category=representation_by_category,
+        )
+        selected = selection_result.selected
+        selected_record_sizes = selection_result.record_content_sizes
+        selected_checkpoint_rows = selection_result.checkpoint_rows
         selected_record_id_set = set(selected["record_ids"])
-        selected_checkpoint_rows = [
-            row for row in checkpoint_rows if str(row["record_id"]) in selected_record_id_set
-        ]
-        selected["checkpoint_ids"] = sorted(
-            {str(row["record_id"]) for row in selected_checkpoint_rows}
+
+        vector_ids, vector_provider, capability_diagnostic = self._retention_provider_selection(
+            selected,
+            selected_record_ids=selected_record_id_set,
+            vector_rows=snapshot.vector_rows,
         )
-        selected["checkpoint_row_ids"] = sorted(
-            f"{ row['run_id'] }:{ row['checkpoint_rowid'] }:{ row['record_id'] }"
-            for row in selected_checkpoint_rows
-        )
-        selected["link_ids"] = sorted(
-            link["id"]
-            for link in links
-            if link["source_id"] in selected_record_id_set
-            or link["target_id"] in selected_record_id_set
-        )
-        if representation_by_category["runtime_events"] != "hot":
-            selected["runtime_event_ids"] = sorted(
-                event["id"] for event in runtime_events if event["event_id"] not in retained_event_ids
+        if capability_diagnostic is not None:
+            return self._retention_preview(
+                status="deferred",
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=resolved_policy,
+                retained_refs=self._deduplicate_retained_refs(canonical_retained_refs),
+                inline_result=inline_result,
+                diagnostics=[capability_diagnostic],
             )
-        selected["retention_anchor_ids"] = sorted(anchor["id"] for anchor in anchors)
-        if representation_by_category["scratch"] != "hot":
-            selected["scratch_lease_ids"] = sorted(
-                str(lease.get("lease_id") or "")
-                for lease in scoped_scratch_leases
-                if lease.get("closed_at") is not None
-            )
-            selected["scratch_paths"] = selected_scratch_paths
-        if representation_by_category["files"] != "hot":
-            selected["file_paths"] = [
-                path for path in selected_file_paths if path not in retained_file_paths
-            ]
-        selected["record_scope_index_ids"] = sorted(
-            f"{ row['record_id'] }:{ row['scope_key'] }"
-            for row in scope_index_rows
-            if str(row["record_id"]) in selected_record_id_set
-        )
-        selected["fts_record_ids"] = sorted(
-            str(row["record_id"])
-            for row in fts_rows
-            if str(row["record_id"]) in selected_record_id_set
-        )
-        if (
-            representation_by_category["checkpoints"] != "hot"
-            and checkpoint_manifest_key in manifest_values
-        ):
-            selected["manifest_keys"].append(checkpoint_manifest_key)
-        if lease_manifest_key in manifest_values:
-            selected["manifest_keys"].append(lease_manifest_key)
+        selected["vector_record_ids"] = vector_ids
 
         for key in selected:
             selected[key] = sorted(set(selected[key]))
 
-        if any(selected.values()):
-            read_only_components = [
-                name
-                for name, component in (
-                    ("backend", self),
-                    ("db_store", self.db_store_provider),
-                    ("vector_store", self.vector_store_provider),
-                )
-                if component is not None and bool(getattr(component, "read_only", False))
-            ]
-            if read_only_components:
-                return self._retention_preview(
-                    status="deferred",
-                    scope=normalized_scope,
-                    lifecycle=lifecycle,
-                    policy=resolved_policy,
-                    retained_refs=self._deduplicate_retained_refs(canonical_retained_refs),
-                    inline_result=inline_result,
-                    diagnostics=[
-                        self._retention_diagnostic(
-                            "workspace.retention.provider_capability_missing",
-                            "Workspace retention cannot apply a non-empty plan through read-only components.",
-                            entity=type(self).__name__,
-                            detail={"read_only_components": read_only_components},
-                        )
-                    ],
-                )
+        selected_path_sizes, path_diagnostic = self._selected_retention_path_sizes(selected)
+        if path_diagnostic is not None:
+            return self._retention_preview(
+                status="deferred",
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=resolved_policy,
+                retained_refs=self._deduplicate_retained_refs(canonical_retained_refs),
+                inline_result=inline_result,
+                diagnostics=[path_diagnostic],
+            )
 
-        vector_provider = self.vector_store_provider
-        if vector_provider is not None and selected_record_id_set:
-            delete_vectors = getattr(vector_provider, "delete_records", None)
-            if not callable(delete_vectors):
-                return self._retention_preview(
-                    status="deferred",
-                    scope=normalized_scope,
-                    lifecycle=lifecycle,
-                    policy=resolved_policy,
-                    retained_refs=self._deduplicate_retained_refs(canonical_retained_refs),
-                    inline_result=inline_result,
-                    diagnostics=[
-                        self._retention_diagnostic(
-                            "workspace.retention.provider_capability_missing",
-                            "Configured vector provider cannot delete derived record entries.",
-                            entity=type(vector_provider).__name__,
-                            detail={"missing_method": "delete_records"},
-                        )
-                    ],
-                )
-            if isinstance(vector_provider, SQLiteVectorStoreProvider):
-                selected["vector_record_ids"] = sorted(
-                    str(row["record_id"])
-                    for row in vector_rows
-                    if str(row["record_id"]) in selected_record_id_set
-                )
-            else:
-                selected["vector_record_ids"] = sorted(selected_record_id_set)
-
-        for key in selected:
-            selected[key] = sorted(set(selected[key]))
-
-        logical_bytes = sum(selected_record_sizes.values())
-        logical_bytes += sum(
-            serialized_size(dict(row))
-            for row in all_record_rows
-            if str(row["id"]) in selected_record_id_set
+        logical_bytes = calculate_retention_logical_bytes(
+            selected=selected,
+            record_content_sizes=selected_record_sizes,
+            record_rows=[dict(row) for row in snapshot.all_record_rows],
+            runtime_events=runtime_events,
+            links=links,
+            anchors=anchors,
+            checkpoint_rows=selected_checkpoint_rows,
+            scope_index_rows=scope_index_facts,
+            scratch_rows=[dict(row) for row in snapshot.scratch_rows],
+            manifest_raw=manifest_raw,
+            fts_rows=fts_facts,
+            vector_rows=[dict(row) for row in snapshot.vector_rows],
+            sqlite_vector_store=isinstance(vector_provider, SQLiteVectorStoreProvider),
+            selected_path_sizes=selected_path_sizes,
         )
-        selected_event_ids = set(selected["runtime_event_ids"])
-        logical_bytes += sum(
-            serialized_size(event) for event in runtime_events if event["id"] in selected_event_ids
-        )
-        selected_link_ids = set(selected["link_ids"])
-        logical_bytes += sum(
-            serialized_size(link) for link in links if link["id"] in selected_link_ids
-        )
-        selected_anchor_ids = set(selected["retention_anchor_ids"])
-        logical_bytes += sum(
-            serialized_size(anchor) for anchor in anchors if anchor["id"] in selected_anchor_ids
-        )
-        selected_checkpoint_ids = set(selected["checkpoint_row_ids"])
-        logical_bytes += sum(
-            serialized_size(
-                {
-                    "run_id": row["run_id"],
-                    "step_id": row["step_id"],
-                    "record_id": row["record_id"],
-                    "state": json_loads(row["state_json"], {}),
-                    "created_at": row["created_at"],
-                }
-            )
-            for row in selected_checkpoint_rows
-            if (
-                f"{ row['run_id'] }:{ row['checkpoint_rowid'] }:{ row['record_id'] }"
-                in selected_checkpoint_ids
-            )
-        )
-        selected_scope_index_ids = set(selected["record_scope_index_ids"])
-        logical_bytes += sum(
-            serialized_size(dict(row))
-            for row in scope_index_rows
-            if f"{ row['record_id'] }:{ row['scope_key'] }" in selected_scope_index_ids
-        )
-        selected_scratch_lease_ids = set(selected["scratch_lease_ids"])
-        logical_bytes += sum(
-            serialized_size(dict(row))
-            for row in scratch_rows
-            if str(row["lease_id"]) in selected_scratch_lease_ids
-        )
-        selected_manifest_keys = set(selected["manifest_keys"])
-        logical_bytes += sum(
-            len(key.encode("utf-8")) + len(manifest_raw[key].encode("utf-8"))
-            for key in selected_manifest_keys
-        )
-        selected_fts_ids = set(selected["fts_record_ids"])
-        logical_bytes += sum(
-            len(str(row["summary"] or "").encode("utf-8"))
-            + len(str(row["content"] or "").encode("utf-8"))
-            for row in fts_rows
-            if str(row["record_id"]) in selected_fts_ids
-        )
-        selected_vector_ids = set(selected["vector_record_ids"])
-        if isinstance(vector_provider, SQLiteVectorStoreProvider):
-            logical_bytes += sum(
-                len(str(row["ref_json"] or "").encode("utf-8"))
-                + len(str(row["embedding_json"] or "").encode("utf-8"))
-                for row in vector_rows
-                if str(row["record_id"]) in selected_vector_ids
-            )
-        else:
-            logical_bytes += sum(
-                serialized_size({"record_id": record_id}) for record_id in selected_vector_ids
-            )
-        for area, key in (("files", "file_paths"), ("scratch", "scratch_paths")):
-            area_root = self.root / area
-            for relative_path in selected[key]:
-                target, diagnostic = self._safe_resolve_path(
-                    area_root / relative_path,
-                    entity=relative_path,
-                    operation="selected-path resolution",
-                )
-                if diagnostic is not None or target is None:
-                    return self._retention_preview(
-                        status="deferred",
-                        scope=normalized_scope,
-                        lifecycle=lifecycle,
-                        policy=resolved_policy,
-                        retained_refs=self._deduplicate_retained_refs(canonical_retained_refs),
-                        inline_result=inline_result,
-                        diagnostics=[cast(WorkspaceRetentionDiagnostic, diagnostic)],
-                    )
-                target_stat, diagnostic = self._safe_stat_path(
-                    target,
-                    entity=str(target),
-                    operation="selected-path stat",
-                )
-                if diagnostic is not None or target_stat is None:
-                    return self._retention_preview(
-                        status="deferred",
-                        scope=normalized_scope,
-                        lifecycle=lifecycle,
-                        policy=resolved_policy,
-                        retained_refs=self._deduplicate_retained_refs(canonical_retained_refs),
-                        inline_result=inline_result,
-                        diagnostics=[cast(WorkspaceRetentionDiagnostic, diagnostic)],
-                    )
-                logical_bytes += target_stat.st_size
 
         return self._retention_preview(
             status="ready",
