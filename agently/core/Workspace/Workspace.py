@@ -21,11 +21,12 @@ import re
 import shutil
 import subprocess
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Concatenate, Literal, ParamSpec, TypeVar, cast
 
 from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.workspace import (
@@ -90,6 +91,26 @@ if TYPE_CHECKING:
 
 
 _MISSING = object()
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _guard_workspace_mutation(
+    method: Callable[Concatenate["Workspace", _P], Coroutine[Any, Any, _R]],
+) -> Callable[Concatenate["Workspace", _P], Coroutine[Any, Any, _R]]:
+    @wraps(method)
+    async def guarded(
+        self: "Workspace",
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> _R:
+        async with self._backend_mutation_guard():
+            return await method(self, *args, **kwargs)
+
+    return cast(
+        Callable[Concatenate["Workspace", _P], Coroutine[Any, Any, _R]],
+        guarded,
+    )
 
 
 class Workspace:
@@ -405,6 +426,7 @@ class Workspace:
         put_record_callable = cast(Callable[[WorkspaceRecordRef], Awaitable[WorkspaceRecordRef]], put_record)
         return await put_record_callable(cast(WorkspaceRecordRef, scoped_ref))
 
+    @_guard_workspace_mutation
     async def put(
         self,
         record_or_content: Any = _MISSING,
@@ -592,10 +614,12 @@ class Workspace:
             meta=meta,
         )
 
+    @_guard_workspace_mutation
     async def checkpoint(self, run_id: str, state: dict[str, Any], *, step_id: str | None = None):
         ref = await self.backend.checkpoint(run_id, state, step_id=step_id)
         return await self._scope_record_ref(ref)
 
+    @_guard_workspace_mutation
     async def put_checkpoint(
         self,
         run_id: str,
@@ -615,6 +639,7 @@ class Workspace:
     async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
         return await self.latest_checkpoint(run_id)
 
+    @_guard_workspace_mutation
     async def put_snapshot(
         self,
         run_id: str,
@@ -695,6 +720,7 @@ class Workspace:
     ) -> WorkspaceLeaseRef:
         return await self.backend.release_lease(run_id, owner_id, lease_token)
 
+    @_guard_workspace_mutation
     async def put_artifact_ref(
         self,
         run_id: str,
@@ -2095,6 +2121,7 @@ class Workspace:
 
         return lineage_scratch_root(self.root, self.scope_lineage)
 
+    @_guard_workspace_mutation
     async def open_scratch(
         self,
         *,
@@ -2141,6 +2168,7 @@ class Workspace:
         }
         return await register(lease)
 
+    @_guard_workspace_mutation
     async def close_scratch(
         self,
         lease_id: str,
@@ -2166,6 +2194,7 @@ class Workspace:
                 shutil.rmtree(path)
         return await close(lease_id)
 
+    @_guard_workspace_mutation
     async def cleanup_scratch_leases(self, *, now: str | None = None) -> dict[str, Any]:
         """Recover crashed scratch leases using durable lease facts.
 

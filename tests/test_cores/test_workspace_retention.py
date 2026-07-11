@@ -1939,6 +1939,222 @@ async def test_backend_mutation_lock_serializes_content_and_file_writes_with_ret
 
 
 @pytest.mark.asyncio
+async def test_root_mutation_guard_serializes_same_backend_scratch_and_runtime_event(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(
+        tmp_path / "retention-same-backend-mutations",
+        vector_store_provider="sqlite",
+    )
+    target = root.with_scope_node("executions", "exec-same-backend-mutations")
+    discarded = await target.put(
+        {"process": "lock holder"},
+        collection="observations",
+        kind="process",
+    )
+    backend = cast(Any, root.backend)
+    provider = backend.vector_store_provider
+    await provider.index_record(discarded, [1.0])
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-same-backend-mutations"),
+            "state_version": None,
+        },
+    )
+    entered_delete = asyncio.Event()
+    release_delete = asyncio.Event()
+    original_delete_records = provider.delete_records
+
+    async def pause_vector_delete(record_ids):
+        entered_delete.set()
+        await release_delete.wait()
+        await original_delete_records(record_ids)
+
+    monkeypatch.setattr(provider, "delete_records", pause_vector_delete)
+    apply_task = asyncio.create_task(target.apply_retention(preview))
+    await asyncio.wait_for(entered_delete.wait(), timeout=2)
+    event_task = asyncio.create_task(
+        target.append_runtime_event(
+            "exec-same-backend-mutations",
+            {"event_type": "late.event", "event_id": "evt-late-mutation"},
+        )
+    )
+    scratch_task = asyncio.create_task(
+        target.open_scratch(cleanup_policy="on_scope_prune")
+    )
+    await asyncio.sleep(0.05)
+    mutations_waited = not event_task.done() and not scratch_task.done()
+    release_delete.set()
+    applied, event, lease = await asyncio.gather(
+        apply_task,
+        event_task,
+        scratch_task,
+    )
+
+    assert mutations_waited is True
+    assert applied["status"] == "applied"
+    assert event in await root.query_runtime_events("exec-same-backend-mutations")
+    assert await backend.get_scratch_lease(cast(str, lease.get("lease_id"))) == lease
+    assert Path(cast(str, lease.get("local_path"))).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_root_mutation_guard_is_shared_by_two_local_backends(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(
+        tmp_path / "retention-shared-root-mutations",
+        vector_store_provider="sqlite",
+    )
+    target = root.with_scope_node("executions", "exec-shared-root-mutations")
+    second_root = WorkspaceManager().create(
+        root.root,
+        create=False,
+        vector_store_provider="sqlite",
+    )
+    second_target = second_root.with_scope_node(
+        "executions",
+        "exec-shared-root-mutations",
+    )
+    discarded = await target.put(
+        {"process": "root lock holder"},
+        collection="observations",
+        kind="process",
+    )
+    backend = cast(Any, root.backend)
+    provider = backend.vector_store_provider
+    await provider.index_record(discarded, [1.0])
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-shared-root-mutations"),
+            "state_version": None,
+        },
+    )
+    entered_delete = asyncio.Event()
+    release_delete = asyncio.Event()
+    original_delete_records = provider.delete_records
+
+    async def pause_vector_delete(record_ids):
+        entered_delete.set()
+        await release_delete.wait()
+        await original_delete_records(record_ids)
+
+    monkeypatch.setattr(provider, "delete_records", pause_vector_delete)
+    apply_task = asyncio.create_task(target.apply_retention(preview))
+    await asyncio.wait_for(entered_delete.wait(), timeout=2)
+    content_task = asyncio.create_task(
+        second_target.put(
+            {"process": "late second backend"},
+            collection="observations",
+            kind="process",
+        )
+    )
+    file_task = asyncio.create_task(
+        second_target.write_file("reports/late-second.txt", "late second")
+    )
+    await asyncio.sleep(0.05)
+    mutations_waited = not content_task.done() and not file_task.done()
+    release_delete.set()
+    applied, late_record, late_file = await asyncio.gather(
+        apply_task,
+        content_task,
+        file_task,
+    )
+
+    assert mutations_waited is True
+    assert applied["status"] == "applied"
+    assert await cast(Any, second_root.backend).get_record(late_record["id"]) == late_record
+    assert (
+        second_target.files_root / late_file["file_refs"][0]["path"]
+    ).read_text(encoding="utf-8") == "late second"
+
+
+@pytest.mark.asyncio
+async def test_root_mutation_guard_holds_compound_checkpoint_as_one_operation(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(
+        tmp_path / "retention-compound-checkpoint",
+        vector_store_provider="sqlite",
+    )
+    target = root.with_scope_node("executions", "exec-compound-checkpoint")
+    discarded = await target.put(
+        {"process": "checkpoint race holder"},
+        collection="observations",
+        kind="process",
+    )
+    backend = cast(Any, root.backend)
+    provider = backend.vector_store_provider
+    await provider.index_record(discarded, [1.0])
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={
+            **_terminal_lifecycle("exec-compound-checkpoint"),
+            "state_version": None,
+        },
+    )
+    entered_delete = asyncio.Event()
+    release_delete = asyncio.Event()
+    original_delete_records = provider.delete_records
+
+    async def pause_vector_delete(record_ids):
+        entered_delete.set()
+        await release_delete.wait()
+        await original_delete_records(record_ids)
+
+    checkpoint_record_committed = asyncio.Event()
+    release_checkpoint = asyncio.Event()
+    original_put = backend.put
+
+    async def pause_after_checkpoint_record(*args: Any, **kwargs: Any):
+        ref = await original_put(*args, **kwargs)
+        checkpoint_record_committed.set()
+        await release_checkpoint.wait()
+        return ref
+
+    monkeypatch.setattr(provider, "delete_records", pause_vector_delete)
+    monkeypatch.setattr(backend, "put", pause_after_checkpoint_record)
+    checkpoint_task = asyncio.create_task(
+        target.put_checkpoint(
+            "exec-compound-checkpoint",
+            {"state_version": 1, "step": "late"},
+            expected_state_version=0,
+        )
+    )
+    await asyncio.wait_for(checkpoint_record_committed.wait(), timeout=2)
+    apply_task = asyncio.create_task(target.apply_retention(preview))
+    await asyncio.sleep(0.05)
+    apply_entered_derived_before_checkpoint_commit = entered_delete.is_set()
+    apply_waited_for_checkpoint = not apply_task.done()
+    release_checkpoint.set()
+    release_delete.set()
+    applied, checkpoint = await asyncio.gather(apply_task, checkpoint_task)
+
+    assert apply_entered_derived_before_checkpoint_commit is False
+    assert apply_waited_for_checkpoint is True
+    assert applied["status"] == "deferred"
+    assert await root.latest_checkpoint("exec-compound-checkpoint") == checkpoint
+    assert await backend.get_record(checkpoint["id"]) == checkpoint
+    with backend._connect() as conn:
+        checkpoint_row = conn.execute(
+            "SELECT record_id FROM checkpoints WHERE run_id = ? ORDER BY rowid DESC LIMIT 1",
+            ("exec-compound-checkpoint",),
+        ).fetchone()
+        latest_manifest = backend._manifest_from_conn(
+            conn,
+            "checkpoint.latest.exec-compound-checkpoint",
+            None,
+        )
+    assert checkpoint_row["record_id"] == checkpoint["id"]
+    assert latest_manifest["id"] == checkpoint["id"]
+
+
+@pytest.mark.asyncio
 async def test_apply_retention_does_not_convert_programming_errors_to_deferred(
     tmp_path,
     monkeypatch,
@@ -2001,6 +2217,7 @@ async def test_stale_old_worker_cannot_overwrite_new_fingerprint_manifest(
         "executions",
         "exec-stale-worker-cas",
     )
+    second_backend = cast(Any, second_root.backend)
     entered_delete = asyncio.Event()
     release_delete = asyncio.Event()
     original_delete_records = provider.delete_records
@@ -2013,7 +2230,11 @@ async def test_stale_old_worker_cannot_overwrite_new_fingerprint_manifest(
     monkeypatch.setattr(provider, "delete_records", pause_old_worker)
     old_task = asyncio.create_task(target.apply_retention(preview))
     await asyncio.wait_for(entered_delete.wait(), timeout=2)
-    same_plan = await second_target.apply_retention(preview)
+    # Simulate an independent process that is outside this process's
+    # root-shared cooperative guard. The private entry still executes the real
+    # SQLite transaction and terminal-manifest CAS; only the in-process guard
+    # acquisition is deliberately bypassed for this inter-process race probe.
+    same_plan = await second_backend._apply_retention_unlocked(preview)
     assert same_plan["status"] == "applied"
     successor_preview = await second_target.inspect_retention(
         {},
@@ -2024,7 +2245,7 @@ async def test_stale_old_worker_cannot_overwrite_new_fingerprint_manifest(
         },
     )
     assert successor_preview["plan_fingerprint"] != preview["plan_fingerprint"]
-    successor = await second_target.apply_retention(successor_preview)
+    successor = await second_backend._apply_retention_unlocked(successor_preview)
     assert successor["status"] == "applied"
     release_delete.set()
     old_result = await old_task

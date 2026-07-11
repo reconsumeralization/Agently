@@ -23,11 +23,13 @@ import stat
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import weakref
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, cast
+from typing import Any, AsyncIterator, Concatenate, Iterator, ParamSpec, TypeVar, cast
 
 from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.workspace import (
@@ -145,6 +147,102 @@ class _DerivedCleanupOperationalError(RuntimeError):
         self.error = error
 
 
+class _RootMutationGuard:
+    """Loop-neutral, asyncio-task-reentrant mutation ownership for one root."""
+
+    def __init__(self) -> None:
+        self._state_lock = threading.Lock()
+        self._owner: object | None = None
+        self._depth = 0
+
+    @staticmethod
+    def _owner_token() -> object:
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        if task is not None:
+            return task
+        return ("thread", threading.get_ident())
+
+    def _try_acquire(self, owner: object) -> bool:
+        with self._state_lock:
+            if self._owner is None:
+                self._owner = owner
+                self._depth = 1
+                return True
+            if self._owner == owner:
+                self._depth += 1
+                return True
+            return False
+
+    def _release(self, owner: object) -> None:
+        with self._state_lock:
+            if self._owner != owner or self._depth <= 0:
+                raise RuntimeError("Workspace mutation guard release ownership mismatch.")
+            self._depth -= 1
+            if self._depth == 0:
+                self._owner = None
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator[None]:
+        owner = self._owner_token()
+        while not self._try_acquire(owner):
+            await asyncio.sleep(0.001)
+        try:
+            yield
+        finally:
+            self._release(owner)
+
+    @contextmanager
+    def try_acquire_sync(self) -> Iterator[bool]:
+        owner = self._owner_token()
+        acquired = self._try_acquire(owner)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self._release(owner)
+
+
+_ROOT_MUTATION_GUARDS: weakref.WeakValueDictionary[str, _RootMutationGuard] = (
+    weakref.WeakValueDictionary()
+)
+_ROOT_MUTATION_GUARDS_LOCK = threading.Lock()
+
+
+def _root_mutation_guard(root: Path) -> _RootMutationGuard:
+    key = str(root.expanduser().resolve())
+    with _ROOT_MUTATION_GUARDS_LOCK:
+        guard = _ROOT_MUTATION_GUARDS.get(key)
+        if guard is None:
+            guard = _RootMutationGuard()
+            _ROOT_MUTATION_GUARDS[key] = guard
+        return guard
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _guard_local_mutation(
+    method: Callable[Concatenate["LocalWorkspaceBackend", _P], Coroutine[Any, Any, _R]],
+) -> Callable[Concatenate["LocalWorkspaceBackend", _P], Coroutine[Any, Any, _R]]:
+    @wraps(method)
+    async def guarded(
+        self: "LocalWorkspaceBackend",
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> _R:
+        async with self._mutation_guard():
+            return await method(self, *args, **kwargs)
+
+    return cast(
+        Callable[Concatenate["LocalWorkspaceBackend", _P], Coroutine[Any, Any, _R]],
+        guarded,
+    )
+
+
 class LocalWorkspaceBackend:
     """Local filesystem content plus SQLite metadata and FTS index."""
 
@@ -208,7 +306,7 @@ class LocalWorkspaceBackend:
         self.content_root = self.root / "content"
         self.files_root = self.root / "files"
         self.db_path = self.root / "workspace.db"
-        self._mutation_lock = threading.Lock()
+        self._root_mutation_guard = _root_mutation_guard(self.root)
         self.mode = mode
         self.read_only = mode in {"read", "read_only", "readonly"}
         self.workspace_id = self._default_workspace_id()
@@ -229,7 +327,12 @@ class LocalWorkspaceBackend:
         self.text_index = self
         self.vector_index = self._default_vector_index()
         if create:
-            self._initialize()
+            with self._try_sync_mutation_guard() as acquired:
+                if not acquired:
+                    raise WorkspaceConfigurationError(
+                        "Workspace root mutation is busy during initialization."
+                    )
+                self._initialize()
         elif not self.root.exists():
             raise WorkspaceConfigurationError(f"Workspace root does not exist: { self.root }")
         else:
@@ -241,23 +344,15 @@ class LocalWorkspaceBackend:
 
     @asynccontextmanager
     async def _mutation_guard(self) -> AsyncIterator[None]:
-        """Serialize cooperative mutations without binding the lock to an event loop."""
+        """Serialize root-shared mutations with asyncio-task re-entrancy."""
 
-        while not self._mutation_lock.acquire(blocking=False):
-            await asyncio.sleep(0.001)
-        try:
+        async with self._root_mutation_guard.acquire():
             yield
-        finally:
-            self._mutation_lock.release()
 
     @contextmanager
     def _try_sync_mutation_guard(self) -> Iterator[bool]:
-        acquired = self._mutation_lock.acquire(blocking=False)
-        try:
+        with self._root_mutation_guard.try_acquire_sync() as acquired:
             yield acquired
-        finally:
-            if acquired:
-                self._mutation_lock.release()
 
     @staticmethod
     def _supports_descriptor_relative_delete() -> bool:
@@ -1167,6 +1262,7 @@ class LocalWorkspaceBackend:
             pass
         return ref
 
+    @_guard_local_mutation
     async def put_record(self, ref: WorkspaceRecordRef) -> WorkspaceRecordRef:
         self._ensure_writable()
         self._ensure_collection(ref["collection"])
@@ -1204,6 +1300,7 @@ class LocalWorkspaceBackend:
             return None
         return self._row_to_ref(row)
 
+    @_guard_local_mutation
     async def index_record(self, ref: WorkspaceRecordRef, content: str) -> None:
         self._ensure_writable()
         with self._connect() as conn:
@@ -1386,6 +1483,7 @@ class LocalWorkspaceBackend:
             return str(value.get("id", ""))
         return str(value)
 
+    @_guard_local_mutation
     async def link(
         self,
         source: WorkspaceRecordRef | str,
@@ -1413,6 +1511,7 @@ class LocalWorkspaceBackend:
             "meta": meta or {},
         }
 
+    @_guard_local_mutation
     async def link_evidence(
         self,
         source: WorkspaceRecordRef | str,
@@ -1473,6 +1572,7 @@ class LocalWorkspaceBackend:
             rows = conn.execute(f"SELECT * FROM links { where } ORDER BY created_at ASC", params).fetchall()
         return [self._row_to_link(row) for row in rows]
 
+    @_guard_local_mutation
     async def checkpoint(
         self,
         run_id: str,
@@ -1595,6 +1695,7 @@ class LocalWorkspaceBackend:
             meta={"artifact_ref": True, **metadata},
         )
 
+    @_guard_local_mutation
     async def claim_lease(
         self,
         run_id: str,
@@ -1640,6 +1741,7 @@ class LocalWorkspaceBackend:
             conn.commit()
         return lease
 
+    @_guard_local_mutation
     async def heartbeat_lease(
         self,
         run_id: str,
@@ -1665,6 +1767,7 @@ class LocalWorkspaceBackend:
             conn.commit()
         return cast(WorkspaceLeaseRef, lease)
 
+    @_guard_local_mutation
     async def release_lease(
         self,
         run_id: str,
@@ -1720,6 +1823,7 @@ class LocalWorkspaceBackend:
             ).fetchall()
         return [self._row_to_ref(row) for row in rows]
 
+    @_guard_local_mutation
     async def append_runtime_event(
         self,
         execution_id: str,
@@ -1869,6 +1973,7 @@ class LocalWorkspaceBackend:
             ).fetchall()
         return [self._row_to_runtime_event_record(row) for row in rows]
 
+    @_guard_local_mutation
     async def record_file_policy(
         self,
         *,
@@ -1913,6 +2018,7 @@ class LocalWorkspaceBackend:
             "links": {},
         }
 
+    @_guard_local_mutation
     async def add_retention_anchor(
         self,
         execution_id: str,
@@ -4345,6 +4451,7 @@ class LocalWorkspaceBackend:
             raise RuntimeError("Workspace retention did not produce a terminal manifest.")
         return await self._resume_retention_derived_cleanup(manifest_ref)
 
+    @_guard_local_mutation
     async def prune_scope(
         self,
         scope: dict[str, Any],
@@ -4473,6 +4580,7 @@ class LocalWorkspaceBackend:
             },
         )
 
+    @_guard_local_mutation
     async def register_scratch_lease(self, lease: WorkspaceScratchLease) -> WorkspaceScratchLease:
         self._ensure_writable()
         lease_id = str(lease.get("lease_id") or uuid.uuid4().hex)
@@ -4543,6 +4651,7 @@ class LocalWorkspaceBackend:
             ).fetchall()
         return [self._row_to_scratch_lease(row) for row in rows]
 
+    @_guard_local_mutation
     async def close_scratch_lease(
         self,
         lease_id: str,
