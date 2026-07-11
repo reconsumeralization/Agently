@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 from typing_extensions import NotRequired, TypedDict
 
 
@@ -266,6 +266,76 @@ class WorkspaceRetentionAnchor(TypedDict):
     preserved_event_ids: list[str]
     created_at: str
     meta: dict[str, Any]
+
+
+WorkspaceRetentionCategory = Literal[
+    "terminal_result",
+    "artifacts",
+    "runtime_events",
+    "checkpoints",
+    "records",
+    "files",
+    "scratch",
+]
+WorkspaceRetentionRepresentation = Literal["discard", "summary", "hot", "cold"]
+WorkspaceRetentionTerminalStatus = Literal["completed", "failed", "cancelled"]
+WorkspaceRetainedReference: TypeAlias = WorkspaceRecordRef | WorkspaceReferenceEnvelope | WorkspaceFileRef
+
+
+class WorkspaceRetentionRule(TypedDict):
+    category: WorkspaceRetentionCategory
+    representation: WorkspaceRetentionRepresentation
+
+
+class WorkspaceRetentionPolicy(TypedDict, total=False):
+    rules: list[WorkspaceRetentionRule]
+    inline_result_limit: int
+
+
+class WorkspaceRetentionLifecycle(TypedDict):
+    execution_id: str
+    status: WorkspaceRetentionTerminalStatus
+    terminal_at: str
+    state_version: int | None
+    recovery_active: bool
+    lease_active: bool
+
+
+class WorkspaceRetentionDiagnostic(TypedDict, total=False):
+    code: str
+    message: str
+    retryable: bool
+    entity: str
+    detail: dict[str, Any]
+
+
+class WorkspaceRetentionAccounting(TypedDict):
+    entities: dict[str, int]
+    logical_bytes_deleted: int
+    physical_bytes_reclaimed: int
+    physical_bytes_pending: int
+
+
+class WorkspaceRetentionPreview(TypedDict):
+    status: Literal["ready", "deferred"]
+    plan_fingerprint: str
+    scope: dict[str, Any]
+    lifecycle: WorkspaceRetentionLifecycle
+    policy: WorkspaceRetentionPolicy
+    retained_refs: list[WorkspaceRetainedReference]
+    inline_result: Any
+    selected: dict[str, list[str]]
+    accounting: WorkspaceRetentionAccounting
+    diagnostics: list[WorkspaceRetentionDiagnostic]
+
+
+class WorkspaceRetentionResult(TypedDict):
+    status: Literal["applied", "deferred", "noop"]
+    plan_fingerprint: str
+    manifest_ref: WorkspaceRecordRef | None
+    retained_refs: list[WorkspaceRetainedReference]
+    accounting: WorkspaceRetentionAccounting
+    diagnostics: list[WorkspaceRetentionDiagnostic]
 
 
 class WorkspaceSearchResult(TypedDict, total=False):

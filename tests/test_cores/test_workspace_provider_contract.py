@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import importlib
+import inspect
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
-from typing import Any, cast
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from typing import Any, Literal, cast, get_args, get_type_hints
 
 import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently.core import PluginManager
+from agently.core import PluginManager, WorkspaceManager
+import agently.types.data as data_types
+import agently.types.data.workspace as workspace_types
 from agently.types.data import (
     AgentlyRequestData,
     WorkspaceBackendCapabilities,
@@ -25,6 +29,9 @@ from agently.types.data import (
     WorkspaceScratchLease,
 )
 from agently.utils import DataFormatter, Settings
+
+
+workspace_plugin_types = importlib.import_module("agently.types.plugins.Workspace")
 
 
 class ProviderProofRequester:
@@ -854,6 +861,23 @@ class RemoteAuditWorkspaceBackend:
         ]
         return anchors[:limit] if limit is not None else anchors
 
+    async def inspect_retention(
+        self,
+        scope: dict[str, Any],
+        *,
+        lifecycle: workspace_types.WorkspaceRetentionLifecycle,
+        retained_refs: Sequence[workspace_types.WorkspaceRetainedReference] = (),
+        inline_result: Any = None,
+        policy: workspace_types.WorkspaceRetentionPolicy | None = None,
+    ) -> workspace_types.WorkspaceRetentionPreview:
+        raise NotImplementedError
+
+    async def apply_retention(
+        self,
+        preview: workspace_types.WorkspaceRetentionPreview,
+    ) -> workspace_types.WorkspaceRetentionResult:
+        raise NotImplementedError
+
     def capabilities(self) -> WorkspaceBackendCapabilities:
         component = type(self).__name__
         return {
@@ -890,6 +914,175 @@ class RemoteAuditWorkspaceBackend:
                 "supports_remote_backend": True,
             },
         }
+
+
+def test_workspace_retention_data_contract_is_exported_with_exact_shapes():
+    expected_exports = (
+        "WorkspaceRetentionCategory",
+        "WorkspaceRetentionRepresentation",
+        "WorkspaceRetentionTerminalStatus",
+        "WorkspaceRetainedReference",
+        "WorkspaceRetentionRule",
+        "WorkspaceRetentionPolicy",
+        "WorkspaceRetentionLifecycle",
+        "WorkspaceRetentionDiagnostic",
+        "WorkspaceRetentionAccounting",
+        "WorkspaceRetentionPreview",
+        "WorkspaceRetentionResult",
+    )
+    missing = [name for name in expected_exports if not hasattr(workspace_types, name)]
+    assert missing == []
+    assert all(getattr(data_types, name) is getattr(workspace_types, name) for name in expected_exports)
+
+    assert get_args(workspace_types.WorkspaceRetentionCategory) == (
+        "terminal_result",
+        "artifacts",
+        "runtime_events",
+        "checkpoints",
+        "records",
+        "files",
+        "scratch",
+    )
+    assert get_args(workspace_types.WorkspaceRetentionRepresentation) == (
+        "discard",
+        "summary",
+        "hot",
+        "cold",
+    )
+    assert get_args(workspace_types.WorkspaceRetentionTerminalStatus) == (
+        "completed",
+        "failed",
+        "cancelled",
+    )
+    assert get_args(workspace_types.WorkspaceRetainedReference) == (
+        workspace_types.WorkspaceRecordRef,
+        workspace_types.WorkspaceReferenceEnvelope,
+        workspace_types.WorkspaceFileRef,
+    )
+
+    expected_keys = {
+        "WorkspaceRetentionRule": (
+            {"category", "representation"},
+            set(),
+        ),
+        "WorkspaceRetentionPolicy": (
+            set(),
+            {"rules", "inline_result_limit"},
+        ),
+        "WorkspaceRetentionLifecycle": (
+            {
+                "execution_id",
+                "status",
+                "terminal_at",
+                "state_version",
+                "recovery_active",
+                "lease_active",
+            },
+            set(),
+        ),
+        "WorkspaceRetentionDiagnostic": (
+            set(),
+            {"code", "message", "retryable", "entity", "detail"},
+        ),
+        "WorkspaceRetentionAccounting": (
+            {
+                "entities",
+                "logical_bytes_deleted",
+                "physical_bytes_reclaimed",
+                "physical_bytes_pending",
+            },
+            set(),
+        ),
+        "WorkspaceRetentionPreview": (
+            {
+                "status",
+                "plan_fingerprint",
+                "scope",
+                "lifecycle",
+                "policy",
+                "retained_refs",
+                "inline_result",
+                "selected",
+                "accounting",
+                "diagnostics",
+            },
+            set(),
+        ),
+        "WorkspaceRetentionResult": (
+            {
+                "status",
+                "plan_fingerprint",
+                "manifest_ref",
+                "retained_refs",
+                "accounting",
+                "diagnostics",
+            },
+            set(),
+        ),
+    }
+    for name, (required, optional) in expected_keys.items():
+        contract = getattr(workspace_types, name)
+        assert contract.__required_keys__ == frozenset(required)
+        assert contract.__optional_keys__ == frozenset(optional)
+
+    hints = get_type_hints(workspace_types.WorkspaceRetentionPreview)
+    assert hints["inline_result"] is Any
+    assert hints["retained_refs"] == list[workspace_types.WorkspaceRetainedReference]
+    assert hints["status"] == Literal["ready", "deferred"]
+
+
+def test_workspace_retention_protocols_and_fake_provider_use_exact_signatures():
+    protocols = (
+        workspace_plugin_types.RetentionPolicy,
+        workspace_plugin_types.DBStoreProvider,
+        workspace_plugin_types.WorkspaceBackend,
+        RemoteAuditWorkspaceBackend,
+    )
+    for protocol in protocols:
+        inspect_method = getattr(protocol, "inspect_retention", None)
+        apply_method = getattr(protocol, "apply_retention", None)
+        assert inspect_method is not None, protocol.__name__
+        assert apply_method is not None, protocol.__name__
+
+        inspect_signature = inspect.signature(inspect_method)
+        assert tuple(inspect_signature.parameters) == (
+            "self",
+            "scope",
+            "lifecycle",
+            "retained_refs",
+            "inline_result",
+            "policy",
+        )
+        assert inspect_signature.parameters["scope"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        for name in ("lifecycle", "retained_refs", "inline_result", "policy"):
+            assert inspect_signature.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert inspect_signature.parameters["retained_refs"].default == ()
+        assert inspect_signature.parameters["inline_result"].default is None
+        assert inspect_signature.parameters["policy"].default is None
+
+        inspect_hints = get_type_hints(inspect_method)
+        assert inspect_method.__annotations__["inline_result"] == "Any"
+        inspect_hints.pop("inline_result")
+        assert inspect_hints == {
+            "scope": dict[str, Any],
+            "lifecycle": workspace_types.WorkspaceRetentionLifecycle,
+            "retained_refs": Sequence[workspace_types.WorkspaceRetainedReference],
+            "policy": workspace_types.WorkspaceRetentionPolicy | None,
+            "return": workspace_types.WorkspaceRetentionPreview,
+        }
+
+        apply_signature = inspect.signature(apply_method)
+        assert tuple(apply_signature.parameters) == ("self", "preview")
+        assert apply_signature.parameters["preview"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert get_type_hints(apply_method) == {
+            "preview": workspace_types.WorkspaceRetentionPreview,
+            "return": workspace_types.WorkspaceRetentionResult,
+        }
+
+
+def test_workspace_manager_requires_terminal_retention_provider_methods():
+    assert "inspect_retention" in WorkspaceManager._DB_STORE_REQUIRED_METHODS
+    assert "apply_retention" in WorkspaceManager._DB_STORE_REQUIRED_METHODS
 
 
 @pytest.mark.asyncio

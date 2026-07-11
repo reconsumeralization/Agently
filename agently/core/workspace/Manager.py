@@ -88,6 +88,8 @@ class WorkspaceManager:
         "get_file_policy",
         "add_retention_anchor",
         "retention_anchors",
+        "inspect_retention",
+        "apply_retention",
         "prune_scope",
         "register_scratch_lease",
         "get_scratch_lease",

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
 from agently.types.data.event import RuntimeEvent, RuntimeEventDict
@@ -25,7 +26,12 @@ from agently.types.data.workspace import (
     WorkspaceLinkRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
+    WorkspaceRetainedReference,
     WorkspaceRetentionAnchor,
+    WorkspaceRetentionLifecycle,
+    WorkspaceRetentionPolicy,
+    WorkspaceRetentionPreview,
+    WorkspaceRetentionResult,
     WorkspaceRuntimeEventRecord,
     WorkspaceScratchLease,
 )
@@ -242,6 +248,21 @@ class RetentionPolicy(Protocol):
         anchor_type: str | None = None,
         limit: int | None = None,
     ) -> list[WorkspaceRetentionAnchor]: ...
+
+    async def inspect_retention(
+        self,
+        scope: dict[str, Any],
+        *,
+        lifecycle: WorkspaceRetentionLifecycle,
+        retained_refs: Sequence[WorkspaceRetainedReference] = (),
+        inline_result: Any = None,
+        policy: WorkspaceRetentionPolicy | None = None,
+    ) -> WorkspaceRetentionPreview: ...
+
+    async def apply_retention(
+        self,
+        preview: WorkspaceRetentionPreview,
+    ) -> WorkspaceRetentionResult: ...
 
 
 @runtime_checkable
@@ -486,6 +507,21 @@ class DBStoreProvider(Protocol):
         anchor_type: str | None = None,
         limit: int | None = None,
     ) -> list[WorkspaceRetentionAnchor]: ...
+
+    async def inspect_retention(
+        self,
+        scope: dict[str, Any],
+        *,
+        lifecycle: WorkspaceRetentionLifecycle,
+        retained_refs: Sequence[WorkspaceRetainedReference] = (),
+        inline_result: Any = None,
+        policy: WorkspaceRetentionPolicy | None = None,
+    ) -> WorkspaceRetentionPreview: ...
+
+    async def apply_retention(
+        self,
+        preview: WorkspaceRetentionPreview,
+    ) -> WorkspaceRetentionResult: ...
 
     async def prune_scope(
         self,
@@ -851,6 +887,21 @@ class WorkspaceBackend(Protocol):
         anchor_type: str | None = None,
         limit: int | None = None,
     ) -> list[WorkspaceRetentionAnchor]: ...
+
+    async def inspect_retention(
+        self,
+        scope: dict[str, Any],
+        *,
+        lifecycle: WorkspaceRetentionLifecycle,
+        retained_refs: Sequence[WorkspaceRetainedReference] = (),
+        inline_result: Any = None,
+        policy: WorkspaceRetentionPolicy | None = None,
+    ) -> WorkspaceRetentionPreview: ...
+
+    async def apply_retention(
+        self,
+        preview: WorkspaceRetentionPreview,
+    ) -> WorkspaceRetentionResult: ...
 
     def capabilities(self) -> WorkspaceBackendCapabilities: ...
 
