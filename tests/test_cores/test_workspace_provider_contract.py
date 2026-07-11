@@ -1087,7 +1087,7 @@ def test_workspace_retention_protocols_and_fake_provider_use_exact_signatures():
 
 
 @pytest.mark.asyncio
-async def test_local_workspace_backend_retention_inspection_is_implemented_before_apply(tmp_path):
+async def test_local_workspace_backend_retention_inspection_and_apply_are_implemented(tmp_path):
     backend = LocalWorkspaceBackend(tmp_path / "retention-contract")
     assert hasattr(backend, "inspect_retention")
     assert hasattr(backend, "apply_retention")
@@ -1106,8 +1106,11 @@ async def test_local_workspace_backend_retention_inspection_is_implemented_befor
     )
     assert preview["status"] == "ready"
     assert all(values == [] for values in preview["selected"].values())
-    with pytest.raises(NotImplementedError):
-        await backend.apply_retention(preview)
+    applied = await backend.apply_retention(preview)
+    assert applied["status"] == "applied"
+    assert applied["manifest_ref"] is not None
+    assert applied["manifest_ref"]["kind"] == "workspace_terminal_manifest"
+    assert (await backend.apply_retention(preview))["status"] == "noop"
 
 
 def test_workspace_manager_requires_terminal_retention_provider_methods():

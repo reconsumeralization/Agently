@@ -74,6 +74,7 @@ from .Retention import (
     strict_retention_json,
     strict_retention_json_value,
     validate_retained_reference_shape,
+    validate_retention_preview,
 )
 from ._defaults import (
     SCOPE_LINEAGE_KINDS,
@@ -583,6 +584,10 @@ class LocalWorkspaceBackend:
         vector_search = vector_index is not None and getattr(vector_index, "name", None) != "noop"
         if isinstance(vector_index, VectorIndexPipeline):
             vector_search = self.embedding_provider is not None and self.vector_store_provider is not None
+        retention_provider = self.db_store_provider
+        supports_retention = callable(
+            getattr(retention_provider, "inspect_retention", None)
+        ) and callable(getattr(retention_provider, "apply_retention", None))
         return {
             "structured_get_data": True,
             "links_query": True,
@@ -605,7 +610,8 @@ class LocalWorkspaceBackend:
             "supports_event_sequence": True,
             "supports_range_read": True,
             "supports_stream_read": True,
-            "supports_retention": True,
+            "supports_retention": supports_retention,
+            "supports_physical_reclamation": False,
             "supports_compaction_anchor": True,
             "supports_remote_backend": False,
         }
@@ -1024,6 +1030,12 @@ class LocalWorkspaceBackend:
     @staticmethod
     def _lease_manifest_key(run_id: str) -> str:
         return f"lease.{ run_id }"
+
+    def _terminal_manifest_record_id(self, execution_id: str) -> str:
+        digest = hashlib.sha256(
+            f"{self.workspace_id}:{execution_id}".encode("utf-8")
+        ).hexdigest()[:24]
+        return f"rec_workspace_terminal_{digest}"
 
     def _require_active_lease(
         self,
@@ -2677,67 +2689,94 @@ class LocalWorkspaceBackend:
         execution_id: str,
         checkpoint_manifest_key: str,
         lease_manifest_key: str,
+        connection: sqlite3.Connection | None = None,
     ) -> _RetentionSQLiteSnapshot:
+        if connection is not None:
+            return self._read_retention_snapshot_on_conn(
+                connection,
+                scope,
+                execution_id=execution_id,
+                checkpoint_manifest_key=checkpoint_manifest_key,
+                lease_manifest_key=lease_manifest_key,
+            )
         with self._connect() as conn:
             conn.execute("BEGIN")
-            all_record_rows = conn.execute("SELECT * FROM records ORDER BY id").fetchall()
-            clauses: list[str] = []
-            scope_params: list[Any] = []
-            for index, (key, value) in enumerate(scope.items()):
-                alias = f"ret_scope_{index}"
-                clauses.append(
-                    f"""
-                    EXISTS (
-                        SELECT 1 FROM record_scope_index {alias}
-                        WHERE {alias}.record_id = r.id
-                        AND {alias}.scope_key = ?
-                        AND {alias}.scope_value = ?
-                    )
-                    """
-                )
-                scope_params.extend([key, self._scope_index_value(value)])
-            scoped_rows = conn.execute(
-                f"SELECT r.id FROM records r WHERE {' AND '.join(clauses)} ORDER BY r.id",
-                scope_params,
-            ).fetchall()
-            checkpoint_rows = conn.execute(
-                """
-                SELECT * FROM checkpoints
-                WHERE run_id = ? ORDER BY created_at ASC, rowid ASC
-                """,
-                (execution_id,),
-            ).fetchall()
-            runtime_event_rows = conn.execute(
-                "SELECT * FROM runtime_events WHERE execution_id = ? ORDER BY sequence ASC, id ASC",
-                (execution_id,),
-            ).fetchall()
-            anchor_rows = conn.execute(
-                "SELECT * FROM retention_anchors WHERE execution_id = ? ORDER BY id",
-                (execution_id,),
-            ).fetchall()
-            scratch_rows = conn.execute("SELECT * FROM scratch_leases ORDER BY lease_id").fetchall()
-            link_rows = conn.execute("SELECT * FROM links ORDER BY id").fetchall()
-            scope_index_rows = conn.execute(
-                "SELECT record_id, scope_key, scope_value FROM record_scope_index ORDER BY record_id, scope_key"
-            ).fetchall()
-            fts_rows = conn.execute(
-                "SELECT record_id, summary, content FROM records_fts ORDER BY record_id"
-            ).fetchall()
-            manifest_rows = conn.execute(
-                "SELECT key, value_json FROM manifests WHERE key IN (?, ?) ORDER BY key",
-                (checkpoint_manifest_key, lease_manifest_key),
-            ).fetchall()
-            vector_table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_vectors'"
-            ).fetchone()
-            vector_rows = (
-                conn.execute(
-                    "SELECT record_id, ref_json, embedding_json FROM workspace_vectors ORDER BY record_id"
-                ).fetchall()
-                if vector_table is not None
-                else []
+            snapshot = self._read_retention_snapshot_on_conn(
+                conn,
+                scope,
+                execution_id=execution_id,
+                checkpoint_manifest_key=checkpoint_manifest_key,
+                lease_manifest_key=lease_manifest_key,
             )
             conn.rollback()
+            return snapshot
+
+    def _read_retention_snapshot_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        scope: Mapping[str, Any],
+        *,
+        execution_id: str,
+        checkpoint_manifest_key: str,
+        lease_manifest_key: str,
+    ) -> _RetentionSQLiteSnapshot:
+        all_record_rows = conn.execute("SELECT * FROM records ORDER BY id").fetchall()
+        clauses: list[str] = []
+        scope_params: list[Any] = []
+        for index, (key, value) in enumerate(scope.items()):
+            alias = f"ret_scope_{index}"
+            clauses.append(
+                f"""
+                EXISTS (
+                    SELECT 1 FROM record_scope_index {alias}
+                    WHERE {alias}.record_id = r.id
+                    AND {alias}.scope_key = ?
+                    AND {alias}.scope_value = ?
+                )
+                """
+            )
+            scope_params.extend([key, self._scope_index_value(value)])
+        scoped_rows = conn.execute(
+            f"SELECT r.id FROM records r WHERE {' AND '.join(clauses)} ORDER BY r.id",
+            scope_params,
+        ).fetchall()
+        checkpoint_rows = conn.execute(
+            """
+            SELECT * FROM checkpoints
+            WHERE run_id = ? ORDER BY created_at ASC, rowid ASC
+            """,
+            (execution_id,),
+        ).fetchall()
+        runtime_event_rows = conn.execute(
+            "SELECT * FROM runtime_events WHERE execution_id = ? ORDER BY sequence ASC, id ASC",
+            (execution_id,),
+        ).fetchall()
+        anchor_rows = conn.execute(
+            "SELECT * FROM retention_anchors WHERE execution_id = ? ORDER BY id",
+            (execution_id,),
+        ).fetchall()
+        scratch_rows = conn.execute("SELECT * FROM scratch_leases ORDER BY lease_id").fetchall()
+        link_rows = conn.execute("SELECT * FROM links ORDER BY id").fetchall()
+        scope_index_rows = conn.execute(
+            "SELECT record_id, scope_key, scope_value FROM record_scope_index ORDER BY record_id, scope_key"
+        ).fetchall()
+        fts_rows = conn.execute(
+            "SELECT record_id, summary, content FROM records_fts ORDER BY record_id"
+        ).fetchall()
+        manifest_rows = conn.execute(
+            "SELECT key, value_json FROM manifests WHERE key IN (?, ?) ORDER BY key",
+            (checkpoint_manifest_key, lease_manifest_key),
+        ).fetchall()
+        vector_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_vectors'"
+        ).fetchone()
+        vector_rows = (
+            conn.execute(
+                "SELECT record_id, ref_json, embedding_json FROM workspace_vectors ORDER BY record_id"
+            ).fetchall()
+            if vector_table is not None
+            else []
+        )
         return _RetentionSQLiteSnapshot(
             all_record_rows=all_record_rows,
             scoped_rows=scoped_rows,
@@ -3092,7 +3131,7 @@ class LocalWorkspaceBackend:
                 sizes.append(int(target_stat.st_size))
         return sizes, None
 
-    async def inspect_retention(
+    async def _inspect_retention(
         self,
         scope: dict[str, Any],
         *,
@@ -3100,6 +3139,7 @@ class LocalWorkspaceBackend:
         retained_refs: Sequence[WorkspaceRetainedReference] = (),
         inline_result: Any = None,
         policy: WorkspaceRetentionPolicy | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> WorkspaceRetentionPreview:
         normalized_scope = {str(key): value for key, value in dict(scope or {}).items() if value is not None}
         if not normalized_scope:
@@ -3138,6 +3178,7 @@ class LocalWorkspaceBackend:
             execution_id=execution_id,
             checkpoint_manifest_key=checkpoint_manifest_key,
             lease_manifest_key=lease_manifest_key,
+            connection=connection,
         )
         diagnostics: list[WorkspaceRetentionDiagnostic] = []
         try:
@@ -3217,10 +3258,20 @@ class LocalWorkspaceBackend:
                 )
 
         checkpoint_manifest = manifest_values.get(checkpoint_manifest_key)
+        effective_retained_refs = list(retained_refs)
+        terminal_manifest = all_records.get(
+            self._terminal_manifest_record_id(execution_id)
+        )
+        if (
+            terminal_manifest is not None
+            and terminal_manifest.get("collection") == "artifacts"
+            and terminal_manifest.get("kind") == "workspace_terminal_manifest"
+        ):
+            effective_retained_refs.append(terminal_manifest)
         roots = await self._resolve_retention_roots(
             owned_record_ids=owned_record_ids,
             all_records=all_records,
-            retained_refs=retained_refs,
+            retained_refs=effective_retained_refs,
             checkpoint_manifest=(
                 cast(WorkspaceRetainedReference, checkpoint_manifest)
                 if isinstance(checkpoint_manifest, dict)
@@ -3357,11 +3408,627 @@ class LocalWorkspaceBackend:
             logical_bytes=logical_bytes,
         )
 
+    async def inspect_retention(
+        self,
+        scope: dict[str, Any],
+        *,
+        lifecycle: WorkspaceRetentionLifecycle,
+        retained_refs: Sequence[WorkspaceRetainedReference] = (),
+        inline_result: Any = None,
+        policy: WorkspaceRetentionPolicy | None = None,
+    ) -> WorkspaceRetentionPreview:
+        return await self._inspect_retention(
+            scope,
+            lifecycle=lifecycle,
+            retained_refs=retained_refs,
+            inline_result=inline_result,
+            policy=policy,
+        )
+
+    @staticmethod
+    def _retention_result(
+        *,
+        status: str,
+        plan_fingerprint: str,
+        manifest_ref: WorkspaceRecordRef | None,
+        retained_refs: Sequence[WorkspaceRetainedReference],
+        accounting: Mapping[str, Any],
+        diagnostics: Sequence[WorkspaceRetentionDiagnostic] = (),
+    ) -> WorkspaceRetentionResult:
+        return cast(
+            WorkspaceRetentionResult,
+            {
+                "status": status,
+                "plan_fingerprint": plan_fingerprint,
+                "manifest_ref": manifest_ref,
+                "retained_refs": list(retained_refs),
+                "accounting": dict(accounting),
+                "diagnostics": list(diagnostics),
+            },
+        )
+
+    def _terminal_manifest_ref_from_row(
+        self,
+        row: sqlite3.Row,
+        *,
+        execution_id: str,
+    ) -> WorkspaceRecordRef:
+        ref = self._strict_retention_record_row(row)
+        expected_id = self._terminal_manifest_record_id(execution_id)
+        if (
+            ref["id"] != expected_id
+            or ref["collection"] != "artifacts"
+            or ref.get("kind") != "workspace_terminal_manifest"
+            or ref.get("path") is not None
+            or ref.get("sha256") is not None
+            or ref.get("size") != 0
+            or ref.get("source") != {"type": "workspace", "name": "terminal_retention"}
+        ):
+            raise ValueError("Workspace terminal manifest record identity is invalid.")
+        meta = ref.get("meta")
+        required_meta = {
+            "schema_version",
+            "plan_fingerprint",
+            "state",
+            "lifecycle",
+            "retained_refs",
+            "inline_result",
+            "accounting",
+            "derived_cleanup",
+        }
+        if not isinstance(meta, dict) or set(meta) != required_meta:
+            raise ValueError("Workspace terminal manifest ledger has invalid top-level fields.")
+        if meta.get("schema_version") != "agently.workspace.terminal_manifest.v1":
+            raise ValueError("Workspace terminal manifest schema version is invalid.")
+        fingerprint = meta.get("plan_fingerprint")
+        if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+            raise ValueError("Workspace terminal manifest fingerprint is invalid.")
+        if meta.get("state") not in {"db_committed", "derived_pending", "applied"}:
+            raise ValueError("Workspace terminal manifest state is invalid.")
+        if not isinstance(meta.get("lifecycle"), dict):
+            raise ValueError("Workspace terminal manifest lifecycle is invalid.")
+        retained_refs = meta.get("retained_refs")
+        if not isinstance(retained_refs, list):
+            raise ValueError("Workspace terminal manifest retained refs are invalid.")
+        for index, retained_ref in enumerate(retained_refs):
+            validate_retained_reference_shape(
+                retained_ref,
+                field=f"terminal_manifest.retained_refs[{index}]",
+            )
+        accounting = meta.get("accounting")
+        if not isinstance(accounting, dict):
+            raise ValueError("Workspace terminal manifest accounting is invalid.")
+        derived = meta.get("derived_cleanup")
+        if not isinstance(derived, dict) or set(derived) != {
+            "pending",
+            "attempts",
+            "last_error",
+        }:
+            raise ValueError("Workspace terminal manifest derived cleanup ledger is invalid.")
+        pending = derived.get("pending")
+        pending_keys = {
+            "vector_record_ids",
+            "content_paths",
+            "file_paths",
+            "scratch_paths",
+        }
+        if not isinstance(pending, dict) or set(pending) != pending_keys:
+            raise ValueError("Workspace terminal manifest pending cleanup is invalid.")
+        for key in sorted(pending_keys):
+            values = pending[key]
+            if (
+                not isinstance(values, list)
+                or not all(isinstance(value, str) and value for value in values)
+                or values != sorted(set(values))
+            ):
+                raise ValueError(
+                    f"Workspace terminal manifest pending cleanup '{key}' is invalid."
+                )
+        attempts = derived.get("attempts")
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+            raise ValueError("Workspace terminal manifest cleanup attempts are invalid.")
+        last_error = derived.get("last_error")
+        if last_error is not None and (
+            not isinstance(last_error, dict)
+            or not isinstance(last_error.get("code"), str)
+            or not isinstance(last_error.get("message"), str)
+            or not isinstance(last_error.get("retryable"), bool)
+            or not isinstance(last_error.get("entity"), str)
+            or ("detail" in last_error and not isinstance(last_error["detail"], dict))
+        ):
+            raise ValueError("Workspace terminal manifest last error is invalid.")
+        return ref
+
+    def _terminal_manifest_from_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        execution_id: str,
+    ) -> WorkspaceRecordRef | None:
+        row = conn.execute(
+            "SELECT * FROM records WHERE id = ?",
+            (self._terminal_manifest_record_id(execution_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._terminal_manifest_ref_from_row(
+            row,
+            execution_id=execution_id,
+        )
+
+    def _write_terminal_manifest_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        execution_id: str,
+        scope: Mapping[str, Any],
+        meta: Mapping[str, Any],
+        created_at: str | None = None,
+    ) -> WorkspaceRecordRef:
+        record_id = self._terminal_manifest_record_id(execution_id)
+        ref: WorkspaceRecordRef = {
+            "id": record_id,
+            "collection": "artifacts",
+            "kind": "workspace_terminal_manifest",
+            "path": None,
+            "sha256": None,
+            "size": 0,
+            "summary": f"Terminal retention manifest for {execution_id}"[:240],
+            "scope": dict(scope),
+            "source": {"type": "workspace", "name": "terminal_retention"},
+            "created_at": created_at or utc_now(),
+            "meta": dict(meta),
+        }
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO records (
+                id, collection, kind, path, sha256, size, summary,
+                scope_json, source_json, meta_json, created_at, is_checkpoint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            """,
+            (
+                ref["id"],
+                ref["collection"],
+                ref["kind"],
+                ref["path"],
+                ref["sha256"],
+                ref["size"],
+                ref["summary"],
+                json_dumps(ref["scope"]),
+                json_dumps(ref["source"]),
+                json_dumps(ref["meta"]),
+                ref["created_at"],
+            ),
+        )
+        self._replace_scope_index_on_conn(conn, record_id, ref["scope"])
+        conn.execute("DELETE FROM records_fts WHERE record_id = ?", (record_id,))
+        return ref
+
+    def _update_terminal_manifest_meta(
+        self,
+        manifest_ref: WorkspaceRecordRef,
+        meta: Mapping[str, Any],
+    ) -> WorkspaceRecordRef:
+        execution_id = str(meta.get("lifecycle", {}).get("execution_id") or "")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._terminal_manifest_from_conn(
+                conn,
+                execution_id=execution_id,
+            )
+            if current is None or current["id"] != manifest_ref["id"]:
+                conn.rollback()
+                raise RuntimeError("Workspace terminal manifest disappeared during derived cleanup.")
+            updated = self._write_terminal_manifest_on_conn(
+                conn,
+                execution_id=execution_id,
+                scope=current["scope"],
+                meta=meta,
+                created_at=current["created_at"],
+            )
+            conn.commit()
+        return updated
+
+    @staticmethod
+    def _delete_ids_on_conn(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        values: Sequence[str],
+    ) -> None:
+        if not values:
+            return
+        placeholders = ",".join("?" for _ in values)
+        conn.execute(
+            f"DELETE FROM {table} WHERE {column} IN ({placeholders})",
+            list(values),
+        )
+
+    def _delete_retention_logical_selection_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        selected: Mapping[str, Sequence[str]],
+    ) -> None:
+        self._delete_ids_on_conn(conn, "links", "id", selected["link_ids"])
+        self._delete_ids_on_conn(
+            conn,
+            "checkpoints",
+            "record_id",
+            selected["checkpoint_ids"],
+        )
+        self._delete_ids_on_conn(
+            conn,
+            "records_fts",
+            "record_id",
+            selected["fts_record_ids"],
+        )
+        for identity in selected["record_scope_index_ids"]:
+            record_id, separator, scope_key = identity.partition(":")
+            if not separator or not record_id or not scope_key:
+                raise ValueError(
+                    f"Invalid Workspace retention scope-index identity: {identity}"
+                )
+            conn.execute(
+                "DELETE FROM record_scope_index WHERE record_id = ? AND scope_key = ?",
+                (record_id, scope_key),
+            )
+        self._delete_ids_on_conn(conn, "records", "id", selected["record_ids"])
+        self._delete_ids_on_conn(
+            conn,
+            "runtime_events",
+            "id",
+            selected["runtime_event_ids"],
+        )
+        self._delete_ids_on_conn(
+            conn,
+            "retention_anchors",
+            "id",
+            selected["retention_anchor_ids"],
+        )
+        self._delete_ids_on_conn(
+            conn,
+            "manifests",
+            "key",
+            selected["manifest_keys"],
+        )
+        self._delete_ids_on_conn(
+            conn,
+            "scratch_leases",
+            "lease_id",
+            selected["scratch_lease_ids"],
+        )
+
+    def _delete_retention_lineage_file(self, area: str, relative_path: str) -> bool:
+        relative = Path(relative_path)
+        if (
+            area not in {"files", "scratch"}
+            or relative.is_absolute()
+            or not relative.parts
+            or relative.parts[0] != "lineage"
+            or ".." in relative.parts
+        ):
+            raise WorkspacePolicyError(
+                f"Workspace retention selected an invalid {area} path: {relative_path}"
+            )
+        area_root, _, diagnostic = self._retention_area_root(area)
+        if diagnostic is not None:
+            raise WorkspacePolicyError(
+                diagnostic.get("message", "Workspace retention area validation failed.")
+            )
+        if area_root is None:
+            return False
+        target = area_root.joinpath(*relative.parts)
+        current = area_root
+        target_stat = None
+        for index, part in enumerate(relative.parts):
+            current = current / part
+            try:
+                current_stat = current.lstat()
+            except FileNotFoundError:
+                return False
+            if stat.S_ISLNK(current_stat.st_mode):
+                raise WorkspacePolicyError(
+                    f"Workspace retention cleanup does not traverse symlinks: {relative_path}"
+                )
+            if index < len(relative.parts) - 1 and not stat.S_ISDIR(current_stat.st_mode):
+                raise WorkspacePolicyError(
+                    f"Workspace retention cleanup parent is not a directory: {relative_path}"
+                )
+            target_stat = current_stat
+        if target_stat is None:
+            return False
+        if not stat.S_ISREG(target_stat.st_mode):
+            raise WorkspacePolicyError(
+                f"Workspace retention cleanup target is not a regular file: {relative_path}"
+            )
+        resolved_target = target.resolve()
+        try:
+            resolved_target.relative_to(area_root)
+        except ValueError as error:
+            raise WorkspacePolicyError(
+                f"Workspace retention cleanup path is not contained: {relative_path}"
+            ) from error
+        if resolved_target != target:
+            raise WorkspacePolicyError(
+                f"Workspace retention cleanup path changed during resolution: {relative_path}"
+            )
+        confirmed_stat = target.lstat()
+        if (
+            stat.S_ISLNK(confirmed_stat.st_mode)
+            or (confirmed_stat.st_dev, confirmed_stat.st_ino)
+            != (target_stat.st_dev, target_stat.st_ino)
+        ):
+            raise WorkspacePolicyError(
+                f"Workspace retention cleanup target changed before deletion: {relative_path}"
+            )
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            return False
+        self._prune_empty_retention_directories(target.parent, area_root / "lineage")
+        return True
+
+    @staticmethod
+    def _prune_empty_retention_directories(start: Path, stop: Path) -> None:
+        current = start
+        while current != stop and stop in current.parents:
+            try:
+                current_stat = current.lstat()
+            except FileNotFoundError:
+                current = current.parent
+                continue
+            if stat.S_ISLNK(current_stat.st_mode) or not stat.S_ISDIR(current_stat.st_mode):
+                return
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
+
+    async def _resume_retention_derived_cleanup(
+        self,
+        manifest_ref: WorkspaceRecordRef,
+    ) -> WorkspaceRetentionResult:
+        meta = cast(dict[str, Any], dict(manifest_ref["meta"]))
+        derived = cast(dict[str, Any], dict(meta["derived_cleanup"]))
+        pending = {
+            key: list(values)
+            for key, values in cast(Mapping[str, Sequence[str]], derived["pending"]).items()
+        }
+        derived["pending"] = pending
+        derived["attempts"] = int(derived["attempts"]) + 1
+        derived["last_error"] = None
+        meta["state"] = "derived_pending"
+        meta["derived_cleanup"] = derived
+        manifest_ref = self._update_terminal_manifest_meta(manifest_ref, meta)
+
+        try:
+            vector_ids = list(pending["vector_record_ids"])
+            if vector_ids:
+                delete_vectors = getattr(self.vector_store_provider, "delete_records", None)
+                if not callable(delete_vectors):
+                    raise WorkspaceConfigurationError(
+                        "Configured vector provider cannot delete derived record entries."
+                    )
+                await cast(
+                    Callable[[Sequence[str]], Awaitable[None]],
+                    delete_vectors,
+                )(vector_ids)
+                pending["vector_record_ids"] = []
+                manifest_ref = self._update_terminal_manifest_meta(manifest_ref, meta)
+
+            for key in ("content_paths", "file_paths", "scratch_paths"):
+                for relative_path in list(pending[key]):
+                    if key == "content_paths":
+                        await self.content.delete_content(relative_path)
+                    elif key == "file_paths":
+                        self._delete_retention_lineage_file("files", relative_path)
+                    else:
+                        self._delete_retention_lineage_file("scratch", relative_path)
+                    pending[key].remove(relative_path)
+                    manifest_ref = self._update_terminal_manifest_meta(manifest_ref, meta)
+        except Exception as error:
+            diagnostic = retention_diagnostic(
+                "workspace.retention.derived_cleanup_failed",
+                f"Workspace derived retention cleanup failed: {error}",
+                entity=str(manifest_ref["id"]),
+                detail={"error_type": type(error).__name__},
+            )
+            meta["state"] = "derived_pending"
+            derived["last_error"] = diagnostic
+            manifest_ref = self._update_terminal_manifest_meta(manifest_ref, meta)
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=str(meta["plan_fingerprint"]),
+                manifest_ref=manifest_ref,
+                retained_refs=cast(
+                    Sequence[WorkspaceRetainedReference],
+                    meta["retained_refs"],
+                ),
+                accounting=cast(Mapping[str, Any], meta["accounting"]),
+                diagnostics=[diagnostic],
+            )
+
+        meta["state"] = "applied"
+        derived["last_error"] = None
+        manifest_ref = self._update_terminal_manifest_meta(manifest_ref, meta)
+        return self._retention_result(
+            status="applied",
+            plan_fingerprint=str(meta["plan_fingerprint"]),
+            manifest_ref=manifest_ref,
+            retained_refs=cast(
+                Sequence[WorkspaceRetainedReference],
+                meta["retained_refs"],
+            ),
+            accounting=cast(Mapping[str, Any], meta["accounting"]),
+        )
+
     async def apply_retention(
         self,
         preview: WorkspaceRetentionPreview,
     ) -> WorkspaceRetentionResult:
-        raise NotImplementedError
+        self._ensure_writable()
+        validated = validate_retention_preview(
+            preview,
+            scope=preview["scope"],
+            lifecycle=preview["lifecycle"],
+            policy=preview["policy"],
+            declared_retained_refs=preview["retained_refs"],
+            inline_result=preview["inline_result"],
+        )
+        if validated["status"] != "ready":
+            diagnostic = retention_diagnostic(
+                "workspace.retention.plan_stale",
+                "Workspace retention requires a ready inspected plan.",
+                entity=str(validated["scope"].get("execution_id") or "execution_id"),
+            )
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=validated["plan_fingerprint"],
+                manifest_ref=None,
+                retained_refs=validated["retained_refs"],
+                accounting=validated["accounting"],
+                diagnostics=[diagnostic],
+            )
+
+        execution_id = str(validated["lifecycle"].get("execution_id") or "")
+        if not execution_id:
+            raise ValueError("Workspace retention preview has no lifecycle execution_id.")
+        manifest_ref: WorkspaceRecordRef | None = None
+        resume_pending = False
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self._terminal_manifest_from_conn(
+                    conn,
+                    execution_id=execution_id,
+                )
+                if existing is not None:
+                    existing_meta = cast(Mapping[str, Any], existing["meta"])
+                    existing_fingerprint = str(existing_meta["plan_fingerprint"])
+                    existing_state = str(existing_meta["state"])
+                    if existing_fingerprint == validated["plan_fingerprint"]:
+                        conn.commit()
+                        if existing_state == "applied":
+                            return self._retention_result(
+                                status="noop",
+                                plan_fingerprint=existing_fingerprint,
+                                manifest_ref=existing,
+                                retained_refs=cast(
+                                    Sequence[WorkspaceRetainedReference],
+                                    existing_meta["retained_refs"],
+                                ),
+                                accounting=cast(
+                                    Mapping[str, Any],
+                                    existing_meta["accounting"],
+                                ),
+                            )
+                        manifest_ref = existing
+                        resume_pending = True
+                    elif existing_state != "applied":
+                        conn.rollback()
+                        diagnostic = retention_diagnostic(
+                            "workspace.retention.plan_conflict",
+                            "A different Workspace retention plan still has pending derived cleanup.",
+                            entity=existing["id"],
+                            detail={
+                                "existing_plan_fingerprint": existing_fingerprint,
+                                "requested_plan_fingerprint": validated["plan_fingerprint"],
+                            },
+                        )
+                        return self._retention_result(
+                            status="deferred",
+                            plan_fingerprint=validated["plan_fingerprint"],
+                            manifest_ref=existing,
+                            retained_refs=validated["retained_refs"],
+                            accounting=validated["accounting"],
+                            diagnostics=[diagnostic],
+                        )
+
+                if not resume_pending:
+                    current = await self._inspect_retention(
+                        validated["scope"],
+                        lifecycle=validated["lifecycle"],
+                        retained_refs=validated["retained_refs"],
+                        inline_result=validated["inline_result"],
+                        policy=validated["policy"],
+                        connection=conn,
+                    )
+                    if (
+                        current["status"] != "ready"
+                        or current["plan_fingerprint"] != validated["plan_fingerprint"]
+                    ):
+                        conn.rollback()
+                        diagnostic = retention_diagnostic(
+                            "workspace.retention.plan_stale",
+                            "Workspace retention scope changed after inspection.",
+                            entity=execution_id,
+                            detail={
+                                "inspected_plan_fingerprint": validated["plan_fingerprint"],
+                                "current_plan_fingerprint": current["plan_fingerprint"],
+                                "current_status": current["status"],
+                            },
+                        )
+                        return self._retention_result(
+                            status="deferred",
+                            plan_fingerprint=validated["plan_fingerprint"],
+                            manifest_ref=None,
+                            retained_refs=validated["retained_refs"],
+                            accounting=validated["accounting"],
+                            diagnostics=[diagnostic],
+                        )
+                    pending = {
+                        key: list(validated["selected"][key])
+                        for key in (
+                            "vector_record_ids",
+                            "content_paths",
+                            "file_paths",
+                            "scratch_paths",
+                        )
+                    }
+                    has_pending = any(pending.values())
+                    meta = {
+                        "schema_version": "agently.workspace.terminal_manifest.v1",
+                        "plan_fingerprint": validated["plan_fingerprint"],
+                        "state": "db_committed" if has_pending else "applied",
+                        "lifecycle": dict(validated["lifecycle"]),
+                        "retained_refs": list(validated["retained_refs"]),
+                        "inline_result": validated["inline_result"],
+                        "accounting": dict(validated["accounting"]),
+                        "derived_cleanup": {
+                            "pending": pending,
+                            "attempts": 0,
+                            "last_error": None,
+                        },
+                    }
+                    manifest_ref = self._write_terminal_manifest_on_conn(
+                        conn,
+                        execution_id=execution_id,
+                        scope=validated["scope"],
+                        meta=meta,
+                        created_at=(existing["created_at"] if existing is not None else None),
+                    )
+                    self._delete_retention_logical_selection_on_conn(
+                        conn,
+                        validated["selected"],
+                    )
+                    conn.commit()
+                    if not has_pending:
+                        return self._retention_result(
+                            status="applied",
+                            plan_fingerprint=validated["plan_fingerprint"],
+                            manifest_ref=manifest_ref,
+                            retained_refs=validated["retained_refs"],
+                            accounting=validated["accounting"],
+                        )
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+
+        if manifest_ref is None:
+            raise RuntimeError("Workspace retention did not produce a terminal manifest.")
+        return await self._resume_retention_derived_cleanup(manifest_ref)
 
     async def prune_scope(
         self,

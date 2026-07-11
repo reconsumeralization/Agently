@@ -1297,3 +1297,463 @@ async def test_inspect_retention_defers_area_disappearance_after_observation(
     assert "workspace.retention.ref_readback_failed" in {
         diagnostic.get("code") for diagnostic in preview["diagnostics"]
     }
+
+
+@pytest.mark.asyncio
+async def test_apply_retention_atomically_cleans_all_selected_carriers_and_is_idempotent(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(
+        tmp_path / "retention-apply-carriers",
+        vector_store_provider="sqlite",
+    )
+    target = root.with_scope_lineage(
+        [
+            {"kind": "projects", "id": "project-apply"},
+            {"kind": "tasks", "id": "task-apply"},
+            {"kind": "executions", "id": "exec-apply"},
+        ]
+    )
+    sibling = root.with_scope_lineage(
+        [
+            {"kind": "projects", "id": "project-apply"},
+            {"kind": "tasks", "id": "task-apply"},
+            {"kind": "executions", "id": "exec-sibling"},
+        ]
+    )
+    retained_content = '{"deliverable":"retained"}'
+    retained_ref = await target.put(
+        retained_content,
+        collection="artifacts",
+        kind="report",
+    )
+    discarded_left = await target.put(
+        {"process": "left"},
+        collection="observations",
+        kind="process",
+    )
+    discarded_right = await target.put(
+        {"process": "right"},
+        collection="observations",
+        kind="process",
+    )
+    sibling_ref = await sibling.put(
+        {"process": "sibling"},
+        collection="observations",
+        kind="process",
+    )
+    target_link = await root.link(discarded_left, discarded_right, relation="next")
+    await root.put_checkpoint(
+        "exec-apply",
+        {"state_version": 1, "step": "terminal"},
+        expected_state_version=0,
+    )
+    target_event = await root.append_runtime_event(
+        "exec-apply",
+        {"event_type": "execution.completed", "event_id": "evt-apply"},
+        state_version=1,
+    )
+    sibling_event = await root.append_runtime_event(
+        "exec-sibling",
+        {"event_type": "execution.completed", "event_id": "evt-sibling"},
+    )
+    backend = cast(Any, root.backend)
+    await backend.vector_store_provider.index_record(discarded_left, [1.0, 0.0])
+    await backend.vector_store_provider.index_record(sibling_ref, [0.0, 1.0])
+
+    discarded_write = await target.write_file("reports/process.txt", "discard file")
+    retained_write = await target.write_file("reports/final.txt", "retained file")
+    retained_file_ref = retained_write["file_refs"][0]
+    sibling_write = await sibling.write_file("reports/sibling.txt", "sibling file")
+    discarded_file = target.files_root / str(discarded_write["file_refs"][0]["path"])
+    retained_file = target.files_root / str(retained_file_ref["path"])
+    sibling_file = sibling.files_root / str(sibling_write["file_refs"][0]["path"])
+    sibling_bytes = sibling_file.read_bytes()
+
+    target_lease = await target.open_scratch(cleanup_policy="on_scope_prune")
+    target_scratch = Path(cast(str, target_lease.get("local_path"))) / "process.tmp"
+    target_scratch.write_text("discard scratch", encoding="utf-8")
+    await target.close_scratch(cast(str, target_lease.get("lease_id")), remove=False)
+    sibling_scratch = sibling.scratch_root() / "sibling.tmp"
+    sibling_scratch.parent.mkdir(parents=True, exist_ok=True)
+    sibling_scratch.write_text("sibling scratch", encoding="utf-8")
+
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-apply"), "state_version": 1},
+        retained_refs=[retained_ref, retained_file_ref],
+        inline_result={"summary": "done"},
+    )
+    assert preview["status"] == "ready"
+
+    observed_locked_snapshot: list[bool] = []
+    original_read_snapshot = backend._read_retention_snapshot
+
+    def observe_locked_snapshot(*args: Any, **kwargs: Any):
+        connection = kwargs.get("connection")
+        if connection is not None:
+            observed_locked_snapshot.append(bool(connection.in_transaction))
+        return original_read_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "_read_retention_snapshot", observe_locked_snapshot)
+    result = await target.apply_retention(preview)
+
+    assert result["status"] == "applied"
+    assert observed_locked_snapshot == [True]
+    assert await root.get(retained_ref) == retained_content
+    assert retained_file.read_bytes() == b"retained file"
+    assert discarded_file.exists() is False
+    assert target_scratch.exists() is False
+    assert sibling_file.read_bytes() == sibling_bytes
+    assert sibling_scratch.read_text(encoding="utf-8") == "sibling scratch"
+    assert await root.query_runtime_events("exec-apply") == []
+    assert await root.query_runtime_events("exec-sibling") == [sibling_event]
+    assert await backend.get_record(discarded_left["id"]) is None
+    assert await backend.get_record(discarded_right["id"]) is None
+    assert await backend.get_record(sibling_ref["id"]) == sibling_ref
+    assert await root.latest_checkpoint("exec-apply") is None
+    assert target_link not in await root.links()
+    assert await backend.get_scratch_lease(cast(str, target_lease.get("lease_id"))) is None
+    assert target_event["id"] in preview["selected"]["runtime_event_ids"]
+
+    manifest_ref = cast(dict[str, Any], result["manifest_ref"])
+    expected_manifest_id = "rec_workspace_terminal_" + hashlib.sha256(
+        f"{backend.workspace_id}:exec-apply".encode("utf-8")
+    ).hexdigest()[:24]
+    assert manifest_ref["id"] == expected_manifest_id
+    assert manifest_ref["collection"] == "artifacts"
+    assert manifest_ref["kind"] == "workspace_terminal_manifest"
+    assert manifest_ref["path"] is None
+    assert manifest_ref["sha256"] is None
+    assert manifest_ref["size"] == 0
+    assert manifest_ref["scope"] == preview["scope"]
+    assert manifest_ref["source"] == {"type": "workspace", "name": "terminal_retention"}
+    assert set(manifest_ref["meta"]) == {
+        "schema_version",
+        "plan_fingerprint",
+        "state",
+        "lifecycle",
+        "retained_refs",
+        "inline_result",
+        "accounting",
+        "derived_cleanup",
+    }
+    assert manifest_ref["meta"]["schema_version"] == "agently.workspace.terminal_manifest.v1"
+    assert manifest_ref["meta"]["plan_fingerprint"] == preview["plan_fingerprint"]
+    assert manifest_ref["meta"]["state"] == "applied"
+    assert set(manifest_ref["meta"]["derived_cleanup"]) == {
+        "pending",
+        "attempts",
+        "last_error",
+    }
+    assert manifest_ref["meta"]["derived_cleanup"] == {
+        "pending": {
+            "vector_record_ids": [],
+            "content_paths": [],
+            "file_paths": [],
+            "scratch_paths": [],
+        },
+        "attempts": 1,
+        "last_error": None,
+    }
+    assert result["accounting"] == preview["accounting"]
+    assert result["accounting"]["physical_bytes_reclaimed"] == 0
+    assert result["accounting"]["physical_bytes_pending"] == 0
+
+    with backend._connect() as conn:
+        manifest_rows = conn.execute(
+            "SELECT id, path, meta_json FROM records WHERE kind = 'workspace_terminal_manifest'"
+        ).fetchall()
+        target_vector = conn.execute(
+            "SELECT record_id FROM workspace_vectors WHERE record_id = ?",
+            (discarded_left["id"],),
+        ).fetchone()
+        sibling_vector = conn.execute(
+            "SELECT record_id FROM workspace_vectors WHERE record_id = ?",
+            (sibling_ref["id"],),
+        ).fetchone()
+    assert len(manifest_rows) == 1
+    assert manifest_rows[0]["path"] is None
+    assert target_vector is None
+    assert sibling_vector is not None
+
+    repeated = await target.apply_retention(preview)
+    assert repeated["status"] == "noop"
+    assert repeated["manifest_ref"] == manifest_ref
+    assert repeated["diagnostics"] == []
+
+    successor_preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-apply"), "state_version": None},
+        retained_refs=[retained_ref, retained_file_ref],
+        inline_result={"summary": "done"},
+    )
+    assert successor_preview["status"] == "ready"
+    assert successor_preview["plan_fingerprint"] != preview["plan_fingerprint"]
+    successor = await target.apply_retention(successor_preview)
+    assert successor["status"] == "applied"
+    assert successor["manifest_ref"] is not None
+    assert successor["manifest_ref"]["id"] == manifest_ref["id"]
+
+
+@pytest.mark.asyncio
+async def test_apply_retention_stale_plan_defers_without_partial_deletion(tmp_path):
+    root = WorkspaceManager().create(
+        tmp_path / "retention-apply-stale",
+        vector_store_provider="sqlite",
+    )
+    target = root.with_scope_node("executions", "exec-stale")
+    original = await target.put(
+        {"process": "original"},
+        collection="observations",
+        kind="process",
+    )
+    event = await root.append_runtime_event(
+        "exec-stale",
+        {"event_type": "execution.completed", "event_id": "evt-stale"},
+    )
+    written = await target.write_file("reports/process.txt", "process file")
+    target_file = target.files_root / str(written["file_refs"][0]["path"])
+    backend = cast(Any, root.backend)
+    await backend.vector_store_provider.index_record(original, [1.0])
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-stale"), "state_version": None},
+    )
+    assert preview["status"] == "ready"
+
+    added_after_inspection = await target.put(
+        {"process": "late mutation"},
+        collection="observations",
+        kind="process",
+    )
+    result = await target.apply_retention(preview)
+
+    assert result["status"] == "deferred"
+    assert result["manifest_ref"] is None
+    assert [diagnostic.get("code") for diagnostic in result["diagnostics"]] == [
+        "workspace.retention.plan_stale"
+    ]
+    assert await backend.get_record(original["id"]) == original
+    assert await backend.get_record(added_after_inspection["id"]) == added_after_inspection
+    assert await root.query_runtime_events("exec-stale") == [event]
+    assert target_file.read_bytes() == b"process file"
+    with backend._connect() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM records_fts WHERE record_id = ?", (original["id"],)
+        ).fetchone() is not None
+        assert conn.execute(
+            "SELECT 1 FROM workspace_vectors WHERE record_id = ?", (original["id"],)
+        ).fetchone() is not None
+        assert conn.execute(
+            "SELECT 1 FROM records WHERE kind = 'workspace_terminal_manifest'"
+        ).fetchone() is None
+
+
+@pytest.mark.asyncio
+async def test_apply_retention_rolls_back_manifest_and_all_logical_deletes_on_db_failure(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-apply-rollback")
+    target = root.with_scope_node("executions", "exec-rollback")
+    discarded = await target.put(
+        {"process": "rollback"},
+        collection="observations",
+        kind="process",
+    )
+    event = await root.append_runtime_event(
+        "exec-rollback",
+        {"event_type": "execution.completed", "event_id": "evt-rollback"},
+    )
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-rollback"), "state_version": None},
+    )
+    assert preview["status"] == "ready"
+    backend = cast(Any, root.backend)
+
+    def fail_after_first_delete(connection, selected):
+        backend._delete_ids_on_conn(
+            connection,
+            "runtime_events",
+            "id",
+            selected["runtime_event_ids"],
+        )
+        raise RuntimeError("injected logical delete failure")
+
+    monkeypatch.setattr(
+        backend,
+        "_delete_retention_logical_selection_on_conn",
+        fail_after_first_delete,
+    )
+    with pytest.raises(RuntimeError, match="injected logical delete failure"):
+        await target.apply_retention(preview)
+
+    assert await backend.get_record(discarded["id"]) == discarded
+    assert await root.query_runtime_events("exec-rollback") == [event]
+    with backend._connect() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM records_fts WHERE record_id = ?", (discarded["id"],)
+        ).fetchone() is not None
+        assert conn.execute(
+            "SELECT 1 FROM records WHERE kind = 'workspace_terminal_manifest'"
+        ).fetchone() is None
+
+
+@pytest.mark.asyncio
+async def test_apply_retention_resumes_only_pending_derived_cleanup_after_partial_failure(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(
+        tmp_path / "retention-apply-resume",
+        vector_store_provider="sqlite",
+    )
+    target = root.with_scope_node("executions", "exec-resume")
+    discarded = await target.put(
+        {"process": "resume"},
+        collection="observations",
+        kind="process",
+    )
+    written = await target.write_file("reports/process.txt", "process file")
+    target_file = target.files_root / str(written["file_refs"][0]["path"])
+    lease = await target.open_scratch(cleanup_policy="on_scope_prune")
+    scratch_file = Path(cast(str, lease.get("local_path"))) / "process.tmp"
+    scratch_file.write_text("process scratch", encoding="utf-8")
+    await target.close_scratch(cast(str, lease.get("lease_id")), remove=False)
+    backend = cast(Any, root.backend)
+    provider = backend.vector_store_provider
+    await provider.index_record(discarded, [1.0])
+    vector_delete_calls: list[list[str]] = []
+    original_delete_records = provider.delete_records
+
+    async def observe_vector_delete(record_ids):
+        vector_delete_calls.append(list(record_ids))
+        await original_delete_records(record_ids)
+
+    monkeypatch.setattr(provider, "delete_records", observe_vector_delete)
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-resume"), "state_version": None},
+    )
+    assert preview["status"] == "ready"
+    conflicting_preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle("exec-resume"), "state_version": None},
+        retained_refs=[discarded],
+    )
+    assert conflicting_preview["status"] == "ready"
+    assert conflicting_preview["plan_fingerprint"] != preview["plan_fingerprint"]
+    content_target = root.content_root / cast(str, discarded["path"])
+    original_unlink = Path.unlink
+    failed_once = False
+
+    def fail_content_once(path: Path, *args: Any, **kwargs: Any):
+        nonlocal failed_once
+        if path == content_target and not failed_once:
+            failed_once = True
+            raise OSError("injected content delete failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_content_once)
+    first = await target.apply_retention(preview)
+
+    assert first["status"] == "deferred"
+    assert [diagnostic.get("code") for diagnostic in first["diagnostics"]] == [
+        "workspace.retention.derived_cleanup_failed"
+    ]
+    assert await backend.get_record(discarded["id"]) is None
+    assert content_target.exists()
+    assert target_file.exists()
+    assert scratch_file.exists()
+    assert vector_delete_calls == [[discarded["id"]]]
+    first_manifest = cast(dict[str, Any], first["manifest_ref"])
+    first_derived = first_manifest["meta"]["derived_cleanup"]
+    assert first_manifest["meta"]["state"] == "derived_pending"
+    assert first_derived["pending"] == {
+        "vector_record_ids": [],
+        "content_paths": [cast(str, discarded["path"])],
+        "file_paths": preview["selected"]["file_paths"],
+        "scratch_paths": preview["selected"]["scratch_paths"],
+    }
+    assert first_derived["attempts"] == 1
+    assert first_derived["last_error"]["code"] == "workspace.retention.derived_cleanup_failed"
+
+    conflict = await target.apply_retention(conflicting_preview)
+    assert conflict["status"] == "deferred"
+    assert [diagnostic.get("code") for diagnostic in conflict["diagnostics"]] == [
+        "workspace.retention.plan_conflict"
+    ]
+    assert vector_delete_calls == [[discarded["id"]]]
+
+    resumed = await target.apply_retention(preview)
+
+    assert resumed["status"] == "applied"
+    assert vector_delete_calls == [[discarded["id"]]]
+    assert content_target.exists() is False
+    assert target_file.exists() is False
+    assert scratch_file.exists() is False
+    resumed_manifest = cast(dict[str, Any], resumed["manifest_ref"])
+    assert resumed_manifest["id"] == first_manifest["id"]
+    assert resumed_manifest["meta"]["state"] == "applied"
+    assert resumed_manifest["meta"]["derived_cleanup"] == {
+        "pending": {
+            "vector_record_ids": [],
+            "content_paths": [],
+            "file_paths": [],
+            "scratch_paths": [],
+        },
+        "attempts": 2,
+        "last_error": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_prune_scope_remains_unconditional_and_creates_no_terminal_manifest(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-prune-scope")
+    target = root.with_scope_node("executions", "exec-prune")
+    sibling = root.with_scope_node("executions", "exec-prune-sibling")
+    target_ref = await target.put(
+        {"target": True},
+        collection="artifacts",
+        kind="retained_if_policy_ran",
+    )
+    sibling_ref = await sibling.put(
+        {"sibling": True},
+        collection="artifacts",
+        kind="sibling",
+    )
+    await target.write_file("reports/target.txt", "target")
+    sibling_write = await sibling.write_file("reports/sibling.txt", "sibling")
+    sibling_file = sibling.files_root / str(sibling_write["file_refs"][0]["path"])
+
+    result = await root.prune_scope({"execution_id": "exec-prune"})
+
+    assert result["records_deleted"] == 1
+    backend = cast(Any, root.backend)
+    assert await backend.get_record(target_ref["id"]) is None
+    assert await backend.get_record(sibling_ref["id"]) == sibling_ref
+    assert target.files_root.exists() is False
+    assert sibling_file.read_bytes() == b"sibling"
+    with backend._connect() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM records WHERE kind = 'workspace_terminal_manifest'"
+        ).fetchone() is None
+
+
+def test_local_retention_capabilities_require_inspect_and_apply_methods(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-capabilities")
+    backend = cast(Any, root.backend)
+    assert backend.capabilities()["features"]["supports_retention"] is True
+    assert backend.capabilities()["features"]["supports_physical_reclamation"] is False
+
+    async def anchors_only(*_args: Any, **_kwargs: Any):
+        return []
+
+    backend.db_store_provider = SimpleNamespace(
+        add_retention_anchor=anchors_only,
+        retention_anchors=anchors_only,
+    )
+    assert backend.capabilities()["features"]["supports_retention"] is False

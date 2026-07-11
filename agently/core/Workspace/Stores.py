@@ -18,6 +18,7 @@ import importlib
 import inspect
 import math
 import sqlite3
+import stat
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
@@ -170,6 +171,90 @@ class LocalContentStore:
         if not target.is_file():
             raise FileNotFoundError(f"Workspace content not found: { path }")
         return target.read_text(encoding="utf-8", errors="replace")
+
+    async def delete_content(self, relative_path: str) -> bool:
+        """Idempotently delete one directly owned content file.
+
+        Retention passes paths selected from the authoritative record snapshot.
+        Re-check every lexical component here so a symlink swap cannot broaden
+        that selection into another content object or an outside path.
+        """
+
+        self.policy.ensure_writable()
+        relative = Path(relative_path)
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise WorkspacePolicyError(
+                f"Path is outside workspace content root: { relative_path }"
+            )
+        root_stat = self.content_root.lstat()
+        if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+            raise WorkspacePolicyError("Workspace content root must be a directly owned directory.")
+        target = self.content_root.joinpath(*relative.parts)
+        current = self.content_root
+        target_stat = None
+        for index, part in enumerate(relative.parts):
+            current = current / part
+            try:
+                current_stat = current.lstat()
+            except FileNotFoundError:
+                return False
+            if stat.S_ISLNK(current_stat.st_mode):
+                raise WorkspacePolicyError(
+                    f"Workspace content cleanup does not traverse symlinks: {relative_path}"
+                )
+            if index < len(relative.parts) - 1 and not stat.S_ISDIR(current_stat.st_mode):
+                raise WorkspacePolicyError(
+                    f"Workspace content cleanup parent is not a directory: {relative_path}"
+                )
+            target_stat = current_stat
+        if target_stat is None:
+            return False
+        if not stat.S_ISREG(target_stat.st_mode):
+            raise WorkspacePolicyError(
+                f"Workspace content cleanup target is not a regular file: {relative_path}"
+            )
+        resolved_target = target.resolve()
+        try:
+            resolved_target.relative_to(self.content_root)
+        except ValueError as error:
+            raise WorkspacePolicyError(
+                f"Path is outside workspace content root: {relative_path}"
+            ) from error
+        if resolved_target != target:
+            raise WorkspacePolicyError(
+                f"Workspace content cleanup path changed during resolution: {relative_path}"
+            )
+        confirmed_stat = target.lstat()
+        if (
+            stat.S_ISLNK(confirmed_stat.st_mode)
+            or (confirmed_stat.st_dev, confirmed_stat.st_ino)
+            != (target_stat.st_dev, target_stat.st_ino)
+        ):
+            raise WorkspacePolicyError(
+                f"Workspace content cleanup target changed before deletion: {relative_path}"
+            )
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            return False
+        self._prune_empty_parents(target.parent)
+        return True
+
+    def _prune_empty_parents(self, start: Path) -> None:
+        current = start
+        while current != self.content_root:
+            try:
+                current_stat = current.lstat()
+            except FileNotFoundError:
+                current = current.parent
+                continue
+            if stat.S_ISLNK(current_stat.st_mode) or not stat.S_ISDIR(current_stat.st_mode):
+                return
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
 
     async def read_content_segment(
         self,

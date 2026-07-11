@@ -1829,7 +1829,15 @@ class Workspace:
         self,
         preview: WorkspaceRetentionPreview,
     ) -> WorkspaceRetentionResult:
-        return await self.backend.apply_retention(preview)
+        validated = validate_retention_preview(
+            preview,
+            scope=preview["scope"],
+            lifecycle=preview["lifecycle"],
+            policy=preview["policy"],
+            declared_retained_refs=preview["retained_refs"],
+            inline_result=preview["inline_result"],
+        )
+        return await self.backend.apply_retention(validated)
 
     def capabilities(self) -> WorkspaceBackendCapabilities:
         capabilities = dict(self.backend.capabilities())
