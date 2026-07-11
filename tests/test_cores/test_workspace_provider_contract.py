@@ -13,7 +13,7 @@ import pytest
 from typing_extensions import get_type_hints
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
-from agently.core import PluginManager, WorkspaceManager
+from agently.core import LocalWorkspaceBackend, PluginManager, WorkspaceManager
 import agently.types.data as data_types
 import agently.types.data.workspace as workspace_types
 from agently.types.data import (
@@ -1037,6 +1037,7 @@ def test_workspace_retention_protocols_and_fake_provider_use_exact_signatures():
         workspace_plugin_types.RetentionPolicy,
         workspace_plugin_types.DBStoreProvider,
         workspace_plugin_types.WorkspaceBackend,
+        LocalWorkspaceBackend,
         RemoteAuditWorkspaceBackend,
     )
     for protocol in protocols:
@@ -1079,6 +1080,47 @@ def test_workspace_retention_protocols_and_fake_provider_use_exact_signatures():
             "preview": workspace_types.WorkspaceRetentionPreview,
             "return": workspace_types.WorkspaceRetentionResult,
         }
+
+
+@pytest.mark.asyncio
+async def test_local_workspace_backend_retention_contract_is_explicitly_unimplemented(tmp_path):
+    backend = LocalWorkspaceBackend(tmp_path / "retention-contract")
+    assert hasattr(backend, "inspect_retention")
+    assert hasattr(backend, "apply_retention")
+
+    lifecycle: workspace_types.WorkspaceRetentionLifecycle = {
+        "execution_id": "exec-contract",
+        "status": "completed",
+        "terminal_at": "2026-07-12T00:00:00+00:00",
+        "state_version": 1,
+        "recovery_active": False,
+        "lease_active": False,
+    }
+    preview: workspace_types.WorkspaceRetentionPreview = {
+        "status": "ready",
+        "plan_fingerprint": "contract-only",
+        "scope": {"execution_id": "exec-contract"},
+        "lifecycle": lifecycle,
+        "policy": {},
+        "retained_refs": [],
+        "inline_result": None,
+        "selected": {},
+        "accounting": {
+            "entities": {},
+            "logical_bytes_deleted": 0,
+            "physical_bytes_reclaimed": 0,
+            "physical_bytes_pending": 0,
+        },
+        "diagnostics": [],
+    }
+
+    with pytest.raises(NotImplementedError):
+        await backend.inspect_retention(
+            {"execution_id": "exec-contract"},
+            lifecycle=lifecycle,
+        )
+    with pytest.raises(NotImplementedError):
+        await backend.apply_retention(preview)
 
 
 def test_workspace_manager_requires_terminal_retention_provider_methods():

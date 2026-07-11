@@ -20,7 +20,7 @@ import shutil
 import sqlite3
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, AsyncIterator, cast
 
@@ -33,7 +33,12 @@ from agently.types.data.workspace import (
     WorkspaceLinkRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
+    WorkspaceRetainedReference,
     WorkspaceRetentionAnchor,
+    WorkspaceRetentionLifecycle,
+    WorkspaceRetentionPolicy,
+    WorkspaceRetentionPreview,
+    WorkspaceRetentionResult,
     WorkspaceRuntimeEventRecord,
     WorkspaceScratchLease,
 )
@@ -1671,6 +1676,23 @@ class LocalWorkspaceBackend:
                 params,
             ).fetchall()
         return [self._row_to_retention_anchor(row) for row in rows]
+
+    async def inspect_retention(
+        self,
+        scope: dict[str, Any],
+        *,
+        lifecycle: WorkspaceRetentionLifecycle,
+        retained_refs: Sequence[WorkspaceRetainedReference] = (),
+        inline_result: Any = None,
+        policy: WorkspaceRetentionPolicy | None = None,
+    ) -> WorkspaceRetentionPreview:
+        raise NotImplementedError
+
+    async def apply_retention(
+        self,
+        preview: WorkspaceRetentionPreview,
+    ) -> WorkspaceRetentionResult:
+        raise NotImplementedError
 
     async def prune_scope(
         self,
