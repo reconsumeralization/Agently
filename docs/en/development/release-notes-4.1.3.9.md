@@ -54,7 +54,7 @@ Embeddings remain application or plugin logic. If a backend has a real
 diagnostics.
 
 ```python
-from agently.core.Workspace import LocalVectorIndex
+from agently.core.workspace import LocalVectorIndex
 
 vector_index = LocalVectorIndex(embedder, similarity="cosine")
 ```

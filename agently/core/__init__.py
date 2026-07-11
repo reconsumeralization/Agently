@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib
-import sys
-
 from agently.types.data import TaskBoardCard, TaskBoardGraph, TaskBoardPatch, TaskBoardRevision, TaskDAG, TaskDAGNode
 
 from .Agent import BaseAgent
@@ -90,10 +87,6 @@ from .runtime import (
     bind_runtime_context,
 )
 from .session import Session
-_workspace_package = importlib.import_module(f"{__name__}.Workspace")
-
-sys.modules[f"{__name__}.workspace"] = _workspace_package
-
 from .Workspace import (
     AgentEmbeddingProvider,
     CallableEmbeddingProvider,
