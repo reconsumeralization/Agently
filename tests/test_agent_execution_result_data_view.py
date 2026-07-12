@@ -295,6 +295,121 @@ async def test_terminal_retention_reuses_explicit_action_workspace_ref_without_d
 
 
 @pytest.mark.asyncio
+async def test_selected_action_artifact_is_promoted_once_and_unselected_artifact_stays_temporary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        prepare_agent_execution_terminal_retention,
+    )
+
+    agent = Agently.create_agent("result-view-selected-action-artifact").use_workspace(tmp_path / "run")
+    selected_value = {"body": "s" * (1024 * 1024)}
+    unselected_value = {"body": "u" * (1024 * 1024)}
+    selected_record = agent.action._finalize_action_result(
+        {
+            "action_call_id": "selected-call",
+            "action_id": "selected_action_artifact",
+            "status": "success",
+            "success": True,
+            "result": selected_value,
+            "data": selected_value,
+        }
+    )
+    unselected_record = agent.action._finalize_action_result(
+        {
+            "action_call_id": "unselected-call",
+            "action_id": "unselected_action_artifact",
+            "status": "success",
+            "success": True,
+            "result": unselected_value,
+            "data": unselected_value,
+        }
+    )
+    selected_ref = selected_record["artifact_refs"][0]
+    unselected_ref = unselected_record["artifact_refs"][0]
+    execution = agent.input("Promote only the accepted Action artifact.").create_execution().strategy("direct")
+    execution.logs["artifact_refs"] = [selected_ref, unselected_ref]
+    execution.result = {
+        "accepted": True,
+        "artifact_refs": [selected_ref],
+        "reply": "r" * 5000,
+    }
+
+    put_values: list[Any] = []
+    original_put_artifact_ref = execution.workspace.put_artifact_ref
+
+    async def capture_put_artifact_ref(*args: Any, **kwargs: Any) -> Any:
+        value = args[1] if len(args) > 1 else kwargs["artifact"]
+        put_values.append(value)
+        return await original_put_artifact_ref(*args, **kwargs)
+
+    monkeypatch.setattr(execution.workspace, "put_artifact_ref", capture_put_artifact_ref)
+
+    event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+
+    assert put_values == [selected_value]
+    assert len(retained_records) == 1
+    assert retained_records[0]["kind"] == "agent_execution_action_artifact"
+    assert [ref["id"] for ref in event_result["artifact_refs"]] == [retained_records[0]["id"]]
+    assert selected_value["body"] not in str(event_result)
+    assert await execution.workspace.search(
+        filters={"kind": "agent_execution_terminal_result", "scope.execution_id": execution.id}
+    ) == []
+    assert await execution.workspace.search(
+        filters={"kind": "agent_execution_action_artifact", "scope.execution_id": execution.id}
+    ) == retained_records
+    agent.action._artifact_manager._artifacts.clear()
+    assert agent.action._artifact_manager.get_artifact_value(selected_ref["artifact_id"]) is None
+    assert unselected_ref["artifact_id"] not in str(
+        await execution.workspace.search(filters={"collection": "artifacts"})
+    )
+
+
+@pytest.mark.asyncio
+async def test_selected_action_artifact_defers_when_store_identity_no_longer_matches(tmp_path) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        prepare_agent_execution_terminal_retention,
+    )
+
+    agent = Agently.create_agent("result-view-selected-action-artifact-mismatch").use_workspace(tmp_path / "run")
+    record = agent.action._finalize_action_result(
+        {
+            "action_call_id": "selected-call",
+            "action_id": "selected_action_artifact",
+            "status": "success",
+            "success": True,
+            "result": {"body": "s" * (1024 * 1024)},
+            "data": {"body": "s" * (1024 * 1024)},
+        }
+    )
+    selected_ref = record["artifact_refs"][0]
+    agent.action._artifact_manager.register_external_artifact_ref(
+        action_call_id="replacement-call",
+        artifact_type="external_ref",
+        label="Replacement with a colliding artifact id",
+        ref={
+            "artifact_id": selected_ref["artifact_id"],
+            "path": "external/replacement.json",
+            "bytes": 1,
+            "sha256": "0" * 64,
+        },
+    )
+    execution = agent.input("Reject the replaced Action artifact.").create_execution().strategy("direct")
+    execution.logs["artifact_refs"] = [selected_ref]
+    execution.result = {"accepted": True, "artifact_refs": [selected_ref], "reply": "r" * 5000}
+
+    event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+
+    assert retained_records == []
+    assert event_result["kind"] == "agent_execution_terminal_result_untrusted"
+    assert execution._terminal_retention_deferred is True
+    assert await execution.workspace.search(
+        filters={"kind": "agent_execution_action_artifact", "scope.execution_id": execution.id}
+    ) == []
+
+
+@pytest.mark.asyncio
 async def test_direct_terminal_retention_emits_small_inline_result_before_cleanup(tmp_path, monkeypatch) -> None:
     captured = []
     order: list[str] = []

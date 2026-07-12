@@ -210,8 +210,22 @@ async def _canonical_result_refs(
     retained_refs: list[WorkspaceRetainedReference] = []
     file_backed = False
     seen: set[str] = set()
-    for raw_ref in _result_ref_candidates(owner, result):
+    for raw_ref, selected in _result_ref_candidates(owner, result):
         if not isinstance(raw_ref, Mapping):
+            continue
+        action_artifact_id = str(raw_ref.get("artifact_id") or "").strip()
+        if action_artifact_id:
+            key = f"action:{action_artifact_id}"
+            if key in seen:
+                continue
+            if not selected:
+                continue
+            promoted_ref = await _promote_selected_action_artifact(owner, raw_ref)
+            if promoted_ref is None:
+                continue
+            retained_records.append(promoted_ref)
+            retained_refs.append(promoted_ref)
+            seen.add(key)
             continue
         envelope_id = str(raw_ref.get("record_id") or "")
         if envelope_id and "workspace_id" in raw_ref:
@@ -314,19 +328,142 @@ async def _canonical_result_refs(
     return retained_records, retained_refs, file_backed
 
 
-def _result_ref_candidates(owner: "AgentExecution", result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    candidates: list[Mapping[str, Any]] = []
+def _result_ref_candidates(
+    owner: "AgentExecution",
+    result: Mapping[str, Any],
+) -> list[tuple[Mapping[str, Any], bool]]:
+    candidates: list[tuple[Mapping[str, Any], bool]] = []
+    action_selection_accepted = result.get("accepted") is True
     for key in ("artifact_refs", "file_refs"):
         values = result.get(key)
         if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
-            candidates.extend(value for value in values if isinstance(value, Mapping))
+            candidates.extend(
+                (value, action_selection_accepted)
+                for value in values
+                if isinstance(value, Mapping)
+            )
     final_result = result.get("final_result")
     if isinstance(final_result, Mapping) and _mapping_has_ref_shape(final_result):
-        candidates.append(final_result)
+        candidates.append((final_result, action_selection_accepted))
+    if isinstance(final_result, Mapping):
+        for key in ("artifact_refs", "file_refs"):
+            values = final_result.get(key)
+            if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
+                candidates.extend(
+                    (value, action_selection_accepted)
+                    for value in values
+                    if isinstance(value, Mapping)
+                )
+    evidence = result.get("evidence")
+    if isinstance(evidence, Sequence) and not isinstance(evidence, (str, bytes, bytearray)):
+        for item in evidence:
+            if not isinstance(item, Mapping):
+                continue
+            for key in ("artifact_refs", "file_refs"):
+                values = item.get(key)
+                if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
+                    candidates.extend(
+                        (value, action_selection_accepted)
+                        for value in values
+                        if isinstance(value, Mapping)
+                    )
     action_refs = owner.logs.get("artifact_refs")
     if isinstance(action_refs, Sequence) and not isinstance(action_refs, (str, bytes, bytearray)):
-        candidates.extend(value for value in action_refs if isinstance(value, Mapping))
+        candidates.extend((value, False) for value in action_refs if isinstance(value, Mapping))
     return candidates
+
+
+async def _promote_selected_action_artifact(
+    owner: "AgentExecution",
+    raw_ref: Mapping[str, Any],
+) -> WorkspaceRecordRef | None:
+    artifact_id = str(raw_ref.get("artifact_id") or "").strip()
+    action_call_id = str(raw_ref.get("action_call_id") or "").strip()
+    if not artifact_id or not action_call_id:
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.action_artifact_invalid",
+            "Selected Action artifact ref is missing artifact_id or action_call_id.",
+        )
+        return None
+    if _action_artifact_identity(raw_ref) not in _bridged_action_artifact_identities(owner):
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.action_artifact_not_bridged",
+            "Selected Action artifact ref was not emitted by this AgentExecution action bridge.",
+        )
+        return None
+    action = getattr(owner.agent, "action", None)
+    artifact_manager = getattr(action, "_artifact_manager", None)
+    get_artifact = getattr(artifact_manager, "get_artifact", None)
+    get_artifact_value = getattr(artifact_manager, "get_artifact_value", None)
+    if not callable(get_artifact) or not callable(get_artifact_value):
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.action_artifact_store_unavailable",
+            "Selected Action artifact store is unavailable for terminal promotion.",
+        )
+        return None
+    stored_artifact = get_artifact(artifact_id)
+    stored_identity = _action_artifact_identity(stored_artifact) if isinstance(stored_artifact, Mapping) else None
+    if stored_identity != _action_artifact_identity(raw_ref):
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.action_artifact_identity_mismatch",
+            "Selected Action artifact ref no longer matches the in-memory artifact identity.",
+        )
+        return None
+    value = get_artifact_value(artifact_id)
+    if value is None:
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.action_artifact_missing",
+            "Selected Action artifact value is no longer available for terminal promotion.",
+        )
+        return None
+    try:
+        return await owner.workspace.put_artifact_ref(
+            owner.id,
+            value,
+            metadata={
+                "scope": {"execution_id": owner.id},
+                "kind": "agent_execution_action_artifact",
+                "summary": f"Selected Action artifact {artifact_id} for AgentExecution {owner.id}",
+                "action_artifact_id": artifact_id,
+                "action_call_id": action_call_id,
+            },
+        )
+    except Exception as error:
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.action_artifact_promotion_failed",
+            f"Selected Action artifact promotion failed: {_compact_error(error)}",
+        )
+        return None
+
+
+def _bridged_action_artifact_identities(owner: "AgentExecution") -> set[tuple[str, str, str, int]]:
+    values = owner.logs.get("artifact_refs")
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        return set()
+    return {
+        _action_artifact_identity(value)
+        for value in values
+        if isinstance(value, Mapping) and value.get("artifact_id")
+    }
+
+
+def _action_artifact_identity(ref: Mapping[str, Any]) -> tuple[str, str, str, int]:
+    try:
+        size = int(ref.get("size") or ref.get("bytes") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return (
+        str(ref.get("artifact_id") or ""),
+        str(ref.get("action_call_id") or ""),
+        str(ref.get("sha256") or ""),
+        size,
+    )
 
 
 async def _canonical_artifact_record(

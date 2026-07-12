@@ -399,7 +399,7 @@ async def async_emit_response_parser_observation(
 
 
 async def async_emit_action_flow_observation(observation: dict[str, Any]) -> None:
-    """Map ActionFlow observations to official RuntimeEvent records."""
+    """Map an Action-owned bounded observation to official RuntimeEvent records."""
 
     from agently.base import async_emit_runtime
     from agently.types.data import ObservationEvent

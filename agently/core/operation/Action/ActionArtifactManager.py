@@ -76,6 +76,10 @@ class ActionArtifactManager:
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         return self._artifacts.get(str(artifact_id))
 
+    def get_artifact_value(self, artifact_id: str) -> Any | None:
+        artifact = self.get_artifact(artifact_id)
+        return artifact.get("value") if artifact is not None else None
+
     # ── redaction / compaction ─────────────────────────────────────────────
 
     @classmethod
@@ -506,11 +510,11 @@ class ActionArtifactManager:
             artifacts=record.get("artifacts", []),
         )
 
-        should_externalize = (
-            self._is_instruction_heavy_record(record)
-            or self._safe_json_size(data) > 8000
+        result_exceeds_inline_limit = (
+            self._safe_json_size(data) > 8000
             or meta.get("max_output_bytes_exceeded") is True
         )
+        should_externalize = self._is_instruction_heavy_record(record) or result_exceeds_inline_limit
         file_refs = self._collect_file_refs(record)
         if file_refs:
             record["file_refs"] = file_refs
@@ -566,7 +570,7 @@ class ActionArtifactManager:
             artifact_refs=artifact_refs,
             redaction_report=redaction_report,
         )
-        return record
+        return self._to_model_visible_record(record) if result_exceeds_inline_limit else record
 
     def normalize_execution_records(
         self,
@@ -597,6 +601,8 @@ class ActionArtifactManager:
             return record
         digest = record.get("model_digest")
         if not isinstance(digest, dict):
+            return record
+        if digest.get("same_as") == "result" and isinstance(record.get("result"), dict):
             return record
         visible_digest = cls._to_hot_path_digest(digest)
         visible = cast(ActionResult, {
