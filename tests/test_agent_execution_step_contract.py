@@ -5001,7 +5001,7 @@ def test_taskboard_final_response_explains_partial_artifact_without_acceptance()
     assert "Ground every official-source claim" in final_response
 
 
-def test_taskboard_final_response_augments_overstrong_model_response_with_completion_notes():
+def test_taskboard_final_response_replaces_overstrong_model_response_with_host_projection():
     final_response = AgentTask._taskboard_user_final_response(
         final={"final_response": "Completed. All success criteria are satisfied."},
         accepted=True,
@@ -5018,9 +5018,10 @@ def test_taskboard_final_response_augments_overstrong_model_response_with_comple
         },
     )
 
-    assert "All success criteria are satisfied" in final_response
+    assert "All success criteria are satisfied" not in final_response
+    assert "Completed with disclosed limitations" in final_response
+    assert "Deliverable artifact: final.md" in final_response
     assert "Official PDF content was not read" in final_response
-    assert "Known limitations/notes" in final_response
 
 
 def test_agent_task_final_response_ignores_overstrong_unaccepted_model_response():
@@ -5057,7 +5058,9 @@ def test_taskboard_final_response_omits_process_notes_for_plain_acceptance():
         },
     )
 
-    assert final_response == "Completed. Deliverable artifact: final.md."
+    assert final_response == (
+        "Completed. Deliverable artifact: final.md. Summary: All criteria are satisfied."
+    )
     assert "Process notes" not in final_response
     assert "Earlier repair note" not in final_response
 
@@ -8358,12 +8361,12 @@ async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace
         )
     )
 
-    data = await execution.async_get_data()
     workspace_record = await execution.async_record_workspace(
-        content={"answer": data["answer"]},
+        content={"stage": "requested-before-terminal"},
         summary="workspace-bound task-step record",
         checkpoint=True,
     )
+    data = await execution.async_get_data()
     meta = await execution.async_get_meta()
 
     assert workspace_record["record"]["collection"] == "observations"
@@ -8375,7 +8378,10 @@ async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace
     assert meta["workspace_refs"]["checkpoints"] == [workspace_record["checkpoint"]["id"]]
     evidence_link_id = meta["workspace_refs"]["verification_evidence"][0]
     assert agent.workspace is not None
-    assert await agent.workspace.get_data(workspace_record["record"]) == {"answer": data["answer"]}
+    assert data["answer"]
+    assert await agent.workspace.get_data(workspace_record["record"]) == {
+        "stage": "requested-before-terminal"
+    }
     history = await agent.workspace.checkpoint_history("workspace-task", step_id="record")
     assert [item["id"] for item in history] == [workspace_record["checkpoint"]["id"]]
     evidence_links = await agent.workspace.links(workspace_record["record"], relation="checkpointed_by")
@@ -8453,6 +8459,31 @@ async def test_agent_execution_workspace_purpose_audit_requires_explicit_retenti
     )
 
     assert workspace_record["record"]["meta"]["workspace_purpose"] == "audit"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_post_terminal_workspace_records_are_purpose_governed(tmp_path):
+    agent = _create_agent("task-step-post-terminal-workspace-purpose").use_workspace(tmp_path / "run")
+    execution = agent.input("Finish before post-terminal writes.").create_execution().strategy("direct")
+
+    async def fake_route(**_kwargs: Any) -> tuple[str, dict[str, str]]:
+        execution.route_info["selected_route"] = "model_request"
+        return "model_request", {"reply": "done"}
+
+    execution._async_execute_route = fake_route  # type: ignore[method-assign]
+    assert await execution.async_get_data() == {"reply": "done"}
+
+    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+        await execution.async_record_workspace(content={"late": "process"}, purpose="process")
+    with pytest.raises(RuntimeError, match="post-terminal.*recovery|recovery.*post-terminal"):
+        await execution.async_record_workspace(content={"late": "recovery"}, purpose="recovery")
+
+    deliverable = await execution.async_record_workspace(
+        content={"late": "deliverable"},
+        purpose="deliverable",
+    )
+    assert await execution.workspace.get_data(deliverable["record"]) == {"late": "deliverable"}
+    assert execution.diagnostics["workspace_retention"]["status"] in {"applied", "noop"}
 
 
 @pytest.mark.asyncio

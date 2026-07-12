@@ -42,7 +42,7 @@ def _serialized_size(value: Any) -> int:
 
 async def prepare_agent_execution_terminal_retention(
     owner: "AgentExecution",
-) -> tuple[Any, list[WorkspaceRecordRef]]:
+) -> tuple[Any, list[WorkspaceRetainedReference]]:
     """Return the bounded terminal-event result and canonical retained refs."""
 
     result = _terminal_result_value(owner)
@@ -73,16 +73,16 @@ async def prepare_agent_execution_terminal_retention(
         event_result = _compact_referenced_result(projected_result, retained_refs, file_backed=True)
         owner._terminal_inline_result = None
         owner._terminal_retained_refs = retained_refs
-        return event_result, retained_records
+        return event_result, retained_refs
     if _serialized_size(projected_result) <= inline_result_limit:
         owner._terminal_inline_result = projected_result
         owner._terminal_retained_refs = retained_refs
-        return projected_result, retained_records
+        return projected_result, retained_refs
     if retained_refs:
         event_result = _compact_referenced_result(projected_result, retained_refs, file_backed=False)
         owner._terminal_inline_result = None
         owner._terminal_retained_refs = retained_refs
-        return event_result, retained_records
+        return event_result, retained_refs
     if owner.workspace is None:
         raise RuntimeError("AgentExecution has no Workspace binding for a large terminal result.")
 
@@ -127,9 +127,9 @@ async def apply_agent_execution_terminal_retention(
                 "execution_id": owner.id,
                 "status": status,
                 "terminal_at": datetime.now(timezone.utc).isoformat(),
-                "state_version": None,
-                "recovery_active": False,
-                "lease_active": False,
+                "state_version": owner._workspace_state_version,
+                "recovery_active": owner._workspace_recovery_active,
+                "lease_active": owner._workspace_lease_active,
             },
             retained_refs=[
                 ref
@@ -227,6 +227,7 @@ async def _canonical_result_refs(
                 continue
             if not selected:
                 continue
+            owner._terminal_selected_action_artifact_ids.add(action_artifact_id)
             promoted_ref = await _promote_selected_action_artifact(owner, raw_ref)
             if promoted_ref is None:
                 continue
@@ -341,7 +342,7 @@ def _result_ref_candidates(
     result: Mapping[str, Any],
 ) -> list[tuple[Mapping[str, Any], bool]]:
     candidates: list[tuple[Mapping[str, Any], bool]] = []
-    action_selection_accepted = result.get("accepted") is True
+    action_selection_accepted = _host_action_selection_eligible(owner)
     for key in ("artifact_refs", "file_refs"):
         values = result.get(key)
         if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
@@ -381,6 +382,20 @@ def _result_ref_candidates(
     return candidates
 
 
+def _host_action_selection_eligible(owner: "AgentExecution") -> bool:
+    """Selection authority belongs to route completion, never result fields."""
+
+    if owner.status not in {"success", "completed"}:
+        return False
+    selected_route = str(owner.route_info.get("selected_route") or owner.close_snapshot.get("route") or "")
+    if selected_route == "model_request" or (not selected_route and owner.strategy_name == "direct"):
+        return True
+    if selected_route == "agent_task":
+        task = getattr(owner, "task_record", None)
+        return getattr(task, "status", None) == "completed"
+    return False
+
+
 async def _promote_selected_action_artifact(
     owner: "AgentExecution",
     raw_ref: Mapping[str, Any],
@@ -411,34 +426,38 @@ async def _promote_selected_action_artifact(
         return None
     action = getattr(owner.agent, "action", None)
     artifact_manager = getattr(action, "_artifact_manager", None)
-    get_artifact = getattr(artifact_manager, "get_artifact", None)
-    get_artifact_value = getattr(artifact_manager, "get_artifact_value", None)
-    get_artifact_scope = getattr(artifact_manager, "get_artifact_scope", None)
-    if not callable(get_artifact) or not callable(get_artifact_value) or not callable(get_artifact_scope):
+    read_artifact_transfer = getattr(artifact_manager, "read_artifact_transfer", None)
+    if not callable(read_artifact_transfer):
         _defer_untrusted_ref(
             owner,
             "agent_execution.retention.action_artifact_store_unavailable",
             "Selected Action artifact store is unavailable for terminal promotion.",
         )
         return None
-    if get_artifact_scope(artifact_id) != expected_scope:
+    transfer = cast(
+        tuple[dict[str, Any], Any] | None,
+        read_artifact_transfer(artifact_id, expected_scope=expected_scope),
+    )
+    if transfer is None:
+        owner._terminal_preserved_action_artifact_ids.add(artifact_id)
         _defer_untrusted_ref(
             owner,
             "agent_execution.retention.action_artifact_stored_scope_mismatch",
-            "Selected Action artifact manager scope does not belong to this AgentExecution.",
+            "Selected Action artifact is unavailable in this AgentExecution scope.",
         )
         return None
-    stored_artifact = get_artifact(artifact_id)
-    stored_identity = _action_artifact_identity(stored_artifact) if isinstance(stored_artifact, Mapping) else None
+    stored_artifact, value = transfer
+    stored_identity = _action_artifact_identity(stored_artifact)
     if stored_identity != _action_artifact_identity(raw_ref):
+        owner._terminal_preserved_action_artifact_ids.add(artifact_id)
         _defer_untrusted_ref(
             owner,
             "agent_execution.retention.action_artifact_identity_mismatch",
             "Selected Action artifact ref no longer matches the in-memory artifact identity.",
         )
         return None
-    value = get_artifact_value(artifact_id)
     if value is None:
+        owner._terminal_preserved_action_artifact_ids.add(artifact_id)
         _defer_untrusted_ref(
             owner,
             "agent_execution.retention.action_artifact_missing",
@@ -457,6 +476,7 @@ async def _promote_selected_action_artifact(
             },
         )
     except Exception as error:
+        owner._terminal_preserved_action_artifact_ids.add(artifact_id)
         _defer_untrusted_ref(
             owner,
             "agent_execution.retention.action_artifact_promotion_failed",
@@ -557,6 +577,12 @@ async def _canonical_artifact_record(
 ) -> tuple[WorkspaceRecordRef | None, WorkspaceReferenceEnvelope | None, Any]:
     is_envelope = "workspace_id" in raw_ref
     record_id = str((raw_ref.get("record_id") if is_envelope else raw_ref.get("id")) or "").strip()
+    trusted_task_handoff = any(
+        isinstance(ref, Mapping) and dict(ref) == dict(raw_ref)
+        for ref in list(getattr(owner, "_terminal_task_handoff_refs", []) or [])
+    )
+    if trusted_task_handoff and not is_envelope:
+        return await _canonical_task_handoff_record(owner, raw_ref, record_id)
     try:
         matches = await owner.workspace.search(filters={"id": record_id})
     except Exception as error:
@@ -622,6 +648,76 @@ async def _canonical_artifact_record(
     return canonical_ref, canonical_envelope, content
 
 
+async def _canonical_task_handoff_record(
+    owner: "AgentExecution",
+    raw_ref: Mapping[str, Any],
+    record_id: str,
+) -> tuple[WorkspaceRecordRef | None, WorkspaceReferenceEnvelope | None, Any]:
+    """Validate one route-owned child ref by exact identity without broad search."""
+
+    canonical_meta = raw_ref.get("meta")
+    canonical_source = raw_ref.get("source")
+    if not (
+        record_id
+        and raw_ref.get("collection") == "artifacts"
+        and isinstance(canonical_meta, Mapping)
+        and canonical_meta.get("artifact_ref") is True
+        and isinstance(canonical_source, Mapping)
+        and canonical_source.get("type") == "workspace"
+        and canonical_source.get("name") == "artifact_ref"
+    ):
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.task_handoff_provenance_mismatch",
+            "AgentTask handoff is not a canonical Workspace artifact ref.",
+        )
+        return None, None, None
+    try:
+        canonical_envelope = await owner.workspace.ref_envelope(record_id)
+        canonical_size = int(raw_ref.get("size") or 0)
+        readback = await owner.workspace.read_bounded(record_id, offset=0, limit=canonical_size + 1)
+    except Exception as error:
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.task_handoff_readback_failed",
+            f"AgentTask handoff readback failed: {_compact_error(error)}",
+        )
+        return None, None, None
+    if not (
+        canonical_envelope.get("record_id") == record_id
+        and canonical_envelope.get("collection") == raw_ref.get("collection")
+        and canonical_envelope.get("kind") == raw_ref.get("kind")
+        and canonical_envelope.get("content_ref") == raw_ref.get("path")
+        and canonical_envelope.get("digest") == raw_ref.get("sha256")
+        and canonical_envelope.get("size") == canonical_size
+    ):
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.task_handoff_identity_mismatch",
+            "AgentTask handoff does not match its persisted canonical identity.",
+        )
+        return None, None, None
+    readback_content = str(readback.get("content") or "")
+    readback_raw = readback_content.encode("utf-8")
+    if not (
+        readback.get("eof") is True
+        and int(readback.get("size") or 0) == canonical_size
+        and len(readback_raw) == canonical_size
+        and hashlib.sha256(readback_raw).hexdigest() == str(raw_ref.get("sha256") or "")
+    ):
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.task_handoff_integrity_mismatch",
+            "AgentTask handoff content does not match its canonical record ref.",
+        )
+        return None, None, None
+    try:
+        content = json.loads(readback_content)
+    except (TypeError, ValueError):
+        content = readback_content
+    return cast(WorkspaceRecordRef, dict(raw_ref)), canonical_envelope, content
+
+
 def _looks_like_record_ref(ref: Mapping[str, Any]) -> bool:
     return all(
         key in ref
@@ -630,11 +726,13 @@ def _looks_like_record_ref(ref: Mapping[str, Any]) -> bool:
 
 
 def _looks_like_file_ref(ref: Mapping[str, Any]) -> bool:
+    if "bytes" not in ref:
+        return False
     try:
-        size = int(ref.get("bytes") or 0)
+        size = int(ref["bytes"])
     except (TypeError, ValueError):
         return False
-    return bool(str(ref.get("path") or "") and str(ref.get("sha256") or "") and size > 0)
+    return bool(str(ref.get("path") or "") and str(ref.get("sha256") or "") and size >= 0)
 
 
 def _mapping_has_ref_shape(ref: Mapping[str, Any]) -> bool:

@@ -88,21 +88,50 @@ class ActionArtifactManager:
             artifact = self._artifacts.get(str(artifact_id))
             return deepcopy(artifact.get("value")) if artifact is not None else None
 
+    def read_artifact_transfer(
+        self,
+        artifact_id: str,
+        *,
+        expected_scope: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], Any] | None:
+        """Atomically read canonical identity plus one exact-value copy."""
+
+        scope = self._normalize_artifact_scope(expected_scope, fallback_id="")
+        if scope is None:
+            return None
+        artifact_key = str(artifact_id)
+        with self._artifact_lock:
+            artifact = self._artifacts.get(artifact_key)
+            stored_scope = self._artifact_scopes.get(artifact_key)
+            if artifact is None or stored_scope != (scope["kind"], scope["id"]):
+                return None
+            identity = {key: deepcopy(value) for key, value in artifact.items() if key != "value"}
+            return identity, deepcopy(artifact.get("value"))
+
     def get_artifact_scope(self, artifact_id: str) -> dict[str, str] | None:
         with self._artifact_lock:
             scope = self._artifact_scopes.get(str(artifact_id))
             return {"kind": scope[0], "id": scope[1]} if scope is not None else None
 
     def release_scope(self, artifact_scope: Mapping[str, Any]) -> int:
+        return self.release_scope_except(artifact_scope, retained_artifact_ids=())
+
+    def release_scope_except(
+        self,
+        artifact_scope: Mapping[str, Any],
+        *,
+        retained_artifact_ids: Mapping[str, Any] | list[str] | tuple[str, ...] | set[str],
+    ) -> int:
         scope = self._normalize_artifact_scope(artifact_scope, fallback_id="")
         if scope is None:
             return 0
         scope_key = (scope["kind"], scope["id"])
+        retained_ids = {str(value) for value in retained_artifact_ids}
         with self._artifact_lock:
             artifact_ids = [
                 artifact_id
                 for artifact_id, owner_scope in self._artifact_scopes.items()
-                if owner_scope == scope_key
+                if owner_scope == scope_key and artifact_id not in retained_ids
             ]
             for artifact_id in artifact_ids:
                 self._artifacts.pop(artifact_id, None)
@@ -305,9 +334,10 @@ class ActionArtifactManager:
         artifact_scope: Mapping[str, Any] | None = None,
     ) -> ActionArtifact:
         artifact_id = f"act_art_{uuid.uuid4().hex}"
-        safe_value = self._redact_value(value)
+        exact_value = deepcopy(value)
+        safe_value = self._redact_value(exact_value)
         preview = self._compact_value(safe_value, limit=4000)
-        raw_bytes = self._json_bytes(safe_value)
+        raw_bytes = self._json_bytes(exact_value)
         size = len(raw_bytes)
         preview_size = self._safe_json_size(preview)
         role = self._artifact_role(artifact_type)
@@ -324,7 +354,7 @@ class ActionArtifactManager:
             "role": role,
             "label": label,
             "media_type": media_type,
-            "value": safe_value,
+            "value": exact_value,
             "meta": deepcopy(resolved_meta),
             "size": size,
             "bytes": size,
@@ -380,7 +410,7 @@ class ActionArtifactManager:
             "role": role,
             "label": label,
             "media_type": media_type,
-            "value": self._redact_value(ref),
+            "value": deepcopy(ref),
             "meta": deepcopy(resolved_meta),
             "size": int(ref.get("size", ref.get("bytes", 0)) or 0),
             "bytes": int(ref.get("bytes", ref.get("size", 0)) or 0),

@@ -288,6 +288,8 @@ from .workspace import (
 )
 
 from .agent_execution import (
+    ActionArtifactReleaseDiagnostic,
+    ActionArtifactReleaseDiagnostics,
     AgentExecutionDiagnostics,
     AgentExecutionLineage,
     AgentExecutionLimits,

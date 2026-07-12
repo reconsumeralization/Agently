@@ -92,6 +92,7 @@ AgentTaskStatus = Literal[
     "max_iterations",
     "timed_out",
     "capability_unavailable",
+    "cancelled",
     "error",
 ]
 AgentTaskExecutionStrategy = Literal["auto", "flat", "taskboard"]
@@ -364,6 +365,14 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
         board_status: str = "",
         disclosure: str = "",
     ) -> str:
+        def bounded(text: str) -> str:
+            raw = text.encode("utf-8")
+            if len(raw) <= 4096:
+                return text
+            suffix = " [truncated]"
+            budget = 4096 - len(suffix.encode("utf-8"))
+            return raw[:budget].decode("utf-8", errors="ignore").rstrip() + suffix
+
         final_map = final if isinstance(final, Mapping) else {}
         provided = str(final_map.get("final_response") or "").strip()
         disclosure = str(disclosure or "").strip()
@@ -400,7 +409,9 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
         if not degradation_reason and (degraded or normalized_artifact_status == "degraded"):
             degradation_reason = reason_text
 
-        if provided and accepted:
+        # A canonical file ref is the terminal deliverable. Model-provided text
+        # may be the file body and must never become a second terminal carrier.
+        if provided and accepted and not ref_paths:
             additions: list[str] = []
             provided_lower = provided.casefold()
             if (normalized_artifact_status == "degraded" or degraded) and degradation_reason:
@@ -416,8 +427,8 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
                 if not disclosure_seen:
                     additions.append(disclosure)
             if additions:
-                return f"{provided.rstrip()} {' '.join(additions)}".strip()
-            return provided
+                return bounded(f"{provided.rstrip()} {' '.join(additions)}".strip())
+            return bounded(provided)
 
         if accepted:
             if normalized_artifact_status == "degraded" or degraded:
@@ -442,7 +453,7 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
             response += " Unmet requirements: " + "; ".join(normalized_missing[:5]) + "."
         if disclosure:
             response += " " + disclosure
-        return response.strip()
+        return bounded(response.strip())
 
     @staticmethod
     def _agent_task_final_result_text(value: Any) -> str:

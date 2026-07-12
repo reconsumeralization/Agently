@@ -43,6 +43,153 @@ def test_action_artifact_scope_is_private_and_returned_values_are_defensive() ->
     assert manager.get_artifact_value(artifact_id) is None
 
 
+def test_action_artifact_keeps_exact_private_value_and_redacts_preview_only() -> None:
+    agent: Any = Agently.create_agent("action-artifact-exact-private-value")
+    exact_value = {"token": "exact-secret", "nested": {"body": "full-value"}}
+    artifact = agent.action._artifact_manager.register_execution_artifact(
+        action_call_id="exact-private-call",
+        artifact_type="action_output",
+        label="Exact private value",
+        value=exact_value,
+    )
+
+    assert artifact["preview"]["token"] == "[REDACTED]"
+    assert agent.action._artifact_manager.get_artifact_value(artifact["artifact_id"]) == exact_value
+
+
+@pytest.mark.asyncio
+async def test_direct_action_entry_releases_success_and_failure_scopes(tmp_path, monkeypatch) -> None:
+    agent: Any = Agently.create_agent("action-artifact-direct-scope-release")
+    action_id = "direct_scope_release"
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Return a large direct Action value.",
+        kwargs={},
+        func=lambda: {"body": "d" * (1024 * 1024)},
+    )
+
+    record = await agent.action.async_execute_action(action_id, {})
+    assert record["artifact_refs"]
+    assert agent.action._artifact_manager._artifacts == {}
+
+    captured_id = ""
+    original_finalize = agent.action._finalize_action_result
+
+    def fail_after_registration(result: Any, *, artifact_scope: dict[str, str] | None = None) -> Any:
+        nonlocal captured_id
+        finalized = original_finalize(result, artifact_scope=artifact_scope)
+        captured_id = finalized["artifact_refs"][0]["artifact_id"]
+        raise RuntimeError("finalization failed after artifact registration")
+
+    monkeypatch.setattr(agent.action, "_finalize_action_result", fail_after_registration)
+    with pytest.raises(RuntimeError, match="finalization failed"):
+        await agent.action.async_execute_action(action_id, {})
+    assert captured_id
+    assert agent.action._artifact_manager.get_artifact_value(captured_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flow_name", ["TriggerFlowActionFlow", "DAGActionFlow"])
+async def test_standalone_action_flows_release_success_scope(
+    flow_name: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    agent: Any = Agently.create_agent(f"action-artifact-standalone-{flow_name}")
+    action_id = f"standalone_{flow_name}"
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Return a large standalone flow value.",
+        kwargs={},
+        func=lambda: {"body": "f" * (1024 * 1024)},
+    )
+    flow = agent.action._flow_controller.create_named_action_flow(flow_name)
+
+    async def planning_handler(context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        if context.get("done_plans"):
+            return {"next_action": "response", "action_calls": []}
+        return {
+            "next_action": "execute",
+            "action_calls": [{"action_id": action_id, "action_input": {}, "purpose": "produce output"}],
+        }
+
+    async def execution_handler(_context: dict[str, Any], request: dict[str, Any]) -> list[Any]:
+        return [await request["async_call_action"](action_id, {})]
+
+    records = await flow.async_run(
+        action=agent.action,
+        prompt=agent.request.prompt,
+        settings=agent.settings,
+        action_list=agent.action.get_action_list(),
+        planning_handler=planning_handler,
+        execution_handler=execution_handler,
+        max_rounds=2,
+    )
+
+    assert records
+    assert agent.action._artifact_manager._artifacts == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_mode", ["failure", "cancellation"])
+async def test_standalone_triggerflow_action_scope_releases_on_failure_and_cancellation(
+    terminal_mode: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    agent: Any = Agently.create_agent(f"action-artifact-standalone-{terminal_mode}")
+    action_id = f"standalone_{terminal_mode}"
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Create a large standalone value before terminal interruption.",
+        kwargs={},
+        func=lambda: {"body": terminal_mode * (1024 * 1024)},
+    )
+    flow = agent.action._flow_controller.create_named_action_flow("TriggerFlowActionFlow")
+    artifact_registered = asyncio.Event()
+    wait_forever = asyncio.Event()
+
+    async def planning_handler(context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        if context.get("done_plans"):
+            return {"next_action": "response", "action_calls": []}
+        return {
+            "next_action": "execute",
+            "action_calls": [{"action_id": action_id, "action_input": {}, "purpose": "interrupt"}],
+        }
+
+    async def execution_handler(_context: dict[str, Any], request: dict[str, Any]) -> list[Any]:
+        await request["async_call_action"](action_id, {})
+        assert agent.action._artifact_manager._artifacts
+        artifact_registered.set()
+        if terminal_mode == "failure":
+            raise RuntimeError("standalone flow failure")
+        await wait_forever.wait()
+        return []
+
+    run = asyncio.create_task(
+        flow.async_run(
+            action=agent.action,
+            prompt=agent.request.prompt,
+            settings=agent.settings,
+            action_list=agent.action.get_action_list(),
+            planning_handler=planning_handler,
+            execution_handler=execution_handler,
+            max_rounds=2,
+        )
+    )
+    await artifact_registered.wait()
+    if terminal_mode == "cancellation":
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    else:
+        with pytest.raises(RuntimeError, match="standalone flow failure"):
+            await run
+    assert agent.action._artifact_manager._artifacts == {}
+
+
 @pytest.mark.asyncio
 async def test_large_action_output_stays_in_memory_and_runtime_event_is_bounded() -> None:
     large_body = "x" * (1024 * 1024)
@@ -339,7 +486,11 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
     concurrent_ref = next(
         ref for ref in concurrent_record["artifact_refs"] if ref.get("artifact_type") == "action_output"
     )
-    owner.logs["artifact_refs"] = [owner_ref]
+    unselected_record = await execute_for(owner, "u")
+    unselected_ref = next(
+        ref for ref in unselected_record["artifact_refs"] if ref.get("artifact_type") == "action_output"
+    )
+    owner.logs["artifact_refs"] = [owner_ref, unselected_ref]
     owner.result = {"accepted": True, "artifact_refs": [owner_ref], "reply": "bounded"}
     owner.status = "success"
 
@@ -358,11 +509,18 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
 
     await _finalize_terminal_execution(owner, failed=False)
 
-    assert agent.action._artifact_manager.get_artifact_value(owner_ref["artifact_id"]) is None
+    if failure_stage == "promotion":
+        assert agent.action._artifact_manager.get_artifact_value(owner_ref["artifact_id"]) is not None
+    else:
+        assert agent.action._artifact_manager.get_artifact_value(owner_ref["artifact_id"]) is None
+    assert agent.action._artifact_manager.get_artifact_value(unselected_ref["artifact_id"]) is None
     assert agent.action._artifact_manager.get_artifact_value(concurrent_ref["artifact_id"]) is not None
     release_diagnostic = owner.diagnostics["action_artifact_release"]
-    assert release_diagnostic["status"] == "released"
+    assert release_diagnostic["status"] == ("deferred" if failure_stage == "promotion" else "released")
     assert release_diagnostic["scope"] == {"kind": "agent_execution", "id": owner.id}
+    assert release_diagnostic["preserved_artifact_ids"] == (
+        [owner_ref["artifact_id"]] if failure_stage == "promotion" else []
+    )
     retention_diagnostics = owner.diagnostics["workspace_retention"]["diagnostics"]
     assert retention_diagnostics
     assert all(len(str(item.get("message", ""))) <= 360 for item in retention_diagnostics)

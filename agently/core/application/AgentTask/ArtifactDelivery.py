@@ -207,10 +207,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 expected_size = int(raw_ref.get("bytes") or 0)
             except (TypeError, ValueError):
                 expected_size = 0
-            if not path or not expected_digest or expected_size <= 0:
+            if not path or not expected_digest or expected_size < 0:
                 defer(
                     "agent_task.retention.deliverable_ref_invalid",
-                    "Terminal Workspace file ref has no verifiable path, size, or digest.",
+                    "Terminal Workspace file ref has no verifiable path, non-negative size, or digest.",
                     path=path,
                 )
                 continue
@@ -325,9 +325,9 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     "execution_id": self.id,
                     "status": status,
                     "terminal_at": datetime.now(timezone.utc).isoformat(),
-                    "state_version": None,
-                    "recovery_active": False,
-                    "lease_active": False,
+                    "state_version": self._workspace_state_version,
+                    "recovery_active": self._workspace_recovery_active,
+                    "lease_active": self._workspace_lease_active,
                 },
                 retained_refs=list(getattr(self, "_terminal_retained_refs", []) or []),
                 inline_result=DataFormatter.sanitize(self.result),

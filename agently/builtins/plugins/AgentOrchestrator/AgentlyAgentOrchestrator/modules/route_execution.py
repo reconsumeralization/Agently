@@ -148,9 +148,19 @@ async def start_execution(
             route, owner.result = await owner._await_route_with_limits(run_coro)
             if owner.status == "running":
                 owner.status = "success"
-            await owner.emit_stream("result", owner.result, route=route, source="agent_execution")
+            terminal_projection = await _prepare_terminal_projection(owner)
+            await owner.emit_stream(
+                "result",
+                terminal_projection[0],
+                route=route,
+                source="agent_execution",
+            )
             terminal_failed = owner.status not in {"success", "completed"}
-            await _finalize_terminal_execution(owner, failed=terminal_failed)
+            await _finalize_terminal_execution(
+                owner,
+                failed=terminal_failed,
+                terminal_projection=terminal_projection,
+            )
             return owner.result
         except RuntimeStageStallError as error:
             owner.status = "timed_out" if error.status == "timed_out" else "stalled"
@@ -196,6 +206,21 @@ async def start_execution(
             )
             await _finalize_terminal_execution(owner, failed=True)
             raise
+        except asyncio.CancelledError as error:
+            owner.status = "cancelled"
+            owner._error = error
+            owner._record_error_diagnostic(error)
+            await owner.emit_stream(
+                "cancelled",
+                {
+                    "status": "cancelled",
+                    "type": error.__class__.__name__,
+                    "message": "AgentExecution was cancelled by its host.",
+                },
+                source="agent_execution",
+            )
+            await _finalize_terminal_execution(owner, failed=True, cancelled=True)
+            raise
         except BaseException as error:
             owner.status = "error"
             owner._error = error
@@ -213,21 +238,39 @@ async def start_execution(
             await owner.close_streams()
 
 
-async def _finalize_terminal_execution(owner: "AgentExecution", *, failed: bool) -> None:
+async def _prepare_terminal_projection(
+    owner: "AgentExecution",
+) -> tuple[Any, list[Any]]:
     try:
-        try:
-            event_result, retained_refs = await prepare_agent_execution_terminal_retention(owner)
-        except Exception as error:
-            defer_agent_execution_terminal_retention(
-                owner,
-                code="agent_execution.retention.prepare_failed",
-                error=error,
-            )
-            event_result = {
+        return await prepare_agent_execution_terminal_retention(owner)
+    except Exception as error:
+        defer_agent_execution_terminal_retention(
+            owner,
+            code="agent_execution.retention.prepare_failed",
+            error=error,
+        )
+        return (
+            {
                 "status": owner.status,
                 "kind": "agent_execution_terminal_result_unavailable",
-            }
-            retained_refs = []
+            },
+            [],
+        )
+
+
+async def _finalize_terminal_execution(
+    owner: "AgentExecution",
+    *,
+    failed: bool,
+    cancelled: bool = False,
+    terminal_projection: tuple[Any, list[Any]] | None = None,
+) -> None:
+    try:
+        event_result, retained_refs = (
+            terminal_projection
+            if terminal_projection is not None
+            else await _prepare_terminal_projection(owner)
+        )
         owner.close_snapshot = {
             **dict(owner.close_snapshot),
             "terminal_result": DataFormatter.sanitize(event_result),
@@ -253,19 +296,26 @@ async def _finalize_terminal_execution(owner: "AgentExecution", *, failed: bool)
                 code="agent_execution.retention.terminal_event_delivery_failed",
                 error=error,
             )
-        terminal_status: Literal["completed", "failed", "cancelled"] = "failed" if failed else "completed"
+        terminal_status: Literal["completed", "failed", "cancelled"] = (
+            "cancelled" if cancelled else "failed" if failed else "completed"
+        )
         await apply_agent_execution_terminal_retention(owner, status=terminal_status)
     finally:
         action = getattr(owner.agent, "action", None)
-        release_scope = getattr(action, "_release_artifact_scope", None)
+        release_scope = getattr(action, "_release_artifact_scope_except", None)
         if callable(release_scope):
             try:
-                released = release_scope({"kind": "agent_execution", "id": owner.id})
+                preserved_ids = set(owner._terminal_preserved_action_artifact_ids)
+                released = release_scope(
+                    {"kind": "agent_execution", "id": owner.id},
+                    retained_artifact_ids=preserved_ids,
+                )
                 released_count = released if isinstance(released, int) else 0
                 owner.diagnostics["action_artifact_release"] = {
-                    "status": "released",
+                    "status": "deferred" if preserved_ids else "released",
                     "scope": {"kind": "agent_execution", "id": owner.id},
                     "released_count": released_count,
+                    "preserved_artifact_ids": sorted(preserved_ids),
                 }
             except Exception as error:
                 owner.diagnostics["action_artifact_release"] = {

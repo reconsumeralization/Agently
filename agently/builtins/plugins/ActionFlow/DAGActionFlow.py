@@ -387,14 +387,14 @@ class DAGActionFlow:
         flow.when("EXECUTE").to(execute_step_via_dag)
         flow.when("DONE").to(finalize_loop)
 
-        execution = flow.create_execution(parent_run_context=action_loop_run)
+        execution = flow.create_execution(parent_run_context=action_loop_run, auto_close=False)
         try:
             with bind_runtime_context(
                 parent_run_context=action_loop_run,
                 tool_phase_run_context=action_loop_run,
                 settings=settings,
             ):
-                await execution.async_start(wait_for_result=False)
+                await execution.async_start()
                 result = await execution.async_close(timeout=timeout)
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
@@ -413,6 +413,9 @@ class DAGActionFlow:
                     error=error,
                 )
             raise
+        finally:
+            if artifact_scope.get("kind") != "agent_execution":
+                action._release_artifact_scope(artifact_scope)
         if isinstance(result, dict):
             result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):

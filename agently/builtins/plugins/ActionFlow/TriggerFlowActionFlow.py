@@ -944,6 +944,9 @@ class TriggerFlowActionFlow:
                     error=error,
                 )
             raise
+        finally:
+            if artifact_scope.get("kind") != "agent_execution" and not exchange_paused:
+                action._release_artifact_scope(artifact_scope)
         if isinstance(result, dict):
             result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):

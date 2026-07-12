@@ -58,6 +58,20 @@ class AgentExecutionDiagnostics(TypedDict):
     last_progress: dict[str, Any]
     required_capabilities: list[dict[str, Any]]
     workspace_retention: NotRequired[dict[str, Any]]
+    action_artifact_release: NotRequired["ActionArtifactReleaseDiagnostics"]
+
+
+class ActionArtifactReleaseDiagnostic(TypedDict):
+    code: str
+    message: str
+
+
+class ActionArtifactReleaseDiagnostics(TypedDict, total=False):
+    status: Literal["released", "deferred", "failed"]
+    scope: dict[str, str]
+    released_count: int
+    preserved_artifact_ids: list[str]
+    diagnostics: list[ActionArtifactReleaseDiagnostic]
 
 
 class AgentExecutionRouteInfo(TypedDict):

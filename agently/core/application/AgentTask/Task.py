@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from agently.core.Workspace import LazyWorkspace, Workspace
+
 from .TaskShared import *
 from .StrategyRouter import AgentTaskStrategyRouterMixin
 from .TaskBoardStrategy import AgentTaskTaskBoardStrategyMixin
@@ -53,7 +55,7 @@ class AgentTask(
         goal: str,
         success_criteria: list[str],
         execution: AgentTaskExecutionStrategy | str | None = "auto",
-        workspace: str | os.PathLike[str] | None = None,
+        workspace: str | os.PathLike[str] | Workspace | LazyWorkspace | None = None,
         max_iterations: int | None = _AGENT_TASK_DEFAULT_MAX_ITERATIONS,
         verify: Literal["before_done"] = "before_done",
         context_profile: str = "auto",
@@ -84,18 +86,20 @@ class AgentTask(
         self.limits = dict(limits or {})
         self.options = dict(options or {})
         agent_with_workspace = cast(Any, agent)
-        if workspace is not None:
-            agent_with_workspace.use_workspace(workspace)
-        if getattr(agent, "workspace", None) is None:
+        if isinstance(workspace, (Workspace, LazyWorkspace)):
+            bound_workspace = workspace
+        else:
+            if workspace is not None:
+                agent_with_workspace.use_workspace(workspace)
+            bound_workspace = getattr(agent, "workspace", None)
+        if bound_workspace is None:
             raise RuntimeError(
                 "AgentTask requires a Workspace binding. Standard Agents include a lazy Workspace; "
                 "pass workspace=... or call agent.use_workspace(...) only when you need an explicit "
                 "root, mode, or provider."
             )
-        bound_workspace = agent_with_workspace.workspace
-        # Bind the task file root as a lineage child of the Agent scope so the
-        # task subtree (and any nested executions) lives under the Agent node and
-        # can be pruned as one contained subtree (spec section 8.2).
+        # The route owner may pass its execution-scoped Workspace directly. The
+        # task derives one child view without mutating the shared Agent binding.
         with_scope_node = getattr(bound_workspace, "with_scope_node", None)
         if callable(with_scope_node):
             self.workspace: Any = with_scope_node(
@@ -157,6 +161,9 @@ class AgentTask(
         self._terminal_retained_refs: list[Any] = []
         self._terminal_retention_deferred = False
         self._terminal_taskboard_state: dict[str, Any] | None = None
+        self._workspace_state_version = 0
+        self._workspace_recovery_active = False
+        self._workspace_lease_active = False
         self._stream_items: list[AgentExecutionStreamData] = []
         self._stream_queues: list[asyncio.Queue[Any]] = []
         self._background_stream_tasks: set[asyncio.Task[Any]] = set()

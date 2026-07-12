@@ -202,6 +202,12 @@ class AgentExecution:
         self._terminal_retention_policy: Any = None
         self._terminal_retention_deferred = False
         self._terminal_retention_diagnostics: list[dict[str, Any]] = []
+        self._terminal_task_handoff_refs: list[Any] = []
+        self._terminal_selected_action_artifact_ids: set[str] = set()
+        self._terminal_preserved_action_artifact_ids: set[str] = set()
+        self._workspace_state_version = 0
+        self._workspace_recovery_active = False
+        self._workspace_lease_active = False
         self._model_request_result: Any = None
         self.status = "created"
         self._started = False
@@ -1131,6 +1137,7 @@ class AgentExecution:
                 event_type=path,
                 meta=meta,
             )
+        self._workspace_state_version += 1
         stream_meta = merge_stream_meta(
             meta,
             execution_id=self.id,

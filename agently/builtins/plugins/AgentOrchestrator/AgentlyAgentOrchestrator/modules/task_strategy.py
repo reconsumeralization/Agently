@@ -140,7 +140,10 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             goal=goal,
             success_criteria=success_criteria,
             execution=execution_strategy,
-            workspace=task_options.get("workspace"),
+            # AgentExecution owns the route and hands its exact scoped view to
+            # AgentTask. AgentTask derives a descendant instead of rebinding
+            # from the Agent-wide Workspace or inferring a filesystem path.
+            workspace=execution.workspace,
             max_iterations=AgentTask.normalize_max_iterations(max_iterations),
             verify=cast(Any, task_options.get("verify", "before_done")),
             context_profile=str(task_options.get("context_profile", "auto")),
@@ -188,6 +191,11 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         await execution.stream.bridge_agent_task_item(item, route="agent_task")
 
     task_meta = await task.async_meta()
+    execution._terminal_task_handoff_refs = [
+        dict(ref)
+        for ref in list(getattr(task, "_terminal_deliverable_refs", []) or [])
+        if isinstance(ref, Mapping)
+    ]
     execution.task_refs.update(
         {
             "status": task.status,

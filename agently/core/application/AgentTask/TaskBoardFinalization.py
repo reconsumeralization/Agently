@@ -560,6 +560,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         trusted_final_refs = self._trusted_terminal_file_refs(trusted_terminal_refs)
         can_attempt_degraded_final = self._taskboard_can_attempt_degraded_final(revision, schedule)
         if result_status != "completed" and not can_attempt_degraded_final:
+            promoted_partial_refs = await self._register_terminal_deliverables(trusted_terminal_refs)
             self.status = "blocked" if result_status == "blocked" else "error"
             reason = "TaskBoard did not reach a completed board state."
             final_response = self._taskboard_user_final_response(
@@ -568,7 +569,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 artifact_status="partial",
                 reason=reason,
                 missing_criteria=["TaskBoard did not reach a completed board state."],
-                final_refs=[],
+                final_refs=trusted_final_refs,
                 board_status=result_status,
                 degraded_finalization_attempted=False,
             )
@@ -581,8 +582,11 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "effective_execution_strategy": self.effective_execution_strategy,
                 "reason": reason,
                 "final_response": final_response,
-                "final_result": "",
-                "artifact_refs": [],
+                "final_result": self._compact_terminal_final_result(
+                    candidate_final_result,
+                    trusted_file_refs=trusted_final_refs,
+                ),
+                "artifact_refs": promoted_partial_refs,
                 "missing_criteria": ["TaskBoard did not reach a completed board state."],
             }
             self._terminal_taskboard_state = {

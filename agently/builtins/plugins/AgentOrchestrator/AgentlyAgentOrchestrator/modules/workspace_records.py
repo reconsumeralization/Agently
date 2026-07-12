@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from agently.types.data import AgentExecutionWorkspacePurpose, AgentExecutionWorkspaceRecord
+from agently.core.Workspace.Retention import resolve_retention_policy
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
@@ -45,6 +46,12 @@ async def record_workspace(
         raise ValueError("AgentExecution Workspace deliverable records cannot also be recovery checkpoints.")
     if purpose == "audit" and owner.options.get("workspace_retention_policy") is None:
         raise ValueError("AgentExecution Workspace audit records require an explicit retention policy override.")
+    post_terminal = owner._completed
+    if post_terminal and purpose in {"process", "recovery"}:
+        raise RuntimeError(
+            f"AgentExecution post-terminal Workspace writes reject purpose={purpose!r}; "
+            "only governed deliverable or explicitly retained audit writes are allowed."
+        )
     if owner.workspace is None:
         raise RuntimeError(
             "AgentExecution has no Workspace binding. "
@@ -77,6 +84,7 @@ async def record_workspace(
         profile=profile,
     )
     append_workspace_ref(owner, collection, record_ref)
+    owner._workspace_state_version += 1
 
     if purpose == "deliverable":
         stored_ref = await owner.workspace.ref_envelope(record_ref)
@@ -88,6 +96,7 @@ async def record_workspace(
             record_ref=record_ref,
             meta={"owner": "AgentExecution", "workspace_purpose": purpose},
         )
+        owner._terminal_anchored_ref_ids.add(record_ref["id"])
 
     checkpoint_ref = None
     if checkpoint:
@@ -111,11 +120,23 @@ async def record_workspace(
         )
         append_workspace_ref(owner, "verification_evidence", evidence_link)
 
-    return {
+    response: AgentExecutionWorkspaceRecord = {
         "record": record_ref,
         "checkpoint": checkpoint_ref,
         "workspace_refs": DataFormatter.sanitize(owner.workspace_refs),
     }
+    if post_terminal:
+        from .terminal_retention import apply_agent_execution_terminal_retention
+
+        owner._terminal_retention_policy = resolve_retention_policy(
+            owner.options.get("workspace_retention_policy"),
+            supports_cold=True,
+        )
+        await apply_agent_execution_terminal_retention(
+            owner,
+            status="completed" if owner.status in {"success", "completed"} else "failed",
+        )
+    return response
 
 
 def workspace_scope(owner: "AgentExecution", scope: dict[str, Any] | None = None) -> dict[str, Any]:

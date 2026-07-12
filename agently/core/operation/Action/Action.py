@@ -596,6 +596,17 @@ class Action:
     def _release_artifact_scope(self, artifact_scope: dict[str, str]) -> int:
         return self._artifact_manager.release_scope(artifact_scope)
 
+    def _release_artifact_scope_except(
+        self,
+        artifact_scope: dict[str, str],
+        *,
+        retained_artifact_ids: set[str],
+    ) -> int:
+        return self._artifact_manager.release_scope_except(
+            artifact_scope,
+            retained_artifact_ids=retained_artifact_ids,
+        )
+
     @classmethod
     def _to_model_visible_record(cls, record: "ActionResult") -> "ActionResult":
         return ActionArtifactManager._to_model_visible_record(record)
@@ -758,18 +769,24 @@ class Action:
         next_value: str = "",
         artifact_scope: dict[str, str] | None = None,
     ):
-        result = await self.action_dispatcher.async_execute(
-            name,
-            kwargs,
-            settings=settings,
-            purpose=purpose,
-            policy_override=policy_override,
-            trusted_policy_override=trusted_policy_override,
-            source_protocol=source_protocol,
-            todo_suggestion=todo_suggestion,
-            next_value=next_value,
-        )
-        return self._finalize_action_result(result, artifact_scope=artifact_scope)
+        owns_scope = artifact_scope is None
+        resolved_scope = artifact_scope or {"kind": "action_call", "id": f"act_call_{uuid.uuid4().hex}"}
+        try:
+            result = await self.action_dispatcher.async_execute(
+                name,
+                kwargs,
+                settings=settings,
+                purpose=purpose,
+                policy_override=policy_override,
+                trusted_policy_override=trusted_policy_override,
+                source_protocol=source_protocol,
+                todo_suggestion=todo_suggestion,
+                next_value=next_value,
+            )
+            return self._finalize_action_result(result, artifact_scope=resolved_scope)
+        finally:
+            if owns_scope:
+                self._release_artifact_scope(resolved_scope)
 
     def execute_action(self, name: str, kwargs: dict[str, Any], **kwargs_options):
         return FunctionShifter.syncify(self.async_execute_action)(name, kwargs, **kwargs_options)

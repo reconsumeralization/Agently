@@ -3624,6 +3624,89 @@ async def test_agent_task_terminal_retention_passes_workspace_policy_override(tm
     assert retention_result["accounting"]["entities"]["record_ids"] == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active_fact", ["recovery", "lease"])
+async def test_agent_task_terminal_retention_passes_real_active_lifecycle_facts(
+    tmp_path,
+    monkeypatch,
+    active_fact: str,
+):
+    agent = _create_agent(f"agent-task-active-{active_fact}").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id=f"agent-task-active-{active_fact}",
+        goal="Preserve active lifecycle state.",
+        success_criteria=["Active state is not cleaned."],
+        execution="flat",
+    )
+    process_ref = await task.workspace.put(
+        {"active": active_fact},
+        collection="observations",
+        kind="active_lifecycle_process",
+    )
+    task.result = {"status": "completed", "final_response": "bounded", "artifact_refs": []}
+    task._workspace_state_version = 23
+    task._workspace_recovery_active = active_fact == "recovery"
+    task._workspace_lease_active = active_fact == "lease"
+    captured: dict[str, Any] = {}
+    original_inspect = task.workspace.inspect_retention
+
+    async def capture_inspect(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs["lifecycle"])
+        return await original_inspect(*args, **kwargs)
+
+    monkeypatch.setattr(task.workspace, "inspect_retention", capture_inspect)
+    retention = await task._apply_terminal_workspace_retention(status="completed")
+
+    assert captured["state_version"] == 23
+    assert captured["recovery_active"] is (active_fact == "recovery")
+    assert captured["lease_active"] is (active_fact == "lease")
+    assert retention is not None
+    assert retention["status"] == "deferred"
+    assert await task.workspace.get_data(process_ref) == {"active": active_fact}
+
+
+@pytest.mark.asyncio
+async def test_agent_task_cancellation_applies_cancelled_retention_and_reraises(tmp_path, monkeypatch):
+    agent = _create_agent("agent-task-cancelled-retention").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-cancelled-retention",
+        goal="Wait until cancelled.",
+        success_criteria=["Cancellation remains observable."],
+        execution="flat",
+    )
+    started = asyncio.Event()
+    wait_forever = asyncio.Event()
+    captured: dict[str, Any] = {}
+    original_inspect = task.workspace.inspect_retention
+
+    async def blocking_iteration(_iteration_index: int) -> dict[str, Any]:
+        started.set()
+        await wait_forever.wait()
+        return {"terminal": False}
+
+    async def capture_inspect(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs["lifecycle"])
+        return await original_inspect(*args, **kwargs)
+
+    monkeypatch.setattr(cast(Any, task), "_run_iteration", blocking_iteration)
+    monkeypatch.setattr(task.workspace, "inspect_retention", capture_inspect)
+    run = asyncio.create_task(task.async_run())
+    await started.wait()
+    run.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert task.status == "cancelled"
+    assert captured["status"] == "cancelled"
+    assert captured["state_version"] is not None
+    cancelled_items = [item for item in task._stream_items if item.path == "agent_task.cancelled"]
+    assert len(cancelled_items) == 1
+    assert len(str(cancelled_items[0].value).encode("utf-8")) <= 4096
+
+
 def test_agent_task_terminal_final_result_is_bounded_and_file_body_free(tmp_path):
     agent = _create_agent("agent-task-terminal-result-bounds").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -3655,6 +3738,65 @@ def test_agent_task_terminal_final_result_is_bounded_and_file_body_free(tmp_path
     assert natural_result["truncated"] is True
     assert str(natural_result["preview"]).startswith("BUSINESS_RESULT_START")
     assert len(json.dumps(natural_result, ensure_ascii=False)) < 2200
+
+
+def test_agent_task_file_backed_final_response_ignores_model_body_and_is_byte_bounded(tmp_path):
+    agent = _create_agent("agent-task-terminal-response-bounds").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-response-bounds",
+        goal="Return a file-backed terminal response.",
+        success_criteria=["The response points to the canonical file."],
+        execution="flat",
+    )
+    model_body = "MODEL_FILE_BODY_MUST_NOT_REACH_FINAL_RESPONSE\n" + ("section\n" * 200000)
+    file_ref = {
+        "path": "reports/final.md",
+        "bytes": len(model_body.encode()),
+        "sha256": "a" * 64,
+        "media_type": "text/markdown",
+        "content_kind": "text",
+        "role": "workspace_artifact",
+    }
+
+    response = task._agent_task_user_final_response(
+        final={"final_response": model_body, "final_result": model_body},
+        accepted=True,
+        artifact_status="accepted",
+        final_refs=[file_ref],
+        final_result=model_body,
+    )
+
+    assert response == "Completed. Deliverable artifact: reports/final.md."
+    assert len(response.encode("utf-8")) <= 4096
+    assert "MODEL_FILE_BODY_MUST_NOT_REACH_FINAL_RESPONSE" not in response
+
+
+@pytest.mark.asyncio
+async def test_agent_task_terminal_retention_accepts_verified_zero_byte_file(tmp_path):
+    agent = _create_agent("agent-task-zero-byte-terminal-file").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-zero-byte-terminal-file",
+        goal="Retain the intentionally empty marker file.",
+        success_criteria=["The empty marker is retained by exact digest."],
+        execution="flat",
+    )
+    await task.workspace.write_file("reports/empty.txt", "")
+    readback = await task.workspace.read_file("reports/empty.txt", max_bytes=1)
+    file_ref = {
+        "path": "reports/empty.txt",
+        "bytes": 0,
+        "sha256": readback["sha256"],
+        "media_type": readback.get("media_type"),
+        "content_kind": readback.get("content_kind", "text"),
+        "role": "workspace_artifact",
+    }
+
+    promoted = await task._register_terminal_deliverables([file_ref])
+
+    assert len(promoted) == 1
+    assert await task.workspace.get_data(promoted[0]) == file_ref
 
 
 @pytest.mark.asyncio
@@ -6460,6 +6602,63 @@ async def test_taskboard_finalization_repairs_structured_continuation_verdict(tm
     ]
     assert len(repair_cards) == 1
     assert "Missing required section." in repair_cards[0].evidence_contract["missing_criteria"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_early_noncompleted_terminal_preserves_verified_partial_ref(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-partial-terminal-ref").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-partial-terminal-ref",
+        goal="Preserve the verified partial report on failure.",
+        success_criteria=["The final report is complete."],
+        execution="taskboard",
+    )
+    await task.workspace.write_file("reports/partial.md", "verified partial body")
+    readback = await task.workspace.read_file("reports/partial.md", max_bytes=128)
+    partial_ref = {
+        "path": "reports/partial.md",
+        "bytes": readback["bytes"],
+        "sha256": readback["sha256"],
+        "media_type": readback.get("media_type"),
+        "content_kind": readback.get("content_kind", "text"),
+        "role": "workspace_artifact",
+    }
+    card = TaskBoardCard.from_value(
+        {"id": "draft", "objective": "Draft the report.", "required_outputs": ["Final report"]}
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-failed",
+            "graph": {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]},
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="failed",
+                    preview={"status": "failed", "remaining_work": ["Complete the report."]},
+                    file_refs=(partial_ref,),
+                ).to_dict()
+            },
+        }
+    )
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+    terminal = await task._finalize_taskboard(
+        revision,
+        context_pack=cast(Any, {}),
+    )
+    retention = await task._apply_terminal_workspace_retention(status="failed")
+
+    assert terminal == {"terminal": True, "status": "error"}
+    assert len(task.result["artifact_refs"]) == 1
+    assert await task.workspace.get_data(task.result["artifact_refs"][0]) == partial_ref
+    assert retention is not None
+    assert retention["status"] in {"applied", "noop"}
+    assert (await task.workspace.read_file("reports/partial.md"))["content"] == "verified partial body"
 
 
 def test_taskboard_final_verification_does_not_parse_repairable_reason_text():
