@@ -175,6 +175,7 @@ class ActionRunContext(_ActionRunContextRequired, total=False):
     done_plans: list[ActionResult]
     last_round_records: list[ActionResult]
     parent_run_context: Any
+    artifact_scope: dict[str, str]
     action: Any
     runtime: Any
 

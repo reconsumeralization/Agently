@@ -572,8 +572,29 @@ class Action:
     def _build_execution_digest(self, record: "ActionResult", *, artifact_refs: list[ActionArtifact], redaction_report: list[str]) -> dict[str, Any]:
         return self._artifact_manager._build_execution_digest(record, artifact_refs=artifact_refs, redaction_report=redaction_report)
 
-    def _finalize_action_result(self, result: Any) -> "ActionResult":
-        return self._artifact_manager.finalize_action_result(result)
+    def _finalize_action_result(
+        self,
+        result: Any,
+        *,
+        artifact_scope: dict[str, str] | None = None,
+    ) -> "ActionResult":
+        return self._artifact_manager.finalize_action_result(
+            result,
+            artifact_scope=artifact_scope,
+        )
+
+    @staticmethod
+    def _artifact_scope_from_run_context(run_context: Any) -> dict[str, str]:
+        execution_id = str(getattr(run_context, "execution_id", "") or "").strip()
+        if execution_id:
+            return {"kind": "agent_execution", "id": execution_id}
+        run_id = str(getattr(run_context, "run_id", "") or "").strip()
+        if not run_id:
+            raise ValueError("Action artifact scope requires a RunContext run_id or execution_id.")
+        return {"kind": "action_run", "id": run_id}
+
+    def _release_artifact_scope(self, artifact_scope: dict[str, str]) -> int:
+        return self._artifact_manager.release_scope(artifact_scope)
 
     @classmethod
     def _to_model_visible_record(cls, record: "ActionResult") -> "ActionResult":
@@ -735,6 +756,7 @@ class Action:
         source_protocol: str = "direct",
         todo_suggestion: str = "",
         next_value: str = "",
+        artifact_scope: dict[str, str] | None = None,
     ):
         result = await self.action_dispatcher.async_execute(
             name,
@@ -747,7 +769,7 @@ class Action:
             todo_suggestion=todo_suggestion,
             next_value=next_value,
         )
-        return self._finalize_action_result(result)
+        return self._finalize_action_result(result, artifact_scope=artifact_scope)
 
     def execute_action(self, name: str, kwargs: dict[str, Any], **kwargs_options):
         return FunctionShifter.syncify(self.async_execute_action)(name, kwargs, **kwargs_options)
@@ -1157,8 +1179,18 @@ class Action:
     def _normalize_execution_record(self, record: Any, command: "ActionCall | None", index: int) -> "ActionResult":
         return normalize_execution_record(record, command, index)
 
-    def _normalize_execution_records(self, records: Any, commands: list["ActionCall"]) -> list["ActionResult"]:
-        return self._artifact_manager.normalize_execution_records(records, commands)
+    def _normalize_execution_records(
+        self,
+        records: Any,
+        commands: list["ActionCall"],
+        *,
+        artifact_scope: dict[str, str] | None = None,
+    ) -> list["ActionResult"]:
+        return self._artifact_manager.normalize_execution_records(
+            records,
+            commands,
+            artifact_scope=artifact_scope,
+        )
 
     @staticmethod
     def to_action_results(records: list["ActionResult"]):

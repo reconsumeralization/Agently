@@ -24,6 +24,8 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
+from threading import RLock
 from typing import Any, cast
 
 from agently.types.data import ActionArtifact, ActionResult, WorkspaceFileRef
@@ -69,16 +71,59 @@ class ActionArtifactManager:
 
     def __init__(self, *, registry: Any = None):
         self._artifacts: dict[str, dict[str, Any]] = {}
+        self._artifact_lock = RLock()
         self._registry = registry
 
     # ── artifact storage access ────────────────────────────────────────────
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
-        return self._artifacts.get(str(artifact_id))
+        with self._artifact_lock:
+            return self._artifacts.get(str(artifact_id))
 
     def get_artifact_value(self, artifact_id: str) -> Any | None:
         artifact = self.get_artifact(artifact_id)
         return artifact.get("value") if artifact is not None else None
+
+    def release_scope(self, artifact_scope: Mapping[str, Any]) -> int:
+        scope = self._normalize_artifact_scope(artifact_scope, fallback_id="")
+        if scope is None:
+            return 0
+        with self._artifact_lock:
+            artifact_ids = [
+                artifact_id
+                for artifact_id, artifact in self._artifacts.items()
+                if self._artifact_scope(artifact) == scope
+            ]
+            for artifact_id in artifact_ids:
+                self._artifacts.pop(artifact_id, None)
+        return len(artifact_ids)
+
+    @staticmethod
+    def _normalize_artifact_scope(
+        artifact_scope: Mapping[str, Any] | None,
+        *,
+        fallback_id: str,
+    ) -> dict[str, str] | None:
+        if isinstance(artifact_scope, Mapping):
+            kind = str(artifact_scope.get("kind") or "").strip()
+            scope_id = str(artifact_scope.get("id") or "").strip()
+            if kind and scope_id:
+                return {"kind": kind, "id": scope_id}
+        if fallback_id:
+            return {"kind": "action_call", "id": fallback_id}
+        return None
+
+    @staticmethod
+    def _artifact_scope(artifact: Mapping[str, Any]) -> dict[str, str] | None:
+        meta = artifact.get("meta")
+        if not isinstance(meta, Mapping):
+            return None
+        scope = meta.get("artifact_scope")
+        if not isinstance(scope, Mapping):
+            return None
+        kind = str(scope.get("kind") or "").strip()
+        scope_id = str(scope.get("id") or "").strip()
+        return {"kind": kind, "id": scope_id} if kind and scope_id else None
 
     # ── redaction / compaction ─────────────────────────────────────────────
 
@@ -258,6 +303,7 @@ class ActionArtifactManager:
         value: Any,
         media_type: str = "application/json",
         meta: dict[str, Any] | None = None,
+        artifact_scope: Mapping[str, Any] | None = None,
     ) -> ActionArtifact:
         artifact_id = f"act_art_{uuid.uuid4().hex}"
         safe_value = self._redact_value(value)
@@ -266,6 +312,11 @@ class ActionArtifactManager:
         size = len(raw_bytes)
         preview_size = self._safe_json_size(preview)
         role = self._artifact_role(artifact_type)
+        resolved_meta = dict(meta or {})
+        resolved_meta["artifact_scope"] = self._normalize_artifact_scope(
+            artifact_scope,
+            fallback_id=action_call_id,
+        )
         stored = {
             "artifact_id": artifact_id,
             "action_call_id": action_call_id,
@@ -274,12 +325,13 @@ class ActionArtifactManager:
             "label": label,
             "media_type": media_type,
             "value": safe_value,
-            "meta": meta or {},
+            "meta": resolved_meta,
             "size": size,
             "bytes": size,
             "sha256": hashlib.sha256(raw_bytes).hexdigest(),
         }
-        self._artifacts[artifact_id] = stored
+        with self._artifact_lock:
+            self._artifacts[artifact_id] = stored
         return {
             "artifact_id": artifact_id,
             "action_call_id": action_call_id,
@@ -295,7 +347,7 @@ class ActionArtifactManager:
             "size": size,
             "bytes": size,
             "sha256": hashlib.sha256(raw_bytes).hexdigest(),
-            "meta": meta or {},
+            "meta": resolved_meta,
         }
 
     def register_external_artifact_ref(
@@ -307,12 +359,18 @@ class ActionArtifactManager:
         ref: dict[str, Any],
         media_type: str = "application/json",
         meta: dict[str, Any] | None = None,
+        artifact_scope: Mapping[str, Any] | None = None,
     ) -> ActionArtifact:
         artifact_id = str(ref.get("artifact_id") or f"act_art_{uuid.uuid4().hex}")
         role = self._artifact_role(artifact_type)
         preview = self._compact_value(ref, limit=4000)
         preview_size = self._safe_json_size(preview)
         path = ref.get("path") or ref.get("uri") or ref.get("url")
+        resolved_meta = dict(meta or {})
+        resolved_meta["artifact_scope"] = self._normalize_artifact_scope(
+            artifact_scope,
+            fallback_id=action_call_id,
+        )
         stored = {
             "artifact_id": artifact_id,
             "action_call_id": action_call_id,
@@ -321,14 +379,15 @@ class ActionArtifactManager:
             "label": label,
             "media_type": media_type,
             "value": self._redact_value(ref),
-            "meta": meta or {},
+            "meta": resolved_meta,
             "size": int(ref.get("size", ref.get("bytes", 0)) or 0),
             "bytes": int(ref.get("bytes", ref.get("size", 0)) or 0),
             "sha256": str(ref.get("sha256", "")),
         }
         if path is not None:
             stored["path"] = str(path)
-        self._artifacts[artifact_id] = stored
+        with self._artifact_lock:
+            self._artifacts[artifact_id] = stored
 
         artifact_ref: ActionArtifact = {
             "artifact_id": artifact_id,
@@ -344,7 +403,7 @@ class ActionArtifactManager:
             "available": True,
             "size": stored["size"],
             "bytes": stored["bytes"],
-            "meta": meta or {},
+            "meta": resolved_meta,
         }
         if path is not None:
             artifact_ref["path"] = str(path)
@@ -358,6 +417,7 @@ class ActionArtifactManager:
         action_call_id: str,
         artifact_refs: Any,
         artifacts: Any,
+        artifact_scope: Mapping[str, Any] | None,
     ) -> list[ActionArtifact]:
         normalized: list[ActionArtifact] = []
         seen: set[tuple[str, str, str]] = set()
@@ -387,6 +447,7 @@ class ActionArtifactManager:
                     value=item.get("value"),
                     media_type=str(item.get("media_type", "application/json")),
                     meta=cast(dict[str, Any], item.get("meta", {})) if isinstance(item.get("meta"), dict) else {},
+                    artifact_scope=artifact_scope,
                 )
                 path = item.get("path") or item.get("uri") or item.get("url")
                 if path is not None:
@@ -402,6 +463,7 @@ class ActionArtifactManager:
                         ref=item,
                         media_type=str(item.get("media_type", item.get("mime_type", "application/json"))),
                         meta=cast(dict[str, Any], item.get("meta", {})) if isinstance(item.get("meta"), dict) else {},
+                        artifact_scope=artifact_scope,
                     )
                 )
 
@@ -488,7 +550,12 @@ class ActionArtifactManager:
 
     # ── result finalization ────────────────────────────────────────────────
 
-    def finalize_action_result(self, result: Any) -> ActionResult:
+    def finalize_action_result(
+        self,
+        result: Any,
+        *,
+        artifact_scope: Mapping[str, Any] | None = None,
+    ) -> ActionResult:
         record = normalize_execution_record(result, None, 0) if not isinstance(result, dict) else cast(ActionResult, result)
         meta = record.get("meta", {})
         if not isinstance(meta, dict):
@@ -508,6 +575,7 @@ class ActionArtifactManager:
             action_call_id=action_call_id,
             artifact_refs=record.get("artifact_refs", []),
             artifacts=record.get("artifacts", []),
+            artifact_scope=artifact_scope,
         )
 
         result_exceeds_inline_limit = (
@@ -542,6 +610,7 @@ class ActionArtifactManager:
                     artifact_type="action_input",
                     label="Action input arguments",
                     value=kwargs,
+                    artifact_scope=artifact_scope,
                 )
             )
         if data is not None:
@@ -551,6 +620,7 @@ class ActionArtifactManager:
                     artifact_type="action_output",
                     label="Action raw output",
                     value=data,
+                    artifact_scope=artifact_scope,
                 )
             )
 
@@ -576,6 +646,8 @@ class ActionArtifactManager:
         self,
         records: Any,
         commands: list[Any],
+        *,
+        artifact_scope: Mapping[str, Any] | None = None,
     ) -> list[ActionResult]:
         if not isinstance(records, list):
             return []
@@ -584,7 +656,10 @@ class ActionArtifactManager:
         seen_call_ids: set[str] = set()
         for index, record in enumerate(records):
             command = commands[index] if index < len(commands) else None
-            finalized = self.finalize_action_result(normalize_execution_record(record, command, index))
+            finalized = self.finalize_action_result(
+                normalize_execution_record(record, command, index),
+                artifact_scope=artifact_scope,
+            )
             action_call_id = str(finalized.get("action_call_id", ""))
             if action_call_id and action_call_id in seen_call_ids:
                 continue

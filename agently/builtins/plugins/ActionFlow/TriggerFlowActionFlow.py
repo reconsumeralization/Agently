@@ -168,6 +168,7 @@ class TriggerFlowActionFlow:
                 "compat_event_family": "tool",
             },
         )
+        artifact_scope = action._artifact_scope_from_run_context(action_loop_run)
 
         async def publish_runtime_observation(
             kind: str,
@@ -426,7 +427,11 @@ class TriggerFlowActionFlow:
                         "error": str(resume_decision.get("reason", "Policy approval was denied.")),
                         "approval": {"required": True, "decision": resume_decision},
                     }
-                    records = action._normalize_execution_records([blocked_record], [pending_action])
+                    records = action._normalize_execution_records(
+                        [blocked_record],
+                        [pending_action],
+                        artifact_scope=artifact_scope,
+                    )
                     done_plans.extend(records)
                     data.set_state("done_plans", done_plans)
                     data.set_state("last_round_records", records)
@@ -518,7 +523,11 @@ class TriggerFlowActionFlow:
                     "error": str(gate_result.get("reason", "Policy approval was denied.")),
                     "approval": {"required": True, "decision": gate_result},
                 }
-                records = action._normalize_execution_records([blocked_record], [command])
+                records = action._normalize_execution_records(
+                    [blocked_record],
+                    [command],
+                    artifact_scope=artifact_scope,
+                )
                 done_plans.extend(records)
                 data.set_state("done_plans", done_plans)
                 data.set_state("last_round_records", records)
@@ -581,6 +590,7 @@ class TriggerFlowActionFlow:
                         "done_plans": done_plans,
                         "last_round_records": last_round_records,
                         "parent_run_context": parent_run_context,
+                        "artifact_scope": artifact_scope,
                         "action": action,
                         "runtime": action.action_runtime,
                     },
@@ -593,6 +603,7 @@ class TriggerFlowActionFlow:
                     },
                 ),
                 action_calls,
+                artifact_scope=artifact_scope,
             )
             agent_execution_context = get_current_agent_execution_context()
             record_action_records = getattr(agent_execution_context, "record_action_records", None)
@@ -748,7 +759,11 @@ class TriggerFlowActionFlow:
                         },
                         "meta": {"exchange": exchange_meta},
                     }
-                    records = action._normalize_execution_records([paused_record], [pending_action])
+                    records = action._normalize_execution_records(
+                        [paused_record],
+                        [pending_action],
+                        artifact_scope=artifact_scope,
+                    )
                     done_plans = execution.get_state("done_plans", [])
                     if not isinstance(done_plans, list):
                         done_plans = []
@@ -927,7 +942,10 @@ class TriggerFlowActionFlow:
         if not isinstance(result, list):
             return []
         normalized = [
-            action._finalize_action_result(action._normalize_execution_record(record, None, index))
+            action._finalize_action_result(
+                action._normalize_execution_record(record, None, index),
+                artifact_scope=artifact_scope,
+            )
             for index, record in enumerate(result)
         ]
         with bind_runtime_context(

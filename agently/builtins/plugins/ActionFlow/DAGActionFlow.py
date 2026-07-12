@@ -112,6 +112,7 @@ class DAGActionFlow:
                 "compat_event_family": "tool",
             },
         )
+        artifact_scope = action._artifact_scope_from_run_context(action_loop_run)
 
         async def publish_runtime_observation(
             kind: str,
@@ -289,6 +290,7 @@ class DAGActionFlow:
                     round_index=round_index,
                     agent_name=agent_name,
                     action_loop_run=action_loop_run,
+                    artifact_scope=artifact_scope,
                 )
 
             graph = {
@@ -317,7 +319,11 @@ class DAGActionFlow:
                     })
 
             # Normalize and finalize records
-            records = action._normalize_execution_records(task_results, action_calls)
+            records = action._normalize_execution_records(
+                task_results,
+                action_calls,
+                artifact_scope=artifact_scope,
+            )
 
             for record_index, record in enumerate(records):
                 action_id = record.get("action_id", record.get("tool_name", "unknown"))
@@ -412,7 +418,10 @@ class DAGActionFlow:
         if not isinstance(result, list):
             return []
         normalized = [
-            action._finalize_action_result(action._normalize_execution_record(record, None, index))
+            action._finalize_action_result(
+                action._normalize_execution_record(record, None, index),
+                artifact_scope=artifact_scope,
+            )
             for index, record in enumerate(result)
         ]
         with bind_runtime_context(
@@ -441,6 +450,7 @@ def _make_dag_node_handler(
     round_index: int,
     agent_name: str,
     action_loop_run,
+    artifact_scope: dict[str, str],
 ):
     """Create a handler for a single action node in the DAG."""
 
@@ -460,6 +470,7 @@ def _make_dag_node_handler(
                 source_protocol=source_protocol,
                 todo_suggestion=str(action_call.get("todo_suggestion", action_call.get("next", ""))),
                 next_value=str(action_call.get("todo_suggestion", action_call.get("next", ""))),
+                artifact_scope=artifact_scope,
             )
         except asyncio.TimeoutError:
             result = {

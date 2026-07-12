@@ -215,42 +215,66 @@ async def start_execution(
 
 async def _finalize_terminal_execution(owner: "AgentExecution", *, failed: bool) -> None:
     try:
-        event_result, retained_refs = await prepare_agent_execution_terminal_retention(owner)
-    except Exception as error:
-        defer_agent_execution_terminal_retention(
-            owner,
-            code="agent_execution.retention.prepare_failed",
-            error=error,
-        )
-        event_result = {
-            "status": owner.status,
-            "kind": "agent_execution_terminal_result_unavailable",
+        try:
+            event_result, retained_refs = await prepare_agent_execution_terminal_retention(owner)
+        except Exception as error:
+            defer_agent_execution_terminal_retention(
+                owner,
+                code="agent_execution.retention.prepare_failed",
+                error=error,
+            )
+            event_result = {
+                "status": owner.status,
+                "kind": "agent_execution_terminal_result_unavailable",
+            }
+            retained_refs = []
+        owner.close_snapshot = {
+            **dict(owner.close_snapshot),
+            "terminal_result": DataFormatter.sanitize(event_result),
+            "terminal_retained_refs": DataFormatter.sanitize(retained_refs),
         }
-        retained_refs = []
-    owner.close_snapshot = {
-        **dict(owner.close_snapshot),
-        "terminal_result": DataFormatter.sanitize(event_result),
-        "terminal_retained_refs": DataFormatter.sanitize(retained_refs),
-    }
-    terminal_close_snapshot = {
-        "status": owner.close_snapshot.get("status", owner.status),
-        "route": owner.close_snapshot.get("route") or owner.route_info.get("selected_route"),
-        "terminal_result": owner.close_snapshot["terminal_result"],
-        "terminal_retained_refs": owner.close_snapshot["terminal_retained_refs"],
-    }
-    reason = owner.close_snapshot.get("reason")
-    if reason:
-        terminal_close_snapshot["reason"] = str(reason)[:360]
-    try:
-        await owner._async_emit_agent_execution_terminal_event(
-            failed=failed,
-            close_snapshot=terminal_close_snapshot,
-        )
-    except Exception as error:
-        defer_agent_execution_terminal_retention(
-            owner,
-            code="agent_execution.retention.terminal_event_delivery_failed",
-            error=error,
-        )
-    terminal_status: Literal["completed", "failed", "cancelled"] = "failed" if failed else "completed"
-    await apply_agent_execution_terminal_retention(owner, status=terminal_status)
+        terminal_close_snapshot = {
+            "status": owner.close_snapshot.get("status", owner.status),
+            "route": owner.close_snapshot.get("route") or owner.route_info.get("selected_route"),
+            "terminal_result": owner.close_snapshot["terminal_result"],
+            "terminal_retained_refs": owner.close_snapshot["terminal_retained_refs"],
+        }
+        reason = owner.close_snapshot.get("reason")
+        if reason:
+            terminal_close_snapshot["reason"] = str(reason)[:360]
+        try:
+            await owner._async_emit_agent_execution_terminal_event(
+                failed=failed,
+                close_snapshot=terminal_close_snapshot,
+            )
+        except Exception as error:
+            defer_agent_execution_terminal_retention(
+                owner,
+                code="agent_execution.retention.terminal_event_delivery_failed",
+                error=error,
+            )
+        terminal_status: Literal["completed", "failed", "cancelled"] = "failed" if failed else "completed"
+        await apply_agent_execution_terminal_retention(owner, status=terminal_status)
+    finally:
+        action = getattr(owner.agent, "action", None)
+        release_scope = getattr(action, "_release_artifact_scope", None)
+        if callable(release_scope):
+            try:
+                released = release_scope({"kind": "agent_execution", "id": owner.id})
+                released_count = released if isinstance(released, int) else 0
+                owner.diagnostics["action_artifact_release"] = {
+                    "status": "released",
+                    "scope": {"kind": "agent_execution", "id": owner.id},
+                    "released_count": released_count,
+                }
+            except Exception as error:
+                owner.diagnostics["action_artifact_release"] = {
+                    "status": "failed",
+                    "scope": {"kind": "agent_execution", "id": owner.id},
+                    "diagnostics": [
+                        {
+                            "code": "agent_execution.action_artifact_release_failed",
+                            "message": (str(error).strip() or error.__class__.__name__)[:360],
+                        }
+                    ],
+                }

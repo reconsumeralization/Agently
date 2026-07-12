@@ -60,7 +60,7 @@ async def prepare_agent_execution_terminal_retention(
         policy = resolve_retention_policy(None, supports_cold=True)
     owner._terminal_retention_policy = policy
     inline_result_limit = cast(int, policy.get("inline_result_limit"))
-    retained_records, retained_refs, file_backed = await _canonical_result_refs(owner, result)
+    retained_records, retained_refs, file_backed, promoted_action_refs = await _canonical_result_refs(owner, result)
     if owner._terminal_retention_deferred:
         owner._terminal_inline_result = None
         owner._terminal_retained_refs = []
@@ -68,17 +68,18 @@ async def prepare_agent_execution_terminal_retention(
             "status": owner.status,
             "kind": "agent_execution_terminal_result_untrusted",
         }, []
+    projected_result = _project_promoted_action_refs(result, promoted_action_refs)
     if file_backed:
-        event_result = _compact_referenced_result(result, retained_refs, file_backed=True)
+        event_result = _compact_referenced_result(projected_result, retained_refs, file_backed=True)
         owner._terminal_inline_result = None
         owner._terminal_retained_refs = retained_refs
         return event_result, retained_records
-    if _serialized_size(result) <= inline_result_limit:
-        owner._terminal_inline_result = result
+    if _serialized_size(projected_result) <= inline_result_limit:
+        owner._terminal_inline_result = projected_result
         owner._terminal_retained_refs = retained_refs
-        return result, retained_records
+        return projected_result, retained_records
     if retained_refs:
-        event_result = _compact_referenced_result(result, retained_refs, file_backed=False)
+        event_result = _compact_referenced_result(projected_result, retained_refs, file_backed=False)
         owner._terminal_inline_result = None
         owner._terminal_retained_refs = retained_refs
         return event_result, retained_records
@@ -87,7 +88,7 @@ async def prepare_agent_execution_terminal_retention(
 
     record_ref = await owner.workspace.put_artifact_ref(
         owner.id,
-        result,
+        projected_result,
         metadata={
             "scope": {"execution_id": owner.id},
             "kind": "agent_execution_terminal_result",
@@ -203,12 +204,18 @@ def _terminal_result_value(owner: "AgentExecution") -> Any:
 async def _canonical_result_refs(
     owner: "AgentExecution",
     result: Any,
-) -> tuple[list[WorkspaceRecordRef], list[WorkspaceRetainedReference], bool]:
+) -> tuple[
+    list[WorkspaceRecordRef],
+    list[WorkspaceRetainedReference],
+    bool,
+    dict[str, WorkspaceRecordRef],
+]:
     if owner.workspace is None or not isinstance(result, Mapping):
-        return [], [], False
+        return [], [], False, {}
     retained_records: list[WorkspaceRecordRef] = []
     retained_refs: list[WorkspaceRetainedReference] = []
     file_backed = False
+    promoted_action_refs: dict[str, WorkspaceRecordRef] = {}
     seen: set[str] = set()
     for raw_ref, selected in _result_ref_candidates(owner, result):
         if not isinstance(raw_ref, Mapping):
@@ -225,6 +232,7 @@ async def _canonical_result_refs(
                 continue
             retained_records.append(promoted_ref)
             retained_refs.append(promoted_ref)
+            promoted_action_refs[action_artifact_id] = promoted_ref
             seen.add(key)
             continue
         envelope_id = str(raw_ref.get("record_id") or "")
@@ -325,7 +333,7 @@ async def _canonical_result_refs(
             "agent_execution.retention.reference_invalid",
             "Terminal artifact ref candidate is not a supported Workspace reference.",
         )
-    return retained_records, retained_refs, file_backed
+    return retained_records, retained_refs, file_backed, promoted_action_refs
 
 
 def _result_ref_candidates(
@@ -386,6 +394,14 @@ async def _promote_selected_action_artifact(
             "Selected Action artifact ref is missing artifact_id or action_call_id.",
         )
         return None
+    expected_scope = {"kind": "agent_execution", "id": owner.id}
+    if _action_artifact_scope(raw_ref) != expected_scope:
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.action_artifact_scope_mismatch",
+            "Selected Action artifact ref does not belong to this AgentExecution scope.",
+        )
+        return None
     if _action_artifact_identity(raw_ref) not in _bridged_action_artifact_identities(owner):
         _defer_untrusted_ref(
             owner,
@@ -428,8 +444,7 @@ async def _promote_selected_action_artifact(
             metadata={
                 "scope": {"execution_id": owner.id},
                 "kind": "agent_execution_action_artifact",
-                "summary": f"Selected Action artifact {artifact_id} for AgentExecution {owner.id}",
-                "action_artifact_id": artifact_id,
+                "summary": f"Selected Action artifact for AgentExecution {owner.id}",
                 "action_call_id": action_call_id,
             },
         )
@@ -464,6 +479,68 @@ def _action_artifact_identity(ref: Mapping[str, Any]) -> tuple[str, str, str, in
         str(ref.get("sha256") or ""),
         size,
     )
+
+
+def _action_artifact_scope(ref: Mapping[str, Any]) -> dict[str, str] | None:
+    meta = ref.get("meta")
+    if not isinstance(meta, Mapping):
+        return None
+    scope = meta.get("artifact_scope")
+    if not isinstance(scope, Mapping):
+        return None
+    kind = str(scope.get("kind") or "").strip()
+    scope_id = str(scope.get("id") or "").strip()
+    return {"kind": kind, "id": scope_id} if kind and scope_id else None
+
+
+def _project_promoted_action_refs(
+    result: Any,
+    promoted_refs: Mapping[str, WorkspaceRecordRef],
+) -> Any:
+    if not promoted_refs or not isinstance(result, Mapping):
+        return result
+    projected = dict(result)
+    _project_ref_lists(projected, promoted_refs)
+    final_result = projected.get("final_result")
+    if isinstance(final_result, Mapping):
+        projected["final_result"] = _project_structured_ref_container(final_result, promoted_refs)
+    evidence = projected.get("evidence")
+    if isinstance(evidence, Sequence) and not isinstance(evidence, (str, bytes, bytearray)):
+        projected["evidence"] = [
+            _project_structured_ref_container(item, promoted_refs)
+            if isinstance(item, Mapping)
+            else item
+            for item in evidence
+        ]
+    return projected
+
+
+def _project_structured_ref_container(
+    value: Mapping[str, Any],
+    promoted_refs: Mapping[str, WorkspaceRecordRef],
+) -> Mapping[str, Any]:
+    artifact_id = str(value.get("artifact_id") or "")
+    if artifact_id in promoted_refs:
+        return promoted_refs[artifact_id]
+    projected = dict(value)
+    _project_ref_lists(projected, promoted_refs)
+    return projected
+
+
+def _project_ref_lists(
+    container: dict[str, Any],
+    promoted_refs: Mapping[str, WorkspaceRecordRef],
+) -> None:
+    for key in ("artifact_refs", "file_refs"):
+        values = container.get(key)
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+            continue
+        container[key] = [
+            promoted_refs.get(str(value.get("artifact_id") or ""), value)
+            if isinstance(value, Mapping)
+            else value
+            for value in values
+        ]
 
 
 async def _canonical_artifact_record(

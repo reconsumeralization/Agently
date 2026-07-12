@@ -304,6 +304,8 @@ async def test_selected_action_artifact_is_promoted_once_and_unselected_artifact
     )
 
     agent = Agently.create_agent("result-view-selected-action-artifact").use_workspace(tmp_path / "run")
+    execution = agent.input("Promote only the accepted Action artifact.").create_execution().strategy("direct")
+    artifact_scope = {"kind": "agent_execution", "id": execution.id}
     selected_value = {"body": "s" * (1024 * 1024)}
     unselected_value = {"body": "u" * (1024 * 1024)}
     selected_record = agent.action._finalize_action_result(
@@ -314,7 +316,8 @@ async def test_selected_action_artifact_is_promoted_once_and_unselected_artifact
             "success": True,
             "result": selected_value,
             "data": selected_value,
-        }
+        },
+        artifact_scope=artifact_scope,
     )
     unselected_record = agent.action._finalize_action_result(
         {
@@ -324,11 +327,11 @@ async def test_selected_action_artifact_is_promoted_once_and_unselected_artifact
             "success": True,
             "result": unselected_value,
             "data": unselected_value,
-        }
+        },
+        artifact_scope=artifact_scope,
     )
     selected_ref = selected_record["artifact_refs"][0]
     unselected_ref = unselected_record["artifact_refs"][0]
-    execution = agent.input("Promote only the accepted Action artifact.").create_execution().strategy("direct")
     execution.logs["artifact_refs"] = [selected_ref, unselected_ref]
     execution.result = {
         "accepted": True,
@@ -359,8 +362,6 @@ async def test_selected_action_artifact_is_promoted_once_and_unselected_artifact
     assert await execution.workspace.search(
         filters={"kind": "agent_execution_action_artifact", "scope.execution_id": execution.id}
     ) == retained_records
-    agent.action._artifact_manager._artifacts.clear()
-    assert agent.action._artifact_manager.get_artifact_value(selected_ref["artifact_id"]) is None
     assert unselected_ref["artifact_id"] not in str(
         await execution.workspace.search(filters={"collection": "artifacts"})
     )
@@ -373,6 +374,7 @@ async def test_selected_action_artifact_defers_when_store_identity_no_longer_mat
     )
 
     agent = Agently.create_agent("result-view-selected-action-artifact-mismatch").use_workspace(tmp_path / "run")
+    execution = agent.input("Reject the replaced Action artifact.").create_execution().strategy("direct")
     record = agent.action._finalize_action_result(
         {
             "action_call_id": "selected-call",
@@ -381,7 +383,8 @@ async def test_selected_action_artifact_defers_when_store_identity_no_longer_mat
             "success": True,
             "result": {"body": "s" * (1024 * 1024)},
             "data": {"body": "s" * (1024 * 1024)},
-        }
+        },
+        artifact_scope={"kind": "agent_execution", "id": execution.id},
     )
     selected_ref = record["artifact_refs"][0]
     agent.action._artifact_manager.register_external_artifact_ref(
@@ -395,7 +398,6 @@ async def test_selected_action_artifact_defers_when_store_identity_no_longer_mat
             "sha256": "0" * 64,
         },
     )
-    execution = agent.input("Reject the replaced Action artifact.").create_execution().strategy("direct")
     execution.logs["artifact_refs"] = [selected_ref]
     execution.result = {"accepted": True, "artifact_refs": [selected_ref], "reply": "r" * 5000}
 

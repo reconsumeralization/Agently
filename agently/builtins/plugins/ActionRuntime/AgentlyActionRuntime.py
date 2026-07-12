@@ -443,6 +443,9 @@ class AgentlyActionRuntime:
         trusted_policy_overrides = request.get("trusted_policy_overrides", {})
         if not isinstance(trusted_policy_overrides, dict):
             trusted_policy_overrides = {}
+        artifact_scope = context.get("artifact_scope")
+        if not isinstance(artifact_scope, dict):
+            artifact_scope = None
         if len(action_calls) == 0:
             return []
         if self.action.async_execute_action is None:
@@ -494,6 +497,7 @@ class AgentlyActionRuntime:
                     source_protocol=str(action_call.get("source_protocol", "structured_plan")),
                     todo_suggestion=next_step,
                     next_value=next_step,
+                    artifact_scope=artifact_scope,
                 )
 
             try:
