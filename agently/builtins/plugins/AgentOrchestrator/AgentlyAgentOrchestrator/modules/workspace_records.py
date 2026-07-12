@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+from agently.types.data import AgentExecutionWorkspacePurpose, AgentExecutionWorkspaceRecord
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 async def record_workspace(
     owner: "AgentExecution",
     *,
+    purpose: AgentExecutionWorkspacePurpose = "process",
     collection: str = "observations",
     kind: str | None = "agent_execution_observation",
     content: Any = None,
@@ -36,7 +38,13 @@ async def record_workspace(
     checkpoint_state: dict[str, Any] | None = None,
     checkpoint_step_id: str | None = None,
     profile: str = "fast",
-) -> dict[str, Any]:
+) -> AgentExecutionWorkspaceRecord:
+    if purpose not in {"process", "deliverable", "recovery", "audit"}:
+        raise ValueError(f"Unsupported AgentExecution Workspace purpose: { purpose }.")
+    if purpose == "deliverable" and checkpoint:
+        raise ValueError("AgentExecution Workspace deliverable records cannot also be recovery checkpoints.")
+    if purpose == "audit" and owner.options.get("workspace_retention_policy") is None:
+        raise ValueError("AgentExecution Workspace audit records require an explicit retention policy override.")
     if owner.workspace is None:
         raise RuntimeError(
             "AgentExecution has no Workspace binding. "
@@ -54,6 +62,7 @@ async def record_workspace(
         "lineage": DataFormatter.sanitize(owner.lineage),
     }
     record_meta.update(dict(meta or {}))
+    record_meta["workspace_purpose"] = purpose
     record_content = content if content is not None else default_workspace_content(owner)
     record_summary = summary or default_workspace_summary(owner, collection)
 
@@ -68,6 +77,17 @@ async def record_workspace(
         profile=profile,
     )
     append_workspace_ref(owner, collection, record_ref)
+
+    if purpose == "deliverable":
+        stored_ref = await owner.workspace.ref_envelope(record_ref)
+        if stored_ref.get("record_id") != record_ref.get("id"):
+            raise RuntimeError("AgentExecution Workspace deliverable record could not be verified after storage.")
+        await owner.workspace.add_retention_anchor(
+            owner.id,
+            anchor_type="deliverable",
+            record_ref=record_ref,
+            meta={"owner": "AgentExecution", "workspace_purpose": purpose},
+        )
 
     checkpoint_ref = None
     if checkpoint:
@@ -91,13 +111,11 @@ async def record_workspace(
         )
         append_workspace_ref(owner, "verification_evidence", evidence_link)
 
-    return DataFormatter.sanitize(
-        {
-            "record": record_ref,
-            "checkpoint": checkpoint_ref,
-            "workspace_refs": owner.workspace_refs,
-        }
-    )
+    return {
+        "record": record_ref,
+        "checkpoint": checkpoint_ref,
+        "workspace_refs": DataFormatter.sanitize(owner.workspace_refs),
+    }
 
 
 def workspace_scope(owner: "AgentExecution", scope: dict[str, Any] | None = None) -> dict[str, Any]:

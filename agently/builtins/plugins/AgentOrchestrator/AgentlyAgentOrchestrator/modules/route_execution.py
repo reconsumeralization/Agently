@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from typing import Any, Literal, TYPE_CHECKING
 
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, RuntimeStageStallError
@@ -25,6 +24,11 @@ from agently.utils import DataFormatter
 from .routes import run_model_request_route, run_skills_route
 from .runtime_guidance import mark_pending_guidance_not_applied
 from .task_strategy import run_agent_task_route
+from .terminal_retention import (
+    apply_agent_execution_terminal_retention,
+    defer_agent_execution_terminal_retention,
+    prepare_agent_execution_terminal_retention,
+)
 
 if TYPE_CHECKING:
     from agently.types.data import OutputValidateHandler, RunContext
@@ -145,9 +149,8 @@ async def start_execution(
             if owner.status == "running":
                 owner.status = "success"
             await owner.emit_stream("result", owner.result, route=route, source="agent_execution")
-            if route != "model_request":
-                with suppress(Exception):
-                    await owner._async_emit_agent_execution_terminal_event(failed=False)
+            terminal_failed = owner.status not in {"success", "completed"}
+            await _finalize_terminal_execution(owner, failed=terminal_failed)
             return owner.result
         except RuntimeStageStallError as error:
             owner.status = "timed_out" if error.status == "timed_out" else "stalled"
@@ -158,8 +161,7 @@ async def start_execution(
                 error.to_diagnostic(),
                 source="agent_execution",
             )
-            with suppress(Exception):
-                await owner._async_emit_agent_execution_terminal_event(failed=True)
+            await _finalize_terminal_execution(owner, failed=True)
             raise
         except asyncio.TimeoutError as error:
             owner.status = "timed_out"
@@ -181,8 +183,7 @@ async def start_execution(
                 timeout_error.to_diagnostic(),
                 source="agent_execution",
             )
-            with suppress(Exception):
-                await owner._async_emit_agent_execution_terminal_event(failed=True)
+            await _finalize_terminal_execution(owner, failed=True)
             raise timeout_error from error
         except AgentExecutionLimitExceeded as error:
             owner.status = "blocked"
@@ -193,8 +194,7 @@ async def start_execution(
                 {"type": error.__class__.__name__, "message": str(error), "limit_name": error.limit_name},
                 source="agent_execution",
             )
-            with suppress(Exception):
-                await owner._async_emit_agent_execution_terminal_event(failed=True)
+            await _finalize_terminal_execution(owner, failed=True)
             raise
         except BaseException as error:
             owner.status = "error"
@@ -205,10 +205,52 @@ async def start_execution(
                 {"type": error.__class__.__name__, "message": str(error)},
                 source="agent_execution",
             )
-            with suppress(Exception):
-                await owner._async_emit_agent_execution_terminal_event(failed=True)
+            await _finalize_terminal_execution(owner, failed=True)
             raise
         finally:
             owner._refresh_diagnostics()
             owner._completed = True
             await owner.close_streams()
+
+
+async def _finalize_terminal_execution(owner: "AgentExecution", *, failed: bool) -> None:
+    try:
+        event_result, retained_refs = await prepare_agent_execution_terminal_retention(owner)
+    except Exception as error:
+        defer_agent_execution_terminal_retention(
+            owner,
+            code="agent_execution.retention.prepare_failed",
+            error=error,
+        )
+        event_result = {
+            "status": owner.status,
+            "kind": "agent_execution_terminal_result_unavailable",
+        }
+        retained_refs = []
+    owner.close_snapshot = {
+        **dict(owner.close_snapshot),
+        "terminal_result": DataFormatter.sanitize(event_result),
+        "terminal_retained_refs": DataFormatter.sanitize(retained_refs),
+    }
+    terminal_close_snapshot = {
+        "status": owner.close_snapshot.get("status", owner.status),
+        "route": owner.close_snapshot.get("route") or owner.route_info.get("selected_route"),
+        "terminal_result": owner.close_snapshot["terminal_result"],
+        "terminal_retained_refs": owner.close_snapshot["terminal_retained_refs"],
+    }
+    reason = owner.close_snapshot.get("reason")
+    if reason:
+        terminal_close_snapshot["reason"] = str(reason)[:360]
+    try:
+        await owner._async_emit_agent_execution_terminal_event(
+            failed=failed,
+            close_snapshot=terminal_close_snapshot,
+        )
+    except Exception as error:
+        defer_agent_execution_terminal_retention(
+            owner,
+            code="agent_execution.retention.terminal_event_delivery_failed",
+            error=error,
+        )
+    terminal_status: Literal["completed", "failed", "cancelled"] = "failed" if failed else "completed"
+    await apply_agent_execution_terminal_retention(owner, status=terminal_status)

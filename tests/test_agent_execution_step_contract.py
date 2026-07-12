@@ -5257,9 +5257,11 @@ async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_pa
     assert task.result["status"] == "completed"
     assert task.result["accepted"] is True
     assert task.result["final_result"] == "Verified final answer."
-    assert task.result["taskboard"]["final_verification"]["is_complete"] is True
-    assert task.result["taskboard"]["taskboard_acceptance_index"]["metadata"]["green_count"] == 1
-    assert task.result["taskboard"]["acceptance_verification_plan"]["all_satisfied"] is True
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert terminal_state["final_verification"]["is_complete"] is True
+    assert terminal_state["taskboard_acceptance_index"]["metadata"]["green_count"] == 1
+    assert terminal_state["acceptance_verification_plan"]["all_satisfied"] is True
+    assert "taskboard" not in task.result
 
 
 @pytest.mark.asyncio
@@ -5460,7 +5462,8 @@ async def test_taskboard_finalization_accepts_manager_loaded_required_skill_cont
 
     assert terminal == {"terminal": True, "status": "completed"}
     assert task.result["accepted"] is True
-    assert task.result["taskboard"]["final_verification"]["missing_required_capabilities"] == []
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert terminal_state["final_verification"]["missing_required_capabilities"] == []
     prompt_bound_skills = verification_calls[0]["execution_meta"]["logs"]["route_logs"]["prompt_bound_skills"]
     assert prompt_bound_skills == [
         {
@@ -5567,9 +5570,10 @@ async def test_taskboard_degraded_final_success_is_not_plain_accepted(tmp_path, 
     assert finalizer_seen["allow_degraded_final"] is True
     assert task.result["accepted"] is True
     assert task.result["artifact_status"] == "degraded"
-    assert task.result["degraded"] is True
+    assert "degraded" not in task.result
     assert "optional source audit unavailable" in task.result["final_response"]
-    assert task.result["taskboard"]["degraded_finalization_attempted"] is True
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert terminal_state["degraded_finalization_attempted"] is True
 
 
 @pytest.mark.asyncio
@@ -5659,16 +5663,17 @@ async def test_taskboard_completion_notes_disclose_card_gaps_in_final_response(t
     assert terminal == {"terminal": True, "status": "completed"}
     assert task.result["accepted"] is True
     assert task.result["artifact_status"] == "degraded"
-    assert task.result["degraded"] is True
+    assert "degraded" not in task.result
     assert "All success criteria are satisfied" in task.result["final_response"]
     assert "Official PDF content was not read" in task.result["final_response"]
-    notes = task.result["taskboard"]["completion_notes"]
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    notes = terminal_state["completion_notes"]
     assert notes["authority"] == "projection_only"
     assert notes["metadata"]["not_evidence"] is True
     assert any("Official PDF content was not read" in note for note in notes["known_limits"])
     assert not any(
         item.get("schema_version") == "task_board_completion_notes/v1"
-        for item in task.result["taskboard"]["evidence_view"].get("evidence_items", [])
+        for item in terminal_state["evidence_view"].get("evidence_items", [])
         if isinstance(item, dict)
     )
 
@@ -6123,7 +6128,9 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
-    assert result["final_result"] == "repaired accepted result"
+    assert result["final_result"] == (
+        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+    )
     assert first_verification["is_complete"] is False
     assert first_verification["failure_analysis"] == "The candidate artifact overshoots the accepted item count."
     assert "The report must include 5-8 news items, not 15." in first_verification["acceptance_delta"]
@@ -6596,7 +6603,10 @@ async def test_flat_promotes_report_like_evidence_to_candidate_final_result(tmp_
 
     assert result["status"] == "completed"
     assert result["accepted"] is True
-    assert result["final_result"].strip() == MockFlatEvidenceCandidateRequester.report.strip()
+    assert result["final_result"]["preview"].startswith("# Weekly Report")
+    assert result["final_result"]["chars"] == len(MockFlatEvidenceCandidateRequester.report.strip())
+    assert result["final_result"]["truncated"] is True
+    assert MockFlatEvidenceCandidateRequester.report not in str(result["final_result"])
     assert verify_requests
     assert "candidate_final_result" in verify_requests[-1]
     assert "Weekly Report" in verify_requests[-1]
@@ -6617,7 +6627,7 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     phases = task_meta["diagnostics"]["phases"]
 
     assert result["status"] == "completed"
@@ -6671,26 +6681,13 @@ async def test_taskboard_checkpoint_and_resume_snapshot_include_handoff_projecti
     assert result["status"] == "completed"
     assert task_meta["workspace_refs"]["checkpoints"]
     checkpoint_history = await agent.workspace.checkpoint_history(task_id)
-    assert checkpoint_history
-    latest_checkpoint = checkpoint_history[0]
-    latest_checkpoint_data = await agent.workspace.get_data(latest_checkpoint)
-    assert latest_checkpoint_data["step_id"].startswith("taskboard-")
-    assert latest_checkpoint_data["strategy"] == "taskboard"
-    assert latest_checkpoint_data["revision_ref"]
-    assert latest_checkpoint_data["handoff_projection"]["schema_version"] == "task_board_handoff_projection/v1"
-    assert latest_checkpoint_data["handoff_projection"]["task_id"] == task_id
-    assert latest_checkpoint_data["handoff_projection"]["effective_execution_strategy"] == "taskboard"
+    assert checkpoint_history == []
 
     snapshot = await agent.workspace.get_snapshot(f"{task_id}::resume")
-    assert snapshot is not None
-    assert snapshot["manifest"]["effective_execution_strategy"] == "taskboard"
-    assert snapshot["taskboard_state"]["revision"]["revision_id"]
-    assert snapshot["taskboard_state"]["handoff_projection"]["schema_version"] == "task_board_handoff_projection/v1"
-    assert snapshot["taskboard_state"]["handoff_projection"]["task_id"] == task_id
-    assert snapshot["taskboard_state"]["tick_index"] >= 1
-    assert snapshot["taskboard_state"]["stage"] in {"tick", "finalize"}
-    assert snapshot["last_verification"]["is_complete"] is True
-    assert snapshot["last_verification"]["final_result"] == "taskboard accepted result"
+    assert snapshot is None
+    terminal_state = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
+    assert terminal_state["revision"]["revision_id"]
+    assert task_meta["diagnostics"]["workspace_retention"]["status"] in {"applied", "noop"}
 
 
 @pytest.mark.asyncio
@@ -6713,17 +6710,8 @@ async def test_taskboard_resume_terminal_snapshot_without_reexecuting_cards(tmp_
 
     agent2 = _create_taskboard_agent("execution-taskboard-terminal-resume-2").use_workspace(workspace_dir)
     MockAgentExecutionRequester.requests = []
-    resumed = await agent2.async_resume(task_id, workspace=workspace_dir)
-    resumed_result = await resumed.async_start()
-    resumed_meta = await resumed.async_get_meta()
-    task_meta = resumed_meta["logs"]["route_logs"]["agent_task"]
-
-    assert resumed.task_refs["resume"] is True
-    assert resumed.task_refs["resumed_from_iteration"] >= 1
-    assert resumed_result["resumed"] is True
-    assert resumed_result["status"] == "completed"
-    assert resumed_result["final_result"] == "taskboard accepted result"
-    assert task_meta["resumed_from_iteration"] >= 1
+    with pytest.raises(ValueError, match="No resumable AgentTask snapshot"):
+        await agent2.async_resume(task_id, workspace=workspace_dir)
     assert MockAgentExecutionRequester.requests == []
 
 
@@ -6839,7 +6827,7 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     card_result = taskboard["revision"]["card_results"]["synthesize"]
 
     assert result["status"] == "completed"
@@ -6992,7 +6980,7 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
     delivered = next(item for item in deliveries if item.get("status") == "delivered")
     tick_completed_items = [
@@ -7106,7 +7094,7 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     review_result = taskboard["revision"]["card_results"]["review"]
     readbacks = review_result["preview"]["readbacks"]
 
@@ -7159,7 +7147,7 @@ async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(t
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     synthesize_result = taskboard["revision"]["card_results"]["synthesize"]
     dependency_carrier = task_meta["diagnostics"]["taskboard_dependency_readback_block_carriers"][0][
         "block_carrier"
@@ -7212,7 +7200,7 @@ async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     synthesize_result = taskboard["revision"]["card_results"]["synthesize"]
     dependency_carrier = task_meta["diagnostics"]["taskboard_dependency_readback_block_carriers"][0][
         "block_carrier"
@@ -7263,8 +7251,8 @@ async def test_taskboard_request_timeout_does_not_cancel_progressing_card_by_def
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    assert "taskboard" in task_meta["result"], task_meta["result"]
-    revision = task_meta["result"]["taskboard"]["revision"]
+    assert "taskboard" not in task_meta["result"], task_meta["result"]
+    revision = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)["revision"]
     slow_result = revision["card_results"]["slow"]
 
     assert result["status"] == "completed"
@@ -7292,14 +7280,15 @@ async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     slow_result = taskboard["revision"]["card_results"]["slow"]
     diagnostic = slow_result["diagnostics"][0]
 
     assert result["status"] == "error"
     assert result["accepted"] is False
     assert result["artifact_status"] == "partial"
-    assert result["taskboard"]["revision"]["card_results"]["slow"]["status"] == "failed"
+    assert "taskboard" not in result
+    assert taskboard["revision"]["card_results"]["slow"]["status"] == "failed"
     assert meta["route"]["selected_route"] == "agent_task"
     assert meta["task_refs"]["execution_strategy"] == "taskboard"
     assert slow_result["status"] == "failed"
@@ -7333,7 +7322,7 @@ async def test_taskboard_tick_timeout_does_not_cancel_running_cards(tmp_path):
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    revision = task_meta["result"]["taskboard"]["revision"]
+    revision = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)["revision"]
     slow_result = revision["card_results"]["slow"]
 
     assert result["status"] == "completed"
@@ -7366,7 +7355,7 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
     meta = await execution.async_get_meta()
     elapsed = asyncio.get_running_loop().time() - started_at
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     card_result = taskboard["revision"]["card_results"]["control-stall"]
     diagnostic = card_result["diagnostics"][0]
 
@@ -7430,7 +7419,7 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     retry_result = taskboard["revision"]["card_results"]["retry"]
 
     assert result["status"] == "completed"
@@ -7466,7 +7455,7 @@ async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = task_meta["result"]["taskboard"]
+    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     partial_result = taskboard["revision"]["card_results"]["partial"]
     diagnostics = partial_result["diagnostics"]
     evidence_summaries = [
@@ -8394,6 +8383,76 @@ async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace
     assert evidence_links[0]["target_id"] == workspace_record["checkpoint"]["id"]
     assert evidence_links[0]["meta"]["evidence"]["execution_id"] == meta["execution_id"]
     assert evidence_links[0]["meta"]["owner"] == "AgentExecution"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_workspace_purpose_defaults_to_process(tmp_path):
+    agent = _create_agent("task-step-workspace-process-purpose").use_workspace(tmp_path / "run")
+    execution = agent.input("record process workspace data").create_execution().strategy("direct")
+
+    workspace_record = await execution.async_record_workspace(
+        content={"stage": "working"},
+        meta={"workspace_purpose": "audit"},
+    )
+
+    assert workspace_record["record"]["meta"]["workspace_purpose"] == "process"
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_workspace_purpose_deliverable_creates_verified_anchor(tmp_path):
+    agent = _create_agent("task-step-workspace-deliverable-purpose").use_workspace(tmp_path / "run")
+    execution = agent.input("record deliverable workspace data").create_execution().strategy("direct")
+
+    workspace_record = await execution.async_record_workspace(
+        content={"report": "accepted body"},
+        purpose="deliverable",
+    )
+
+    assert workspace_record["record"]["meta"]["workspace_purpose"] == "deliverable"
+    assert execution.workspace is not None
+    assert await execution.workspace.get_data(workspace_record["record"]) == {"report": "accepted body"}
+    anchors = await execution.workspace.retention_anchors(execution.id, anchor_type="deliverable")
+    assert len(anchors) == 1
+    assert anchors[0]["record_ref"] is not None
+    assert anchors[0]["record_ref"]["record_id"] == workspace_record["record"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_workspace_purpose_rejects_deliverable_checkpoint_role(tmp_path):
+    agent = _create_agent("task-step-workspace-purpose-role-conflict").use_workspace(tmp_path / "run")
+    execution = agent.input("reject conflated workspace roles").create_execution().strategy("direct")
+
+    with pytest.raises(ValueError, match="deliverable.*checkpoint|checkpoint.*deliverable"):
+        await execution.async_record_workspace(
+            content={"report": "must not become recovery state"},
+            purpose="deliverable",
+            checkpoint=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_workspace_purpose_audit_requires_explicit_retention_override(tmp_path):
+    agent = _create_agent("task-step-workspace-audit-purpose").use_workspace(tmp_path / "run")
+    execution = agent.input("reject implicit audit retention").create_execution().strategy("direct")
+
+    with pytest.raises(ValueError, match="audit.*retention policy|retention policy.*audit"):
+        await execution.async_record_workspace(content={"decision": "reviewed"}, purpose="audit")
+
+    policy = {
+        "rules": [{"category": "records", "representation": "hot"}],
+        "inline_result_limit": 4096,
+    }
+    audited_execution = (
+        agent.input("record explicitly retained audit data")
+        .create_execution(options={"workspace_retention_policy": policy})
+        .strategy("direct")
+    )
+    workspace_record = await audited_execution.async_record_workspace(
+        content={"decision": "reviewed"},
+        purpose="audit",
+    )
+
+    assert workspace_record["record"]["meta"]["workspace_purpose"] == "audit"
 
 
 @pytest.mark.asyncio

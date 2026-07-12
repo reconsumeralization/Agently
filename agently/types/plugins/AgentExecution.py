@@ -23,6 +23,7 @@ from agently.types.data import (
     AgentExecutionLimits,
     AgentExecutionMeta,
     AgentExecutionStreamData,
+    AgentExecutionWorkspacePurpose,
     AgentExecutionWorkspaceRecord,
     OutputValidateHandler,
     RunContext,
@@ -142,6 +143,7 @@ class AgentExecution(Protocol):
     async def async_record_workspace(
         self,
         *,
+        purpose: AgentExecutionWorkspacePurpose = "process",
         collection: str = "observations",
         kind: str | None = "agent_execution_observation",
         content: Any = None,

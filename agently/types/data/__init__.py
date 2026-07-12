@@ -294,6 +294,7 @@ from .agent_execution import (
     AgentExecutionMeta,
     AgentExecutionStatus,
     AgentExecutionStreamMeta,
+    AgentExecutionWorkspacePurpose,
     AgentExecutionWorkspaceRecord,
     AgentExecutionWorkspaceRefs,
     CapabilityKind,

@@ -99,6 +99,8 @@ if TYPE_CHECKING:
     from agently.types.data import (
         AgentExecutionLineage,
         AgentExecutionLimits,
+        AgentExecutionWorkspacePurpose,
+        AgentExecutionWorkspaceRecord,
         OutputValidateHandler,
         RunContext,
         SkillExecutionPlan,
@@ -194,6 +196,11 @@ class AgentExecution:
         self.diagnostics: dict[str, Any] = initial_diagnostics()
         self.workspace_refs: dict[str, Any] = initial_workspace_refs()
         self.result: Any = None
+        self._terminal_inline_result: Any = None
+        self._terminal_retained_refs: list[Any] = []
+        self._terminal_anchored_ref_ids: set[str] = set()
+        self._terminal_retention_deferred = False
+        self._terminal_retention_diagnostics: list[dict[str, Any]] = []
         self._model_request_result: Any = None
         self.status = "created"
         self._started = False
@@ -440,7 +447,12 @@ class AgentExecution:
             self._agent_execution_started_emitted = True
         return run_context
 
-    async def _async_emit_agent_execution_terminal_event(self, *, failed: bool = False) -> None:
+    async def _async_emit_agent_execution_terminal_event(
+        self,
+        *,
+        failed: bool = False,
+        close_snapshot: dict[str, Any] | None = None,
+    ) -> None:
         if self.agent_execution_run_context is None:
             return
         await self.agent._async_emit_agent_execution_terminal_event(
@@ -450,7 +462,7 @@ class AgentExecution:
             route=cast(str | None, self.route_info.get("selected_route")),
             strategy=self.strategy_name,
             task_refs=self.task_refs,
-            close_snapshot=self.close_snapshot,
+            close_snapshot=self.close_snapshot if close_snapshot is None else close_snapshot,
             failed=failed,
         )
 
@@ -1367,6 +1379,7 @@ class AgentExecution:
     async def async_record_workspace(
         self,
         *,
+        purpose: "AgentExecutionWorkspacePurpose" = "process",
         collection: str = "observations",
         kind: str | None = "agent_execution_observation",
         content: Any = None,
@@ -1378,9 +1391,10 @@ class AgentExecution:
         checkpoint_state: dict[str, Any] | None = None,
         checkpoint_step_id: str | None = None,
         profile: str = "fast",
-    ) -> dict[str, Any]:
+    ) -> "AgentExecutionWorkspaceRecord":
         return await record_workspace_entry(
             self,
+            purpose=purpose,
             collection=collection,
             kind=kind,
             content=content,
