@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import sys
 import textwrap
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -3592,6 +3593,68 @@ async def test_physical_accounting_readback_mismatch_returns_persisted_conflict(
     detail = result["diagnostics"][0].get("detail")
     assert detail is not None
     assert detail["measured_accounting"] != result["accounting"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_apply_holds_root_guard_until_maintenance_worker_exits(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-maintenance-cancel")
+    execution_id = "exec-maintenance-cancel"
+    target = root.with_scope_node("executions", execution_id)
+    backend = cast(Any, root.backend)
+    second_root = WorkspaceManager().create(root.root, create=False)
+    second_target = second_root.with_scope_node("executions", execution_id)
+    await target.put(
+        {"row": "cancel maintenance"},
+        collection="observations",
+        kind="large_sqlite_row",
+        meta={"padding": "x" * 65536},
+    )
+    preview = await target.inspect_retention(
+        {}, lifecycle={**_terminal_lifecycle(execution_id), "state_version": None}
+    )
+    maintenance_entered = threading.Event()
+    maintenance_release = threading.Event()
+    maintenance_exited = threading.Event()
+
+    def block_maintenance():
+        maintenance_entered.set()
+        maintenance_release.wait(timeout=5)
+        maintenance_exited.set()
+
+    monkeypatch.setattr(
+        backend,
+        "_run_sqlite_physical_maintenance_sync",
+        block_maintenance,
+    )
+    apply_task = asyncio.create_task(target.apply_retention(preview))
+    while not maintenance_entered.is_set():
+        await asyncio.sleep(0.001)
+    apply_task.cancel()
+    competing_task = asyncio.create_task(
+        second_target.put(
+            {"row": "must wait for maintenance"},
+            collection="observations",
+            kind="large_sqlite_row",
+        )
+    )
+    await asyncio.sleep(0.01)
+    apply_task.cancel()
+    await asyncio.sleep(0.05)
+    apply_done_before_release = apply_task.done()
+    competing_done_before_release = competing_task.done()
+
+    maintenance_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await apply_task
+    competing_ref = await asyncio.wait_for(competing_task, timeout=2)
+
+    assert apply_done_before_release is False
+    assert competing_done_before_release is False
+    assert maintenance_exited.is_set()
+    assert await cast(Any, second_root.backend).get_record(competing_ref["id"]) is not None
 
 
 @pytest.mark.asyncio

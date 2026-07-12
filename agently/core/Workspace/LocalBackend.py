@@ -4768,6 +4768,31 @@ class LocalWorkspaceBackend:
         if attempted_vacuum:
             self._checkpoint_sqlite_wal_sync("TRUNCATE")
 
+    async def _run_sqlite_physical_maintenance(self) -> None:
+        worker = asyncio.create_task(
+            asyncio.to_thread(self._run_sqlite_physical_maintenance_sync)
+        )
+        first_cancellation: asyncio.CancelledError | None = None
+        worker_error: BaseException | None = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as error:
+                if first_cancellation is None:
+                    first_cancellation = error
+            except BaseException as error:
+                worker_error = error
+                break
+        if worker.done() and worker_error is None:
+            try:
+                worker.result()
+            except BaseException as error:
+                worker_error = error
+        if first_cancellation is not None:
+            raise first_cancellation
+        if worker_error is not None:
+            raise worker_error
+
     async def _finalize_sqlite_physical_reclamation(
         self,
         result: WorkspaceRetentionResult,
@@ -4779,7 +4804,7 @@ class LocalWorkspaceBackend:
             return result
         maintenance_error: Exception | None = None
         try:
-            await asyncio.to_thread(self._run_sqlite_physical_maintenance_sync)
+            await self._run_sqlite_physical_maintenance()
         except (sqlite3.Error, OSError) as error:
             maintenance_error = error
 
