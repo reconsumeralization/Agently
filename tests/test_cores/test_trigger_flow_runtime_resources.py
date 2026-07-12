@@ -69,7 +69,7 @@ async def test_trigger_flow_auto_close_waits_for_in_flight_start(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_default_workspace_stays_lazy_through_finite_lifecycle(
+async def test_trigger_flow_default_workspace_retains_only_terminal_manifest_after_finite_lifecycle(
     tmp_path,
     monkeypatch,
 ):
@@ -87,7 +87,7 @@ async def test_trigger_flow_default_workspace_stays_lazy_through_finite_lifecycl
         if event_type is not None and event_type.startswith("triggerflow."):
             captured_event_types.append(event_type)
 
-    hook_name = "test_trigger_flow_default_workspace_stays_lazy_through_finite_lifecycle.capture"
+    hook_name = "test_trigger_flow_default_workspace_retains_only_terminal_manifest_after_finite_lifecycle.capture"
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     execution = flow.create_execution(auto_close=True, auto_close_timeout=0.0)
     workspace = cast(Any, execution.require_runtime_resource("workspace"))
@@ -102,23 +102,511 @@ async def test_trigger_flow_default_workspace_stays_lazy_through_finite_lifecycl
         await Agently.event_center.async_flush(hook_name)
 
         assert snapshot["value"] == "hello"
-        assert getattr(workspace, "is_materialized") is False
+        assert getattr(workspace, "is_materialized") is True
         assert execution._snapshot_store is None
         assert execution._runtime_event_store is None
         assert workspace.root == expected_root.resolve()
         assert workspace.files_root == (
             expected_root / "files" / "lineage" / "executions" / execution.id / "files"
         ).resolve()
-        assert not workspace.root.exists()
+        assert workspace.root.exists()
         assert "workspace" in execution.get_runtime_resources()
+        records = await workspace.search(None)
+        assert [record["kind"] for record in records] == [
+            "workspace_terminal_manifest"
+        ]
+        assert await workspace.query_runtime_events(execution.id) == []
+        assert await workspace.latest_snapshot(execution.id) is None
+        assert (await workspace.glob_files("**/*"))["count"] == 0
         assert {
             "triggerflow.definition_declared",
             "triggerflow.execution_started",
             "triggerflow.execution_completed",
             "triggerflow.execution_closed",
+            "triggerflow.workspace_retention_applied",
         }.issubset(captured_event_types)
     finally:
         Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_pending_interrupt_rejects_close_before_terminal_retention(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    execution = TriggerFlow(name="pending-retention-guard").create_execution(
+        auto_close=False,
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    await execution.async_pause_for(
+        type="approval",
+        interrupt_id="approval",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="pending interrupts"):
+            await execution.async_close()
+
+        assert await workspace.latest_snapshot(execution.run_context.run_id) is not None
+        assert await workspace.search(
+            None,
+            filters={"kind": "workspace_terminal_manifest"},
+        ) == []
+        assert execution.get_status() == "waiting"
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_resumed_execution_discards_recovery_state_at_terminal_close(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="resumed-terminal-retention")
+
+    async def pause(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finish(data: TriggerFlowRuntimeData):
+        await data.async_set_state("approved", data.value)
+
+    flow.to(pause).to(finish)
+    execution = flow.create_execution(auto_close=False)
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    await execution.async_start("draft")
+    assert await workspace.latest_snapshot(execution.run_context.run_id) is not None
+    await execution.async_continue_with(
+        "approval",
+        "approved",
+        resume_request_id="approval-1",
+    )
+    close_result = await execution.async_close()
+
+    assert close_result["approved"] == "approved"
+    assert await workspace.latest_snapshot(execution.run_context.run_id) is None
+    assert await workspace.query_runtime_events(execution.id) == []
+    records = await workspace.search(None)
+    assert [record["kind"] for record in records] == [
+        "workspace_terminal_manifest"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_terminal_retention_failure_preserves_recovery_data(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    large_body = "retention-failure-" + ("x" * 5000)
+    captured_event_types: list[str] = []
+
+    async def capture(event):
+        event_type = normalize_triggerflow_event_type(event.event_type)
+        if event_type is not None:
+            captured_event_types.append(event_type)
+
+    hook_name = "test_trigger_flow_terminal_retention_failure_preserves_recovery_data.capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    flow = TriggerFlow(name="terminal-retention-failure")
+
+    async def produce(data: TriggerFlowRuntimeData):
+        return large_body
+
+    flow.to(produce).end()
+    execution = flow.create_execution(auto_close=False)
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    try:
+        await execution.async_start("start")
+        await execution.async_save(step_id="before-terminal-retention")
+
+        async def fail_ref_readback(*args, **kwargs):
+            raise OSError("injected terminal ref readback failure")
+
+        monkeypatch.setattr(workspace, "ref_envelope", fail_ref_readback)
+        close_result = await execution.async_close()
+        await Agently.event_center.async_flush(hook_name)
+
+        assert close_result["$final_result"] == large_body
+        assert await workspace.latest_snapshot(execution.run_context.run_id) is not None
+        assert await workspace.query_runtime_events(execution.id)
+        assert len(
+            await workspace.search(
+                None,
+                filters={"kind": "triggerflow_terminal_result"},
+            )
+        ) == 1
+        assert await workspace.search(
+            None,
+            filters={"kind": "workspace_terminal_manifest"},
+        ) == []
+        assert "triggerflow.workspace_retention_deferred" in captured_event_types
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_retention_cancellation_finalizes_close_then_propagates(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="terminal-retention-cancellation")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(auto_close=False)
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    await execution.async_start("ok")
+    workspace.materialize()
+
+    async def cancel_apply(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(workspace, "apply_retention", cancel_apply)
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() == "closed"
+    assert execution._closed_event.is_set()
+    assert execution.id not in flow._executions
+    assert execution._close_reason == "manual"
+    assert await execution.async_close() == {"value": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_retention_base_exception_finalizes_close_then_propagates(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+
+    class FatalRetentionError(BaseException):
+        pass
+
+    flow = TriggerFlow(name="terminal-retention-base-exception")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(auto_close=False)
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    await execution.async_start("ok")
+    workspace.materialize()
+
+    async def fail_apply(*args, **kwargs):
+        raise FatalRetentionError("injected fatal retention failure")
+
+    monkeypatch.setattr(workspace, "apply_retention", fail_apply)
+
+    with pytest.raises(FatalRetentionError, match="injected fatal retention failure"):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() == "closed"
+    assert execution._closed_event.is_set()
+    assert execution.id not in flow._executions
+    assert execution._close_reason == "manual"
+    assert await execution.async_close() == {"value": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_closed_event_failure_can_retry_terminal_close(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+
+    class FailClosedOnce:
+        def __init__(self):
+            self.failed = False
+
+        async def append_runtime_event(self, execution_id, event, **kwargs):
+            if event.event_type == "triggerflow.execution_closed" and not self.failed:
+                self.failed = True
+                raise OSError("injected closed event failure")
+            return {"id": event.event_id, "event_type": event.event_type}
+
+    flow = TriggerFlow(name="terminal-closed-event-retry")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"runtime_event_store": FailClosedOnce()},
+    )
+
+    await execution.async_start("ok")
+    with pytest.raises(OSError, match="injected closed event failure"):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() != "closed"
+    assert not execution._closed_event.is_set()
+    assert execution.id in flow._executions
+
+    assert await execution.async_close() == {"value": "ok"}
+    assert execution.get_lifecycle_state() == "closed"
+    assert execution._closed_event.is_set()
+    assert execution.id not in flow._executions
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_close_retry_reuses_large_terminal_carrier(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    large_body = "retry-terminal-" + ("x" * 5000)
+
+    class FailCompletedOnce:
+        def __init__(self):
+            self.failed = False
+
+        async def append_runtime_event(self, execution_id, event, **kwargs):
+            if event.event_type == "triggerflow.execution_completed" and not self.failed:
+                self.failed = True
+                raise OSError("injected completed event failure")
+            return {"id": event.event_id, "event_type": event.event_type}
+
+    flow = TriggerFlow(name="terminal-carrier-retry")
+
+    async def produce(data: TriggerFlowRuntimeData):
+        return large_body
+
+    flow.to(produce).end()
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"runtime_event_store": FailCompletedOnce()},
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    await execution.async_start("start")
+
+    with pytest.raises(OSError, match="injected completed event failure"):
+        await execution.async_close()
+    result_records = await workspace.search(
+        None,
+        filters={"kind": "triggerflow_terminal_result"},
+    )
+    assert len(result_records) == 1
+
+    # Once a terminal carrier exists, the sealed snapshot is immutable.
+    assert execution.get_lifecycle_state() == "sealed"
+    with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+        await execution.async_unseal(reason="late-unseal")
+    with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+        await execution.async_set_state("$final_result", "late-mutated-result", emit=False)
+
+    close_result = await execution.async_close()
+    assert close_result["$final_result"] == large_body
+    assert await workspace.get_data(result_records[0]) == close_result
+    assert len(
+        await workspace.search(
+            None,
+            filters={"kind": "triggerflow_terminal_result"},
+        )
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_terminal_promotion_freezes_state_before_first_await(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    large_body = "promotion-freeze-" + ("x" * 5000)
+    flow = TriggerFlow(name="terminal-promotion-freeze")
+
+    async def produce(data: TriggerFlowRuntimeData):
+        return large_body
+
+    flow.to(produce).end()
+    execution = flow.create_execution(auto_close=False)
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    await execution.async_start("start")
+    workspace.materialize()
+    original_put_artifact_ref = workspace.put_artifact_ref
+    promotion_started = asyncio.Event()
+    allow_promotion = asyncio.Event()
+
+    async def block_promotion(*args, **kwargs):
+        promotion_started.set()
+        await allow_promotion.wait()
+        return await original_put_artifact_ref(*args, **kwargs)
+
+    monkeypatch.setattr(workspace, "put_artifact_ref", block_promotion)
+    close_task = asyncio.create_task(execution.async_close())
+    await promotion_started.wait()
+    try:
+        with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+            await execution.async_set_state("late", "mutation", emit=False)
+        with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+            execution.set_result("late-result")
+    finally:
+        allow_promotion.set()
+
+    close_result = await close_task
+    assert close_result["$final_result"] == large_body
+    assert "late" not in close_result
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_completed_event_cancellation_reuses_terminal_event_id(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    completed_events: list[tuple[str, int, dict[str, Any], int | None]] = []
+
+    class CaptureRuntimeEvents:
+        async def append_runtime_event(self, execution_id, event, **kwargs):
+            if event.event_type == "triggerflow.execution_completed":
+                completed_events.append(
+                    (
+                        event.event_id,
+                        event.timestamp,
+                        dict(event.payload),
+                        kwargs.get("state_version"),
+                    )
+                )
+            return {"id": event.event_id, "event_type": event.event_type}
+
+    flow = TriggerFlow(name="terminal-completed-event-cancellation")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"runtime_event_store": CaptureRuntimeEvents()},
+    )
+    await execution.async_start("ok")
+    original_emit = execution._emit_runtime_event
+    cancelled = False
+
+    async def cancel_after_completed_event(event_type, **kwargs):
+        nonlocal cancelled
+        await original_emit(event_type, **kwargs)
+        if event_type == "triggerflow.execution_completed" and not cancelled:
+            cancelled = True
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(execution, "_emit_runtime_event", cancel_after_completed_event)
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() == "sealed"
+    with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+        await execution.async_set_state("late", "mutation", emit=False)
+    assert await execution.async_close() == {"value": "ok"}
+    assert len(completed_events) == 2
+    assert completed_events[0] == completed_events[1]
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_closed_event_retry_reuses_terminal_event_body(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    closed_events: list[tuple[str, int, dict[str, Any], int | None]] = []
+
+    class CaptureRuntimeEvents:
+        async def append_runtime_event(self, execution_id, event, **kwargs):
+            if event.event_type == "triggerflow.execution_closed":
+                closed_events.append(
+                    (
+                        event.event_id,
+                        event.timestamp,
+                        dict(event.payload),
+                        kwargs.get("state_version"),
+                    )
+                )
+            return {"id": event.event_id, "event_type": event.event_type}
+
+    flow = TriggerFlow(name="terminal-closed-event-body-retry")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"runtime_event_store": CaptureRuntimeEvents()},
+    )
+    await execution.async_start("ok")
+    original_emit = execution._emit_runtime_event
+    failed = False
+
+    async def fail_after_closed_event(event_type, **kwargs):
+        nonlocal failed
+        await original_emit(event_type, **kwargs)
+        if event_type == "triggerflow.execution_closed" and not failed:
+            failed = True
+            await asyncio.sleep(0.01)
+            raise OSError("injected postcommit closed failure")
+
+    monkeypatch.setattr(execution, "_emit_runtime_event", fail_after_closed_event)
+
+    with pytest.raises(OSError, match="injected postcommit closed failure"):
+        await execution.async_close(reason="first-reason")
+
+    assert execution.get_lifecycle_state() == "sealed"
+    with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+        await execution.async_set_state("late", "mutation", emit=False)
+    assert await execution.async_close(reason="second-reason") == {"value": "ok"}
+    assert len(closed_events) == 2
+    assert closed_events[0] == closed_events[1]
+    assert closed_events[0][2]["reason"] == "first-reason"
+    assert execution._close_reason == "first-reason"
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_closed_event_cancellation_finishes_terminal_bookkeeping(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="terminal-closed-event-cancellation")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("ok")
+    original_emit = execution._emit_runtime_event
+    cancelled = False
+
+    async def cancel_after_closed_event(event_type, **kwargs):
+        nonlocal cancelled
+        await original_emit(event_type, **kwargs)
+        if event_type == "triggerflow.execution_closed" and not cancelled:
+            cancelled = True
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(execution, "_emit_runtime_event", cancel_after_closed_event)
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() == "closed"
+    assert execution._closed_event.is_set()
+    assert execution.id not in flow._executions
+    assert await execution.async_close() == {"value": "ok"}
 
 
 @pytest.mark.asyncio

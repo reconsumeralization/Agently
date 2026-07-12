@@ -73,6 +73,11 @@ from .ExecutionResult import TriggerFlowExecutionResult
 from .ExecutionInterrupts import TriggerFlowExecutionInterrupts
 from .ExecutionPersistence import TriggerFlowExecutionPersistence
 from .ExecutionRuntimeIO import TriggerFlowExecutionRuntimeIO
+from .ExecutionRetention import (
+    TriggerFlowTerminalRetention,
+    apply_triggerflow_terminal_retention,
+    prepare_triggerflow_terminal_retention,
+)
 from .RecoveryDiagnostics import diagnose_runtime_event_records, project_runtime_event_record
 
 InputT = TypeVar("InputT")
@@ -196,6 +201,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._auto_close_task: asyncio.Task[Any] | None = None
         self._close_started = False
         self._close_result: Any = None
+        self._terminal_state_frozen = False
+        self._terminal_retention: TriggerFlowTerminalRetention | None = None
         self._closed_event = asyncio.Event()
         self._runtime_stream_stopped = False
         self._intervention_mode: TriggerFlowInterventionMode = intervention_mode
@@ -776,6 +783,16 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     def _build_close_snapshot(self):
         return self._runtime_io.build_close_snapshot()
 
+    def _ensure_terminal_state_mutable(self):
+        if (
+            self._terminal_state_frozen
+            and self._lifecycle_state != TRIGGER_FLOW_LIFECYCLE_CLOSED
+        ):
+            raise RuntimeError(
+                f"TriggerFlow execution {self.id} can not mutate state because its "
+                "terminal close snapshot is frozen. Retry async_close() with the existing terminal unit."
+            )
+
     def _clear_transient_aggregation_state(self):
         for key in TRANSIENT_AGGREGATION_STATE_KEYS:
             self._system_runtime_data.pop(key, None)
@@ -958,6 +975,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 payload={"reason": reason},
             )
             return self
+        self._ensure_terminal_state_mutable()
         if self._lifecycle_state != TRIGGER_FLOW_LIFECYCLE_OPEN:
             self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_OPEN)
             self._mark_activity()
@@ -1004,45 +1022,143 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 await self._async_expire_pending_interventions()
                 self._clear_transient_aggregation_state()
 
-                result = self._build_close_snapshot()
+                if self._terminal_retention is None:
+                    result = self._build_close_snapshot()
+                    self._terminal_state_frozen = True
+                else:
+                    result = self._terminal_retention["close_result"]
                 if self._status not in {TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
                     self._set_status(TRIGGER_FLOW_STATUS_COMPLETED)
+                if self._terminal_retention is None:
+                    self._terminal_retention = (
+                        await prepare_triggerflow_terminal_retention(
+                            self,
+                            result,
+                        )
+                    )
+                terminal_retention = self._terminal_retention
+                if self._status not in {TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
                     if not self._runtime_completed_emitted:
-                        self._runtime_completed_emitted = True
                         await self._emit_runtime_event(
                             "triggerflow.execution_completed",
                             message=f"TriggerFlow execution '{ self.id }' completed.",
-                            payload={
-                                "result": self._to_serializable_value(result),
-                                "origin_chunk": self._get_origin_chunk_payload(),
-                            },
+                            payload=dict(terminal_retention["completed_event_payload"]),
+                            event_id=terminal_retention["completed_event_id"],
+                            event_timestamp=terminal_retention["completed_event_timestamp"],
+                            state_version=terminal_retention["completed_event_state_version"],
                         )
+                        self._runtime_completed_emitted = True
 
                 await self.async_stop_stream()
                 await self._release_managed_execution_resources()
 
-                self._closed_at = time.time()
                 self._close_result = result
-                self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_CLOSED)
-                await self._emit_runtime_event(
-                    "triggerflow.execution_closed",
-                    message=f"TriggerFlow execution '{ self.id }' closed.",
-                    payload={
+                closed_event_payload = terminal_retention["closed_event_payload"]
+                if closed_event_payload is None:
+                    self._closed_at = time.time()
+                    workspace_configured = (
+                        self._get_runtime_resource("workspace", None) is not None
+                    )
+                    prepared_result = terminal_retention["result"]
+                    retention_status = (
+                        str(prepared_result["status"])
+                        if prepared_result is not None
+                        else ("pending" if workspace_configured else "not_configured")
+                    )
+                    closed_event_payload = {
                         "reason": reason,
                         "closed_at": self._closed_at,
-                        "result": self._to_serializable_value(result),
-                    },
+                        "execution_id": self.id,
+                        "retention_status": retention_status,
+                    }
+                    terminal_retention["closed_event_payload"] = closed_event_payload
+                    terminal_retention["closed_event_timestamp"] = int(time.time() * 1000)
+                    terminal_retention["closed_event_state_version"] = self._state_version + 1
+                else:
+                    self._closed_at = cast(float, closed_event_payload["closed_at"])
+                    self._close_reason = str(closed_event_payload["reason"])
+                closed_event_task = asyncio.create_task(
+                    self._emit_runtime_event(
+                        "triggerflow.execution_closed",
+                        message=f"TriggerFlow execution '{ self.id }' closed.",
+                        payload=dict(closed_event_payload),
+                        event_id=terminal_retention["closed_event_id"],
+                        event_timestamp=cast(
+                            int,
+                            terminal_retention["closed_event_timestamp"],
+                        ),
+                        state_version=cast(
+                            int,
+                            terminal_retention["closed_event_state_version"],
+                        ),
+                    )
                 )
+                postcommit_error: BaseException | None = None
+                try:
+                    await asyncio.shield(closed_event_task)
+                except asyncio.CancelledError as error:
+                    postcommit_error = error
+                    if not closed_event_task.done():
+                        await asyncio.shield(closed_event_task)
+                self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_CLOSED)
+                try:
+                    terminal_retention = await apply_triggerflow_terminal_retention(
+                        self,
+                        terminal_retention,
+                    )
+                    self._terminal_retention = terminal_retention
+                except BaseException as error:
+                    postcommit_error = error
+                retention_result = terminal_retention["result"]
+                if retention_result is not None:
+                    retention_event_type = (
+                        "triggerflow.workspace_retention_applied"
+                        if retention_result["status"] in {"applied", "noop"}
+                        else "triggerflow.workspace_retention_deferred"
+                    )
+                    try:
+                        await self._emit_runtime_event(
+                            retention_event_type,
+                            level=(
+                                "INFO"
+                                if retention_result["status"] in {"applied", "noop"}
+                                else "WARNING"
+                            ),
+                            message=(
+                                f"TriggerFlow execution '{self.id}' terminal Workspace retention "
+                                f"finished with status '{retention_result['status']}'."
+                            ),
+                            payload={
+                                "execution_id": self.id,
+                                "status": retention_result["status"],
+                                "accounting": retention_result["accounting"],
+                                "diagnostics": retention_result["diagnostics"],
+                            },
+                            persist=False,
+                        )
+                    except BaseException as error:
+                        if not isinstance(error, Exception):
+                            postcommit_error = postcommit_error or error
                 self._closed_event.set()
                 self._trigger_flow.remove_execution(self)
 
                 if self._auto_close_task is not None and self._auto_close_task is not asyncio.current_task():
                     self._auto_close_task.cancel()
+                if postcommit_error is not None:
+                    raise postcommit_error
                 return self._close_result
             except BaseException:
+                if self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED:
+                    raise
                 self._close_started = False
                 self._close_reason = None
-                if sealed_for_close and self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_SEALED:
+                if self._terminal_retention is None:
+                    self._terminal_state_frozen = False
+                if (
+                    sealed_for_close
+                    and self._terminal_retention is None
+                    and self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_SEALED
+                ):
                     await self.async_unseal(reason="close_failed")
                 raise
 
@@ -1054,26 +1170,39 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         message: str | None = None,
         payload: Any = None,
         error: BaseException | None = None,
+        persist: bool = True,
+        event_id: str | None = None,
+        event_timestamp: int | None = None,
+        state_version: int | None = None,
     ):
         from agently.base import async_emit_runtime
 
+        event_data: dict[str, Any] = {
+            "event_type": event_type,
+            "source": "TriggerFlowExecution",
+            "level": level,
+            "message": message,
+            "payload": payload,
+            "error": error,
+            "run": self.run_context,
+            "meta": {"execution_id": self.id},
+        }
+        if event_id is not None:
+            event_data["event_id"] = event_id
+        if event_timestamp is not None:
+            event_data["timestamp"] = event_timestamp
         event = RuntimeEvent.model_validate(
-            {
-                "event_type": event_type,
-                "source": "TriggerFlowExecution",
-                "level": level,
-                "message": message,
-                "payload": payload,
-                "error": error,
-                "run": self.run_context,
-                "meta": {"execution_id": self.id},
-            }
+            event_data
         )
         persistence_error: BaseException | None = None
-        try:
-            await self._persist_runtime_event(event)
-        except BaseException as error:
-            persistence_error = error
+        if persist:
+            try:
+                await self._persist_runtime_event(
+                    event,
+                    state_version=state_version,
+                )
+            except BaseException as error:
+                persistence_error = error
         try:
             await async_emit_runtime(event)
         except BaseException as delivery_error:
@@ -1389,7 +1518,12 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 return value
         return None
 
-    async def _persist_runtime_event(self, event: RuntimeEvent):
+    async def _persist_runtime_event(
+        self,
+        event: RuntimeEvent,
+        *,
+        state_version: int | None = None,
+    ):
         runtime_event_store = self._runtime_event_store
         if runtime_event_store is None:
             return None
@@ -1398,7 +1532,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             append_runtime_event,
             {
                 "idempotency_key": event.event_id,
-                "state_version": self._state_version,
+                "state_version": (
+                    self._state_version
+                    if state_version is None
+                    else state_version
+                ),
                 "parent_signal_id": self._runtime_event_parent_signal_id(event),
                 "node_id": self._runtime_event_node_id(event),
                 "operator_id": self._runtime_event_operator_id(event),
@@ -2789,6 +2927,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         *,
         emit: bool = True,
     ):
+        self._ensure_terminal_state_mutable()
         futures = []
         handlers = self._handlers["runtime_data"]
 
