@@ -40,10 +40,13 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 await self._emit("agent_task.resumed", {"task_id": self.id, "terminal": True})
                 await self._ensure_final_reflection()
                 await self._emit("result", self.result)
+                await self._apply_terminal_workspace_retention(
+                    status="completed" if self.status == "completed" else "failed"
+                )
                 await self._close_streams()
                 return self.result
             self.status = "running"
-            execution = self._flow.create_execution(auto_close=False)
+            execution = self._flow.create_execution(auto_close=False, workspace=False)
             try:
                 await self._record_phase(
                     "configured",
@@ -70,6 +73,9 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                         "status": self.status,
                         "accepted": False,
                         "artifact_status": "partial",
+                        "task_id": self.id,
+                        "execution_strategy": self.execution_strategy,
+                        "effective_execution_strategy": self.effective_execution_strategy,
                         "reason": reason,
                         "final_response": self._agent_task_user_final_response(
                             accepted=False,
@@ -77,11 +83,16 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                             status=self.status,
                             reason=reason,
                         ),
-                        "iterations": len(self.iterations),
+                        "final_result": "",
+                        "artifact_refs": [],
+                        "missing_criteria": [],
                     }
                     await self._emit("agent_task.blocked", self.result)
                 await self._ensure_final_reflection()
                 await self._emit("result", self.result)
+                await self._apply_terminal_workspace_retention(
+                    status="completed" if self.status == "completed" else "failed"
+                )
                 return self.result
             except BaseException as error:
                 self.status = "timed_out" if self._is_timeout_error(error) else "error"
@@ -136,6 +147,8 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             "accepted": False,
             "artifact_status": "partial",
             "task_id": self.id,
+            "execution_strategy": self.execution_strategy,
+            "effective_execution_strategy": self.effective_execution_strategy,
             "reason": reason,
             "final_response": self._agent_task_user_final_response(
                 accepted=False,
@@ -143,7 +156,9 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 status="timed_out",
                 reason=reason,
             ),
-            "iterations": len(self.iterations),
+            "final_result": "",
+            "artifact_refs": [],
+            "missing_criteria": [],
         }
         self.diagnostics.setdefault("terminal_reason", "timed_out")
         await self._emit_progress(iteration_index, "timed_out", f"Iteration {iteration_index}: { reason }")

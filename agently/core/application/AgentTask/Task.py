@@ -101,8 +101,8 @@ class AgentTask(
             self.workspace: Any = with_scope_node(
                 "tasks",
                 self.id,
-                scope={"task_id": self.id},
-                search_scope={"task_id": self.id},
+                scope={"task_id": self.id, "execution_id": self.id},
+                search_scope={"task_id": self.id, "execution_id": self.id},
             )
         else:
             self.workspace = bound_workspace
@@ -153,6 +153,10 @@ class AgentTask(
         self._resumed_taskboard_state: dict[str, Any] | None = None
         self._latest_taskboard_acceptance_index: dict[str, Any] | None = None
         self._resumed_prior_result: Any = None
+        self._terminal_deliverable_refs: list[WorkspaceRecordRef] = []
+        self._terminal_retained_refs: list[Any] = []
+        self._terminal_retention_deferred = False
+        self._terminal_taskboard_state: dict[str, Any] | None = None
         self._stream_items: list[AgentExecutionStreamData] = []
         self._stream_queues: list[asyncio.Queue[Any]] = []
         self._background_stream_tasks: set[asyncio.Task[Any]] = set()

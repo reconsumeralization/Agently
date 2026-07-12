@@ -3091,6 +3091,174 @@ def _create_agent(name: str = "agent-task-loop-test"):
 
 
 @pytest.mark.asyncio
+async def test_agent_task_internal_flow_workspace_isolated_until_terminal_retention(tmp_path, monkeypatch):
+    agent = _create_agent("agent-task-internal-flow-workspace").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-internal-flow-workspace",
+        goal="Return one bounded result.",
+        success_criteria=["The bounded result is returned."],
+        execution="flat",
+    )
+    create_execution_kwargs: dict[str, Any] = {}
+
+    class _Execution:
+        async def async_start(self, _input: Any) -> None:
+            task.status = "completed"
+            task.result = {
+                "status": "completed",
+                "accepted": True,
+                "artifact_status": "accepted",
+                "task_id": task.id,
+                "execution_strategy": "flat",
+                "effective_execution_strategy": "flat",
+                "final_response": "Completed.",
+                "final_result": "Completed.",
+                "artifact_refs": [],
+                "reason": "",
+                "missing_criteria": [],
+            }
+
+        async def async_close(self) -> None:
+            return None
+
+    class _Flow:
+        def create_execution(self, **kwargs: Any) -> _Execution:
+            create_execution_kwargs.update(kwargs)
+            return _Execution()
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    cast(Any, task)._flow = _Flow()
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_ensure_final_reflection", noop)
+    monkeypatch.setattr(cast(Any, task), "_apply_terminal_workspace_retention", noop, raising=False)
+
+    result = await task.async_run()
+
+    assert result["status"] == "completed"
+    assert create_execution_kwargs == {"auto_close": False, "workspace": False}
+
+
+@pytest.mark.asyncio
+async def test_agent_task_terminal_retention_promotes_trusted_file_ref(tmp_path):
+    agent = _create_agent("agent-task-terminal-retention-helper").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-retention-helper",
+        goal="Produce the final report.",
+        success_criteria=["The final report is written and read back."],
+        execution="flat",
+    )
+    final_body = "# Final report\n\nTrusted terminal deliverable.\n"
+    await task.workspace.write_file("reports/final.md", final_body)
+    readback = await task.workspace.read_file("reports/final.md", max_bytes=4096)
+    trusted_ref = {
+        "path": "reports/final.md",
+        "bytes": int(readback["bytes"]),
+        "sha256": str(readback["sha256"]),
+        "media_type": readback.get("media_type"),
+        "content_kind": str(readback.get("content_kind") or "text"),
+        "role": "workspace_artifact",
+    }
+    process_ref = await task.workspace.put(
+        {"revision": {"cards": ["draft"]}, "evidence_view": {"body": "process-only"}},
+        collection="observations",
+        kind="agent_task_taskboard_checkpoint",
+        scope={"task_id": task.id},
+    )
+    await task.workspace.put_checkpoint(task.id, {"status": "running"}, step_id="working")
+    await task.workspace.write_file("working/draft.md", "temporary process file")
+
+    register = getattr(task, "_register_terminal_deliverables", None)
+    apply_retention = getattr(task, "_apply_terminal_workspace_retention", None)
+    assert callable(register), "AgentTask must expose terminal deliverable registration."
+    assert callable(apply_retention), "AgentTask must expose terminal Workspace retention."
+
+    promoted_refs = await cast(Any, register)([trusted_ref])
+    anchors = await task.workspace.retention_anchors(task.id, anchor_type="deliverable")
+    task.result = {
+        "status": "completed",
+        "accepted": True,
+        "artifact_status": "accepted",
+        "task_id": task.id,
+        "execution_strategy": "flat",
+        "effective_execution_strategy": "flat",
+        "final_response": "Completed: reports/final.md",
+        "final_result": "Workspace artifact delivered at reports/final.md.",
+        "artifact_refs": promoted_refs,
+        "reason": "",
+        "missing_criteria": [],
+    }
+    retention_result = await cast(Any, apply_retention)(status="completed")
+
+    final_readback = await task.workspace.read_file("reports/final.md", max_bytes=4096)
+    assert final_readback["content"] == final_body
+    assert final_readback["sha256"] == trusted_ref["sha256"]
+    assert len(promoted_refs) == 1
+    assert len(anchors) == 1
+    assert anchors[0]["record_ref"]["record_id"] == promoted_refs[0]["id"]
+    assert await task.workspace.get_data(promoted_refs[0]) == trusted_ref
+    assert retention_result is not None
+    assert retention_result["status"] in {"applied", "noop"}
+    assert await cast(Any, task.workspace.backend).get_record(process_ref["id"]) is None
+    assert await task.workspace.checkpoint_history(task.id) == []
+    assert task.workspace.resolve_file_path("working/draft.md").exists() is False
+
+
+@pytest.mark.asyncio
+async def test_agent_task_terminal_retention_defers_on_deliverable_digest_mismatch(tmp_path):
+    agent = _create_agent("agent-task-terminal-retention-mismatch").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-retention-mismatch",
+        goal="Preserve a changed report for inspection.",
+        success_criteria=["The report is retained only after matching readback."],
+        execution="flat",
+    )
+    await task.workspace.write_file("reports/final.md", "original")
+    original = await task.workspace.read_file("reports/final.md", max_bytes=64)
+    stale_ref = {
+        "path": "reports/final.md",
+        "bytes": int(original["bytes"]),
+        "sha256": str(original["sha256"]),
+        "media_type": original.get("media_type"),
+        "content_kind": str(original.get("content_kind") or "text"),
+        "role": "workspace_artifact",
+    }
+    process_ref = await task.workspace.put(
+        {"process": "must remain when terminal integrity is uncertain"},
+        collection="observations",
+        kind="agent_task_observation",
+    )
+    await task.workspace.write_file("reports/final.md", "changed after trusted readback")
+    task.result = {
+        "status": "completed",
+        "accepted": True,
+        "artifact_status": "accepted",
+        "task_id": task.id,
+        "execution_strategy": "flat",
+        "effective_execution_strategy": "flat",
+        "final_response": "Completed.",
+        "final_result": "reports/final.md",
+        "artifact_refs": [],
+        "reason": "",
+        "missing_criteria": [],
+    }
+
+    promoted_refs = await cast(Any, task)._register_terminal_deliverables([stale_ref])
+    retention_result = await task._apply_terminal_workspace_retention(status="completed")
+
+    assert promoted_refs == []
+    assert retention_result is not None
+    assert retention_result["status"] == "deferred"
+    assert await cast(Any, task.workspace.backend).get_record(process_ref["id"]) is not None
+    changed = await task.workspace.read_file("reports/final.md", max_bytes=64)
+    assert changed["content"] == "changed after trusted readback"
+
+
+@pytest.mark.asyncio
 async def test_agent_task_guidance_records_workspace_refs_without_evidence_items(tmp_path):
     agent = _create_agent("agent-task-guidance-record").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -4348,6 +4516,11 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
 
     assert result["status"] == "completed"
     assert result["final_result"].startswith("Workspace artifact delivered at reports/final.md")
+    assert len(result["artifact_refs"]) == 1
+    assert result["artifact_refs"][0]["kind"] == "agent_task_deliverable"
+    assert "verification" not in result
+    assert "iterations" not in result
+    assert "# Delivered Report" not in json.dumps(result, ensure_ascii=False)
     assert "final_response" in result
     assert "Completed" in result["final_response"]
     assert "reports/final.md" in result["final_response"]
@@ -6084,7 +6257,10 @@ async def test_taskboard_finalization_promotes_single_terminal_candidate_without
 
     assert result == {"terminal": True, "status": "completed"}
     assert calls == {"finalizer": 0, "verifier": 1}
-    assert task.result["taskboard"]["finalization_source"] == "candidate_promotion"
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert terminal_state["finalization_source"] == "candidate_promotion"
+    assert "taskboard" not in task.result
+    assert task.result["artifact_refs"] == []
 
 
 @pytest.mark.asyncio
@@ -6173,8 +6349,11 @@ async def test_taskboard_finalization_skips_verifier_when_acceptance_cache_is_cl
     assert result == {"terminal": True, "status": "completed"}
     assert calls == {"finalizer": 0, "verifier": 0}
     assert task.result["accepted"] is True
-    assert task.result["taskboard"]["acceptance_verification_plan"]["all_satisfied"] is True
-    assert task.result["taskboard"]["final_verification"]["verification_source"] == "taskboard_acceptance_cache"
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert terminal_state["acceptance_verification_plan"]["all_satisfied"] is True
+    assert terminal_state["final_verification"]["verification_source"] == (
+        "taskboard_acceptance_cache"
+    )
 
 
 @pytest.mark.asyncio
@@ -6270,7 +6449,8 @@ async def test_taskboard_final_gate_blocks_only_explicit_dirty_state_facts(tmp_p
     assert calls == {"finalizer": 0, "verifier": 1}
     assert task.result["accepted"] is False
     assert task.result["artifact_status"] == "partial"
-    assert task.result["taskboard"]["explicit_state_facts"][0]["code"] == "task_repo.dirty"
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert terminal_state["explicit_state_facts"][0]["code"] == "task_repo.dirty"
     assert "Task-scoped repository files are still dirty." in task.result["reason"]
 
 
@@ -6784,23 +6964,15 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     execution_meta = await result_facade.async_get_meta()
     meta = await task.meta()
     delta_text = "".join([chunk async for chunk in task.get_async_generator(type="delta")])
-    resumed_execution = await result_facade.async_resume()
-    resumed_result = await resumed_execution.async_start()
-    resumed_meta = await resumed_execution.async_get_meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     assert "final_response" in result
     assert await result_facade.async_get_text() == result["final_response"]
     assert result_facade.task_refs["task_id"] == "legacy-script-upgrade"
     assert result_facade.task_refs["status"] == "completed"
     assert execution_meta["task_refs"]["task_id"] == "legacy-script-upgrade"
     assert execution_meta["task_refs"]["status"] == "completed"
-    assert resumed_execution.task_refs["task_id"] == "legacy-script-upgrade"
-    assert resumed_execution.task_refs["resume"] is True
-    assert resumed_result["status"] == "completed"
-    assert resumed_result["resumed"] is True
-    assert resumed_meta["task_refs"]["status"] == "completed"
     assert meta["status"] == "completed"
     assert len(meta["iterations"]) == 2
     for iteration in meta["iterations"]:
@@ -6861,16 +7033,16 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert meta["workspace_refs"]["reflections"]
     workspace = agent.workspace
     assert workspace is not None
-    assert len(await workspace.checkpoint_history("legacy-script-upgrade")) == 2
+    assert await workspace.checkpoint_history("legacy-script-upgrade") == []
     verifies_links = await workspace.links(relation="verifies_observation")
     decision_links = await workspace.links(relation="implements_decision")
     checkpoint_links = await workspace.links(relation="checkpointed_by")
     reflection_links = await workspace.links(relation="reflects_on")
-    assert len(verifies_links) == 2
-    assert len(decision_links) == 2
-    assert len(checkpoint_links) == 2
-    assert reflection_links
-    assert all(link["meta"]["evidence"] for link in [*verifies_links, *decision_links, *checkpoint_links])
+    assert verifies_links == []
+    assert decision_links == []
+    assert checkpoint_links == []
+    assert reflection_links == []
+    assert meta["diagnostics"]["workspace_retention"]["status"] in {"applied", "noop"}
 
 
 @pytest.mark.asyncio
@@ -7984,7 +8156,7 @@ async def test_agent_task_loop_verification_guard_replans_when_missing_criteria_
     meta = await task.meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     assert any(item.path.endswith(".replan") for item in stream_items)
     assert meta["iterations"][0]["verification"]["is_complete"] is False
     assert "missing_criteria_present" in meta["iterations"][0]["verification"]["guard_reasons"]
@@ -8057,7 +8229,7 @@ async def test_agent_task_loop_verification_guard_replans_when_final_result_miss
     assert result["status"] == "completed"
     assert result["accepted"] is True
     assert result["artifact_status"] == "accepted"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     assert any(item.path.endswith(".replan") for item in stream_items)
     first_verification = meta["iterations"][0]["verification"]
     assert first_verification["is_complete"] is False
@@ -8134,7 +8306,7 @@ async def test_agent_task_loop_verification_guard_replans_on_failed_action_evide
     meta = await task.meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     assert any(phase["phase"] == "replanned" for phase in meta["diagnostics"]["phases"])
     first_verification = meta["iterations"][0]["verification"]
     assert first_verification["is_complete"] is False
@@ -8218,7 +8390,7 @@ async def test_agent_task_loop_replans_on_structured_blocks_replan_signal(tmp_pa
     meta = await task.async_meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     first_verification = meta["iterations"][0]["verification"]
     assert first_verification["is_complete"] is False
     assert first_verification["replan_signals"][0]["status"] == "replan_goal"
@@ -8297,7 +8469,7 @@ async def test_required_capabilities_satisfied_cumulatively_across_iterations(tm
 
     # Iteration 1 cannot complete (skill_y still missing); iteration 2 completes.
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     first = meta["iterations"][0]["verification"]
     assert first["is_complete"] is False
     assert "skill_y" in " ".join(first.get("missing_required_capabilities", []))
@@ -9004,7 +9176,7 @@ async def test_capability_evidence_satisfied_cumulatively_across_iterations(tmp_
     meta = await task.async_meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     first = meta["iterations"][0]["verification"]
     assert first["is_complete"] is False
     assert "design-skill" in " ".join(first.get("missing_capability_evidence", []))
@@ -10172,7 +10344,7 @@ async def test_action_succeeded_evidence_satisfied_in_earlier_iteration(tmp_path
     meta = await task.async_meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     # Iteration 2 must not report build_action as missing — it succeeded in iter 1.
     second = meta["iterations"][1]["verification"]
     assert "build_action" not in " ".join(second.get("missing_capability_evidence", []))

@@ -396,11 +396,17 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         if bool(verification.get("is_complete")):
             self.status = "completed"
             final_result = verification.get("final_result") or execution_result
+            terminal_file_refs = self._trusted_terminal_file_refs(execution_result, verification)
+            promoted_refs = await self._register_terminal_deliverables(terminal_file_refs)
+            if terminal_file_refs and not isinstance(final_result, str):
+                final_result = self._workspace_artifact_final_result_from_refs(terminal_file_refs)
             self.result = {
                 "status": "completed",
                 "accepted": True,
                 "artifact_status": "accepted",
                 "task_id": self.id,
+                "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
                 "final_result": final_result,
                 "final_response": self._agent_task_user_final_response(
                     final=verification,
@@ -409,10 +415,12 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     status="completed",
                     reason=str(verification.get("reason") or ""),
                     missing_criteria=verification.get("missing_criteria", []),
+                    final_refs=terminal_file_refs,
                     final_result=final_result,
                 ),
-                "iterations": iteration_index,
-                "verification": verification,
+                "artifact_refs": promoted_refs,
+                "reason": verification.get("reason", ""),
+                "missing_criteria": verification.get("missing_criteria", []),
             }
             await self._emit_progress(
                 iteration_index,
@@ -431,12 +439,15 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             self.status = "blocked"
             reason = verification.get("reason") or "Verifier blocked the task."
             blocked_final_result = verification.get("final_result") or ""
-            blocked_final_refs = execution_result.get("file_refs", []) if isinstance(execution_result, Mapping) else []
+            blocked_final_refs = self._trusted_terminal_file_refs(execution_result, verification)
+            promoted_refs = await self._register_terminal_deliverables(blocked_final_refs)
             self.result = {
                 "status": "blocked",
                 "accepted": False,
                 "artifact_status": "blocked",
                 "task_id": self.id,
+                "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
                 "reason": reason,
                 "final_response": self._agent_task_user_final_response(
                     final=verification,
@@ -448,8 +459,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     final_refs=blocked_final_refs,
                     final_result=blocked_final_result,
                 ),
-                "iterations": iteration_index,
-                "verification": verification,
+                "artifact_refs": promoted_refs,
+                "missing_criteria": verification.get("missing_criteria", []),
             }
             if blocked_final_result not in (None, ""):
                 self.result["final_result"] = blocked_final_result
@@ -478,12 +489,15 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 self.status = "max_iterations"
                 reason = verification.get("reason") or "Task did not pass verification before max_iterations."
             partial_final_result = verification.get("final_result") or ""
-            partial_final_refs = execution_result.get("file_refs", []) if isinstance(execution_result, Mapping) else []
+            partial_final_refs = self._trusted_terminal_file_refs(execution_result, verification)
+            promoted_refs = await self._register_terminal_deliverables(partial_final_refs)
             self.result = {
                 "status": self.status,
                 "accepted": False,
                 "artifact_status": "partial",
                 "task_id": self.id,
+                "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
                 "reason": reason,
                 "final_response": self._agent_task_user_final_response(
                     final=verification,
@@ -495,13 +509,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     final_refs=partial_final_refs,
                     final_result=partial_final_result,
                 ),
-                "iterations": iteration_index,
-                "verification": verification,
+                "artifact_refs": promoted_refs,
+                "missing_criteria": verification.get("missing_criteria", []),
             }
             if partial_final_result not in (None, ""):
                 self.result["final_result"] = partial_final_result
-            if missing_capabilities:
-                self.result["missing_required_capabilities"] = missing_capabilities
             await self._emit_progress(
                 iteration_index,
                 self.status,

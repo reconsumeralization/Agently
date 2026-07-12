@@ -17,7 +17,16 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
+
+from agently.types.data import (
+    WorkspaceFileRef,
+    WorkspaceRecordRef,
+    WorkspaceReferenceEnvelope,
+    WorkspaceRetentionResult,
+    WorkspaceRetentionTerminalStatus,
+)
 
 from .AcceptanceLocator import build_workspace_artifact_acceptance_locator_items, collect_acceptance_points
 from .TaskShared import *
@@ -29,6 +38,281 @@ _PUBLIC_DELTA_RETRY_MARKER_RE = re.compile(r"\A<\$retry(?::(?P<label>[^>]*)?)?>(
 
 
 class AgentTaskArtifactMixin(AgentTaskMixinBase):
+    async def _register_terminal_deliverables(
+        self,
+        refs: Sequence[WorkspaceFileRef | WorkspaceRecordRef | WorkspaceReferenceEnvelope],
+    ) -> list[WorkspaceRecordRef]:
+        """Promote only caller-selected, readback-verified terminal deliverables."""
+
+        promoted: list[WorkspaceRecordRef] = []
+        retained = list(getattr(self, "_terminal_retained_refs", []) or [])
+
+        def defer(code: str, message: str, *, path: str = "") -> None:
+            setattr(self, "_terminal_retention_deferred", True)
+            diagnostic = {"code": code, "message": message}
+            if path:
+                diagnostic["path"] = path
+            self.diagnostics.setdefault("workspace_retention", {}).setdefault("diagnostics", []).append(diagnostic)
+
+        def ref_key(ref: Mapping[str, Any]) -> str:
+            return json.dumps(ref, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+        retained_keys = {ref_key(ref) for ref in retained if isinstance(ref, Mapping)}
+
+        def retain(ref: Mapping[str, Any]) -> None:
+            value = dict(DataFormatter.sanitize(dict(ref)))
+            key = ref_key(value)
+            if key not in retained_keys:
+                retained.append(value)
+                retained_keys.add(key)
+
+        for raw_ref in refs:
+            if not isinstance(raw_ref, Mapping):
+                continue
+            if "id" in raw_ref:
+                record_ref = cast(WorkspaceRecordRef, dict(DataFormatter.sanitize(dict(raw_ref))))
+                if not str(record_ref.get("id") or ""):
+                    defer(
+                        "agent_task.retention.deliverable_ref_invalid",
+                        "Terminal Workspace record ref has no record id.",
+                    )
+                    continue
+                try:
+                    await self.workspace.add_retention_anchor(
+                        self.id,
+                        anchor_type="deliverable",
+                        record_ref=record_ref,
+                    )
+                except Exception as error:
+                    defer(
+                        "agent_task.retention.deliverable_promotion_failed",
+                        _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    )
+                    continue
+                promoted.append(record_ref)
+                retain(record_ref)
+                continue
+            if "workspace_id" in raw_ref:
+                envelope = cast(WorkspaceReferenceEnvelope, dict(DataFormatter.sanitize(dict(raw_ref))))
+                try:
+                    await self.workspace.add_retention_anchor(
+                        self.id,
+                        anchor_type="deliverable",
+                        record_ref=envelope,
+                    )
+                except Exception as error:
+                    defer(
+                        "agent_task.retention.deliverable_promotion_failed",
+                        _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    )
+                    continue
+                retain(envelope)
+                continue
+
+            path = str(raw_ref.get("path") or "").strip()
+            expected_digest = str(raw_ref.get("sha256") or "").strip()
+            try:
+                expected_size = int(raw_ref.get("bytes") or 0)
+            except (TypeError, ValueError):
+                expected_size = 0
+            if not path or not expected_digest or expected_size <= 0:
+                defer(
+                    "agent_task.retention.deliverable_ref_invalid",
+                    "Terminal Workspace file ref has no verifiable path, size, or digest.",
+                    path=path,
+                )
+                continue
+            try:
+                readback = await self.workspace.read_file(path, max_bytes=1)
+            except Exception as error:
+                defer(
+                    "agent_task.retention.deliverable_readback_failed",
+                    _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    path=path,
+                )
+                continue
+            actual_digest = str(readback.get("sha256") or "")
+            try:
+                actual_size = int(readback.get("bytes") or 0)
+            except (TypeError, ValueError):
+                actual_size = 0
+            if actual_digest != expected_digest or actual_size != expected_size:
+                defer(
+                    "agent_task.retention.deliverable_integrity_mismatch",
+                    "Terminal deliverable size or digest changed after trusted readback.",
+                    path=path,
+                )
+                continue
+            canonical_file_ref = cast(
+                WorkspaceFileRef,
+                {
+                    "path": path,
+                    "bytes": actual_size,
+                    "sha256": actual_digest,
+                    "media_type": raw_ref.get("media_type") or readback.get("media_type"),
+                    "content_kind": str(raw_ref.get("content_kind") or readback.get("content_kind") or "unknown"),
+                    "role": str(raw_ref.get("role") or "workspace_artifact"),
+                },
+            )
+            if ref_key(canonical_file_ref) in retained_keys:
+                continue
+            try:
+                record_ref = await self.workspace.put_artifact_ref(
+                    self.id,
+                    canonical_file_ref,
+                    metadata={
+                        "scope": {"task_id": self.id},
+                        "kind": "agent_task_deliverable",
+                    },
+                )
+                await self.workspace.add_retention_anchor(
+                    self.id,
+                    anchor_type="deliverable",
+                    record_ref=record_ref,
+                )
+            except Exception as error:
+                defer(
+                    "agent_task.retention.deliverable_promotion_failed",
+                    _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    path=path,
+                )
+                continue
+            promoted.append(record_ref)
+            retain(canonical_file_ref)
+            retain(record_ref)
+
+        self._terminal_deliverable_refs = [
+            *list(getattr(self, "_terminal_deliverable_refs", []) or []),
+            *promoted,
+        ]
+        self._terminal_retained_refs = retained
+        return promoted
+
+    async def _apply_terminal_workspace_retention(
+        self,
+        *,
+        status: WorkspaceRetentionTerminalStatus,
+    ) -> WorkspaceRetentionResult | None:
+        """Apply Workspace-owned cleanup without changing the business result."""
+
+        if bool(getattr(self, "_terminal_retention_deferred", False)):
+            diagnostics = list(
+                cast(Mapping[str, Any], self.diagnostics.get("workspace_retention", {})).get("diagnostics", [])
+                or []
+            )
+            result = cast(
+                WorkspaceRetentionResult,
+                {
+                    "status": "deferred",
+                    "plan_fingerprint": "",
+                    "manifest_ref": None,
+                    "retained_refs": list(getattr(self, "_terminal_retained_refs", []) or []),
+                    "accounting": {
+                        "entities": {},
+                        "logical_bytes_deleted": 0,
+                        "physical_bytes_reclaimed": 0,
+                        "physical_bytes_pending": 0,
+                    },
+                    "diagnostics": diagnostics,
+                },
+            )
+            self.diagnostics["workspace_retention"] = {
+                "status": "deferred",
+                "accounting": DataFormatter.sanitize(result["accounting"]),
+                "diagnostics": diagnostics,
+            }
+            return result
+        try:
+            preview = await self.workspace.inspect_retention(
+                {},
+                lifecycle={
+                    "execution_id": self.id,
+                    "status": status,
+                    "terminal_at": datetime.now(timezone.utc).isoformat(),
+                    "state_version": None,
+                    "recovery_active": False,
+                    "lease_active": False,
+                },
+                retained_refs=list(getattr(self, "_terminal_retained_refs", []) or []),
+                inline_result=DataFormatter.sanitize(self.result),
+            )
+            if preview["status"] == "ready":
+                result = await self.workspace.apply_retention(preview)
+            else:
+                result = cast(
+                    WorkspaceRetentionResult,
+                    {
+                        "status": "deferred",
+                        "plan_fingerprint": preview["plan_fingerprint"],
+                        "manifest_ref": None,
+                        "retained_refs": preview["retained_refs"],
+                        "accounting": preview["accounting"],
+                        "diagnostics": preview["diagnostics"],
+                    },
+                )
+        except Exception as error:
+            self.diagnostics["workspace_retention"] = {
+                "status": "deferred",
+                "accounting": {},
+                "diagnostics": [
+                    {
+                        "code": "agent_task.retention.apply_failed",
+                        "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                    }
+                ],
+            }
+            return None
+        self.diagnostics["workspace_retention"] = {
+            "status": result["status"],
+            "accounting": DataFormatter.sanitize(result["accounting"]),
+            "diagnostics": [
+                {
+                    "code": str(item.get("code") or ""),
+                    "message": str(item.get("message") or "")[:360],
+                }
+                for item in result["diagnostics"][:8]
+            ],
+        }
+        return result
+
+    @classmethod
+    def _trusted_terminal_file_refs(cls, *values: Any) -> list[dict[str, Any]]:
+        """Collect only explicit trusted ref fields from known terminal carriers."""
+
+        refs: list[dict[str, Any]] = []
+        seen: set[tuple[str, int, str]] = set()
+
+        def collect(value: Any) -> None:
+            if isinstance(value, Mapping):
+                if cls._workspace_artifact_ref_has_trusted_readback(value) and cls._is_trusted_workspace_artifact_ref(
+                    value
+                ):
+                    key = (
+                        str(value.get("path") or ""),
+                        int(value.get("bytes") or 0),
+                        str(value.get("sha256") or ""),
+                    )
+                    if key not in seen:
+                        refs.append(dict(DataFormatter.sanitize(dict(value))))
+                        seen.add(key)
+                    return
+                for key in ("file_refs", "artifact_refs"):
+                    nested = value.get(key)
+                    if isinstance(nested, Sequence) and not isinstance(nested, str | bytes | bytearray):
+                        for item in nested:
+                            collect(item)
+                manifest = value.get("artifact_manifest")
+                if isinstance(manifest, Mapping):
+                    collect(manifest.get("file_refs"))
+                return
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+                for item in value:
+                    collect(item)
+
+        for value in values:
+            collect(value)
+        return refs
+
     @staticmethod
     def _workspace_artifact_manifest_path(manifest: Mapping[str, Any] | None) -> str:
         if isinstance(manifest, Mapping):

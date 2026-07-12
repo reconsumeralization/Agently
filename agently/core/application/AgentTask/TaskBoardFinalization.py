@@ -579,17 +579,20 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "status": self.status,
                 "accepted": False,
                 "artifact_status": "partial",
-                "degraded": False,
                 "task_id": self.id,
                 "execution_strategy": self.execution_strategy,
                 "effective_execution_strategy": self.effective_execution_strategy,
                 "reason": reason,
                 "final_response": final_response,
-                "taskboard": {
-                    "revision": revision.to_dict(),
-                    "schedule": schedule.to_dict(),
-                    "evidence_view": evidence_view,
-                },
+                "final_result": "",
+                "artifact_refs": [],
+                "missing_criteria": ["TaskBoard did not reach a completed board state."],
+            }
+            self._terminal_taskboard_state = {
+                "revision": revision.to_dict(),
+                "schedule": schedule.to_dict(),
+                "evidence_view": evidence_view,
+                "terminal_status": result_status,
             }
             await self._emit("agent_task.blocked", self.result)
             return {"terminal": True, "status": self.status}
@@ -952,33 +955,37 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             completion_notes=completion_notes,
         )
         self.status = "completed" if accepted else "blocked"
+        promoted_refs = await self._register_terminal_deliverables(trusted_final_refs)
+        compact_final_result = final.get("final_result", "")
+        if trusted_final_refs:
+            compact_final_result = self._workspace_artifact_final_result_from_refs(trusted_final_refs)
+        self._terminal_taskboard_state = {
+            "revision": revision.to_dict(),
+            "schedule": schedule.to_dict(),
+            "evidence_view": evidence_view,
+            "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+            "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+            "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
+            "completion_notes": completion_notes,
+            "explicit_state_facts": explicit_state_facts,
+            "blocking_state_facts": blocking_state_facts,
+            "terminal_status": result_status,
+            "degraded_finalization_attempted": degraded_finalization_attempted,
+            "finalization_source": finalization_source,
+            "final_verification": final_verification,
+        }
         self.result = {
             "status": self.status,
             "accepted": accepted,
             "artifact_status": artifact_status,
-            "degraded": degraded,
             "task_id": self.id,
             "execution_strategy": self.execution_strategy,
             "effective_execution_strategy": self.effective_execution_strategy,
-            "final_result": final.get("final_result", ""),
+            "final_result": compact_final_result,
             "reason": final.get("reason", ""),
             "final_response": final_response,
             "missing_criteria": final.get("missing_criteria", []),
-            "taskboard": {
-                "revision": revision.to_dict(),
-                "schedule": schedule.to_dict(),
-                "evidence_view": evidence_view,
-                "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
-                "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
-                "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
-                "completion_notes": completion_notes,
-                "explicit_state_facts": explicit_state_facts,
-                "blocking_state_facts": blocking_state_facts,
-                "terminal_status": result_status,
-                "degraded_finalization_attempted": degraded_finalization_attempted,
-                "finalization_source": finalization_source,
-                "final_verification": final_verification,
-            },
+            "artifact_refs": promoted_refs,
         }
         await self._record_phase(
             "terminal",
