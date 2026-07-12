@@ -437,7 +437,7 @@ class _RootMutationGuard:
         self._depth = 0
         self._lock_path = lock_path
         self._advisory_handle: _AdvisoryLockHandle | None = None
-        self._poison_error: _AdvisoryLockReleaseError | None = None
+        self._poison_message: str | None = None
 
     @staticmethod
     def _owner_token() -> object:
@@ -451,8 +451,11 @@ class _RootMutationGuard:
 
     def _try_reserve(self, owner: object) -> bool | None:
         with self._state_lock:
-            if self._poison_error is not None:
-                raise self._poison_error
+            if self._poison_message is not None:
+                raise _AdvisoryLockReleaseError(
+                    self._poison_message,
+                    native_release_uncertain=True,
+                )
             if self._owner is None:
                 self._owner = owner
                 self._depth = 1
@@ -475,15 +478,17 @@ class _RootMutationGuard:
                     advisory_handle.release()
                 except _AdvisoryLockReleaseError as error:
                     if error.native_release_uncertain:
-                        poison_error = _AdvisoryLockReleaseError(
+                        poison_message = (
                             "Workspace root mutation guard is permanently poisoned "
-                            f"after uncertain native lock release: {error}",
-                            native_release_uncertain=True,
+                            f"after uncertain native lock release: {error}"
                         )
-                        self._poison_error = poison_error
+                        self._poison_message = poison_message
                         _retain_poisoned_root_mutation_guard(self)
                         self._owner = None
-                        raise poison_error
+                        raise _AdvisoryLockReleaseError(
+                            poison_message,
+                            native_release_uncertain=True,
+                        )
                     self._owner = None
                     self._advisory_handle = None
                     raise

@@ -2880,34 +2880,75 @@ async def test_uncertain_native_release_poisons_root_guard_across_backend_gc(
     try:
         result = await target.apply_retention(preview)
         opens_after_poison = waiter_open_count
-        with pytest.raises(
-            local_backend_module._AdvisoryLockReleaseError,
-            match="poison|release",
-        ):
-            await asyncio.wait_for(
-                target.put(
-                    {"process": "must fail fast"},
-                    collection="observations",
-                    kind="process",
-                ),
-                timeout=0.1,
-            )
+        guard = cast(Any, root.backend)._root_mutation_guard
+
+        def traceback_depth(error: BaseException) -> int:
+            depth = 0
+            traceback = error.__traceback__
+            while traceback is not None:
+                depth += 1
+                traceback = traceback.tb_next
+            return depth
+
+        async_errors: list[BaseException] = []
+        async_depths: list[int] = []
+        for attempt in range(5):
+            with pytest.raises(
+                local_backend_module._AdvisoryLockReleaseError,
+                match="poison|release",
+            ) as caught:
+                await asyncio.wait_for(
+                    target.put(
+                        {"process": f"must fail fast {attempt}"},
+                        collection="observations",
+                        kind="process",
+                    ),
+                    timeout=0.1,
+                )
+            async_errors.append(caught.value)
+            async_depths.append(traceback_depth(caught.value))
         assert waiter_open_count == opens_after_poison
+
+        sync_errors: list[BaseException] = []
+        sync_depths: list[int] = []
+        for _ in range(5):
+            with pytest.raises(
+                local_backend_module._AdvisoryLockReleaseError,
+                match="poison|release",
+            ) as caught:
+                with guard.try_acquire_sync():
+                    pass
+            sync_errors.append(caught.value)
+            sync_depths.append(traceback_depth(caught.value))
 
         del target
         del root
         gc.collect()
-        with pytest.raises(
-            local_backend_module._AdvisoryLockReleaseError,
-            match="poison|release",
-        ):
-            WorkspaceManager().create(workspace_path, create=False)
+        backend_errors: list[BaseException] = []
+        backend_depths: list[int] = []
+        for _ in range(5):
+            with pytest.raises(
+                local_backend_module._AdvisoryLockReleaseError,
+                match="poison|release",
+            ) as caught:
+                WorkspaceManager().create(workspace_path, create=False)
+            backend_errors.append(caught.value)
+            backend_depths.append(traceback_depth(caught.value))
 
         assert result["status"] == "deferred"
         assert [item.get("code") for item in result["diagnostics"]] == [
             "workspace.retention.advisory_lock_release_failed"
         ]
         assert result["accounting"]["logical_bytes_deleted"] > 0
+        assert len({id(error) for error in async_errors}) == 5
+        assert len({id(error) for error in sync_errors}) == 5
+        assert len({id(error) for error in backend_errors}) == 5
+        assert len(set(async_depths)) == 1
+        assert len(set(sync_depths)) == 1
+        assert len(set(backend_depths)) == 1
+        assert not any(
+            isinstance(value, BaseException) for value in vars(guard).values()
+        )
     finally:
         monkeypatch.setattr(local_backend_module._fcntl, "flock", original_flock)
         monkeypatch.setattr(local_backend_module.os, "close", original_close)
