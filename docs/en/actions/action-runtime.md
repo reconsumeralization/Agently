@@ -427,6 +427,13 @@ execution terminal owner. If selected promotion fails, the selected source is
 kept with bounded retry diagnostics while unselected artifacts from that exact
 scope are released.
 
+Because a standalone scope is discarded at run end, any artifact refs returned
+from that run are historical projections with `available=false` and
+`full_value_available=false`. Their bounded digest/preview remains useful, but
+`read_action_artifact` cannot retrieve the released value. Only call readback
+while a ref explicitly reports `available=true`, such as an execution-owned
+scope that has not yet completed transfer or cleanup.
+
 ## Extension guidance
 
 | You want to change | Replace |

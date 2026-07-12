@@ -655,7 +655,10 @@ AgentExecution is the parent of a routed AgentTask. The task receives an
 explicit execution-scoped Workspace view and derives a child scope; it does not
 search for an execution directory or rebind the Agent-wide Workspace. Canonical
 task file and record refs are handed back to AgentExecution without copying the
-deliverable.
+deliverable. In that child scope, `execution_id` remains the inherited parent
+execution id and `task_id` identifies the exact Task. Task cleanup therefore
+removes only Task process records/files while leaving the parent and sibling
+Tasks live.
 
 At terminal state, AgentExecution prepares one bounded carrier before emitting
 the `result` stream item or terminal RuntimeEvent. Both surfaces use that same
@@ -666,7 +669,17 @@ body. File-backed AgentTask `final_response` text points to the canonical file
 and is always byte-bounded.
 
 `AgentExecution.async_record_workspace(...)` uses purpose-aware lifecycle
-rules. After terminal state, `process` and `recovery` writes are rejected.
+rules. Terminal state is checked again after any internal execution wait, so a
+fresh call cannot race completion and append a process/checkpoint afterward.
+After terminal state, `process` and `recovery` writes are rejected.
 Explicit `deliverable` writes and policy-enabled `audit` writes are accepted
 only with immediate Workspace retention governance. Active recovery or lease
 facts defer destructive cleanup, including cancellation cleanup.
+
+Workspace and replaceable providers expose
+`await workspace.get_retention_lifecycle(execution_id, status=...,
+terminal_at=...)`. It returns the existing typed lifecycle shape using the
+latest persisted snapshot state version, unresolved recovery facts, and active
+lease state. Agent consumers forward this snapshot rather than synthesizing
+stream counters or private runtime flags. Cancellation uses the distinct
+`agent_execution.cancelled` RuntimeEvent and retention status.
