@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 from datetime import datetime, timezone
@@ -83,16 +84,106 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 retained.append(value)
                 retained_keys.add(key)
 
+        async def canonical_artifact_record(
+            raw_ref: Mapping[str, Any],
+        ) -> WorkspaceRecordRef | None:
+            is_envelope = "workspace_id" in raw_ref
+            record_id = str((raw_ref.get("record_id") if is_envelope else raw_ref.get("id")) or "").strip()
+            if not record_id:
+                defer(
+                    "agent_task.retention.deliverable_ref_invalid",
+                    "Terminal Workspace reference has no record id.",
+                )
+                return None
+            try:
+                matches = await self.workspace.search(filters={"id": record_id})
+            except Exception as error:
+                defer(
+                    "agent_task.retention.deliverable_lookup_failed",
+                    _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                )
+                return None
+            if len(matches) != 1:
+                defer(
+                    "agent_task.retention.deliverable_lookup_failed",
+                    "Terminal Workspace record is absent from the current scoped Workspace.",
+                )
+                return None
+            canonical_ref = matches[0]
+            canonical_meta = canonical_ref.get("meta")
+            canonical_source = canonical_ref.get("source")
+            if not (
+                canonical_ref.get("collection") == "artifacts"
+                and isinstance(canonical_meta, Mapping)
+                and canonical_meta.get("artifact_ref") is True
+                and isinstance(canonical_source, Mapping)
+                and canonical_source.get("type") == "workspace"
+                and canonical_source.get("name") == "artifact_ref"
+            ):
+                defer(
+                    "agent_task.retention.deliverable_provenance_mismatch",
+                    "Persisted Workspace record is not a canonical artifact ref.",
+                )
+                return None
+            try:
+                canonical_size = int(canonical_ref.get("size") or 0)
+                readback = await self.workspace.read_bounded(
+                    canonical_ref,
+                    offset=0,
+                    limit=canonical_size + 1,
+                )
+                canonical_envelope = await self.workspace.ref_envelope(canonical_ref)
+            except Exception as error:
+                defer(
+                    "agent_task.retention.deliverable_readback_failed",
+                    _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                )
+                return None
+            readback_raw = str(readback.get("content") or "").encode("utf-8")
+            if not (
+                readback.get("eof") is True
+                and int(readback.get("size") or 0) == canonical_size
+                and len(readback_raw) == canonical_size
+                and hashlib.sha256(readback_raw).hexdigest() == str(canonical_ref.get("sha256") or "")
+            ):
+                defer(
+                    "agent_task.retention.deliverable_integrity_mismatch",
+                    "Persisted Workspace artifact content does not match its canonical record ref.",
+                )
+                return None
+            if is_envelope:
+                identity_fields = (
+                    "workspace_id",
+                    "kind",
+                    "collection",
+                    "record_id",
+                    "version",
+                    "content_ref",
+                    "digest",
+                    "size",
+                    "created_at",
+                )
+                identity_matches = all(raw_ref.get(key) == canonical_envelope.get(key) for key in identity_fields)
+            else:
+                identity_fields = ("id", "kind", "collection", "path", "sha256", "size", "created_at")
+                identity_matches = all(raw_ref.get(key) == canonical_ref.get(key) for key in identity_fields)
+            if not identity_matches:
+                defer(
+                    "agent_task.retention.deliverable_identity_mismatch",
+                    "Terminal Workspace reference does not match the canonical persisted identity.",
+                )
+                return None
+            return canonical_ref
+
         for raw_ref in refs:
             if not isinstance(raw_ref, Mapping):
                 continue
-            if "id" in raw_ref:
-                record_ref = cast(WorkspaceRecordRef, dict(DataFormatter.sanitize(dict(raw_ref))))
-                if not str(record_ref.get("id") or ""):
-                    defer(
-                        "agent_task.retention.deliverable_ref_invalid",
-                        "Terminal Workspace record ref has no record id.",
-                    )
+            if "id" in raw_ref or "workspace_id" in raw_ref:
+                record_ref = await canonical_artifact_record(raw_ref)
+                if record_ref is None:
+                    continue
+                if any(ref.get("id") == record_ref.get("id") for ref in promoted):
+                    retain(record_ref)
                     continue
                 try:
                     await self.workspace.add_retention_anchor(
@@ -108,22 +199,6 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     continue
                 promoted.append(record_ref)
                 retain(record_ref)
-                continue
-            if "workspace_id" in raw_ref:
-                envelope = cast(WorkspaceReferenceEnvelope, dict(DataFormatter.sanitize(dict(raw_ref))))
-                try:
-                    await self.workspace.add_retention_anchor(
-                        self.id,
-                        anchor_type="deliverable",
-                        record_ref=envelope,
-                    )
-                except Exception as error:
-                    defer(
-                        "agent_task.retention.deliverable_promotion_failed",
-                        _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                    )
-                    continue
-                retain(envelope)
                 continue
 
             path = str(raw_ref.get("path") or "").strip()
@@ -302,7 +377,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         cls,
         *values: Any,
     ) -> list[WorkspaceFileRef | WorkspaceRecordRef | WorkspaceReferenceEnvelope]:
-        """Collect explicit, provenance-bearing Workspace refs from terminal carriers."""
+        """Collect explicit structured Workspace refs from terminal carriers."""
 
         refs: list[WorkspaceFileRef | WorkspaceRecordRef | WorkspaceReferenceEnvelope] = []
         seen: set[str] = set()
@@ -323,25 +398,16 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             seen.add(identity)
 
         def is_artifact_record_ref(value: Mapping[str, Any]) -> bool:
-            meta = value.get("meta")
-            source = value.get("source")
             return (
                 bool(str(value.get("id") or ""))
-                and str(value.get("collection") or "") == "artifacts"
-                and isinstance(meta, Mapping)
-                and meta.get("artifact_ref") is True
-                and isinstance(source, Mapping)
-                and source.get("type") == "workspace"
-                and source.get("name") == "artifact_ref"
+                and all(key in value for key in ("collection", "path", "sha256", "size", "source", "meta"))
             )
 
         def is_artifact_reference_envelope(value: Mapping[str, Any]) -> bool:
             return (
                 bool(str(value.get("workspace_id") or ""))
                 and bool(str(value.get("record_id") or ""))
-                and str(value.get("collection") or "") == "artifacts"
-                and bool(str(value.get("digest") or ""))
-                and value.get("content_ref") not in (None, "")
+                and all(key in value for key in ("collection", "content_ref", "digest", "size"))
             )
 
         def collect(value: Any) -> None:

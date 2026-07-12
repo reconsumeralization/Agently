@@ -3284,13 +3284,141 @@ async def test_agent_task_terminal_selector_retains_explicit_record_and_envelope
     anchors = await task.workspace.retention_anchors(task.id, anchor_type="deliverable")
 
     assert selected == [record_ref, envelope]
-    assert promoted == [record_ref]
+    assert promoted == [record_ref, envelope_record]
     assert len(anchors) == 2
     anchored_record_ids = {anchor["record_ref"]["record_id"] for anchor in anchors}
     assert anchored_record_ids == {record_ref["id"], envelope_record["id"]}
     retained = cast(list[dict[str, Any]], task._terminal_retained_refs)
     assert any(ref.get("id") == record_ref["id"] for ref in retained)
-    assert any(ref.get("record_id") == envelope_record["id"] for ref in retained)
+    assert any(ref.get("id") == envelope_record["id"] for ref in retained)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_terminal_registration_rejects_spoofed_artifact_record_mapping(tmp_path):
+    agent = _create_agent("agent-task-terminal-spoofed-record").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-spoofed-record",
+        goal="Reject caller-spoofed artifact provenance.",
+        success_criteria=["Only persisted Workspace artifact provenance is trusted."],
+        execution="flat",
+    )
+    process_ref = await task.workspace.put(
+        {"process": "must remain because terminal retention is deferred"},
+        collection="observations",
+        kind="agent_task_observation",
+    )
+    spoofed_ref = {
+        **process_ref,
+        "collection": "artifacts",
+        "kind": "agent_task_deliverable",
+        "source": {"type": "workspace", "name": "artifact_ref"},
+        "meta": {"artifact_ref": True},
+    }
+    selected = task._trusted_terminal_refs({"artifact_refs": [spoofed_ref]})
+
+    promoted = await task._register_terminal_deliverables(selected)
+    task.result = {
+        "status": "completed",
+        "accepted": True,
+        "artifact_status": "accepted",
+        "task_id": task.id,
+        "final_result": "Business result remains unchanged.",
+        "artifact_refs": promoted,
+    }
+    retention_result = await task._apply_terminal_workspace_retention(status="completed")
+
+    assert promoted == []
+    assert task.result["final_result"] == "Business result remains unchanged."
+    assert retention_result is not None
+    assert retention_result["status"] == "deferred"
+    assert await task.workspace.search(filters={"id": process_ref["id"]}) == [process_ref]
+    assert await task.workspace.retention_anchors(task.id, anchor_type="deliverable") == []
+    assert any(
+        diagnostic["code"] == "agent_task.retention.deliverable_provenance_mismatch"
+        for diagnostic in task.diagnostics["workspace_retention"]["diagnostics"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_task_envelope_only_terminal_result_returns_canonical_artifact_ref(tmp_path, monkeypatch):
+    agent = _create_agent("agent-task-terminal-envelope-only").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-envelope-only",
+        goal="Return the canonical Workspace artifact pointer.",
+        success_criteria=["The canonical artifact record is retained."],
+        execution="flat",
+    )
+    artifact_ref = await task.workspace.put_artifact_ref(
+        task.id,
+        {"kind": "canonical envelope deliverable", "value": "retained"},
+        metadata={"scope": {"task_id": task.id}, "kind": "agent_task_deliverable"},
+    )
+    envelope = await task.workspace.ref_envelope(artifact_ref)
+
+    async def build_context() -> dict[str, Any]:
+        return {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}}
+
+    async def request_plan(_iteration_index: int, _context_pack: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "execution_shape": "direct",
+            "step_instruction": "Return the explicit canonical Workspace envelope.",
+            "expected_evidence": "A canonical Workspace artifact envelope.",
+            "rationale": "The artifact already exists in the current scoped Workspace.",
+        }
+
+    async def execute_step(
+        _iteration_index: int,
+        _plan: Mapping[str, Any],
+        _context_pack: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return (
+            {
+                "status": "completed",
+                "final_result": "Canonical Workspace artifact is ready.",
+                "artifact_refs": [envelope],
+                "remaining_work": [],
+            },
+            {"status": "completed", "execution_id": "business-stage", "logs": {}},
+        )
+
+    async def deliver_workspace_artifact(execution_result: Any, **_kwargs: Any) -> Any:
+        return execution_result
+
+    async def verify_result(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The canonical Workspace artifact is present.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": "Canonical Workspace artifact is ready.",
+        }
+
+    monkeypatch.setattr(cast(Any, task), "_build_context", build_context)
+    monkeypatch.setattr(cast(Any, task), "_request_plan", request_plan)
+    monkeypatch.setattr(cast(Any, task), "_execute_step", execute_step)
+    monkeypatch.setattr(cast(Any, task), "_deliver_workspace_artifact", deliver_workspace_artifact)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", verify_result)
+
+    result = await task.async_run()
+
+    assert result["status"] == "completed"
+    assert result["artifact_refs"] == [artifact_ref]
+    assert await task.workspace.search(filters={"id": artifact_ref["id"]}) == [artifact_ref]
+    manifest_id = cast(Any, task.workspace.backend)._terminal_manifest_record_id(task.id)
+    manifest_ref = await cast(Any, task.workspace.backend).get_record(manifest_id)
+    assert manifest_ref is not None
+    assert any(
+        retained_ref.get("record_id") == artifact_ref["id"]
+        for retained_ref in manifest_ref["meta"]["retained_refs"]
+    )
 
 
 @pytest.mark.asyncio
