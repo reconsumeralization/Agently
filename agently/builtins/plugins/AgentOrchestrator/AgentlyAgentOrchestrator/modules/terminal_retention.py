@@ -14,16 +14,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING, cast
 
+from agently.core.Workspace.Retention import resolve_retention_policy, serialized_size
 from agently.types.data import (
     WorkspaceFileRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
     WorkspaceRetainedReference,
+    WorkspaceRetentionPolicy,
     WorkspaceRetentionResult,
     WorkspaceRetentionTerminalStatus,
 )
@@ -33,19 +36,8 @@ if TYPE_CHECKING:
     from .execution import AgentExecution
 
 
-_TERMINAL_INLINE_RESULT_LIMIT = 4096
-
-
 def _serialized_size(value: Any) -> int:
-    return len(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    )
+    return serialized_size(value)
 
 
 async def prepare_agent_execution_terminal_retention(
@@ -54,13 +46,39 @@ async def prepare_agent_execution_terminal_retention(
     """Return the bounded terminal-event result and canonical retained refs."""
 
     result = _terminal_result_value(owner)
-    retained_records, retained_refs = await _canonical_result_refs(owner, result)
-    if _serialized_size(result) <= _TERMINAL_INLINE_RESULT_LIMIT:
+    try:
+        policy = resolve_retention_policy(
+            cast(WorkspaceRetentionPolicy | None, owner.options.get("workspace_retention_policy")),
+            supports_cold=True,
+        )
+    except Exception as error:
+        defer_agent_execution_terminal_retention(
+            owner,
+            code="agent_execution.retention.policy_invalid",
+            error=error,
+        )
+        policy = resolve_retention_policy(None, supports_cold=True)
+    owner._terminal_retention_policy = policy
+    inline_result_limit = cast(int, policy.get("inline_result_limit"))
+    retained_records, retained_refs, file_backed = await _canonical_result_refs(owner, result)
+    if owner._terminal_retention_deferred:
+        owner._terminal_inline_result = None
+        owner._terminal_retained_refs = []
+        return {
+            "status": owner.status,
+            "kind": "agent_execution_terminal_result_untrusted",
+        }, []
+    if file_backed:
+        event_result = _compact_referenced_result(result, retained_refs, file_backed=True)
+        owner._terminal_inline_result = None
+        owner._terminal_retained_refs = retained_refs
+        return event_result, retained_records
+    if _serialized_size(result) <= inline_result_limit:
         owner._terminal_inline_result = result
         owner._terminal_retained_refs = retained_refs
         return result, retained_records
     if retained_refs:
-        event_result = _compact_referenced_result(result, retained_refs)
+        event_result = _compact_referenced_result(result, retained_refs, file_backed=False)
         owner._terminal_inline_result = None
         owner._terminal_retained_refs = retained_refs
         return event_result, retained_records
@@ -118,7 +136,7 @@ async def apply_agent_execution_terminal_retention(
                 if str(ref.get("id") or "") not in owner._terminal_anchored_ref_ids
             ],
             inline_result=owner._terminal_inline_result,
-            policy=cast(Any, owner.options.get("workspace_retention_policy")),
+            policy=cast(WorkspaceRetentionPolicy, owner._terminal_retention_policy),
         )
         if preview["status"] == "ready":
             result = await owner.workspace.apply_retention(preview)
@@ -185,13 +203,14 @@ def _terminal_result_value(owner: "AgentExecution") -> Any:
 async def _canonical_result_refs(
     owner: "AgentExecution",
     result: Any,
-) -> tuple[list[WorkspaceRecordRef], list[WorkspaceRetainedReference]]:
+) -> tuple[list[WorkspaceRecordRef], list[WorkspaceRetainedReference], bool]:
     if owner.workspace is None or not isinstance(result, Mapping):
-        return [], []
+        return [], [], False
     retained_records: list[WorkspaceRecordRef] = []
     retained_refs: list[WorkspaceRetainedReference] = []
+    file_backed = False
     seen: set[str] = set()
-    for raw_ref in _result_ref_candidates(result):
+    for raw_ref in _result_ref_candidates(owner, result):
         if not isinstance(raw_ref, Mapping):
             continue
         envelope_id = str(raw_ref.get("record_id") or "")
@@ -199,13 +218,18 @@ async def _canonical_result_refs(
             key = f"record:{envelope_id}"
             if key in seen:
                 continue
-            try:
-                canonical_envelope = await owner.workspace.ref_envelope(envelope_id)
-            except Exception:
+            canonical_ref, canonical_envelope, content = await _canonical_artifact_record(owner, raw_ref)
+            if canonical_ref is None or canonical_envelope is None:
                 continue
             if not _envelope_identity_matches(raw_ref, canonical_envelope):
+                _defer_untrusted_ref(
+                    owner,
+                    "agent_execution.retention.reference_identity_mismatch",
+                    "Terminal Workspace envelope does not match its persisted canonical identity.",
+                )
                 continue
             retained_refs.append(canonical_envelope)
+            file_backed = file_backed or _content_is_file_ref(content)
             seen.add(key)
             continue
 
@@ -214,16 +238,28 @@ async def _canonical_result_refs(
             key = f"record:{ref_id}"
             if key in seen:
                 continue
-            try:
-                envelope = await owner.workspace.ref_envelope(cast(dict[str, Any], dict(raw_ref)))
-            except Exception:
+            canonical_ref, _envelope, content = await _canonical_artifact_record(owner, raw_ref)
+            if canonical_ref is None:
                 continue
-            if envelope.get("record_id") != ref_id:
+            if not _record_identity_matches(raw_ref, canonical_ref):
+                _defer_untrusted_ref(
+                    owner,
+                    "agent_execution.retention.reference_identity_mismatch",
+                    "Terminal Workspace record ref does not match its persisted canonical identity.",
+                )
                 continue
-            record_ref = cast(WorkspaceRecordRef, DataFormatter.sanitize(dict(raw_ref)))
-            retained_records.append(record_ref)
-            retained_refs.append(record_ref)
+            retained_records.append(canonical_ref)
+            retained_refs.append(canonical_ref)
+            file_backed = file_backed or _content_is_file_ref(content)
             seen.add(key)
+            continue
+
+        if ref_id:
+            _defer_untrusted_ref(
+                owner,
+                "agent_execution.retention.reference_invalid",
+                "Terminal Workspace record candidate is not a complete WorkspaceRecordRef.",
+            )
             continue
 
         if _looks_like_file_ref(raw_ref):
@@ -233,11 +269,26 @@ async def _canonical_result_refs(
                 continue
             try:
                 readback = await owner.workspace.read_file(path, max_bytes=1)
-            except Exception:
+            except Exception as error:
+                _defer_untrusted_ref(
+                    owner,
+                    "agent_execution.retention.file_readback_failed",
+                    f"Terminal Workspace file ref readback failed: {_compact_error(error)}",
+                )
                 continue
             if str(readback.get("sha256") or "") != str(raw_ref.get("sha256") or ""):
+                _defer_untrusted_ref(
+                    owner,
+                    "agent_execution.retention.file_identity_mismatch",
+                    "Terminal Workspace file ref digest does not match persisted readback.",
+                )
                 continue
             if int(readback.get("bytes") or 0) != int(raw_ref.get("bytes") or 0):
+                _defer_untrusted_ref(
+                    owner,
+                    "agent_execution.retention.file_identity_mismatch",
+                    "Terminal Workspace file ref size does not match persisted readback.",
+                )
                 continue
             file_ref = cast(
                 WorkspaceFileRef,
@@ -251,20 +302,102 @@ async def _canonical_result_refs(
                 },
             )
             retained_refs.append(file_ref)
+            file_backed = True
             seen.add(key)
-    return retained_records, retained_refs
+            continue
+
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.reference_invalid",
+            "Terminal artifact ref candidate is not a supported Workspace reference.",
+        )
+    return retained_records, retained_refs, file_backed
 
 
-def _result_ref_candidates(result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+def _result_ref_candidates(owner: "AgentExecution", result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     candidates: list[Mapping[str, Any]] = []
     for key in ("artifact_refs", "file_refs"):
         values = result.get(key)
         if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
             candidates.extend(value for value in values if isinstance(value, Mapping))
     final_result = result.get("final_result")
-    if isinstance(final_result, Mapping):
+    if isinstance(final_result, Mapping) and _mapping_has_ref_shape(final_result):
         candidates.append(final_result)
+    action_refs = owner.logs.get("artifact_refs")
+    if isinstance(action_refs, Sequence) and not isinstance(action_refs, (str, bytes, bytearray)):
+        candidates.extend(value for value in action_refs if isinstance(value, Mapping))
     return candidates
+
+
+async def _canonical_artifact_record(
+    owner: "AgentExecution",
+    raw_ref: Mapping[str, Any],
+) -> tuple[WorkspaceRecordRef | None, WorkspaceReferenceEnvelope | None, Any]:
+    is_envelope = "workspace_id" in raw_ref
+    record_id = str((raw_ref.get("record_id") if is_envelope else raw_ref.get("id")) or "").strip()
+    try:
+        matches = await owner.workspace.search(filters={"id": record_id})
+    except Exception as error:
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.reference_lookup_failed",
+            f"Terminal Workspace record lookup failed: {_compact_error(error)}",
+        )
+        return None, None, None
+    if len(matches) != 1:
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.reference_lookup_failed",
+            "Terminal Workspace record is absent from the current scoped Workspace.",
+        )
+        return None, None, None
+    canonical_ref = cast(WorkspaceRecordRef, matches[0])
+    canonical_meta = canonical_ref.get("meta")
+    canonical_source = canonical_ref.get("source")
+    if not (
+        canonical_ref.get("collection") == "artifacts"
+        and isinstance(canonical_meta, Mapping)
+        and canonical_meta.get("artifact_ref") is True
+        and isinstance(canonical_source, Mapping)
+        and canonical_source.get("type") == "workspace"
+        and canonical_source.get("name") == "artifact_ref"
+    ):
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.reference_provenance_mismatch",
+            "Persisted Workspace record is not a canonical artifact ref.",
+        )
+        return None, None, None
+    try:
+        canonical_size = int(canonical_ref.get("size") or 0)
+        readback = await owner.workspace.read_bounded(canonical_ref, offset=0, limit=canonical_size + 1)
+        canonical_envelope = await owner.workspace.ref_envelope(canonical_ref)
+    except Exception as error:
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.reference_readback_failed",
+            f"Terminal Workspace record readback failed: {_compact_error(error)}",
+        )
+        return None, None, None
+    readback_content = str(readback.get("content") or "")
+    readback_raw = readback_content.encode("utf-8")
+    if not (
+        readback.get("eof") is True
+        and int(readback.get("size") or 0) == canonical_size
+        and len(readback_raw) == canonical_size
+        and hashlib.sha256(readback_raw).hexdigest() == str(canonical_ref.get("sha256") or "")
+    ):
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.reference_integrity_mismatch",
+            "Persisted Workspace artifact content does not match its canonical record ref.",
+        )
+        return None, None, None
+    try:
+        content = json.loads(readback_content)
+    except (TypeError, ValueError):
+        content = readback_content
+    return canonical_ref, canonical_envelope, content
 
 
 def _looks_like_record_ref(ref: Mapping[str, Any]) -> bool:
@@ -282,6 +415,29 @@ def _looks_like_file_ref(ref: Mapping[str, Any]) -> bool:
     return bool(str(ref.get("path") or "") and str(ref.get("sha256") or "") and size > 0)
 
 
+def _mapping_has_ref_shape(ref: Mapping[str, Any]) -> bool:
+    return bool("workspace_id" in ref or _looks_like_record_ref(ref) or _looks_like_file_ref(ref))
+
+
+def _record_identity_matches(candidate: Mapping[str, Any], canonical: WorkspaceRecordRef) -> bool:
+    return all(
+        candidate.get(key) == canonical.get(key)
+        for key in (
+            "id",
+            "collection",
+            "kind",
+            "path",
+            "sha256",
+            "size",
+            "summary",
+            "scope",
+            "source",
+            "created_at",
+            "meta",
+        )
+    )
+
+
 def _envelope_identity_matches(
     candidate: Mapping[str, Any],
     canonical: WorkspaceReferenceEnvelope,
@@ -292,7 +448,16 @@ def _envelope_identity_matches(
     return True
 
 
-def _compact_referenced_result(result: Any, refs: list[WorkspaceRetainedReference]) -> dict[str, Any]:
+def _content_is_file_ref(content: Any) -> bool:
+    return isinstance(content, Mapping) and _looks_like_file_ref(content)
+
+
+def _compact_referenced_result(
+    result: Any,
+    refs: list[WorkspaceRetainedReference],
+    *,
+    file_backed: bool,
+) -> dict[str, Any]:
     compact: dict[str, Any] = {"artifact_refs": DataFormatter.sanitize(refs)}
     if isinstance(result, Mapping):
         for key in (
@@ -302,12 +467,20 @@ def _compact_referenced_result(result: Any, refs: list[WorkspaceRetainedReferenc
             "task_id",
             "execution_strategy",
             "effective_execution_strategy",
-            "final_result",
         ):
             value = result.get(key)
             if value is not None and _serialized_size(value) <= 1600:
                 compact[key] = DataFormatter.sanitize(value)
+        if not file_backed:
+            value = result.get("final_result")
+            if value is not None and _serialized_size(value) <= 1600:
+                compact["final_result"] = DataFormatter.sanitize(value)
     return compact
+
+
+def _defer_untrusted_ref(owner: "AgentExecution", code: str, message: str) -> None:
+    owner._terminal_retention_deferred = True
+    owner._terminal_retention_diagnostics.append({"code": code, "message": message[:360]})
 
 
 def _record_deferred_diagnostics(owner: "AgentExecution") -> None:

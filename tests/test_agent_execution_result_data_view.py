@@ -146,9 +146,152 @@ async def test_terminal_retention_accepts_only_verified_workspace_file_ref(tmp_p
 
     event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
 
-    assert event_result == execution.result
+    assert event_result == {"artifact_refs": [file_ref]}
+    assert "file-backed result" not in str(event_result)
     assert retained_records == []
     assert execution._terminal_retained_refs == [file_ref]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forgery", ["record_path", "envelope_digest", "file_digest", "process_record"])
+async def test_terminal_retention_defers_forged_or_non_artifact_workspace_refs(tmp_path, forgery: str) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        apply_agent_execution_terminal_retention,
+        prepare_agent_execution_terminal_retention,
+    )
+
+    execution = (
+        Agently.create_agent(f"result-view-forged-retention-{forgery}")
+        .use_workspace(tmp_path / forgery)
+        .input("Reject an untrusted terminal ref.")
+        .create_execution()
+        .strategy("direct")
+    )
+    if forgery == "process_record":
+        canonical_ref = await execution.workspace.put(
+            {"notes": "process only"},
+            collection="observations",
+            kind="process_notes",
+        )
+        candidate = canonical_ref
+    elif forgery == "file_digest":
+        write_result = await execution.workspace.write_file("final.md", "canonical file body")
+        canonical_ref = write_result["file_refs"][0]
+        candidate = {**canonical_ref, "sha256": "0" * 64}
+    else:
+        canonical_ref = await execution.workspace.put_artifact_ref(
+            execution.id,
+            {"path": "final.md", "body": "canonical"},
+            metadata={"kind": "existing_deliverable"},
+        )
+        if forgery == "record_path":
+            candidate = {**canonical_ref, "path": "artifacts/forged.json"}
+        else:
+            envelope = await execution.workspace.ref_envelope(canonical_ref)
+            candidate = {**envelope, "digest": "f" * 64}
+    business_result = {"artifact_refs": [candidate], "reply": "business result remains available"}
+    execution.result = business_result
+
+    event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+    retention_result = await apply_agent_execution_terminal_retention(execution, status="completed")
+
+    assert event_result["kind"] == "agent_execution_terminal_result_untrusted"
+    assert retained_records == []
+    assert retention_result is None
+    assert execution.result == business_result
+    assert execution.diagnostics["workspace_retention"]["status"] == "deferred"
+    if forgery != "file_digest":
+        assert await execution.workspace.search(filters={"id": canonical_ref["id"]})
+    else:
+        assert (await execution.workspace.read_file("final.md"))["sha256"] == canonical_ref["sha256"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_retention_keeps_small_file_backed_body_out_of_event_carrier(tmp_path) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        prepare_agent_execution_terminal_retention,
+    )
+
+    execution = (
+        Agently.create_agent("result-view-small-file-backed-retention")
+        .use_workspace(tmp_path / "run")
+        .input("Return a small file-backed body.")
+        .create_execution()
+        .strategy("direct")
+    )
+    file_body = "small file-backed terminal body probe"
+    write_result = await execution.workspace.write_file("final.md", file_body)
+    file_ref = write_result["file_refs"][0]
+    execution.result = {
+        "status": "completed",
+        "final_result": file_body,
+        "artifact_refs": [file_ref],
+    }
+
+    event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+
+    assert retained_records == []
+    assert file_body not in str(event_result)
+    assert event_result["artifact_refs"] == [file_ref]
+    assert "final_result" not in event_result
+    assert execution._terminal_inline_result is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_retention_uses_policy_inline_limit_during_preparation(tmp_path) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        apply_agent_execution_terminal_retention,
+        prepare_agent_execution_terminal_retention,
+    )
+
+    execution = (
+        Agently.create_agent("result-view-policy-inline-limit-retention")
+        .use_workspace(tmp_path / "run")
+        .input("Apply the explicit retention threshold.")
+        .create_execution(options={"workspace_retention_policy": {"inline_result_limit": 1024}})
+        .strategy("direct")
+    )
+    execution.result = {"reply": "p" * 1500}
+
+    event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+    retention_result = await apply_agent_execution_terminal_retention(execution, status="completed")
+
+    assert len(retained_records) == 1
+    assert retained_records[0]["kind"] == "agent_execution_terminal_result"
+    assert event_result["record_id"] == retained_records[0]["id"]
+    assert retention_result is not None
+    assert retention_result["status"] in {"applied", "noop"}
+    assert execution.diagnostics["workspace_retention"]["status"] in {"applied", "noop"}
+
+
+@pytest.mark.asyncio
+async def test_terminal_retention_reuses_explicit_action_workspace_ref_without_duplicate(tmp_path) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        prepare_agent_execution_terminal_retention,
+    )
+
+    execution = (
+        Agently.create_agent("result-view-action-ref-retention")
+        .use_workspace(tmp_path / "run")
+        .input("Reuse the explicit Action artifact ref.")
+        .create_execution()
+        .strategy("direct")
+    )
+    action_ref = await execution.workspace.put_artifact_ref(
+        execution.id,
+        {"artifact_id": "action-output", "path": "outputs/action.json"},
+        metadata={"kind": "action_artifact"},
+    )
+    execution.logs["artifact_refs"] = [action_ref]
+    execution.result = {"reply": "a" * 5000}
+
+    event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+
+    assert [ref["id"] for ref in retained_records] == [action_ref["id"]]
+    assert [ref["id"] for ref in event_result["artifact_refs"]] == [action_ref["id"]]
+    assert await execution.workspace.search(
+        filters={"kind": "agent_execution_terminal_result", "scope.execution_id": execution.id}
+    ) == []
 
 
 @pytest.mark.asyncio

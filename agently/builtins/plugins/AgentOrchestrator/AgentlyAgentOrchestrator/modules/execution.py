@@ -199,6 +199,7 @@ class AgentExecution:
         self._terminal_inline_result: Any = None
         self._terminal_retained_refs: list[Any] = []
         self._terminal_anchored_ref_ids: set[str] = set()
+        self._terminal_retention_policy: Any = None
         self._terminal_retention_deferred = False
         self._terminal_retention_diagnostics: list[dict[str, Any]] = []
         self._model_request_result: Any = None
