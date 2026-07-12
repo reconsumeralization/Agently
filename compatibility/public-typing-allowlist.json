@@ -22,6 +22,9 @@
       "scan": "declared_public_callables"
     }
   ],
+  "required_typed_callables": [
+    "agently.core.Workspace.LazyWorkspace.LazyWorkspace.get_retention_lifecycle"
+  ],
   "any_allowlist": [
     {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.input",

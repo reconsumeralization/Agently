@@ -252,12 +252,14 @@ recording an execution digest plus artifact references.
 
 The digest is what the next action-planning round normally sees. It includes the
 action id, call id, purpose, status, a compact instruction preview, result
-preview, preview truncation metadata, redaction notes, artifact refs, and any
+preview, preview truncation metadata, redaction notes, artifact candidates, and any
 Workspace file refs returned by the Action. Full raw content such as complete
 code, shell output, SQL rows, page HTML, screenshots, or logs is retained as a
-redacted artifact instead of being inserted into every prompt. Artifact refs
-include role, media type, size/bytes, preview size, SHA-256, and truncation
-flags so consumers can tell that a preview is not complete evidence.
+redacted artifact instead of being inserted into every prompt. Each model-visible
+candidate carries one host-issued `selection_key` plus task-relevant facts such
+as role, media type, label, and a bounded preview. Canonical artifact ids, call
+ids, scope, digest, size, and provenance remain host-owned and are not copied
+through the model.
 Actions that explicitly return `artifacts` or `artifact_refs` use the same
 contract even when the output is small. This includes MCP resource/content
 blocks surfaced by `MCPActionExecutor`; Agently records the declared artifact
@@ -280,18 +282,19 @@ pointers, and artifact refs omit preview bodies while keeping readback ids.
 That compaction only applies to hot-path model context; full redacted content
 stays in the Action artifact store for explicit readback.
 
-When the model or application needs the omitted detail, read it explicitly:
+While the owning ActionFlow scope is still live, the model can request omitted
+detail through the built-in readback Action:
 
 ```python
-turn = agent.input("Use the action and summarize the result.")
-records = agent.get_action_result(prompt=turn.prompt)
-artifact_ref = records[0]["artifact_refs"][0]
-
-raw = agent.action.read_action_artifact(
-    artifact_id=artifact_ref["artifact_id"],
-    action_call_id=artifact_ref["action_call_id"],
-)
+readback_call = {
+    "action_id": "read_action_artifact",
+    "action_input": {"selection_key": artifact_candidate["selection_key"]},
+}
 ```
+
+This is an in-flow readback contract. After a standalone ActionFlow returns,
+its candidates truthfully report `available=false`; applications must use a
+durably promoted Workspace ref instead of trying to read the released scope.
 
 `Action.to_action_results(records)` uses the digest for instruction-heavy
 actions, so follow-up replies can reason about what happened without receiving
@@ -415,10 +418,13 @@ There is no legacy positional handler signature — the public contract is `(con
 
 Large Action values stay exact in the private `ActionArtifactManager`. Sensitive
 field redaction and truncation apply to model-visible previews and RuntimeEvents,
-not to the private value selected for durable promotion. AgentExecution selects
-an Action artifact only from host-owned successful route/completion state plus
-an explicit structured artifact ref; a business field named `accepted` has no
-selection authority.
+not to the private value selected for durable promotion. AgentExecution accepts
+only a `selection_key` offered exactly once by that execution and returned
+exactly once by the terminal result. The host resolves that key with the expected
+execution scope and reconstructs the canonical ref and exact value; unknown,
+duplicate, or copied canonical identities are rejected. A business field named
+`accepted` has no selection authority. Provider-supplied artifact ids are stored
+only as provenance while each scope receives a fresh local artifact id.
 
 Standalone direct Action calls, `TriggerFlowActionFlow`, and `DAGActionFlow`
 release their exact `action_call` or `action_run` scope in `finally` on success,
@@ -426,6 +432,11 @@ failure, and cancellation. An AgentExecution-owned scope is transferred to the
 execution terminal owner. If selected promotion fails, the selected source is
 kept with bounded retry diagnostics while unselected artifacts from that exact
 scope are released.
+
+A durable standalone `TriggerFlowActionFlow` pause keeps its scope while the
+exchange is pending. Response/resume closes the flow after the final interrupt;
+explicit abandonment or host close cancels the wait. All three paths release
+the standalone scope once.
 
 Because a standalone scope is discarded at run end, any artifact refs returned
 from that run are historical projections with `available=false` and

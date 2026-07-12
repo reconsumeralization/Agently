@@ -226,10 +226,12 @@ host 的 `direct` / `dry_run` 调用保持既有行为，不做这类过滤。
 这类指令型 action 会记录一份执行 digest 和一组 artifact references，用来控制后续模型上下文长度。
 
 后续 action planning round 默认看到的是 digest。它包含 action id、call id、目的、状态、精简指令预览、
-结果预览、preview 截断元数据、脱敏说明、artifact refs，以及 Action 返回的 Workspace file refs。
+结果预览、preview 截断元数据、脱敏说明、artifact candidates，以及 Action 返回的 Workspace file refs。
 完整代码、shell 输出、SQL 结果集、页面 HTML、截图、日志等原始内容会以脱敏 artifact 形式保留，
-不会默认塞进每一轮 prompt。artifact refs 会包含 role、media type、size/bytes、preview size、
-SHA-256 和截断标记，消费方可以明确知道 preview 不是完整证据。
+不会默认塞进每一轮 prompt。每个 model-visible candidate 只携带一个 host-issued
+`selection_key`，以及 role、media type、label、有界 preview 等任务相关事实。
+canonical artifact id、call id、scope、digest、size 与 provenance 仍由 host 持有，
+不会让模型复制。
 显式返回 `artifacts` 或 `artifact_refs` 的 action 即使输出很小也使用同一合同。
 这包括 `MCPActionExecutor` 暴露的 MCP resource/content block；Agently 记录
 声明过的 artifact metadata，但不会通过扫描目录推断未声明的文件写入。
@@ -247,18 +249,18 @@ Search、Browse 等内置 Web actions 在运行时不会弹出包安装确认。
 这个压缩只作用于 hot-path 模型上下文；完整脱敏内容仍留在 Action artifact store 里，
 需要显式读回。
 
-如果模型或应用需要回溯细节，可以显式读取：
+当所属 ActionFlow scope 仍处于 live 状态时，模型可以通过内置 readback Action
+请求被省略的细节：
 
 ```python
-turn = agent.input("使用 action，并总结执行结果。")
-records = agent.get_action_result(prompt=turn.prompt)
-artifact_ref = records[0]["artifact_refs"][0]
-
-raw = agent.action.read_action_artifact(
-    artifact_id=artifact_ref["artifact_id"],
-    action_call_id=artifact_ref["action_call_id"],
-)
+readback_call = {
+    "action_id": "read_action_artifact",
+    "action_input": {"selection_key": artifact_candidate["selection_key"]},
+}
 ```
+
+这是 flow 内 readback 合同。standalone ActionFlow 返回后，candidate 会如实报告
+`available=false`；应用应使用已 durable promotion 的 Workspace ref，而不是读取已释放 scope。
 
 `Action.to_action_results(records)` 对指令型 action 使用 digest，因此后续回复能知道发生了什么，
 但不会默认拿到完整 payload。
@@ -373,15 +375,21 @@ observation 映射到官方事件流。
 
 大型 Action value 会以 exact value 保存在私有 `ActionArtifactManager` 中。敏感字段
 redaction 与 truncation 只作用于 model-visible preview 和 RuntimeEvent，不会修改供
-durable promotion 选择的私有值。AgentExecution 只依据 host-owned 的成功
-route/completion state 加显式 structured artifact ref 选择 Action artifact；业务字段
-`accepted` 不具备选择权限。
+durable promotion 选择的私有值。AgentExecution 只接受当前 execution 恰好提供一次、
+terminal result 也恰好返回一次的 `selection_key`。host 会结合预期 execution scope
+解析该 key，并重建 canonical ref 与 exact value；unknown key、duplicate key 和复制的
+canonical identity 都会被拒绝。业务字段 `accepted` 不具备选择权限。provider 提供的
+artifact id 只作为 provenance 保存，每个 scope 都会得到新的 local artifact id。
 
 Standalone direct Action call、`TriggerFlowActionFlow` 与 `DAGActionFlow` 会在
 success、failure 和 cancellation 的 `finally` 中释放精确 `action_call` 或
 `action_run` scope。AgentExecution-owned scope 会 transfer 给 execution terminal
 owner。若 selected promotion 失败，selected source 会连同 bounded retry diagnostics
 一起保留，而同一精确 scope 中未选择的 artifacts 会被释放。
+
+Standalone `TriggerFlowActionFlow` 的 durable pause 会在 exchange pending 期间保留
+scope。response/resume 会在最后一个 interrupt 后关闭 flow；显式 abandon 或 host close
+会取消等待。这三条路径都会且只会释放一次 standalone scope。
 
 Standalone scope 在 run end 被丢弃，所以该 run 返回的 artifact ref 是历史投影，
 `available=false` 且 `full_value_available=false`。bounded digest/preview 仍可用于

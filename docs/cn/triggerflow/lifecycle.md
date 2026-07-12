@@ -137,6 +137,12 @@ close 上的 `timeout=` 是 **drain timeout** —— 在途 task 的最大等待
 
 `close()` / `async_close()` 默认拒绝关闭仍有 pending interrupt 的 execution。应先恢复这些 interrupt；如果关闭时就是要放弃等待，必须显式传 `pending_interrupts="cancel"`。
 
+对于 standalone ActionFlow 的 durable exchange，
+`execution_exchange.async_respond(...)` 会恢复 live execution，并在最后一个
+interrupt 完成后关闭它。host 明确放弃等待时使用
+`execution_exchange.async_abandon(...)`。直接 close、abandon 和成功完成最终 resume
+都会触发 ActionFlow-owned 临时 artifact scope 的一次性清理。
+
 close 还会释放 execution-local 的 transient aggregation state，例如未完成的
 `when(mode="and")`、`batch`、`collect`、`for_each` 和 `match` bookkeeping。
 这些 scratch key 不属于 durable close snapshot。

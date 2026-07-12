@@ -660,17 +660,27 @@ execution id and `task_id` identifies the exact Task. Task cleanup therefore
 removes only Task process records/files while leaving the parent and sibling
 Tasks live.
 
+On a failed AgentTask, terminal cleanup still discards ordinary process records,
+files, and checkpoints. If the task has a compact `task_id::resume` snapshot
+from its last completed iteration, the task adds a recovery anchor before
+cleanup so that snapshot remains available for explicit resume. Successful and
+cancelled tasks do not retain that recovery point by default.
+
 At terminal state, AgentExecution prepares one bounded carrier before emitting
 the `result` stream item or terminal RuntimeEvent. Both surfaces use that same
 carrier and `terminal_retained_refs` contains every canonical record, envelope,
 or file ref. The in-process `AgentExecutionResult.get_data()` business value may
 remain complete; event payloads and retained manifests do not duplicate a large
 body. File-backed AgentTask `final_response` text points to the canonical file
-and is always byte-bounded.
+and is always byte-bounded. The AgentExecution terminal finalizer is the sole
+owner of `agent_execution.completed`, `agent_execution.failed`, and
+`agent_execution.cancelled`; nested ModelRequest completion emits only its own
+request/model lifecycle events.
 
 `AgentExecution.async_record_workspace(...)` uses purpose-aware lifecycle
-rules. Terminal state is checked again after any internal execution wait, so a
-fresh call cannot race completion and append a process/checkpoint afterward.
+rules. `process` and `recovery` writes are accepted only while the execution is
+actively running; the method neither starts a fresh execution nor waits for it
+to finish. Their checkpoints always use the canonical AgentExecution id.
 After terminal state, `process` and `recovery` writes are rejected.
 Explicit `deliverable` writes and policy-enabled `audit` writes are accepted
 only with immediate Workspace retention governance. Active recovery or lease
