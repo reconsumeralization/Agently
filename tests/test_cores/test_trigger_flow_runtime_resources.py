@@ -91,7 +91,6 @@ async def test_trigger_flow_default_workspace_stays_lazy_through_finite_lifecycl
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     execution = flow.create_execution(auto_close=True, auto_close_timeout=0.0)
     workspace = cast(Any, execution.require_runtime_resource("workspace"))
-    state = execution.save()
     expected_root = tmp_path / ".agently" / "workspaces" / "scripts" / script_scope()
 
     try:
@@ -111,7 +110,7 @@ async def test_trigger_flow_default_workspace_stays_lazy_through_finite_lifecycl
             expected_root / "files" / "lineage" / "executions" / execution.id / "files"
         ).resolve()
         assert not workspace.root.exists()
-        assert "workspace" in state["resource_keys"]
+        assert "workspace" in execution.get_runtime_resources()
         assert {
             "triggerflow.definition_declared",
             "triggerflow.execution_started",
@@ -1176,6 +1175,147 @@ async def test_async_recovery_activation_uses_independent_snapshot_store():
         }
     finally:
         await execution.async_close()
+
+
+@pytest.mark.asyncio
+async def test_public_async_save_activates_default_workspace_without_backfill(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    execution = TriggerFlow(name="runtime-public-async-save").create_execution(
+        auto_close=False
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    try:
+        await execution.async_set_state("value", 1, emit=False)
+        assert execution._snapshot_store is None
+        assert execution._runtime_event_store is None
+
+        snapshot_ref = await execution.async_save(step_id="public-async-save")
+        before_new_event = await workspace.query_runtime_events(execution.id)
+
+        assert snapshot_ref["scope"]["step_id"] == "public-async-save"
+        assert execution._snapshot_store is workspace
+        assert execution._runtime_event_store is workspace
+        assert before_new_event == []
+
+        await execution._emit_runtime_event("triggerflow.after_public_async_save")
+        after_new_event = await workspace.query_runtime_events(execution.id)
+        assert [event["event_type"] for event in after_new_event] == [
+            "triggerflow.after_public_async_save"
+        ]
+    finally:
+        await execution.async_close()
+
+
+@pytest.mark.asyncio
+async def test_public_sync_save_activates_subsequent_workspace_events_without_backfill(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    execution = TriggerFlow(name="runtime-public-sync-save").create_execution(
+        auto_close=False
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    try:
+        saved_state = execution.save()
+
+        assert saved_state["execution_id"] == execution.id
+        assert execution._snapshot_store is workspace
+        assert execution._runtime_event_store is workspace
+        assert getattr(workspace, "is_materialized") is False
+
+        await execution._emit_runtime_event("triggerflow.after_public_sync_save")
+        events = await workspace.query_runtime_events(execution.id)
+        assert [event["event_type"] for event in events] == [
+            "triggerflow.after_public_sync_save"
+        ]
+    finally:
+        await execution.async_close()
+
+
+@pytest.mark.asyncio
+async def test_public_sync_load_activates_default_workspace_for_subsequent_events(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="runtime-public-sync-load")
+    source = flow.create_execution(workspace=False, auto_close=False)
+    source_state = source.save()
+    restored = flow.create_execution(auto_close=False)
+    workspace = cast(Any, restored.require_runtime_resource("workspace"))
+    try:
+        restored.load(source_state)
+
+        assert restored._snapshot_store is workspace
+        assert restored._runtime_event_store is workspace
+        await restored._emit_runtime_event("triggerflow.after_public_sync_load")
+        events = await workspace.query_runtime_events(restored.id)
+        assert [event["event_type"] for event in events] == [
+            "triggerflow.after_public_sync_load"
+        ]
+    finally:
+        await restored.async_close()
+        await source.async_close()
+
+
+@pytest.mark.asyncio
+async def test_async_load_activates_workspace_and_keeps_duplicate_resume_idempotent(
+    tmp_path,
+):
+    workspace = Agently.create_workspace(tmp_path / "async-load-recovery")
+    flow = TriggerFlow(name="runtime-async-load-recovery")
+
+    async def gate(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finalize(data: TriggerFlowRuntimeData):
+        resumes = list(data.get_state("resumes", []) or [])
+        resumes.append(data.value)
+        await data.async_set_state("resumes", resumes, emit=False)
+
+    flow.to(gate).to(finalize)
+    source = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"workspace": workspace, "durable_provider": workspace},
+    )
+    restored = flow.create_execution(auto_close=False, workspace=workspace)
+    try:
+        await source.async_start("start")
+        source_state = source.save()
+        load = await restored.async_load(
+            source_state,
+            runtime_resources={"workspace": workspace},
+        )
+
+        assert load["ready"] is True
+        assert restored._snapshot_store is workspace
+        assert restored._runtime_event_store is workspace
+
+        await restored.async_continue_with(
+            "approval",
+            {"approved": True},
+            resume_request_id="stable-resume-1",
+        )
+        repeated = await restored.async_continue_with(
+            "approval",
+            {"approved": True},
+            resume_request_id="stable-resume-1",
+        )
+
+        assert repeated is not None
+        assert repeated["resume_request_id"] == "stable-resume-1"
+        assert restored.get_state("resumes") == [{"approved": True}]
+    finally:
+        await restored.async_close(pending_interrupts="cancel")
+        await source.async_close(pending_interrupts="cancel")
 
 
 @pytest.mark.asyncio

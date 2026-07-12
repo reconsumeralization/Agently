@@ -2117,6 +2117,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         encoding: str | None = "utf-8",
         require_idle: bool = False,
     ):
+        self._activate_recovery_durability(reason="save")
         return self._persistence.save(
             path,
             encoding=encoding,
@@ -2132,6 +2133,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         execution_resources: "list[ExecutionResourceRequirement] | None" = None,
         validate_resources: bool = False,
     ):
+        if runtime_resources:
+            self._update_runtime_resources(runtime_resources)
+        self._bind_configured_durability_resources()
+        self._activate_recovery_durability(reason="load")
         return self._persistence.load(
             state,
             encoding=encoding,
@@ -2265,6 +2270,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         )
         resolved_runtime_resources = dict(runtime_resources or {})
         resolved_runtime_resources.update(resolver_report.get("runtime_resources", {}))
+        if resolved_runtime_resources:
+            self._update_runtime_resources(resolved_runtime_resources)
+        self._bind_configured_durability_resources()
+        self._activate_recovery_durability(reason="async_load")
         self.load(
             state,
             encoding=encoding,
@@ -2312,8 +2321,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         require_idle: bool = False,
         require_distributed_provider: bool = False,
     ):
+        await self._async_activate_recovery_durability(reason="async_save")
         resolved_snapshot_store = snapshot_store if snapshot_store is not None else self._snapshot_store
-        if resolved_snapshot_store is None or not hasattr(resolved_snapshot_store, "put_snapshot"):
+        if resolved_snapshot_store is None or not callable(
+            getattr(resolved_snapshot_store, "put_snapshot", None)
+        ):
             raise TypeError(
                 "TriggerFlow snapshot_store must expose async put_snapshot(run_id, state, step_id=...). "
                 "Pass snapshot_store to async_save(...) or set runtime resource 'snapshot_store'."

@@ -1,9 +1,703 @@
 import asyncio
+import copy
+from typing import Any, cast
 
 import pytest
 from pydantic import TypeAdapter
 
 from agently import TriggerFlow, TriggerFlowInterruptEvent, TriggerFlowRuntimeData
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_dynamic_pause_persists_waiting_snapshot_without_backfill(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="dynamic-pause-default-workspace")
+
+    async def ask_feedback(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    flow.to(ask_feedback)
+    execution = flow.create_execution(auto_close=False)
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    try:
+        assert getattr(workspace, "is_materialized") is False
+        assert execution._snapshot_store is None
+        assert execution._runtime_event_store is None
+
+        await execution.async_start("pricing")
+
+        pending = execution.get_pending_interrupts()
+        snapshot = await workspace.get_snapshot(execution.run_context.run_id)
+        runtime_events = await workspace.query_runtime_events(execution.id)
+        event_types = [event["event_type"] for event in runtime_events]
+
+        assert pending["approval"]["status"] == "waiting"
+        assert snapshot is not None
+        assert snapshot["interrupts"]["approval"]["status"] == "waiting"
+        assert event_types[0] == "triggerflow.interrupt_planned"
+        assert "triggerflow.definition_declared" not in event_types
+        assert "triggerflow.execution_started" not in event_types
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_dynamic_pause_snapshot_failure_rolls_back_before_publish(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    published: list[dict[str, Any]] = []
+
+    class ExchangeProvider:
+        async def publish_request(self, execution_id, request, *, interrupt):
+            published.append(
+                {
+                    "execution_id": execution_id,
+                    "request": request,
+                    "interrupt": interrupt,
+                }
+            )
+            return None
+
+    execution = TriggerFlow(name="dynamic-pause-snapshot-failure").create_execution(
+        auto_close=False,
+        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    status_before_pause = execution.get_status()
+    state_version_before_pause = execution._state_version
+
+    async def fail_snapshot(*args, **kwargs):
+        raise OSError("injected pause snapshot failure")
+
+    monkeypatch.setattr(workspace, "put_snapshot", fail_snapshot)
+    try:
+        with pytest.raises(OSError, match="injected pause snapshot failure"):
+            await execution.async_pause_for(
+                type="approval",
+                interrupt_id="approval",
+                resume_to="next",
+            )
+
+        assert execution.get_interrupt("approval") is None
+        assert execution.get_pending_interrupts() == {}
+        assert execution.get_status() == status_before_pause
+        assert execution._state_version >= state_version_before_pause
+        assert published == []
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+async def _run_overlapping_pause_snapshot_failure(
+    *,
+    first_interrupt_id: str,
+    second_interrupt_id: str,
+):
+    first_snapshot_entered = asyncio.Event()
+    release_first_snapshot = asyncio.Event()
+    snapshot_calls = 0
+    published: list[dict[str, Any]] = []
+
+    class ExchangeProvider:
+        async def publish_request(self, execution_id, request, *, interrupt):
+            published.append(
+                {
+                    "execution_id": execution_id,
+                    "request": request,
+                    "interrupt": interrupt,
+                }
+            )
+            return None
+
+    execution = TriggerFlow(name="overlapping-pause-snapshot").create_execution(
+        auto_close=False,
+        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    async def controlled_snapshot(run_id, state, *, step_id=None, **kwargs):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            first_snapshot_entered.set()
+            await release_first_snapshot.wait()
+            raise OSError("injected older snapshot failure")
+        return {"id": "newer-snapshot", "run_id": run_id, "step_id": step_id}
+
+    workspace.put_snapshot = controlled_snapshot
+    first_task = asyncio.create_task(
+        execution.async_pause_for(
+            type="approval",
+            payload={"attempt": 1},
+            interrupt_id=first_interrupt_id,
+            resume_to="next",
+        )
+    )
+    await asyncio.wait_for(first_snapshot_entered.wait(), timeout=2)
+    second_task = asyncio.create_task(
+        execution.async_pause_for(
+            type="approval",
+            payload={"attempt": 2},
+            interrupt_id=second_interrupt_id,
+            resume_to="next",
+        )
+    )
+    if first_interrupt_id == second_interrupt_id:
+        await asyncio.sleep(0.01)
+        assert not second_task.done()
+    else:
+        await asyncio.wait_for(asyncio.shield(second_task), timeout=2)
+    release_first_snapshot.set()
+    with pytest.raises(OSError, match="injected older snapshot failure"):
+        await first_task
+    await second_task
+    return execution, published
+
+
+@pytest.mark.asyncio
+async def test_pause_snapshot_rollback_does_not_delete_newer_same_id_interrupt():
+    execution, published = await _run_overlapping_pause_snapshot_failure(
+        first_interrupt_id="same",
+        second_interrupt_id="same",
+    )
+    try:
+        stored = execution.get_interrupt("same")
+        assert isinstance(stored, dict)
+        assert stored["status"] == "waiting"
+        assert stored["payload"] == {"attempt": 2}
+        assert execution.get_status() == "waiting"
+        assert [item["interrupt"]["payload"] for item in published] == [
+            {"attempt": 2}
+        ]
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_pause_snapshot_rollback_keeps_waiting_status_for_other_interrupt():
+    execution, published = await _run_overlapping_pause_snapshot_failure(
+        first_interrupt_id="older",
+        second_interrupt_id="newer",
+    )
+    try:
+        assert execution.get_interrupt("older") is None
+        newer = execution.get_interrupt("newer")
+        assert isinstance(newer, dict)
+        assert newer["status"] == "waiting"
+        assert execution.get_status() == "waiting"
+        assert [item["interrupt"]["id"] for item in published] == ["newer"]
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_same_id_pause_does_not_publish_older_attempt_after_newer_attempt():
+    first_snapshot_entered = asyncio.Event()
+    release_first_snapshot = asyncio.Event()
+    snapshot_calls = 0
+    published: list[int] = []
+
+    class ExchangeProvider:
+        async def publish_request(self, execution_id, request, *, interrupt):
+            attempt = int(interrupt["payload"]["attempt"])
+            published.append(attempt)
+            return {"exchange_id": f"exchange-{attempt}"}
+
+    execution = TriggerFlow(name="same-id-pause-publish-order").create_execution(
+        auto_close=False,
+        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    async def controlled_snapshot(*args, **kwargs):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            first_snapshot_entered.set()
+            await release_first_snapshot.wait()
+        return {"id": f"snapshot-{snapshot_calls}"}
+
+    workspace.put_snapshot = controlled_snapshot
+    first_task = asyncio.create_task(
+        execution.async_pause_for(
+            type="approval",
+            payload={"attempt": 1},
+            interrupt_id="same",
+            resume_to="next",
+        )
+    )
+    await asyncio.wait_for(first_snapshot_entered.wait(), timeout=2)
+    second_task = asyncio.create_task(
+        execution.async_pause_for(
+            type="approval",
+            payload={"attempt": 2},
+            interrupt_id="same",
+            resume_to="next",
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert not second_task.done()
+    release_first_snapshot.set()
+
+    try:
+        await asyncio.gather(first_task, second_task)
+        stored = execution.get_interrupt("same")
+        assert isinstance(stored, dict)
+        assert published == [1, 2]
+        assert stored["payload"] == {"attempt": 2}
+        assert stored["external_wait_request"]["exchange_id"] == "exchange-2"
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_same_id_cancelled_pause_attempts_leave_no_ghost_interrupt_or_fence():
+    snapshot_entered = [asyncio.Event(), asyncio.Event()]
+    snapshot_calls = 0
+    published: list[dict[str, Any]] = []
+
+    class ExchangeProvider:
+        async def publish_request(self, execution_id, request, *, interrupt):
+            published.append(interrupt)
+            return None
+
+    execution = TriggerFlow(name="same-id-pause-cancellation").create_execution(
+        auto_close=False,
+        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    async def blocked_snapshot(*args, **kwargs):
+        nonlocal snapshot_calls
+        call_index = snapshot_calls
+        snapshot_calls += 1
+        snapshot_entered[call_index].set()
+        await asyncio.Event().wait()
+
+    workspace.put_snapshot = blocked_snapshot
+    first_task = asyncio.create_task(
+        execution.async_pause_for(
+            type="approval",
+            payload={"attempt": 1},
+            interrupt_id="same",
+            resume_to="next",
+        )
+    )
+    await asyncio.wait_for(snapshot_entered[0].wait(), timeout=2)
+    second_task = asyncio.create_task(
+        execution.async_pause_for(
+            type="approval",
+            payload={"attempt": 2},
+            interrupt_id="same",
+            resume_to="next",
+        )
+    )
+
+    first_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_task
+    await asyncio.wait_for(snapshot_entered[1].wait(), timeout=2)
+    second_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+
+    try:
+        assert execution.get_interrupt("same") is None
+        assert execution.get_pending_interrupts() == {}
+        assert execution.get_status() == "created"
+        assert execution._interrupts._pause_boundary_locks == {}
+        assert published == []
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_same_id_failed_pause_attempts_leave_no_ghost_interrupt_or_fence():
+    first_snapshot_entered = asyncio.Event()
+    release_first_snapshot = asyncio.Event()
+    snapshot_calls = 0
+
+    execution = TriggerFlow(name="same-id-pause-double-failure").create_execution(
+        auto_close=False,
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    async def failed_snapshot(*args, **kwargs):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            first_snapshot_entered.set()
+            await release_first_snapshot.wait()
+        raise OSError(f"snapshot failure {snapshot_calls}")
+
+    workspace.put_snapshot = failed_snapshot
+    first_task = asyncio.create_task(
+        execution.async_pause_for(
+            type="approval",
+            payload={"attempt": 1},
+            interrupt_id="same",
+            resume_to="next",
+        )
+    )
+    await asyncio.wait_for(first_snapshot_entered.wait(), timeout=2)
+    second_task = asyncio.create_task(
+        execution.async_pause_for(
+            type="approval",
+            payload={"attempt": 2},
+            interrupt_id="same",
+            resume_to="next",
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert not second_task.done()
+    release_first_snapshot.set()
+
+    results = await asyncio.gather(first_task, second_task, return_exceptions=True)
+    try:
+        assert all(isinstance(result, OSError) for result in results)
+        assert execution.get_interrupt("same") is None
+        assert execution.get_pending_interrupts() == {}
+        assert execution.get_status() == "created"
+        assert execution._interrupts._pause_boundary_locks == {}
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_same_id_failed_pause_restores_previous_exposed_interrupt():
+    snapshot_calls = 0
+    published: list[int] = []
+
+    class ExchangeProvider:
+        async def publish_request(self, execution_id, request, *, interrupt):
+            attempt = int(interrupt["payload"]["attempt"])
+            published.append(attempt)
+            return {"exchange_id": f"exchange-{attempt}"}
+
+    execution = TriggerFlow(name="same-id-pause-restore-previous").create_execution(
+        auto_close=False,
+        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    async def fail_second_snapshot(*args, **kwargs):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 2:
+            raise OSError("snapshot-2-failed")
+        return {"id": "snapshot-1"}
+
+    workspace.put_snapshot = fail_second_snapshot
+    try:
+        await execution.async_pause_for(
+            type="approval",
+            payload={"attempt": 1},
+            interrupt_id="same",
+            resume_to="next",
+        )
+        previous = copy.deepcopy(execution.get_interrupt("same"))
+
+        with pytest.raises(OSError, match="snapshot-2-failed"):
+            await execution.async_pause_for(
+                type="approval",
+                payload={"attempt": 2},
+                interrupt_id="same",
+                resume_to="next",
+            )
+
+        assert published == [1]
+        assert execution.get_interrupt("same") == previous
+        assert execution.get_status() == "waiting"
+        assert execution._interrupts._pause_boundary_locks == {}
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_continue_waits_until_pause_snapshot_and_exposure_complete():
+    snapshot_entered = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    published: list[str] = []
+
+    class ExchangeProvider:
+        async def publish_request(self, execution_id, request, *, interrupt):
+            published.append(str(interrupt["external_wait_request"]["dispatch_state"]))
+            return {"exchange_id": "approval-1"}
+
+    flow = TriggerFlow(name="pause-resume-boundary-order")
+
+    async def pause(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="same",
+            resume_to="next",
+        )
+
+    async def finish(data: TriggerFlowRuntimeData):
+        return data.value
+
+    flow.to(pause).to(finish)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    async def blocked_snapshot(*args, **kwargs):
+        snapshot_entered.set()
+        await release_snapshot.wait()
+        return {"id": "waiting-snapshot"}
+
+    workspace.put_snapshot = blocked_snapshot
+    start_task = asyncio.create_task(execution.async_start("draft"))
+    await asyncio.wait_for(snapshot_entered.wait(), timeout=2)
+    continue_task = asyncio.create_task(
+        execution.async_continue_with(
+            "same",
+            "approved",
+            resume_request_id="early-resume",
+        )
+    )
+    await asyncio.sleep(0.01)
+
+    try:
+        assert not continue_task.done()
+        assert published == []
+        pending_before_exposure = execution.get_interrupt("same")
+        assert isinstance(pending_before_exposure, dict)
+        assert pending_before_exposure["status"] == "waiting"
+        release_snapshot.set()
+        await start_task
+        await continue_task
+        assert published == ["persisted"]
+        stored = execution.get_interrupt("same")
+        assert isinstance(stored, dict)
+        assert stored["status"] == "resumed"
+        assert stored["external_wait_request"]["dispatch_state"] == "completed"
+    finally:
+        if not release_snapshot.is_set():
+            release_snapshot.set()
+        await asyncio.gather(start_task, continue_task, return_exceptions=True)
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_close_cancellation_during_pause_snapshot_does_not_publish_stale_wait():
+    snapshot_entered = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    published: list[dict[str, Any]] = []
+
+    class ExchangeProvider:
+        async def publish_request(self, execution_id, request, *, interrupt):
+            published.append(interrupt)
+            return None
+
+    flow = TriggerFlow(name="pause-close-boundary-order")
+
+    async def pause(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="same",
+            resume_to="next",
+        )
+
+    flow.to(pause)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+
+    async def blocked_snapshot(*args, **kwargs):
+        snapshot_entered.set()
+        await release_snapshot.wait()
+        return {"id": "waiting-snapshot"}
+
+    workspace.put_snapshot = blocked_snapshot
+    start_task = asyncio.create_task(execution.async_start("draft"))
+    await asyncio.wait_for(snapshot_entered.wait(), timeout=2)
+    close_task = asyncio.create_task(
+        execution.async_close(reason="cancel-during-snapshot", pending_interrupts="cancel")
+    )
+    await asyncio.sleep(0.01)
+
+    try:
+        stored = execution.get_interrupt("same")
+        assert isinstance(stored, dict)
+        assert stored["status"] == "cancelled"
+        release_snapshot.set()
+        await asyncio.gather(start_task, close_task)
+        assert published == []
+        cancelled = execution.get_interrupt("same")
+        assert isinstance(cancelled, dict)
+        assert cancelled["status"] == "cancelled"
+    finally:
+        if not release_snapshot.is_set():
+            release_snapshot.set()
+        await asyncio.gather(start_task, close_task, return_exceptions=True)
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_close_cancellation_during_persisted_event_does_not_publish_stale_wait():
+    persisted_event_entered = asyncio.Event()
+    release_persisted_event = asyncio.Event()
+    published: list[dict[str, Any]] = []
+
+    class ExchangeProvider:
+        async def publish_request(self, execution_id, request, *, interrupt):
+            published.append(interrupt)
+            return None
+
+    flow = TriggerFlow(name="pause-close-persisted-event-order")
+
+    async def pause(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="same",
+            resume_to="next",
+        )
+
+    flow.to(pause)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+    )
+    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    original_append_runtime_event = workspace.append_runtime_event
+
+    async def blocked_persisted_event(execution_id, event, **kwargs):
+        if event.event_type == "triggerflow.interrupt_persisted":
+            persisted_event_entered.set()
+            await release_persisted_event.wait()
+        return await original_append_runtime_event(execution_id, event, **kwargs)
+
+    workspace.append_runtime_event = blocked_persisted_event
+    start_task = asyncio.create_task(execution.async_start("draft"))
+    await asyncio.wait_for(persisted_event_entered.wait(), timeout=2)
+    close_task = asyncio.create_task(
+        execution.async_close(reason="cancel-during-persisted-event", pending_interrupts="cancel")
+    )
+    await asyncio.sleep(0.01)
+
+    try:
+        stored = execution.get_interrupt("same")
+        assert isinstance(stored, dict)
+        assert stored["status"] == "cancelled"
+        release_persisted_event.set()
+        await asyncio.gather(start_task, close_task)
+        assert published == []
+        cancelled = execution.get_interrupt("same")
+        assert isinstance(cancelled, dict)
+        assert cancelled["status"] == "cancelled"
+    finally:
+        if not release_persisted_event.is_set():
+            release_persisted_event.set()
+        await asyncio.gather(start_task, close_task, return_exceptions=True)
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_self_resume_can_repause_same_id_after_exposure_barrier():
+    flow = TriggerFlow(name="same-id-self-repause")
+
+    async def gate(data: TriggerFlowRuntimeData):
+        if data.is_resume and data.resume.value == "complete":
+            return "done"
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="gate",
+            resume_to="self",
+            max_resumes=2,
+        )
+
+    flow.to(gate)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("draft")
+
+    try:
+        await asyncio.wait_for(
+            execution.async_continue_with(
+                "gate",
+                "retry",
+                resume_request_id="round-1",
+            ),
+            timeout=2,
+        )
+        repaused = execution.get_interrupt("gate")
+        assert isinstance(repaused, dict)
+        assert repaused["status"] == "waiting"
+        assert repaused["resume_count"] == 1
+        assert repaused["resume_requests"]["round-1"]["status"] == "completed"
+
+        await asyncio.wait_for(
+            execution.async_continue_with(
+                "gate",
+                "complete",
+                resume_request_id="round-2",
+            ),
+            timeout=2,
+        )
+        resumed = execution.get_interrupt("gate")
+        assert isinstance(resumed, dict)
+        assert resumed["status"] == "resumed"
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_self_repause_dispatch_failure_preserves_newer_wait_generation():
+    flow = TriggerFlow(name="same-id-self-repause-dispatch-failure")
+
+    async def gate(data: TriggerFlowRuntimeData):
+        if data.is_resume:
+            await data.async_pause_for(
+                type="approval",
+                interrupt_id="gate",
+                resume_to="self",
+                max_resumes=2,
+            )
+            raise RuntimeError("after repause")
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="gate",
+            resume_to="self",
+            max_resumes=2,
+        )
+
+    flow.to(gate)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("draft")
+    first_generation = copy.deepcopy(execution.get_interrupt("gate"))
+
+    try:
+        with pytest.raises(RuntimeError, match="after repause"):
+            await execution.async_continue_with(
+                "gate",
+                "retry",
+                resume_request_id="round-1",
+            )
+
+        repaused = execution.get_interrupt("gate")
+        assert isinstance(first_generation, dict)
+        assert isinstance(repaused, dict)
+        assert repaused["created_at"] != first_generation["created_at"]
+        assert repaused["status"] == "waiting"
+        assert repaused["external_wait_request"]["dispatch_state"] == "exposed"
+        assert repaused["resume_requests"]["round-1"]["status"] == "dispatch_failed"
+        assert execution.get_status() == "waiting"
+        assert execution.is_waiting() is True
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
 
 
 @pytest.mark.asyncio
