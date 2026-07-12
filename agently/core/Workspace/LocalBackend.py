@@ -4768,10 +4768,11 @@ class LocalWorkspaceBackend:
         if attempted_vacuum:
             self._checkpoint_sqlite_wal_sync("TRUNCATE")
 
-    async def _run_sqlite_physical_maintenance(self) -> None:
-        worker = asyncio.create_task(
-            asyncio.to_thread(self._run_sqlite_physical_maintenance_sync)
-        )
+    async def _await_completion_before_cancellation(
+        self,
+        awaitable: Awaitable[_R],
+    ) -> _R:
+        worker = asyncio.ensure_future(awaitable)
         first_cancellation: asyncio.CancelledError | None = None
         worker_error: BaseException | None = None
         while not worker.done():
@@ -4792,6 +4793,12 @@ class LocalWorkspaceBackend:
             raise first_cancellation
         if worker_error is not None:
             raise worker_error
+        return worker.result()
+
+    async def _run_sqlite_physical_maintenance(self) -> None:
+        await self._await_completion_before_cancellation(
+            asyncio.to_thread(self._run_sqlite_physical_maintenance_sync)
+        )
 
     async def _finalize_sqlite_physical_reclamation(
         self,
@@ -4933,9 +4940,11 @@ class LocalWorkspaceBackend:
                         allocated_before = self._sqlite_allocated_bytes()
                         result = await self._apply_retention_unlocked(preview)
                         if result["status"] == "applied":
-                            result = await self._finalize_sqlite_physical_reclamation(
-                                result,
-                                allocated_before=allocated_before,
+                            result = await self._await_completion_before_cancellation(
+                                self._finalize_sqlite_physical_reclamation(
+                                    result,
+                                    allocated_before=allocated_before,
+                                )
                             )
                     except (sqlite3.Error, OSError) as error:
                         diagnostic = retention_diagnostic(

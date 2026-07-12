@@ -3618,6 +3618,7 @@ async def test_cancelled_apply_holds_root_guard_until_maintenance_worker_exits(
     maintenance_entered = threading.Event()
     maintenance_release = threading.Event()
     maintenance_exited = threading.Event()
+    allocated_values = iter((100_000, 90_000, 90_000))
 
     def block_maintenance():
         maintenance_entered.set()
@@ -3629,6 +3630,8 @@ async def test_cancelled_apply_holds_root_guard_until_maintenance_worker_exits(
         "_run_sqlite_physical_maintenance_sync",
         block_maintenance,
     )
+    monkeypatch.setattr(backend, "_sqlite_allocated_bytes", lambda: next(allocated_values))
+    monkeypatch.setattr(backend, "_sqlite_pending_bytes_sync", lambda: 24_000)
     apply_task = asyncio.create_task(target.apply_retention(preview))
     while not maintenance_entered.is_set():
         await asyncio.sleep(0.001)
@@ -3655,6 +3658,66 @@ async def test_cancelled_apply_holds_root_guard_until_maintenance_worker_exits(
     assert competing_done_before_release is False
     assert maintenance_exited.is_set()
     assert await cast(Any, second_root.backend).get_record(competing_ref["id"]) is not None
+    with backend._connect() as conn:
+        manifest = backend._terminal_manifest_from_conn(
+            conn,
+            execution_id=execution_id,
+        )
+    assert manifest is not None
+    assert manifest["meta"]["accounting"]["physical_bytes_reclaimed"] == 10_000
+    assert manifest["meta"]["accounting"]["physical_bytes_pending"] == 14_000
+    repeated = await target.apply_retention(preview)
+    assert repeated["status"] == "noop"
+    assert repeated["accounting"]["physical_bytes_reclaimed"] == 0
+    with backend._connect() as conn:
+        manifest_after_repeated_apply = backend._terminal_manifest_from_conn(
+            conn,
+            execution_id=execution_id,
+        )
+    assert manifest_after_repeated_apply is not None
+    assert (
+        manifest_after_repeated_apply["meta"]["accounting"][
+            "physical_bytes_reclaimed"
+        ]
+        == 10_000
+    )
+    assert (
+        manifest_after_repeated_apply["meta"]["accounting"]["physical_bytes_pending"]
+        == 14_000
+    )
+
+
+@pytest.mark.asyncio
+async def test_postcommit_finalization_consumes_worker_error_before_cancellation(
+    tmp_path,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-cancel-worker-error")
+    backend = cast(Any, root.backend)
+    worker_entered = asyncio.Event()
+    worker_release = asyncio.Event()
+    unhandled_contexts: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled_contexts.append(context))
+
+    async def fail_after_release() -> None:
+        worker_entered.set()
+        await worker_release.wait()
+        raise AssertionError("injected finalization programming error")
+
+    finalization_task = asyncio.create_task(
+        backend._await_completion_before_cancellation(fail_after_release())
+    )
+    try:
+        await worker_entered.wait()
+        finalization_task.cancel()
+        worker_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await finalization_task
+        await asyncio.sleep(0)
+        assert unhandled_contexts == []
+    finally:
+        loop.set_exception_handler(previous_handler)
 
 
 @pytest.mark.asyncio
