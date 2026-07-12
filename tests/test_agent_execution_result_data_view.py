@@ -149,7 +149,7 @@ async def test_terminal_retention_accepts_only_verified_workspace_file_ref(tmp_p
 
     event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
 
-    assert event_result == {"artifact_refs": [file_ref]}
+    assert event_result == {"artifact_refs": [file_ref], "artifacts": [file_ref]}
     assert "file-backed result" not in str(event_result)
     assert retained_records == [file_ref]
     assert execution._terminal_retained_refs == [file_ref]
@@ -179,7 +179,7 @@ async def test_terminal_retention_accepts_verified_zero_byte_workspace_file_ref(
     event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
     retention = await apply_agent_execution_terminal_retention(execution, status="completed")
 
-    assert event_result == {"artifact_refs": [file_ref]}
+    assert event_result == {"artifact_refs": [file_ref], "artifacts": [file_ref]}
     assert retained_records == [file_ref]
     assert execution._terminal_retained_refs == [file_ref]
     assert retention is not None

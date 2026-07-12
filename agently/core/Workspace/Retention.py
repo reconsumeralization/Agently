@@ -456,11 +456,6 @@ def build_retention_selection(
         for row in fts_rows
         if str(row.get("record_id") or "") in selected_record_ids
     )
-    if (
-        representation_by_category.get("checkpoints") != "hot"
-        and checkpoint_manifest_key in manifest_keys
-    ):
-        selected["manifest_keys"].append(checkpoint_manifest_key)
     if lease_manifest_key in manifest_keys:
         selected["manifest_keys"].append(lease_manifest_key)
     for key in selected:

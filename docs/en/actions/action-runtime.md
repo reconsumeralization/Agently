@@ -295,6 +295,20 @@ readback_call = {
 This is an in-flow readback contract. After a standalone ActionFlow returns,
 its candidates truthfully report `available=false`; applications must use a
 durably promoted Workspace ref instead of trying to read the released scope.
+The public readback selector is only `selection_key`. Agently resolves it
+against the currently bound AgentExecution, AgentTask, or standalone ActionFlow
+artifact scope; TaskBoard host code binds the current task lineage so sibling
+cards in one task can consume the same retained artifact. Missing scope and
+cross-task or cross-execution access fail closed. Canonical artifact ids and
+Action call ids are not alternate readback selectors.
+
+Oversized direct Action and ActionFlow carriers are compacted as complete
+records before they enter a TriggerFlow state or return boundary. This covers
+large kwargs/instructions as well as large output fields and avoids retaining
+duplicate `data`, `result`, and `model_digest` payloads. Finite internal
+ActionFlow and TaskDAG executions do not bind a Workspace. A
+`TriggerFlowActionFlow` binds a lazy Workspace only when an approval pause needs
+save/resume recovery.
 
 `Action.to_action_results(records)` uses the digest for instruction-heavy
 actions, so follow-up replies can reason about what happened without receiving
@@ -428,8 +442,9 @@ only as provenance while each scope receives a fresh local artifact id.
 
 Standalone direct Action calls, `TriggerFlowActionFlow`, and `DAGActionFlow`
 release their exact `action_call` or `action_run` scope in `finally` on success,
-failure, and cancellation. An AgentExecution-owned scope is transferred to the
-execution terminal owner. If selected promotion fails, the selected source is
+failure, and cancellation. An AgentExecution- or AgentTask-owned scope is
+transferred to its terminal owner; child ActionFlows never release that
+inherited scope early. If selected promotion fails, the selected source is
 kept with bounded retry diagnostics while unselected artifacts from that exact
 scope are released.
 
@@ -444,6 +459,9 @@ from that run are historical projections with `available=false` and
 `read_action_artifact` cannot retrieve the released value. Only call readback
 while a ref explicitly reports `available=true`, such as an execution-owned
 scope that has not yet completed transfer or cleanup.
+At model and terminal boundaries, `artifact_refs` and the compatibility alias
+`artifacts` are normalized to the same selection-key-only list so one alias
+cannot expose a canonical identity omitted by the other.
 
 ## Extension guidance
 

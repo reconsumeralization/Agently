@@ -26,7 +26,11 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING, Any
 
-from agently.core.runtime.RuntimeContext import bind_runtime_context, resolve_parent_run_context
+from agently.core.runtime.RuntimeContext import (
+    bind_runtime_context,
+    get_current_agent_execution_context,
+    resolve_parent_run_context,
+)
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -112,7 +116,11 @@ class DAGActionFlow:
                 "compat_event_family": "tool",
             },
         )
-        artifact_scope = action._artifact_scope_from_run_context(action_loop_run)
+        parent_artifact_scope = action._artifact_scope_from_agent_execution_context(
+            get_current_agent_execution_context(),
+        )
+        artifact_scope = parent_artifact_scope or action._artifact_scope_from_run_context(action_loop_run)
+        owns_artifact_scope = artifact_scope.get("kind") == "action_run"
 
         async def publish_runtime_observation(
             kind: str,
@@ -300,7 +308,14 @@ class DAGActionFlow:
             }
 
             dag_executor = TaskDAGExecutor(resolver=resolver, name=f"dag-action-exec-{agent_name}-round-{round_index}")
-            result = await dag_executor.async_run(graph, {"round_index": round_index}, timeout=timeout, concurrency=concurrency)
+            compiled_dag = dag_executor.compile(graph)
+            dag_execution = compiled_dag.create_execution(
+                auto_close=False,
+                concurrency=concurrency,
+                workspace=False,
+            )
+            await dag_execution.async_start({"round_index": round_index})
+            result = await dag_execution.async_close(timeout=timeout)
 
             # Extract per-task results and collect them
             task_results: list[dict[str, Any]] = []
@@ -369,12 +384,13 @@ class DAGActionFlow:
                     run=action_run,
                 )
 
-            done_plans.extend(records)
+            state_records = action._to_action_flow_return_records(records)
+            done_plans.extend(state_records)
             data.set_state("done_plans", done_plans)
-            data.set_state("last_round_records", records)
+            data.set_state("last_round_records", state_records)
             data.set_state("round_index", round_index + 1)
             await data.async_emit("PLAN", None)
-            return records
+            return state_records
 
         async def finalize_loop(data):
             result = data.value if isinstance(data.value, list) else []
@@ -387,7 +403,11 @@ class DAGActionFlow:
         flow.when("EXECUTE").to(execute_step_via_dag)
         flow.when("DONE").to(finalize_loop)
 
-        execution = flow.create_execution(parent_run_context=action_loop_run, auto_close=False)
+        execution = flow.create_execution(
+            parent_run_context=action_loop_run,
+            workspace=False,
+            auto_close=False,
+        )
         action_loop_completed = False
         try:
             with bind_runtime_context(
@@ -416,28 +436,27 @@ class DAGActionFlow:
                 )
             raise
         finally:
-            if artifact_scope.get("kind") != "agent_execution" and not action_loop_completed:
+            if owns_artifact_scope and not action_loop_completed:
                 action._release_artifact_scope(artifact_scope)
         if isinstance(result, dict):
             result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
-            if artifact_scope.get("kind") != "agent_execution":
+            if owns_artifact_scope:
                 action._release_artifact_scope(artifact_scope)
             return []
-        try:
-            normalized = [
-                action._finalize_action_result(
-                    action._normalize_execution_record(record, None, index),
-                    artifact_scope=artifact_scope,
-                )
-                for index, record in enumerate(result)
-            ]
-        finally:
-            if artifact_scope.get("kind") != "agent_execution":
-                action._release_artifact_scope(artifact_scope)
-        if artifact_scope.get("kind") != "agent_execution":
+        normalized = action._to_action_flow_return_records(result)
+        if owns_artifact_scope:
+            action._release_artifact_scope(artifact_scope)
+        if owns_artifact_scope:
             normalized = action._project_released_artifact_scope(normalized, artifact_scope)
+            for state_key in ("done_plans", "last_round_records", "action_loop_result"):
+                state_value = execution.get_state(state_key, [])
+                await execution.async_set_state(
+                    state_key,
+                    action._project_released_artifact_scope(state_value, artifact_scope),
+                )
         normalized = action._to_action_flow_return_records(normalized)
+        normalized = action.to_model_visible_records(normalized)
         with bind_runtime_context(
             parent_run_context=action_loop_run,
             tool_phase_run_context=action_loop_run,

@@ -3430,12 +3430,24 @@ class LocalWorkspaceBackend:
             f"SELECT r.id FROM records r WHERE {' AND '.join(clauses)} ORDER BY r.id",
             scope_params,
         ).fetchall()
-        checkpoint_rows = conn.execute(
+        checkpoint_scope = (
+            f"""
+            OR EXISTS (
+                SELECT 1 FROM records r
+                WHERE r.id = checkpoints.record_id
+                AND {' AND '.join(clauses)}
+            )
             """
+            if clauses
+            else ""
+        )
+        checkpoint_rows = conn.execute(
+            f"""
             SELECT * FROM checkpoints
-            WHERE run_id = ? ORDER BY created_at ASC, rowid ASC
+            WHERE run_id = ? {checkpoint_scope}
+            ORDER BY created_at ASC, rowid ASC
             """,
-            (execution_id,),
+            [execution_id, *scope_params],
         ).fetchall()
         runtime_event_rows = conn.execute(
             "SELECT * FROM runtime_events WHERE execution_id = ? ORDER BY sequence ASC, id ASC",
@@ -3453,9 +3465,18 @@ class LocalWorkspaceBackend:
         fts_rows = conn.execute(
             "SELECT record_id, summary, content FROM records_fts ORDER BY record_id"
         ).fetchall()
+        manifest_keys = {
+            checkpoint_manifest_key,
+            lease_manifest_key,
+            *(
+                f"checkpoint.latest.{str(row['run_id'])}"
+                for row in checkpoint_rows
+            ),
+        }
+        manifest_placeholders = ", ".join("?" for _ in manifest_keys)
         manifest_rows = conn.execute(
-            "SELECT key, value_json FROM manifests WHERE key IN (?, ?) ORDER BY key",
-            (checkpoint_manifest_key, lease_manifest_key),
+            f"SELECT key, value_json FROM manifests WHERE key IN ({manifest_placeholders}) ORDER BY key",
+            sorted(manifest_keys),
         ).fetchall()
         vector_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_vectors'"
@@ -3521,7 +3542,7 @@ class LocalWorkspaceBackend:
             value = strict_retention_json(
                 row["value_json"], dict, field=f"manifests.{key}.value_json"
             )
-            if key == checkpoint_manifest_key:
+            if key.startswith("checkpoint.latest."):
                 value = validate_retained_reference_shape(
                     value,
                     field=f"manifests.{key}.value_json",
@@ -3962,6 +3983,8 @@ class LocalWorkspaceBackend:
         persisted_lease = manifest_values.get(lease_manifest_key)
         checkpoint_version = None
         for row in reversed(checkpoint_facts):
+            if str(row.get("run_id") or "") != execution_id:
+                continue
             checkpoint_version = self._checkpoint_state_version(row["state"])
             if checkpoint_version is not None:
                 break
@@ -4088,6 +4111,20 @@ class LocalWorkspaceBackend:
         selected_record_sizes = selection_result.record_content_sizes
         selected_checkpoint_rows = selection_result.checkpoint_rows
         selected_record_id_set = set(selected["record_ids"])
+        if representation_by_category["checkpoints"] != "hot":
+            for manifest_key, manifest_value in manifest_values.items():
+                if not manifest_key.startswith("checkpoint.latest."):
+                    continue
+                if not isinstance(manifest_value, Mapping):
+                    selected["manifest_keys"].append(manifest_key)
+                    continue
+                manifest_record_id = str(
+                    manifest_value.get("record_id")
+                    or manifest_value.get("id")
+                    or ""
+                )
+                if manifest_record_id not in retained_record_ids:
+                    selected["manifest_keys"].append(manifest_key)
 
         vector_ids, vector_provider, capability_diagnostic = self._retention_provider_selection(
             selected,

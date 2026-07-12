@@ -3,11 +3,13 @@ from pprint import pprint
 
 from agently import Agently
 from agently.core import Action
+from agently.core.runtime import bind_runtime_context
 
 
 agent = Agently.create_agent()
 workspace = Path(__file__).resolve().parent
-artifact_scope = {"kind": "example_run", "id": "action-execution-recall"}
+execution = agent.input("Inspect the example Workspace.").create_execution().strategy("direct")
+artifact_scope = {"kind": "agent_execution", "id": execution.id}
 
 agent.enable_shell(
     root=workspace,
@@ -15,12 +17,13 @@ agent.enable_shell(
     action_id="inspect_workspace",
 )
 
-records = agent.action.execute_action(
-    "inspect_workspace",
-    {"cmd": "pwd", "workdir": str(workspace)},
-    purpose="Inspect workspace path",
-    artifact_scope=artifact_scope,
-)
+with bind_runtime_context(agent_execution_context=execution.execution_context):
+    records = agent.action.execute_action(
+        "inspect_workspace",
+        {"cmd": "pwd", "workdir": str(workspace)},
+        purpose="Inspect workspace path",
+        artifact_scope=artifact_scope,
+    )
 
 print("RAW ACTION RECORD")
 pprint(records)
@@ -33,9 +36,10 @@ assert artifact_refs
 artifact_ref = artifact_refs[0]
 selection_key = artifact_ref.get("selection_key")
 assert selection_key is not None
-raw_artifact = agent.action.read_action_artifact(
-    selection_key=selection_key,
-)
+with bind_runtime_context(agent_execution_context=execution.execution_context):
+    raw_artifact = agent.action.read_action_artifact(
+        selection_key=selection_key,
+    )
 agent.action._release_artifact_scope(artifact_scope)
 
 print("\nRECALLED RAW ARTIFACT")
@@ -52,8 +56,8 @@ pprint(raw_artifact)
 # enable_shell() registers a bash action restricted to the "pwd" command.
 # The raw ActionResult contains model_digest (a compact summary the model can read)
 # and artifact_refs (pointers to full stored artifacts).
-# agent.action.read_action_artifact() resolves the host-issued selection_key for
-# audit or downstream use while the owning scope is still live.
+# agent.action.read_action_artifact() resolves only the host-issued selection_key
+# in the currently bound AgentExecution scope.
 #
 # Flow:
 # agent.enable_shell(root=workspace, commands=["pwd"], action_id="inspect_workspace")

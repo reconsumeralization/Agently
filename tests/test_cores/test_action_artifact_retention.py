@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -75,6 +77,9 @@ async def test_direct_action_entry_releases_success_and_failure_scopes(tmp_path,
     )
 
     record = await agent.action.async_execute_action(action_id, {})
+    serialized_record = json.dumps(record, ensure_ascii=False, default=str).encode("utf-8")
+    assert len(serialized_record) <= 16000, len(serialized_record)
+    assert ("d" * 100).encode("utf-8") not in serialized_record
     assert record["artifact_refs"]
     returned_ref = next(
         ref for ref in record["artifact_refs"] if ref.get("artifact_type") == "action_output"
@@ -116,6 +121,31 @@ async def test_direct_action_entry_releases_success_and_failure_scopes(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_direct_action_entry_bounds_complete_large_instruction_record() -> None:
+    agent: Any = Agently.create_agent("action-artifact-direct-large-instruction")
+    action_id = "direct_large_instruction"
+    marker = "DIRECT_LARGE_INSTRUCTION_MUST_NOT_RETURN_RAW"
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Consume a large instruction and return a compact fact.",
+        kwargs={"code": (str, "Instruction body.")},
+        func=lambda code: {"received_bytes": len(code.encode("utf-8"))},
+    )
+
+    record = await agent.action.async_execute_action(
+        action_id,
+        {"code": ("q" * (1024 * 1024)) + marker},
+    )
+
+    serialized_record = json.dumps(record, ensure_ascii=False, default=str).encode("utf-8")
+    assert len(serialized_record) <= 16000, len(serialized_record)
+    assert marker.encode("utf-8") not in serialized_record
+    assert record["artifact_refs"]
+    assert all(ref.get("available") is False for ref in record["artifact_refs"])
+    assert agent.action._artifact_manager._artifacts == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("flow_name", ["TriggerFlowActionFlow", "DAGActionFlow"])
 async def test_standalone_action_flows_release_success_scope(
     flow_name: str,
@@ -125,13 +155,25 @@ async def test_standalone_action_flows_release_success_scope(
     monkeypatch.chdir(tmp_path)
     agent: Any = Agently.create_agent(f"action-artifact-standalone-{flow_name}")
     action_id = f"standalone_{flow_name}"
+    output_marker = f"{flow_name}_RAW_OUTPUT_TAIL_MUST_STAY_COLD"
     agent.action.register_action(
         action_id=action_id,
         desc="Return a large standalone flow value.",
         kwargs={},
-        func=lambda: {"body": "f" * (1024 * 1024)},
+        func=lambda: {"body": ("f" * (1024 * 1024)) + output_marker},
     )
     flow = agent.action._flow_controller.create_named_action_flow(flow_name)
+    from agently import TriggerFlow
+
+    captured_executions: list[Any] = []
+    original_create_execution = TriggerFlow.create_execution
+
+    def capture_execution(trigger_flow: Any, **kwargs: Any) -> Any:
+        execution = original_create_execution(trigger_flow, **kwargs)
+        captured_executions.append(execution)
+        return execution
+
+    monkeypatch.setattr(TriggerFlow, "create_execution", capture_execution)
 
     async def planning_handler(context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
         if context.get("done_plans"):
@@ -141,8 +183,16 @@ async def test_standalone_action_flows_release_success_scope(
             "action_calls": [{"action_id": action_id, "action_input": {}, "purpose": "produce output"}],
         }
 
-    async def execution_handler(_context: dict[str, Any], request: dict[str, Any]) -> list[Any]:
-        return [await request["async_call_action"](action_id, {})]
+    async def execution_handler(context: dict[str, Any], request: dict[str, Any]) -> list[Any]:
+        return [
+            await agent.action.async_execute_action(
+                str(command["action_id"]),
+                dict(command.get("action_input") or {}),
+                purpose=str(command.get("purpose") or ""),
+                artifact_scope=context["artifact_scope"],
+            )
+            for command in request["action_calls"]
+        ]
 
     records = await flow.async_run(
         action=agent.action,
@@ -170,12 +220,152 @@ async def test_standalone_action_flows_release_success_scope(
     collect_refs(records)
     serialized_records = json.dumps(records, ensure_ascii=False)
     assert len(serialized_records.encode("utf-8")) <= 16000
-    assert "f" * 100 not in serialized_records
+    assert output_marker not in serialized_records
     assert all(ref["available"] is False for ref in returned_refs)
     assert all(ref["full_value_available"] is False for ref in returned_refs)
     assert all(ref.get("preview") or ref.get("preview_omitted") is True for ref in returned_refs)
     assert all(ref.get("sha256") for ref in returned_refs)
     assert agent.action._artifact_manager._artifacts == {}
+    action_loop_executions = [
+        execution
+        for execution in captured_executions
+        if execution.get_state("round_index", None) is not None
+        and isinstance(execution.get_state("done_plans", None), list)
+    ]
+    assert len(action_loop_executions) == 1
+    execution = action_loop_executions[0]
+    internal_workspace = execution._get_runtime_resource("workspace", None)
+    stored_content_bytes = 0
+    stored_records: list[dict[str, Any]] = []
+    if internal_workspace is not None:
+        stored_records = await internal_workspace.search()
+        for stored_ref in stored_records:
+            stored_content_bytes += len(
+                json.dumps(stored_ref, ensure_ascii=False, default=str).encode("utf-8")
+            )
+            if stored_ref.get("path"):
+                stored_value = await internal_workspace.get_data(stored_ref)
+                stored_content_bytes += len(
+                    json.dumps(stored_value, ensure_ascii=False, default=str).encode("utf-8")
+                )
+    for state_key in ("done_plans", "last_round_records", "action_loop_result"):
+        state_bytes = json.dumps(
+            execution.get_state(state_key, []),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+        assert len(state_bytes) <= 16000, {
+            "state_key": state_key,
+            "state_bytes": len(state_bytes),
+            "workspace_record_kinds": [record.get("kind") for record in stored_records],
+            "workspace_terminal_bytes": stored_content_bytes,
+        }
+        assert output_marker.encode("utf-8") not in state_bytes
+    assert internal_workspace is None, {
+        "record_count": len(stored_records),
+        "stored_content_bytes": stored_content_bytes,
+    }
+    assert stored_content_bytes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flow_name", ["TriggerFlowActionFlow", "DAGActionFlow"])
+async def test_standalone_action_flows_bound_large_instruction_before_state_and_storage(
+    flow_name: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    agent: Any = Agently.create_agent(f"action-artifact-large-instruction-{flow_name}")
+    action_id = f"large_instruction_{flow_name}"
+    marker = f"{flow_name}_LARGE_INSTRUCTION_MUST_STAY_COLD"
+    large_code = ("i" * (1024 * 1024)) + marker
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Consume a large instruction and return a compact fact.",
+        kwargs={"code": (str, "Instruction body.")},
+        func=lambda code: {"received_bytes": len(code.encode("utf-8"))},
+    )
+    flow = agent.action._flow_controller.create_named_action_flow(flow_name)
+    from agently import TriggerFlow
+
+    captured_executions: list[Any] = []
+    original_create_execution = TriggerFlow.create_execution
+
+    def capture_execution(trigger_flow: Any, **kwargs: Any) -> Any:
+        execution = original_create_execution(trigger_flow, **kwargs)
+        captured_executions.append(execution)
+        return execution
+
+    monkeypatch.setattr(TriggerFlow, "create_execution", capture_execution)
+
+    async def planning_handler(context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        if context.get("done_plans"):
+            return {"next_action": "response", "action_calls": []}
+        return {
+            "next_action": "execute",
+            "action_calls": [
+                {
+                    "action_id": action_id,
+                    "action_input": {"code": large_code},
+                    "purpose": "consume instruction",
+                }
+            ],
+        }
+
+    async def execution_handler(context: dict[str, Any], request: dict[str, Any]) -> list[Any]:
+        return [
+            await agent.action.async_execute_action(
+                str(command["action_id"]),
+                dict(command.get("action_input") or {}),
+                purpose=str(command.get("purpose") or ""),
+                artifact_scope=context["artifact_scope"],
+            )
+            for command in request["action_calls"]
+        ]
+
+    records = await flow.async_run(
+        action=agent.action,
+        prompt=agent.request.prompt,
+        settings=agent.settings,
+        action_list=agent.action.get_action_list(),
+        planning_handler=planning_handler,
+        execution_handler=execution_handler,
+        max_rounds=2,
+    )
+
+    action_loop_executions = [
+        execution
+        for execution in captured_executions
+        if execution.get_state("round_index", None) is not None
+        and isinstance(execution.get_state("done_plans", None), list)
+    ]
+    assert len(action_loop_executions) == 1
+    execution = action_loop_executions[0]
+    carriers: dict[str, Any] = {
+        "return": records,
+        "done_plans": execution.get_state("done_plans", []),
+        "last_round_records": execution.get_state("last_round_records", []),
+        "action_loop_result": execution.get_state("action_loop_result", []),
+    }
+    for name, carrier in carriers.items():
+        carrier_bytes = json.dumps(carrier, ensure_ascii=False, default=str).encode("utf-8")
+        assert len(carrier_bytes) <= 16000, (name, len(carrier_bytes))
+        assert marker.encode("utf-8") not in carrier_bytes
+    internal_workspace = execution._get_runtime_resource("workspace", None)
+    stored_content_bytes = 0
+    if internal_workspace is not None:
+        for stored_ref in await internal_workspace.search():
+            stored_content_bytes += len(
+                json.dumps(stored_ref, ensure_ascii=False, default=str).encode("utf-8")
+            )
+            if stored_ref.get("path"):
+                stored_value = await internal_workspace.get_data(stored_ref)
+                stored_content_bytes += len(
+                    json.dumps(stored_value, ensure_ascii=False, default=str).encode("utf-8")
+                )
+    assert internal_workspace is None, {"stored_content_bytes": stored_content_bytes}
+    assert stored_content_bytes == 0
 
 
 @pytest.mark.asyncio
@@ -364,6 +554,92 @@ def test_small_explicit_artifact_model_projection_hides_canonical_identity() -> 
     assert set(visible["artifact_refs"][0]).isdisjoint(
         {"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"}
     )
+    assert visible["artifacts"] == visible["artifact_refs"]
+
+
+def test_public_action_artifact_readback_selector_is_selection_key_only() -> None:
+    signature = inspect.signature(Agently.create_agent("action-readback-signature").action.async_read_action_artifact)
+
+    assert list(signature.parameters) == ["selection_key"]
+
+
+@pytest.mark.asyncio
+async def test_action_artifact_readback_fails_closed_without_scope_or_across_execution_scope() -> None:
+    from agently.core.runtime import bind_runtime_context
+
+    agent: Any = Agently.create_agent("action-readback-scope-bound")
+    scope_a = {"kind": "agent_execution", "id": "execution-a"}
+    artifact = agent.action._artifact_manager.register_execution_artifact(
+        action_call_id="scope-a-call",
+        artifact_type="action_output",
+        label="Execution A private output",
+        value={"private": "execution-a-only"},
+        artifact_scope=scope_a,
+    )
+
+    missing_scope = await agent.action.async_read_action_artifact(
+        selection_key=artifact["selection_key"],
+    )
+    with bind_runtime_context(
+        agent_execution_context=SimpleNamespace(execution_id="execution-b"),
+    ):
+        cross_scope = await agent.action.async_read_action_artifact(
+            selection_key=artifact["selection_key"],
+        )
+    with bind_runtime_context(
+        agent_execution_context=SimpleNamespace(execution_id="execution-a"),
+    ):
+        own_scope = await agent.action.async_read_action_artifact(
+            selection_key=artifact["selection_key"],
+        )
+
+    assert missing_scope["ok"] is False
+    assert missing_scope["status"] in {"forbidden", "not_found"}
+    assert "artifact_id" not in missing_scope
+    assert "value" not in missing_scope
+    assert cross_scope["ok"] is False
+    assert cross_scope["status"] in {"forbidden", "not_found"}
+    assert "artifact_id" not in cross_scope
+    assert "value" not in cross_scope
+    assert own_scope["ok"] is True
+    assert own_scope["value"] == {"private": "execution-a-only"}
+
+
+@pytest.mark.asyncio
+async def test_artifacts_only_terminal_carrier_promotes_selection_without_canonical_alias_leak(tmp_path) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        prepare_agent_execution_terminal_retention,
+    )
+
+    agent: Any = Agently.create_agent("artifacts-only-terminal-carrier").use_workspace(
+        tmp_path / "workspace"
+    )
+    execution = agent.input("Return the selected artifact.").create_execution().strategy("direct")
+    execution.status = "success"
+    execution.route_info["selected_route"] = "model_request"
+    scope = {"kind": "agent_execution", "id": execution.id}
+    canonical_ref = agent.action._artifact_manager.register_execution_artifact(
+        action_call_id="artifacts-only-call",
+        artifact_type="action_output",
+        label="Artifacts-only output",
+        value={"body": "canonical terminal value"},
+        artifact_scope=scope,
+    )
+    execution.logs["artifact_refs"] = [canonical_ref]
+    execution.result = {
+        "status": "success",
+        "artifacts": [canonical_ref],
+    }
+
+    terminal_result, retained_refs = await prepare_agent_execution_terminal_retention(execution)
+
+    assert len(retained_refs) == 1
+    assert cast(Any, retained_refs[0])["collection"] == "artifacts"
+    assert terminal_result["artifact_refs"] == terminal_result["artifacts"]
+    terminal_json = json.dumps(terminal_result, ensure_ascii=False, default=str)
+    assert canonical_ref["artifact_id"] not in terminal_json
+    assert canonical_ref["action_call_id"] not in terminal_json
+    assert "artifact_scope" not in terminal_json
 
 
 @pytest.mark.asyncio

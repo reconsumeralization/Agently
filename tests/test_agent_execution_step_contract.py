@@ -3304,8 +3304,7 @@ def test_taskboard_available_readback_omits_programmatic_provenance_noise():
     evidence_view = {
         "artifact_refs": [
             {
-                "artifact_id": "artifact-1",
-                "action_call_id": "call-1",
+                "selection_key": "selection-1",
                 "role": "output",
                 "label": "search note",
                 "media_type": "text/markdown",
@@ -3328,7 +3327,7 @@ def test_taskboard_available_readback_omits_programmatic_provenance_noise():
     available = AgentTask._taskboard_available_readback(evidence_view)
     hot_text = json.dumps(available, ensure_ascii=False)
 
-    assert available["action_artifact_readback"]["artifact_refs"][0]["artifact_id"] == "artifact-1"
+    assert available["action_artifact_readback"]["artifact_refs"][0]["selection_key"] == "selection-1"
     assert available["workspace_file_readback"]["file_refs"][0]["path"] == "retained/source.md"
     assert '"sha256"' not in hot_text
     assert '"bytes"' not in hot_text
@@ -3375,8 +3374,7 @@ async def test_taskboard_readback_work_unit_hot_payload_omits_programmatic_prove
                         "status": "completed",
                         "artifact_refs": [
                             {
-                                "artifact_id": "artifact-1",
-                                "action_call_id": "call-1",
+                                "selection_key": "selection-1",
                                 "label": "cold action output",
                                 "media_type": "text/markdown",
                                 "bytes": 4096,
@@ -3413,7 +3411,7 @@ async def test_taskboard_readback_work_unit_hot_payload_omits_programmatic_prove
             {
                 "status": "completed",
                 "answer": "readback captured",
-                "readbacks": [{"ok": True, "artifact_id": "artifact-1", "action_call_id": "call-1"}],
+                "readbacks": [{"ok": True, "selection_key": "selection-1"}],
                 "file_readbacks": [{"ok": True, "path": "sources/source.md"}],
                 "file_refs": file_refs,
                 "remaining_work": [],
@@ -3435,7 +3433,7 @@ async def test_taskboard_readback_work_unit_hot_payload_omits_programmatic_prove
     work_unit = captured_work_units[0]
     hot_text = json.dumps(work_unit["input_payload"], ensure_ascii=False)
     cold_text = json.dumps(work_unit["input_refs"], ensure_ascii=False)
-    assert work_unit["input_payload"]["artifact_refs"][0]["artifact_id"] == "artifact-1"
+    assert work_unit["input_payload"]["artifact_refs"][0]["selection_key"] == "selection-1"
     assert work_unit["input_payload"]["file_refs"][0]["path"] == "sources/source.md"
     assert '"sha256"' not in hot_text
     assert '"bytes"' not in hot_text
@@ -3468,7 +3466,7 @@ async def test_taskboard_dependency_readback_work_unit_hot_payload_omits_program
                 "schema_version": "agent_task_taskboard_dependency_readbacks/v1",
                 "card_id": "synthesize",
                 "ref_count": 1,
-                "readbacks": [{"ok": True, "artifact_id": "artifact-1", "action_call_id": "call-1"}],
+                "readbacks": [{"ok": True, "selection_key": "selection-1"}],
                 "diagnostics": [],
             },
             {"execution_id": "dependency-readback-hot-provenance", "status": "completed", "logs": {}},
@@ -3480,8 +3478,7 @@ async def test_taskboard_dependency_readback_work_unit_hot_payload_omits_program
         {
             "artifact_refs": [
                 {
-                    "artifact_id": "artifact-1",
-                    "action_call_id": "call-1",
+                    "selection_key": "selection-1",
                     "label": "large dependency output",
                     "media_type": "text/markdown",
                     "bytes": 999999,
@@ -3494,16 +3491,16 @@ async def test_taskboard_dependency_readback_work_unit_hot_payload_omits_program
         context_pack={"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
     )
 
-    assert output["readbacks"][0]["artifact_id"] == "artifact-1"
+    assert output["readbacks"][0]["selection_key"] == "selection-1"
     work_unit = captured_work_units[0]
     hot_text = json.dumps(work_unit["input_payload"], ensure_ascii=False)
     cold_text = json.dumps(work_unit["input_refs"], ensure_ascii=False)
-    assert work_unit["input_payload"]["artifact_refs"][0]["artifact_id"] == "artifact-1"
+    assert work_unit["input_payload"]["artifact_refs"][0]["selection_key"] == "selection-1"
     assert '"sha256"' not in hot_text
     assert '"bytes"' not in hot_text
     assert '"media_type"' not in hot_text
     assert '"full_value_available"' not in hot_text
-    assert '"sha256"' in cold_text
+    assert '"sha256"' not in cold_text
     assert '"bytes"' in cold_text
     assert '"media_type"' in cold_text
 
@@ -3513,8 +3510,7 @@ def test_taskboard_action_artifact_readback_preview_omits_ref_provenance_noise()
         {
             "ok": True,
             "status": "read",
-            "artifact_id": "artifact-1",
-            "action_call_id": "call-1",
+            "selection_key": "selection-1",
             "media_type": "text/markdown",
             "value": {
                 "summary": "bounded source note",
@@ -3531,8 +3527,7 @@ def test_taskboard_action_artifact_readback_preview_omits_ref_provenance_noise()
             "meta": {"sha256": "2" * 64, "bytes": 8192},
         },
         {
-            "artifact_id": "artifact-1",
-            "action_call_id": "call-1",
+            "selection_key": "selection-1",
             "media_type": "text/markdown",
             "bytes": 4096,
             "sha256": "1" * 64,
@@ -3540,7 +3535,7 @@ def test_taskboard_action_artifact_readback_preview_omits_ref_provenance_noise()
     )
 
     hot_text = json.dumps(compact, ensure_ascii=False)
-    assert compact["artifact_id"] == "artifact-1"
+    assert compact["selection_key"] == "selection-1"
     assert compact["value_preview"]["summary"] == "bounded source note"
     assert compact["value_preview"]["file_refs"][0]["path"] == "retained/source.md"
     assert '"sha256"' not in hot_text
@@ -4301,12 +4296,11 @@ async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_
     file_ref = dict(write_result["file_refs"][0])
     file_ref["role"] = "download"
 
-    async def fake_read_action_artifact(artifact_id: str, action_call_id: str | None = None) -> dict[str, Any]:
+    async def fake_read_action_artifact(selection_key: str) -> dict[str, Any]:
         return {
             "ok": True,
             "status": "success",
-            "artifact_id": artifact_id,
-            "action_call_id": action_call_id,
+            "selection_key": selection_key,
             "artifact_type": "action_output",
             "value": {
                 "kind": "remote_file",
@@ -4351,8 +4345,7 @@ async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_
                         "preview": "Action artifact ref only; file refs are nested in readback.",
                         "artifact_refs": [
                             {
-                                "action_call_id": "act-call-download",
-                                "artifact_id": "act-art-download-output",
+                                "selection_key": "sel-download-output",
                                 "artifact_type": "action_output",
                                 "available": True,
                                 "full_value_available": True,
@@ -4392,9 +4385,9 @@ async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_
     )
     assert readback_item["status"] == "ok"
     assert readback_item["body_state"] in {"bounded", "truncated"}
-    assert readback_item["artifact_id"] == "act-art-download-output"
+    assert readback_item["selection_key"] == "sel-download-output"
     assert "Only the first page preview" in readback_item["body"]
-    assert "act-call-download" in readback_item["aliases"]
+    assert "sel-download-output" in readback_item["aliases"]
 
     next_revision = TaskBoardValidator().apply_patch(
         revision,
@@ -7124,6 +7117,7 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
     assert result["accepted"] is True
     assert result["final_result"] == "taskboard readback accepted result"
     assert review_result["status"] == "completed"
+    assert agent.action._artifact_manager._artifacts == {}
     assert review_result["metadata"]["execution_kind"] == "taskboard_artifact_readback"
     block_carrier = review_result["metadata"]["block_carrier"]
     assert block_carrier["work_unit"]["origin"] == "taskboard_card"

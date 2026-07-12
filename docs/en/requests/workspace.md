@@ -288,6 +288,10 @@ when a distributed provider needs fail-closed append ordering, and use
 `idempotency_key=...` for callback or webhook retry safety. Workspace does not
 decide pause/resume, approval, retry, or DAG readiness; those semantics remain
 owned by TriggerFlow, PolicyApproval, ExecutionExchange, and AgentExecution.
+It is opt-in: ordinary observation belongs in the configured logging/DevTools
+path. Bind `runtime_event_store` only when durable Workspace event replay or
+audit is required. Finite internal ActionFlow executions therefore keep no
+Workspace event archive by default.
 
 Workspace-backed durable providers also expose TriggerFlow-facing snapshot CAS,
 lease, and artifact-ref helpers:
@@ -366,6 +370,12 @@ await agent.workspace.add_retention_anchor(
     preserved_event_ids=[event_record["event_id"]],
 )
 ```
+
+Task-scoped terminal cleanup joins checkpoint rows by the scoped checkpoint
+record identity, not only by the parent lifecycle run id. It removes matching
+`checkpoint.latest.<run-id>` manifests for task and resume run ids together
+with their deleted records. A recovery anchor keeps the referenced compact
+resume checkpoint and its matching latest manifest.
 
 `capabilities()` reports the active backend components for content, metadata,
 checkpoint, RuntimeEvent storage, ref resolution, retention policy, text index,

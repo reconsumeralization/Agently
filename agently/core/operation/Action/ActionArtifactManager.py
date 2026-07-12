@@ -24,7 +24,9 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from threading import RLock
 from typing import Any, cast
@@ -39,6 +41,7 @@ class ActionArtifactManager:
     _MODEL_VISIBLE_RECORD_MAX_BYTES = 6000
     _MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES = 2400
     _MODEL_VISIBLE_INSTRUCTION_MAX_BYTES = 1200
+    _ACTION_CARRIER_MAX_BYTES = 16000
     _INSTRUCTION_HEAVY_EXECUTOR_TYPES = {
         "bash_sandbox",
         "python_sandbox",
@@ -76,6 +79,30 @@ class ActionArtifactManager:
         self._selection_index: dict[str, str] = {}
         self._artifact_lock = RLock()
         self._registry = registry
+        self._current_artifact_scope: ContextVar[dict[str, str] | None] = ContextVar(
+            f"agently_action_artifact_scope_{id(self)}",
+            default=None,
+        )
+
+    @contextmanager
+    def bind_artifact_scope(
+        self,
+        artifact_scope: Mapping[str, Any],
+    ) -> Iterator[dict[str, str]]:
+        """Bind the exact execution-owned scope for nested artifact readback."""
+
+        scope = self._normalize_artifact_scope(artifact_scope, fallback_id="")
+        if scope is None:
+            raise ValueError("Action artifact scope requires non-empty kind and id values.")
+        token = self._current_artifact_scope.set(scope)
+        try:
+            yield scope
+        finally:
+            self._current_artifact_scope.reset(token)
+
+    def current_artifact_scope(self) -> dict[str, str] | None:
+        scope = self._current_artifact_scope.get()
+        return dict(scope) if scope is not None else None
 
     # ── artifact storage access ────────────────────────────────────────────
 
@@ -864,24 +891,64 @@ class ActionArtifactManager:
 
         if not isinstance(records, list):
             return []
-        projected: list[ActionResult] = []
-        for record in records:
-            digest = record.get("model_digest") if isinstance(record, dict) else None
-            preview_meta = digest.get("result_preview_meta") if isinstance(digest, dict) else None
-            meta = record.get("meta") if isinstance(record, dict) else None
-            output_was_bounded = (
-                isinstance(preview_meta, dict)
-                and preview_meta.get("truncated") is True
-            ) or (
-                isinstance(meta, dict)
-                and meta.get("max_output_bytes_exceeded") is True
-            )
-            projected.append(
-                cls._to_model_visible_record(record)
-                if output_was_bounded
-                else record
-            )
-        return projected
+        return [
+            cls._to_action_carrier_record(record)
+            if cls._safe_json_size(record) > cls._ACTION_CARRIER_MAX_BYTES
+            else record
+            for record in records
+        ]
+
+    @classmethod
+    def _to_action_carrier_record(cls, record: ActionResult) -> ActionResult:
+        """Project an oversized complete record without carrying raw previews."""
+
+        visible = cls._to_model_visible_record(record)
+        host_refs = [
+            cls._compact_action_carrier_artifact_ref(ref)
+            for ref in cls.canonicalize_artifact_aliases(record, model_visible=False)
+        ]
+        visible["artifact_refs"] = cast(list[ActionArtifact], host_refs)
+        visible["artifacts"] = visible["artifact_refs"]
+        digest = visible.get("result")
+        if isinstance(digest, dict):
+            compact_digest = dict(digest)
+            if "instruction" in compact_digest:
+                compact_digest["instruction"] = {"omitted": True}
+            if "result_preview" in compact_digest:
+                compact_digest["result_preview"] = {"omitted": True}
+            visible["result"] = compact_digest
+            visible["data"] = {
+                "same_as": "result",
+                "action_call_id": compact_digest.get("action_call_id", ""),
+                "carrier_compacted": True,
+            }
+            visible["model_digest"] = dict(visible["data"])
+        return visible
+
+    @classmethod
+    def _compact_action_carrier_artifact_ref(cls, ref: Mapping[str, Any]) -> ActionArtifact:
+        keep_keys = (
+            "artifact_id",
+            "selection_key",
+            "action_call_id",
+            "artifact_type",
+            "role",
+            "label",
+            "media_type",
+            "available",
+            "full_value_available",
+            "truncated",
+            "preview_size",
+            "size",
+            "bytes",
+            "sha256",
+            "path",
+            "meta",
+        )
+        compact = {key: deepcopy(ref.get(key)) for key in keep_keys if key in ref}
+        if "preview" in ref:
+            compact["preview_omitted"] = True
+        return cast(ActionArtifact, compact)
 
     @classmethod
     def _to_hot_path_digest(cls, digest: dict[str, Any]) -> dict[str, Any]:
@@ -952,23 +1019,53 @@ class ActionArtifactManager:
     @classmethod
     def _project_model_artifact_refs(cls, record: ActionResult) -> ActionResult:
         visible = cast(ActionResult, deepcopy(record))
-        artifact_refs = record.get("artifact_refs")
-        refs = (
-            artifact_refs
-            if isinstance(artifact_refs, list) and artifact_refs
-            else record.get("artifacts", [])
-        )
-        visible_refs: list[ActionArtifact] = [
-            cls._to_model_selection_candidate(ref)
-            for ref in refs
-            if isinstance(ref, dict)
-        ] if isinstance(refs, list) else []
-        # Always overwrite both public aliases, including the empty case, so a
-        # malformed or partially normalized record cannot leave canonical
-        # identities visible through the other alias.
-        visible["artifact_refs"] = visible_refs
-        visible["artifacts"] = visible_refs
+        visible_refs = cls.canonicalize_artifact_aliases(record, model_visible=True)
+        visible["artifact_refs"] = cast(list[ActionArtifact], visible_refs)
+        visible["artifacts"] = cast(list[ActionArtifact], visible_refs)
         return visible
+
+    @classmethod
+    def canonicalize_artifact_aliases(
+        cls,
+        container: Mapping[str, Any],
+        *,
+        model_visible: bool,
+    ) -> list[dict[str, Any]]:
+        """Merge both aliases once and return one deduplicated canonical list."""
+
+        merged: list[dict[str, Any]] = []
+        primary_values = container.get("artifact_refs")
+        primary_alias = (
+            "artifact_refs"
+            if isinstance(primary_values, Sequence)
+            and not isinstance(primary_values, (str, bytes, bytearray))
+            else "artifacts"
+        )
+        seen_primary: set[tuple[str, str, str, str]] = set()
+        for alias in (primary_alias, "artifacts" if primary_alias == "artifact_refs" else "artifact_refs"):
+            values = container.get(alias)
+            if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+                continue
+            for value in values:
+                if not isinstance(value, Mapping):
+                    continue
+                item = dict(value)
+                key = (
+                    str(item.get("selection_key") or ""),
+                    str(item.get("artifact_id") or ""),
+                    str(item.get("record_id") or item.get("id") or ""),
+                    str(item.get("path") or item.get("content_ref") or ""),
+                )
+                if alias != primary_alias and key in seen_primary:
+                    continue
+                if alias == primary_alias:
+                    seen_primary.add(key)
+                merged.append(
+                    dict(cls._to_model_selection_candidate(item))
+                    if model_visible and item.get("selection_key")
+                    else item
+                )
+        return merged
 
     # ── recall action injection ────────────────────────────────────────────
 

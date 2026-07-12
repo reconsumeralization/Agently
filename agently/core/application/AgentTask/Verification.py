@@ -3028,8 +3028,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             return cls._compact_verifier_prompt_value(ref, max_chars=600)
         keep_keys = (
             "selection_key",
-            "artifact_id",
-            "action_call_id",
             "path",
             "role",
             "label",
@@ -3050,6 +3048,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "available",
         )
         compact = {key: ref.get(key) for key in keep_keys if key in ref}
+        if not ref.get("selection_key"):
+            for key in ("artifact_id", "action_call_id"):
+                if key in ref:
+                    compact[key] = ref.get(key)
         if "preview" in ref:
             compact["preview"] = cls._compact_verifier_prompt_value(ref.get("preview"), max_chars=600)
         if "content_preview" in ref:

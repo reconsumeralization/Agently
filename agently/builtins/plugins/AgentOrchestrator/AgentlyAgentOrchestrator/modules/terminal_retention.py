@@ -45,7 +45,7 @@ async def prepare_agent_execution_terminal_retention(
 ) -> tuple[Any, list[WorkspaceRetainedReference]]:
     """Return the bounded terminal-event result and canonical retained refs."""
 
-    result = _terminal_result_value(owner)
+    result = _canonicalize_result_artifact_aliases(_terminal_result_value(owner))
     try:
         policy = resolve_retention_policy(
             cast(WorkspaceRetentionPolicy | None, owner.options.get("workspace_retention_policy")),
@@ -445,8 +445,14 @@ async def _promote_selected_action_artifact(
             "Selected Action artifact candidate is missing selection_key.",
         )
         return None
-    expected_scope = {"kind": "agent_execution", "id": owner.id}
     action = getattr(owner.agent, "action", None)
+    task = getattr(owner, "task_record", None)
+    task_id = str(getattr(task, "id", "") or "").strip()
+    expected_scope = (
+        {"kind": "agent_task", "id": task_id}
+        if task_id
+        else {"kind": "agent_execution", "id": owner.id}
+    )
     artifact_manager = getattr(action, "_artifact_manager", None)
     read_selection_transfer = getattr(artifact_manager, "read_selection_transfer", None)
     if not callable(read_selection_transfer):
@@ -494,7 +500,6 @@ async def _promote_selected_action_artifact(
                 "scope": {"execution_id": owner.id},
                 "kind": "agent_execution_action_artifact",
                 "summary": f"Selected Action artifact for AgentExecution {owner.id}",
-                "action_call_id": action_call_id,
             },
         )
         return promoted_ref, artifact_id
@@ -562,6 +567,38 @@ def _project_ref_lists(
             else value
             for value in values
         ]
+    artifact_refs = container.get("artifact_refs")
+    if isinstance(artifact_refs, list):
+        container["artifacts"] = artifact_refs
+
+
+def _canonicalize_result_artifact_aliases(value: Any) -> Any:
+    """Normalize Action artifact aliases once before retention selection."""
+
+    if not isinstance(value, Mapping):
+        return value
+    from agently.core.operation.Action.ActionArtifactManager import ActionArtifactManager
+
+    projected = dict(value)
+    refs = ActionArtifactManager.canonicalize_artifact_aliases(
+        projected,
+        model_visible=True,
+    )
+    if "artifact_refs" in projected or "artifacts" in projected:
+        projected["artifact_refs"] = refs
+        projected["artifacts"] = refs
+    final_result = projected.get("final_result")
+    if isinstance(final_result, Mapping):
+        projected["final_result"] = _canonicalize_result_artifact_aliases(final_result)
+    evidence = projected.get("evidence")
+    if isinstance(evidence, Sequence) and not isinstance(evidence, (str, bytes, bytearray)):
+        projected["evidence"] = [
+            _canonicalize_result_artifact_aliases(item)
+            if isinstance(item, Mapping)
+            else item
+            for item in evidence
+        ]
+    return projected
 
 
 def _project_released_action_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -790,7 +827,11 @@ def _compact_referenced_result(
     *,
     file_backed: bool,
 ) -> dict[str, Any]:
-    compact: dict[str, Any] = {"artifact_refs": DataFormatter.sanitize(refs)}
+    sanitized_refs = DataFormatter.sanitize(refs)
+    compact: dict[str, Any] = {
+        "artifact_refs": sanitized_refs,
+        "artifacts": sanitized_refs,
+    }
     if isinstance(result, Mapping):
         for key in (
             "status",

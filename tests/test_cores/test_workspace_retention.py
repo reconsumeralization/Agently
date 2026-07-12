@@ -694,6 +694,159 @@ async def test_inspect_retention_selects_every_mutation_relevant_carrier(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_task_scope_retention_deletes_checkpoint_rows_and_manifests_across_run_ids(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-task-checkpoint-runs")
+    parent_execution_id = "parent-execution"
+    task_id = "routed-task"
+    target = root.with_scope_lineage(
+        [
+            {"kind": "executions", "id": parent_execution_id},
+            {"kind": "tasks", "id": task_id},
+        ]
+    )
+    sibling = root.with_scope_lineage(
+        [
+            {"kind": "executions", "id": parent_execution_id},
+            {"kind": "tasks", "id": "sibling-task"},
+        ]
+    )
+    task_checkpoint = await target.put_checkpoint(
+        task_id,
+        {"state_version": 1, "kind": "task-process"},
+        expected_state_version=0,
+    )
+    resume_checkpoint = await target.put_checkpoint(
+        f"{task_id}::resume",
+        {"state_version": 1, "kind": "resume-process"},
+        expected_state_version=0,
+    )
+    sibling_checkpoint = await sibling.put_checkpoint(
+        "sibling-task",
+        {"state_version": 1, "kind": "sibling-process"},
+        expected_state_version=0,
+    )
+
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(parent_execution_id), "state_version": None},
+    )
+    assert preview["status"] == "ready", preview["diagnostics"]
+    result = await target.apply_retention(preview)
+    assert result["status"] == "applied"
+
+    backend = cast(Any, root.backend)
+    with backend._connect() as conn:
+        target_rows = conn.execute(
+            "SELECT run_id, record_id FROM checkpoints WHERE run_id IN (?, ?)",
+            (task_id, f"{task_id}::resume"),
+        ).fetchall()
+        target_manifests = conn.execute(
+            "SELECT key, value_json FROM manifests WHERE key IN (?, ?)",
+            (f"checkpoint.latest.{task_id}", f"checkpoint.latest.{task_id}::resume"),
+        ).fetchall()
+        dangling_checkpoint_rows = conn.execute(
+            """
+            SELECT c.run_id, c.record_id FROM checkpoints c
+            LEFT JOIN records r ON r.id = c.record_id
+            WHERE r.id IS NULL
+            """
+        ).fetchall()
+        sibling_rows = conn.execute(
+            "SELECT run_id, record_id FROM checkpoints WHERE run_id = ?",
+            ("sibling-task",),
+        ).fetchall()
+        sibling_manifest = conn.execute(
+            "SELECT value_json FROM manifests WHERE key = ?",
+            ("checkpoint.latest.sibling-task",),
+        ).fetchone()
+
+    assert target_rows == [], [dict(row) for row in target_rows]
+    assert target_manifests == [], [dict(row) for row in target_manifests]
+    assert dangling_checkpoint_rows == [], [dict(row) for row in dangling_checkpoint_rows]
+    assert await backend.get_record(task_checkpoint["id"]) is None
+    assert await backend.get_record(resume_checkpoint["id"]) is None
+    assert [str(row["record_id"]) for row in sibling_rows] == [sibling_checkpoint["id"]]
+    assert json.loads(str(sibling_manifest["value_json"]))["id"] == sibling_checkpoint["id"]
+
+
+@pytest.mark.asyncio
+async def test_failed_task_scope_retention_keeps_only_recovery_anchored_resume_checkpoint(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-task-recovery-anchor")
+    parent_execution_id = "parent-failed-execution"
+    task_id = "failed-routed-task"
+    target = root.with_scope_lineage(
+        [
+            {"kind": "executions", "id": parent_execution_id},
+            {"kind": "tasks", "id": task_id},
+        ]
+    )
+    ordinary = await target.put_checkpoint(
+        task_id,
+        {"state_version": 1, "kind": "ordinary-process"},
+        expected_state_version=0,
+    )
+    first_resume = await target.put_checkpoint(
+        f"{task_id}::resume",
+        {"state_version": 1, "kind": "old-resume"},
+        expected_state_version=0,
+    )
+    latest_resume = await target.put_checkpoint(
+        f"{task_id}::resume",
+        {"state_version": 2, "kind": "compact-resume"},
+        expected_state_version=1,
+    )
+    await root.add_retention_anchor(
+        parent_execution_id,
+        anchor_type="recovery",
+        record_ref=latest_resume,
+    )
+
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(parent_execution_id), "status": "failed", "state_version": None},
+    )
+    assert preview["status"] == "ready", preview["diagnostics"]
+    result = await target.apply_retention(preview)
+    assert result["status"] == "applied"
+
+    backend = cast(Any, root.backend)
+    with backend._connect() as conn:
+        checkpoint_rows = conn.execute(
+            """
+            SELECT run_id, record_id FROM checkpoints
+            WHERE run_id IN (?, ?) ORDER BY run_id, rowid
+            """,
+            (task_id, f"{task_id}::resume"),
+        ).fetchall()
+        checkpoint_manifests = conn.execute(
+            """
+            SELECT key, value_json FROM manifests
+            WHERE key IN (?, ?) ORDER BY key
+            """,
+            (f"checkpoint.latest.{task_id}", f"checkpoint.latest.{task_id}::resume"),
+        ).fetchall()
+        dangling_checkpoint_rows = conn.execute(
+            """
+            SELECT c.run_id, c.record_id FROM checkpoints c
+            LEFT JOIN records r ON r.id = c.record_id
+            WHERE r.id IS NULL
+            """
+        ).fetchall()
+
+    assert [dict(row) for row in checkpoint_rows] == [
+        {"run_id": f"{task_id}::resume", "record_id": latest_resume["id"]}
+    ]
+    assert [str(row["key"]) for row in checkpoint_manifests] == [
+        f"checkpoint.latest.{task_id}::resume"
+    ]
+    assert json.loads(str(checkpoint_manifests[0]["value_json"]))["id"] == latest_resume["id"]
+    assert dangling_checkpoint_rows == []
+    assert await backend.get_record(ordinary["id"]) is None
+    assert await backend.get_record(first_resume["id"]) is None
+    assert await backend.get_record(latest_resume["id"]) == latest_resume
+
+
+@pytest.mark.asyncio
 async def test_inspect_retention_converts_readback_oserror_to_deferred(tmp_path, monkeypatch):
     workspace = WorkspaceManager().create(tmp_path / "retention-readback-error")
     ref = await workspace.put(

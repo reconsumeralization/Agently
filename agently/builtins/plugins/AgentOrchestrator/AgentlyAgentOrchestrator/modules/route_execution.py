@@ -301,14 +301,21 @@ async def _finalize_terminal_execution(
         if callable(release_scope):
             try:
                 preserved_ids = set(owner._terminal_preserved_action_artifact_ids)
+                task = getattr(owner, "task_record", None)
+                task_id = str(getattr(task, "id", "") or "").strip()
+                artifact_scope = (
+                    {"kind": "agent_task", "id": task_id}
+                    if task_id
+                    else {"kind": "agent_execution", "id": owner.id}
+                )
                 released = release_scope(
-                    {"kind": "agent_execution", "id": owner.id},
+                    artifact_scope,
                     retained_artifact_ids=preserved_ids,
                 )
                 released_count = released if isinstance(released, int) else 0
                 owner.diagnostics["action_artifact_release"] = {
                     "status": "deferred" if preserved_ids else "released",
-                    "scope": {"kind": "agent_execution", "id": owner.id},
+                    "scope": artifact_scope,
                     "released_count": released_count,
                     "preserved_artifact_ids": sorted(preserved_ids),
                 }

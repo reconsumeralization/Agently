@@ -4,10 +4,12 @@ import json
 
 from agently import Agently
 from agently.core import Action
+from agently.core.runtime import bind_runtime_context
 
 
 agent = Agently.create_agent()
-artifact_scope = {"kind": "example_run", "id": "action-evidence-refs"}
+execution = agent.input("Inspect bounded Action evidence.").create_execution().strategy("direct")
+artifact_scope = {"kind": "agent_execution", "id": execution.id}
 stdout = "alpha-line\n" * 1500
 stderr = "warning-line\n" * 700
 
@@ -38,9 +40,10 @@ visible_digest = next(iter(visible.values()))
 artifact_refs = record.get("artifact_refs", [])
 output_ref = next(ref for ref in artifact_refs if ref.get("artifact_type") == "action_output")
 
-raw = agent.action.read_action_artifact(
-    selection_key=str(output_ref.get("selection_key", "")),
-)
+with bind_runtime_context(agent_execution_context=execution.execution_context):
+    raw = agent.action.read_action_artifact(
+        selection_key=str(output_ref.get("selection_key", "")),
+    )
 agent.action._release_artifact_scope(artifact_scope)
 
 deduped = agent.action._artifact_manager.normalize_execution_records(

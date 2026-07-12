@@ -1,6 +1,7 @@
 import pytest
 
 import asyncio
+import json
 import shlex
 import sys
 import uuid
@@ -350,7 +351,8 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     record = action.execute_action(action_id, {}, artifact_scope=artifact_scope)
 
     assert record.get("status") == "success"
-    assert record.get("data", {}).get("stdout") == stdout
+    assert record.get("data", {}).get("carrier_compacted") is True
+    assert len(json.dumps(record, ensure_ascii=False, default=str).encode("utf-8")) <= 16000
     artifact_refs = record.get("artifact_refs")
     assert isinstance(artifact_refs, list)
     output_ref = next(ref for ref in artifact_refs if ref.get("artifact_type") == "action_output")
@@ -359,7 +361,7 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     assert output_ref.get("bytes", 0) > output_ref.get("preview_size", 0)
     assert isinstance(output_ref.get("sha256"), str) and len(str(output_ref.get("sha256"))) == 64
 
-    digest = record.get("model_digest")
+    digest = record.get("result")
     assert isinstance(digest, dict)
     preview_meta = digest.get("result_preview_meta")
     assert isinstance(preview_meta, dict)
@@ -377,9 +379,10 @@ def test_large_action_output_uses_digest_and_artifact_ref():
         {"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"}
     )
 
-    recalled = action.read_action_artifact(
-        selection_key=str(output_ref.get("selection_key", "")),
-    )
+    with action._artifact_manager.bind_artifact_scope(artifact_scope):
+        recalled = action.read_action_artifact(
+            selection_key=str(output_ref.get("selection_key", "")),
+        )
     assert recalled["ok"] is True
     assert recalled["value"]["stdout"] == stdout
     assert recalled["value"]["stderr"] == stderr
@@ -390,10 +393,11 @@ def test_large_action_output_uses_digest_and_artifact_ref():
             "selection_key": str(output_ref.get("selection_key", "")),
         },
         source_protocol="structured_plan",
+        artifact_scope=artifact_scope,
     )
     assert dispatched_recall.get("status") == "success"
-    assert dispatched_recall.get("data", {}).get("stdout") == stdout
-    assert dispatched_recall.get("result", {}).get("stderr") == stderr
+    assert dispatched_recall.get("data", {}).get("carrier_compacted") is True
+    assert len(json.dumps(dispatched_recall, ensure_ascii=False, default=str).encode("utf-8")) <= 16000
     action._release_artifact_scope(artifact_scope)
 
 
@@ -422,9 +426,10 @@ def test_max_output_bytes_preserves_full_output_in_artifact():
     artifact_refs = record.get("artifact_refs")
     assert isinstance(artifact_refs, list)
     output_ref = next(ref for ref in artifact_refs if ref.get("artifact_type") == "action_output")
-    recalled = action.read_action_artifact(
-        selection_key=str(output_ref.get("selection_key", "")),
-    )
+    with action._artifact_manager.bind_artifact_scope(artifact_scope):
+        recalled = action.read_action_artifact(
+            selection_key=str(output_ref.get("selection_key", "")),
+        )
     assert recalled["value"] == output
     action._release_artifact_scope(artifact_scope)
 

@@ -1197,15 +1197,13 @@ def test_instruction_heavy_direct_action_releases_historical_artifact_refs(tmp_p
     assert all(ref.get("full_value_available") is False for ref in artifact_refs)
 
     recalled_input = agent.action.read_action_artifact(
-        artifact_id=input_artifact_id,
-        action_call_id=input_action_call_id,
+        selection_key=str(input_ref.get("selection_key", "")),
     )
     assert recalled_input.get("ok") is False
     assert recalled_input.get("status") == "not_found"
 
     recalled = agent.action.read_action_artifact(
-        artifact_id=output_artifact_id,
-        action_call_id=output_action_call_id,
+        selection_key=str(output_ref.get("selection_key", "")),
     )
     assert recalled.get("ok") is False
     assert recalled.get("status") == "not_found"
@@ -1282,7 +1280,9 @@ async def test_action_loop_exposes_live_recall_then_returns_historical_refs(tmp_
     )
 
     assert len(records) == 1
-    assert str(tmp_path) in str(records[0].get("data", {}).get("stdout", ""))
+    assert str(tmp_path) in str(
+        records[0].get("data", {}).get("result_preview", {}).get("stdout", "")
+    )
     assert len(seen_rounds) >= 2
     second_round = seen_rounds[1]
     assert "read_action_artifact" in second_round["action_ids"]
