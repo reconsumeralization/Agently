@@ -573,3 +573,22 @@ smoke：callable embedding provider 负责 records 的向量化索引，
 
 `workspace.ingest(...)` 仅作为旧代码兼容 alias 保留。新代码应使用
 `workspace.put(...)`；确实需要旧 profile 路径时，把 `profile=...` 传给 `put`。
+
+## Agent run 的终态保留
+
+AgentExecution 是 routed AgentTask 的父级。Task 接收显式的 execution-scoped
+Workspace view，再派生 child scope；它不会搜索 execution 目录，也不会重新绑定 Agent
+级 Workspace。Task 的 canonical file/record ref 会直接 handoff 给 AgentExecution，
+不会复制 deliverable。
+
+进入终态时，AgentExecution 会在发送 `result` stream item 或 terminal RuntimeEvent
+之前准备唯一的 bounded carrier。两个表面复用同一 carrier，
+`terminal_retained_refs` 完整包含 canonical record、envelope 和 file refs。进程内
+`AgentExecutionResult.get_data()` 仍可保留完整业务值；event payload 与 retained
+manifest 不复制大 body。file-backed AgentTask 的 `final_response` 只指向 canonical
+file，并始终受 byte bound 约束。
+
+`AgentExecution.async_record_workspace(...)` 采用 purpose-aware lifecycle 规则。
+终态之后拒绝 `process` 与 `recovery` 写入；显式 `deliverable` 写入和 policy-enabled
+`audit` 写入只有在立即接受 Workspace retention 治理时才允许。active recovery 或
+lease facts 会推迟破坏性 cleanup，cancellation cleanup 同样如此。

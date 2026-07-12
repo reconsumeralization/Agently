@@ -411,6 +411,22 @@ the official event stream.
 
 There is no legacy positional handler signature — the public contract is `(context, request)` only.
 
+## Action Artifact Lifetime
+
+Large Action values stay exact in the private `ActionArtifactManager`. Sensitive
+field redaction and truncation apply to model-visible previews and RuntimeEvents,
+not to the private value selected for durable promotion. AgentExecution selects
+an Action artifact only from host-owned successful route/completion state plus
+an explicit structured artifact ref; a business field named `accepted` has no
+selection authority.
+
+Standalone direct Action calls, `TriggerFlowActionFlow`, and `DAGActionFlow`
+release their exact `action_call` or `action_run` scope in `finally` on success,
+failure, and cancellation. An AgentExecution-owned scope is transferred to the
+execution terminal owner. If selected promotion fails, the selected source is
+kept with bounded retry diagnostics while unselected artifacts from that exact
+scope are released.
+
 ## Extension guidance
 
 | You want to change | Replace |

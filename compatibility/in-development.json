@@ -51,6 +51,8 @@
           "action_execution",
           "action_loop_close"
         ],
+        "agent_execution_terminal_retention_contract": "AgentExecution prepares one bounded terminal projection before result-stream and terminal RuntimeEvent delivery; both use the same carrier while get_data() retains the complete in-process business value. Routed AgentTask Workspace scopes are explicit AgentExecution descendants and hand canonical refs to the parent without copying. terminal_retained_refs includes canonical record, envelope, and file refs. Host route/completion state owns Action selection; a business accepted field has no authority. CancelledError emits a bounded cancelled projection, submits status=cancelled with real state/recovery/lease facts, then re-raises. Post-terminal process/recovery record writes fail, while deliverable and explicitly retained audit writes receive immediate purpose-aware retention.",
+        "action_artifact_lifecycle_contract": "ActionArtifactManager keeps exact private values and applies redaction only to previews/events unless an explicit durable policy says otherwise. Standalone direct Action, TriggerFlowActionFlow, and DAGActionFlow scopes release in finally; AgentExecution scopes transfer to terminal handling. Promotion failure preserves the selected source and retry identity while releasing unselected artifacts from the exact scope.",
         "event_center_delivery_policy": {
           "register_hook_parameter": "delivery_policy",
           "hooker_attribute": "delivery_policy",

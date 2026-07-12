@@ -369,6 +369,20 @@ observation 映射到官方事件流。
 
 没有 legacy positional 签名 —— 公开契约只是 `(context, request)`。
 
+## Action artifact 生命周期
+
+大型 Action value 会以 exact value 保存在私有 `ActionArtifactManager` 中。敏感字段
+redaction 与 truncation 只作用于 model-visible preview 和 RuntimeEvent，不会修改供
+durable promotion 选择的私有值。AgentExecution 只依据 host-owned 的成功
+route/completion state 加显式 structured artifact ref 选择 Action artifact；业务字段
+`accepted` 不具备选择权限。
+
+Standalone direct Action call、`TriggerFlowActionFlow` 与 `DAGActionFlow` 会在
+success、failure 和 cancellation 的 `finally` 中释放精确 `action_call` 或
+`action_run` scope。AgentExecution-owned scope 会 transfer 给 execution terminal
+owner。若 selected promotion 失败，selected source 会连同 bounded retry diagnostics
+一起保留，而同一精确 scope 中未选择的 artifacts 会被释放。
+
 ## 扩展指南
 
 | 你想改 | 替换 |

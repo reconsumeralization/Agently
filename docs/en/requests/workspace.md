@@ -648,3 +648,25 @@ observation, and ContextBuilder packages it into a ContextPackage.
 `workspace.ingest(...)` remains as a compatibility alias for older code. New
 code should use `workspace.put(...)`; when an older profile path is needed, pass
 `profile=...` to `put`.
+
+## Terminal Retention For Agent Runs
+
+AgentExecution is the parent of a routed AgentTask. The task receives an
+explicit execution-scoped Workspace view and derives a child scope; it does not
+search for an execution directory or rebind the Agent-wide Workspace. Canonical
+task file and record refs are handed back to AgentExecution without copying the
+deliverable.
+
+At terminal state, AgentExecution prepares one bounded carrier before emitting
+the `result` stream item or terminal RuntimeEvent. Both surfaces use that same
+carrier and `terminal_retained_refs` contains every canonical record, envelope,
+or file ref. The in-process `AgentExecutionResult.get_data()` business value may
+remain complete; event payloads and retained manifests do not duplicate a large
+body. File-backed AgentTask `final_response` text points to the canonical file
+and is always byte-bounded.
+
+`AgentExecution.async_record_workspace(...)` uses purpose-aware lifecycle
+rules. After terminal state, `process` and `recovery` writes are rejected.
+Explicit `deliverable` writes and policy-enabled `audit` writes are accepted
+only with immediate Workspace retention governance. Active recovery or lease
+facts defer destructive cleanup, including cancellation cleanup.
