@@ -19,6 +19,7 @@ import pytest
 
 from agently.core import LazyWorkspace, WorkspaceManager
 from agently.core.Workspace.Errors import WorkspacePolicyError
+from agently.core.Workspace.LocalBackend import LocalWorkspaceBackend
 from agently.core.Workspace.Retention import (
     canonical_retention_fingerprint,
     resolve_retention_policy,
@@ -2490,6 +2491,7 @@ async def test_retention_inspection_defers_without_advisory_lock_support(
     ]
     assert preview["diagnostics"][0].get("retryable") is False
     assert cast(Any, root.backend).capabilities()["features"]["supports_retention"] is False
+    assert cast(Any, root.backend).capabilities()["features"]["supports_physical_reclamation"] is False
     result = await target.apply_retention(preview)
     assert result["status"] == "deferred"
     assert [diagnostic.get("code") for diagnostic in result["diagnostics"]] == [
@@ -3360,13 +3362,21 @@ async def test_forced_full_vacuum_reports_exact_allocated_block_reclaim(
     backend._retention_full_vacuum_min_bytes = 1
     backend._retention_full_vacuum_ratio = 0.0
     checkpoint_modes: list[str] = []
+    allocation_measurements = 0
     original_checkpoint = backend._checkpoint_sqlite_wal_sync
+    original_allocated = backend._sqlite_allocated_bytes
 
     def track_checkpoint(mode: str):
         checkpoint_modes.append(mode)
         return original_checkpoint(mode)
 
+    def track_allocated():
+        nonlocal allocation_measurements
+        allocation_measurements += 1
+        return original_allocated()
+
     monkeypatch.setattr(backend, "_checkpoint_sqlite_wal_sync", track_checkpoint)
+    monkeypatch.setattr(backend, "_sqlite_allocated_bytes", track_allocated)
     await _seed_large_sqlite_retention_scope(target, count=64)
     preview = await target.inspect_retention(
         {}, lifecycle={**_terminal_lifecycle(execution_id), "state_version": None}
@@ -3384,6 +3394,7 @@ async def test_forced_full_vacuum_reports_exact_allocated_block_reclaim(
     assert manifest_ref is not None
     assert manifest_ref["meta"]["accounting"] == result["accounting"]
     assert checkpoint_modes == ["TRUNCATE"]
+    assert allocation_measurements == 2
 
 
 @pytest.mark.asyncio
@@ -3529,6 +3540,58 @@ async def test_physical_accounting_cas_failure_is_postcommit_deferred(
     assert "rolled back" not in str(result["diagnostics"][0].get("message"))
     assert result["accounting"]["logical_bytes_deleted"] > 0
     assert result["accounting"]["physical_bytes_pending"] > 0
+
+
+@pytest.mark.asyncio
+async def test_physical_accounting_readback_mismatch_returns_persisted_conflict(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-physical-readback-conflict")
+    execution_id = "exec-physical-readback-conflict"
+    target = root.with_scope_node("executions", execution_id)
+    backend = cast(Any, root.backend)
+    backend._retention_full_vacuum_min_bytes = 1 << 40
+    backend._retention_full_vacuum_ratio = 2.0
+    await _seed_large_sqlite_retention_scope(target, count=48)
+    preview = await target.inspect_retention(
+        {}, lifecycle={**_terminal_lifecycle(execution_id), "state_version": None}
+    )
+    original_update = backend._update_terminal_manifest_meta
+
+    def return_equal_total_stale_distribution(manifest_ref, meta):
+        accounting = cast(dict[str, Any], meta["accounting"])
+        if manifest_ref["meta"]["state"] == "applied" and (
+            accounting["physical_bytes_reclaimed"]
+            or accounting["physical_bytes_pending"]
+        ):
+            stale = json.loads(json.dumps(manifest_ref))
+            total = (
+                accounting["physical_bytes_reclaimed"]
+                + accounting["physical_bytes_pending"]
+            )
+            stale["meta"]["accounting"]["physical_bytes_reclaimed"] = total
+            stale["meta"]["accounting"]["physical_bytes_pending"] = 0
+            return stale
+        return original_update(manifest_ref, meta)
+
+    monkeypatch.setattr(
+        backend,
+        "_update_terminal_manifest_meta",
+        return_equal_total_stale_distribution,
+    )
+    result = await target.apply_retention(preview)
+
+    assert result["status"] == "deferred"
+    assert [item.get("code") for item in result["diagnostics"]] == [
+        "workspace.retention.physical_accounting_conflict"
+    ]
+    manifest_ref = result["manifest_ref"]
+    assert manifest_ref is not None
+    assert result["accounting"] == manifest_ref["meta"]["accounting"]
+    detail = result["diagnostics"][0].get("detail")
+    assert detail is not None
+    assert detail["measured_accounting"] != result["accounting"]
 
 
 @pytest.mark.asyncio
@@ -3749,6 +3812,36 @@ async def test_same_fingerprint_stale_manifest_updates_merge_monotonically(tmp_p
     assert final["meta"]["derived_cleanup"]["attempts"] == 3
 
 
+def test_same_plan_cas_preserves_equal_total_persisted_physical_distribution():
+    pending = {
+        "vector_record_ids": [],
+        "content_paths": [],
+        "file_paths": [],
+        "scratch_paths": [],
+    }
+    current = {
+        "plan_fingerprint": "a" * 64,
+        "state": "applied",
+        "derived_cleanup": {"pending": pending, "attempts": 1, "last_error": None},
+        "accounting": {
+            "entities": {},
+            "logical_bytes_deleted": 100,
+            "physical_bytes_reclaimed": 4096,
+            "physical_bytes_pending": 8192,
+        },
+    }
+    proposed = json.loads(json.dumps(current))
+    proposed["accounting"]["physical_bytes_reclaimed"] = 8192
+    proposed["accounting"]["physical_bytes_pending"] = 4096
+
+    merged = cast(Any, LocalWorkspaceBackend)._merge_terminal_manifest_meta(
+        current,
+        proposed,
+    )
+
+    assert merged["accounting"] == current["accounting"]
+
+
 @pytest.mark.asyncio
 async def test_successive_fingerprints_do_not_embed_terminal_manifest_ledgers(tmp_path):
     root = WorkspaceManager().create(tmp_path / "retention-ledger-bounds")
@@ -3883,3 +3976,4 @@ def test_local_retention_capabilities_require_inspect_and_apply_methods(tmp_path
         retention_anchors=anchors_only,
     )
     assert backend.capabilities()["features"]["supports_retention"] is False
+    assert backend.capabilities()["features"]["supports_physical_reclamation"] is False

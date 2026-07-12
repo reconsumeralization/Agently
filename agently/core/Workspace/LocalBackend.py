@@ -1188,6 +1188,8 @@ class LocalWorkspaceBackend:
                 retention_provider is self
                 and isinstance(self.db_path, Path)
                 and hasattr(os.stat_result, "st_blocks")
+                and self._supports_advisory_lock()
+                and supports_retention
             ),
             "supports_compaction_anchor": True,
             "supports_remote_backend": False,
@@ -4334,6 +4336,10 @@ class LocalWorkspaceBackend:
                         current_meta,
                         meta,
                     )
+                    if current_raw == expected_raw:
+                        next_meta["accounting"] = dict(
+                            cast(Mapping[str, Any], meta["accounting"])
+                        )
                     updated_raw = json_dumps(next_meta)
                     compare_raw = (
                         expected_raw if current_raw == expected_raw else current_raw
@@ -4410,16 +4416,9 @@ class LocalWorkspaceBackend:
             "attempts": max(current_attempts, proposed_attempts),
             "last_error": last_error,
         }
-        current_accounting = cast(Mapping[str, Any], current["accounting"])
-        proposed_accounting = cast(Mapping[str, Any], proposed["accounting"])
-        current_physical = int(current_accounting["physical_bytes_reclaimed"]) + int(
-            current_accounting["physical_bytes_pending"]
+        merged["accounting"] = dict(
+            cast(Mapping[str, Any], current["accounting"])
         )
-        proposed_physical = int(
-            proposed_accounting["physical_bytes_reclaimed"]
-        ) + int(proposed_accounting["physical_bytes_pending"])
-        if proposed_physical >= current_physical:
-            merged["accounting"] = dict(proposed_accounting)
         return merged
 
     @staticmethod
@@ -4813,14 +4812,9 @@ class LocalWorkspaceBackend:
             )
         updated_ref = manifest_ref
         try:
-            for _ in range(2):
-                meta = cast(dict[str, Any], dict(updated_ref["meta"]))
-                meta["accounting"] = accounting
-                updated_ref = self._update_terminal_manifest_meta(updated_ref, meta)
-                next_accounting = await measured_accounting()
-                if next_accounting == accounting:
-                    break
-                accounting = next_accounting
+            meta = cast(dict[str, Any], dict(updated_ref["meta"]))
+            meta["accounting"] = accounting
+            updated_ref = self._update_terminal_manifest_meta(updated_ref, meta)
         except (
             sqlite3.Error,
             OSError,
@@ -4841,6 +4835,25 @@ class LocalWorkspaceBackend:
                 accounting=accounting,
                 diagnostics=[diagnostic],
             )
+        persisted_accounting = cast(
+            Mapping[str, Any], updated_ref["meta"]["accounting"]
+        )
+        if dict(persisted_accounting) != accounting:
+            diagnostic = retention_diagnostic(
+                "workspace.retention.physical_accounting_conflict",
+                "Workspace physical accounting changed before the measured snapshot could be persisted.",
+                entity=str(updated_ref["id"]),
+                detail={"measured_accounting": accounting},
+            )
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=result["plan_fingerprint"],
+                manifest_ref=updated_ref,
+                retained_refs=result["retained_refs"],
+                accounting=persisted_accounting,
+                diagnostics=[diagnostic],
+            )
+        accounting = dict(persisted_accounting)
         if maintenance_error is not None:
             diagnostic = retention_diagnostic(
                 "workspace.retention.physical_maintenance_failed",
