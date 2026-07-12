@@ -101,12 +101,6 @@ try:
 except ImportError:
     _fcntl = None
 
-try:
-    _msvcrt: Any = importlib.import_module("msvcrt")
-except ImportError:
-    _msvcrt = None
-
-
 @dataclass(frozen=True)
 class _RetentionSQLiteSnapshot:
     all_record_rows: list[sqlite3.Row]
@@ -161,57 +155,230 @@ class _DerivedCleanupOperationalError(RuntimeError):
         self.error = error
 
 
+class _AdvisoryLockAcquisitionError(WorkspaceConfigurationError):
+    diagnostic_code = "workspace.retention.advisory_lock_failed"
+
+
+class _AdvisoryLockCarrierError(_AdvisoryLockAcquisitionError):
+    diagnostic_code = "workspace.retention.advisory_lock_invalid"
+
+
+class _AdvisoryLockReleaseError(WorkspaceConfigurationError):
+    pass
+
+
 @dataclass(frozen=True)
 class _AdvisoryLockHandle:
     fd: int
-    mechanism: str
+    path: Path
 
     def release(self) -> None:
+        unlock_error: OSError | None = None
+        close_error: OSError | None = None
         try:
-            if self.mechanism == "fcntl":
-                _fcntl.flock(self.fd, _fcntl.LOCK_UN)
-            elif self.mechanism == "msvcrt":
-                os.lseek(self.fd, 0, os.SEEK_SET)
-                _msvcrt.locking(self.fd, _msvcrt.LK_UNLCK, 1)
-            else:
-                raise RuntimeError(
-                    f"Unknown Workspace advisory lock mechanism: {self.mechanism}"
-                )
-        finally:
+            _fcntl.flock(self.fd, _fcntl.LOCK_UN)
+        except OSError as error:
+            unlock_error = error
+        try:
             os.close(self.fd)
+        except OSError as error:
+            close_error = error
+        if unlock_error is not None or close_error is not None:
+            failures = ", ".join(
+                str(error)
+                for error in (unlock_error, close_error)
+                if error is not None
+            )
+            raise _AdvisoryLockReleaseError(
+                f"Workspace advisory lock release failed for {self.path}: {failures}"
+            )
+
+
+class _PosixAdvisoryLockWaiter:
+    """One safely opened carrier descriptor reused by non-blocking retries."""
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        root_fd: int,
+        carrier_fd: int,
+    ) -> None:
+        self.path = path
+        self._root_fd: int | None = root_fd
+        self._carrier_fd: int | None = carrier_fd
+
+    @classmethod
+    def open(
+        cls,
+        path: Path,
+        *,
+        create: bool,
+    ) -> "_PosixAdvisoryLockWaiter | None":
+        root_fd: int | None = None
+        carrier_fd: int | None = None
+        try:
+            root_fd = os.open(
+                path.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+            try:
+                named_stat = os.stat(
+                    path.name,
+                    dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                named_stat = None
+            if named_stat is not None and not stat.S_ISREG(named_stat.st_mode):
+                raise _AdvisoryLockCarrierError(
+                    f"Workspace advisory lock carrier is not a regular file: {path}"
+                )
+            flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            if create:
+                flags |= os.O_CREAT
+            try:
+                carrier_fd = os.open(
+                    path.name,
+                    flags,
+                    0o600,
+                    dir_fd=root_fd,
+                )
+            except FileNotFoundError:
+                if not create:
+                    os.close(root_fd)
+                    return None
+                raise
+            waiter = cls(path=path, root_fd=root_fd, carrier_fd=carrier_fd)
+            waiter._verify_named_identity()
+            return waiter
+        except _AdvisoryLockAcquisitionError:
+            if carrier_fd is not None:
+                os.close(carrier_fd)
+            if root_fd is not None:
+                os.close(root_fd)
+            raise
+        except OSError as error:
+            if carrier_fd is not None:
+                os.close(carrier_fd)
+            if root_fd is not None:
+                os.close(root_fd)
+            error_type = (
+                _AdvisoryLockCarrierError
+                if error.errno in {errno.EISDIR, errno.ELOOP, errno.ENOTDIR}
+                else _AdvisoryLockAcquisitionError
+            )
+            raise error_type(
+                f"Workspace advisory lock carrier open failed for {path}: {error}"
+            ) from error
+
+    def _verify_named_identity(self) -> None:
+        if self._root_fd is None or self._carrier_fd is None:
+            raise RuntimeError("Workspace advisory lock waiter is closed.")
+        descriptor_stat = os.fstat(self._carrier_fd)
+        try:
+            named_stat = os.stat(
+                self.path.name,
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise _AdvisoryLockCarrierError(
+                f"Workspace advisory lock carrier identity is unavailable for {self.path}: {error}"
+            ) from error
+        if not stat.S_ISREG(descriptor_stat.st_mode) or not stat.S_ISREG(
+            named_stat.st_mode
+        ):
+            raise _AdvisoryLockCarrierError(
+                f"Workspace advisory lock carrier is not a regular file: {self.path}"
+            )
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+            named_stat.st_dev,
+            named_stat.st_ino,
+        ):
+            raise _AdvisoryLockCarrierError(
+                f"Workspace advisory lock carrier changed during acquisition: {self.path}"
+            )
+
+    def try_acquire(self) -> _AdvisoryLockHandle | None:
+        if self._carrier_fd is None:
+            raise RuntimeError("Workspace advisory lock waiter is closed.")
+        try:
+            _fcntl.flock(self._carrier_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                return None
+            raise _AdvisoryLockAcquisitionError(
+                f"Workspace advisory lock acquisition failed for {self.path}: {error}"
+            ) from error
+        try:
+            self._verify_named_identity()
+        except _AdvisoryLockAcquisitionError:
+            try:
+                _fcntl.flock(self._carrier_fd, _fcntl.LOCK_UN)
+            except OSError:
+                pass
+            raise
+        except OSError as error:
+            try:
+                _fcntl.flock(self._carrier_fd, _fcntl.LOCK_UN)
+            except OSError:
+                pass
+            raise _AdvisoryLockAcquisitionError(
+                f"Workspace advisory lock identity verification failed for {self.path}: {error}"
+            ) from error
+        carrier_fd = self._carrier_fd
+        self._carrier_fd = None
+        if self._root_fd is not None:
+            os.close(self._root_fd)
+            self._root_fd = None
+        return _AdvisoryLockHandle(fd=carrier_fd, path=self.path)
+
+    def close(self) -> None:
+        if self._carrier_fd is not None:
+            os.close(self._carrier_fd)
+            self._carrier_fd = None
+        if self._root_fd is not None:
+            os.close(self._root_fd)
+            self._root_fd = None
 
 
 class _NativeAdvisoryLock:
-    """Small portability seam for non-blocking process-owned file locks."""
+    """Proven host-lock seam; unsupported hosts stay process-local."""
 
     @staticmethod
     def supported() -> bool:
-        return _fcntl is not None or _msvcrt is not None
+        return bool(
+            _fcntl is not None
+            and getattr(os, "O_DIRECTORY", 0)
+            and getattr(os, "O_NOFOLLOW", 0)
+            and getattr(os, "O_CLOEXEC", 0)
+            and os.open in os.supports_dir_fd
+            and os.stat in os.supports_dir_fd
+            and os.stat in os.supports_follow_symlinks
+        )
 
     @staticmethod
-    def try_acquire(path: Path) -> _AdvisoryLockHandle | None:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    def open_waiter(
+        path: Path,
+        *,
+        create: bool,
+    ) -> _PosixAdvisoryLockWaiter | None:
+        if not _NativeAdvisoryLock.supported():
+            raise _AdvisoryLockAcquisitionError(
+                "Workspace native advisory locking is unavailable."
+            )
+        return _PosixAdvisoryLockWaiter.open(path, create=create)
+
+    @staticmethod
+    def preflight(path: Path) -> _AdvisoryLockAcquisitionError | None:
         try:
-            if _fcntl is not None:
-                _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-                return _AdvisoryLockHandle(fd=fd, mechanism="fcntl")
-            if _msvcrt is not None:
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"\0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
-                return _AdvisoryLockHandle(fd=fd, mechanism="msvcrt")
-            raise RuntimeError("Workspace advisory locking is unavailable.")
-        except OSError as error:
-            os.close(fd)
-            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
-                return None
-            raise WorkspaceConfigurationError(
-                f"Workspace advisory lock acquisition failed for {path}: {error}"
-            ) from error
-        except Exception:
-            os.close(fd)
-            raise
+            waiter = _NativeAdvisoryLock.open_waiter(path, create=False)
+        except _AdvisoryLockAcquisitionError as error:
+            return error
+        if waiter is not None:
+            waiter.close()
+        return None
 
 
 class _RootMutationGuard:
@@ -280,16 +447,37 @@ class _RootMutationGuard:
             if reservation is not None:
                 break
             await asyncio.sleep(0.001)
+        waiter: _PosixAdvisoryLockWaiter | None = None
+        body_failed = False
         try:
             if reservation and _NativeAdvisoryLock.supported():
-                handle = _NativeAdvisoryLock.try_acquire(self._lock_path)
+                waiter = _NativeAdvisoryLock.open_waiter(
+                    self._lock_path,
+                    create=True,
+                )
+                if waiter is None:
+                    raise _AdvisoryLockAcquisitionError(
+                        f"Workspace advisory lock carrier disappeared: {self._lock_path}"
+                    )
+                delay = 0.005
+                handle = waiter.try_acquire()
                 while handle is None:
-                    await asyncio.sleep(0.001)
-                    handle = _NativeAdvisoryLock.try_acquire(self._lock_path)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 0.05)
+                    handle = waiter.try_acquire()
                 self._set_advisory_handle(owner, handle)
             yield
+        except BaseException:
+            body_failed = True
+            raise
         finally:
-            self._release(owner)
+            if waiter is not None:
+                waiter.close()
+            try:
+                self._release(owner)
+            except _AdvisoryLockReleaseError:
+                if not body_failed:
+                    raise
 
     @contextmanager
     def try_acquire_sync(self) -> Iterator[bool]:
@@ -297,21 +485,37 @@ class _RootMutationGuard:
         reservation = self._try_reserve(owner)
         acquired = reservation is not None
         if reservation and _NativeAdvisoryLock.supported():
+            waiter: _PosixAdvisoryLockWaiter | None = None
             try:
-                handle = _NativeAdvisoryLock.try_acquire(self._lock_path)
+                waiter = _NativeAdvisoryLock.open_waiter(
+                    self._lock_path,
+                    create=True,
+                )
+                handle = waiter.try_acquire() if waiter is not None else None
             except Exception:
                 self._release(owner)
                 raise
+            finally:
+                if waiter is not None:
+                    waiter.close()
             if handle is None:
                 self._release(owner)
                 acquired = False
             else:
                 self._set_advisory_handle(owner, handle)
+        body_failed = False
         try:
             yield acquired
+        except BaseException:
+            body_failed = True
+            raise
         finally:
             if acquired:
-                self._release(owner)
+                try:
+                    self._release(owner)
+                except _AdvisoryLockReleaseError:
+                    if not body_failed:
+                        raise
 
 
 _ROOT_MUTATION_GUARDS: weakref.WeakValueDictionary[str, _RootMutationGuard] = (
@@ -2220,6 +2424,21 @@ class LocalWorkspaceBackend:
     ) -> WorkspaceRetentionDiagnostic:
         return retention_diagnostic(code, message, entity=entity, detail=detail)
 
+    @staticmethod
+    def _advisory_lock_diagnostic(
+        error: _AdvisoryLockAcquisitionError,
+        *,
+        entity: str,
+    ) -> WorkspaceRetentionDiagnostic:
+        diagnostic = retention_diagnostic(
+            error.diagnostic_code,
+            str(error),
+            entity=entity,
+            detail={"error_type": type(error).__name__},
+        )
+        diagnostic["retryable"] = False
+        return diagnostic
+
     def _safe_resolve_path(
         self,
         path: Path,
@@ -3472,6 +3691,26 @@ class LocalWorkspaceBackend:
                 inline_result=inline_result,
                 diagnostics=[diagnostic],
             )
+        advisory_lock_error = _NativeAdvisoryLock.preflight(
+            self.root / ".workspace.mutation.lock"
+        )
+        if advisory_lock_error is not None:
+            return self._retention_preview(
+                status="deferred",
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=resolved_policy,
+                retained_refs=list(retained_refs),
+                inline_result=inline_result,
+                diagnostics=[
+                    self._advisory_lock_diagnostic(
+                        advisory_lock_error,
+                        entity=str(
+                            normalized_scope.get("execution_id") or "workspace"
+                        ),
+                    )
+                ],
+            )
         if not self._supports_descriptor_relative_delete():
             diagnostic = self._retention_diagnostic(
                 "workspace.retention.derived_delete_unsupported",
@@ -4351,45 +4590,95 @@ class LocalWorkspaceBackend:
         self,
         preview: WorkspaceRetentionPreview,
     ) -> WorkspaceRetentionResult:
-        async with self._mutation_guard():
-            if not self._supports_advisory_lock():
-                diagnostic = retention_diagnostic(
-                    "workspace.retention.advisory_lock_unsupported",
-                    "Workspace retention requires a native OS advisory lock mechanism.",
-                    entity=str(
-                        preview["scope"].get("execution_id") or "workspace"
-                    ),
-                )
-                diagnostic["retryable"] = False
-                return self._retention_result(
-                    status="deferred",
-                    plan_fingerprint=preview["plan_fingerprint"],
-                    manifest_ref=None,
-                    retained_refs=preview["retained_refs"],
-                    accounting=self._zero_retention_accounting(
-                        preview["accounting"]
-                    ),
-                    diagnostics=[diagnostic],
-                )
-            try:
-                return await self._apply_retention_unlocked(preview)
-            except (sqlite3.Error, OSError) as error:
-                diagnostic = retention_diagnostic(
-                    "workspace.retention.apply_failed",
-                    f"Workspace retention transaction failed and was rolled back: {error}",
-                    entity=str(preview["scope"].get("execution_id") or "workspace"),
-                    detail={"error_type": type(error).__name__},
-                )
-                return self._retention_result(
-                    status="deferred",
-                    plan_fingerprint=preview["plan_fingerprint"],
-                    manifest_ref=None,
-                    retained_refs=preview["retained_refs"],
-                    accounting=self._zero_retention_accounting(
-                        preview["accounting"]
-                    ),
-                    diagnostics=[diagnostic],
-                )
+        entity = str(preview["scope"].get("execution_id") or "workspace")
+        result: WorkspaceRetentionResult | None = None
+        try:
+            async with self._mutation_guard():
+                if not self._supports_advisory_lock():
+                    diagnostic = retention_diagnostic(
+                        "workspace.retention.advisory_lock_unsupported",
+                        "Workspace retention requires a native OS advisory lock mechanism.",
+                        entity=entity,
+                    )
+                    diagnostic["retryable"] = False
+                    result = self._retention_result(
+                        status="deferred",
+                        plan_fingerprint=preview["plan_fingerprint"],
+                        manifest_ref=None,
+                        retained_refs=preview["retained_refs"],
+                        accounting=self._zero_retention_accounting(
+                            preview["accounting"]
+                        ),
+                        diagnostics=[diagnostic],
+                    )
+                else:
+                    try:
+                        result = await self._apply_retention_unlocked(preview)
+                    except (sqlite3.Error, OSError) as error:
+                        diagnostic = retention_diagnostic(
+                            "workspace.retention.apply_failed",
+                            f"Workspace retention transaction failed and was rolled back: {error}",
+                            entity=entity,
+                            detail={"error_type": type(error).__name__},
+                        )
+                        result = self._retention_result(
+                            status="deferred",
+                            plan_fingerprint=preview["plan_fingerprint"],
+                            manifest_ref=None,
+                            retained_refs=preview["retained_refs"],
+                            accounting=self._zero_retention_accounting(
+                                preview["accounting"]
+                            ),
+                            diagnostics=[diagnostic],
+                        )
+        except _AdvisoryLockAcquisitionError as error:
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=preview["plan_fingerprint"],
+                manifest_ref=None,
+                retained_refs=preview["retained_refs"],
+                accounting=self._zero_retention_accounting(preview["accounting"]),
+                diagnostics=[
+                    self._advisory_lock_diagnostic(error, entity=entity)
+                ],
+            )
+        except _AdvisoryLockReleaseError as error:
+            diagnostic = retention_diagnostic(
+                "workspace.retention.advisory_lock_release_failed",
+                (
+                    "Workspace retention completed its operation but advisory lock "
+                    f"release reported a failure: {error}"
+                ),
+                entity=entity,
+                detail={
+                    "error_type": type(error).__name__,
+                    "operation_status": result["status"] if result is not None else None,
+                },
+            )
+            diagnostic["retryable"] = False
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=(
+                    result["plan_fingerprint"]
+                    if result is not None
+                    else preview["plan_fingerprint"]
+                ),
+                manifest_ref=result["manifest_ref"] if result is not None else None,
+                retained_refs=(
+                    result["retained_refs"]
+                    if result is not None
+                    else preview["retained_refs"]
+                ),
+                accounting=(
+                    result["accounting"]
+                    if result is not None
+                    else self._zero_retention_accounting(preview["accounting"])
+                ),
+                diagnostics=[diagnostic],
+            )
+        if result is None:
+            raise RuntimeError("Workspace retention apply produced no result.")
+        return result
 
     async def _apply_retention_unlocked(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import importlib
 import json
@@ -2424,7 +2425,12 @@ async def test_retention_inspection_defers_without_advisory_lock_support(
         "agently.core.Workspace.LocalBackend"
     )
     monkeypatch.setattr(local_backend_module, "_fcntl", None, raising=False)
-    monkeypatch.setattr(local_backend_module, "_msvcrt", None, raising=False)
+    monkeypatch.setattr(
+        local_backend_module,
+        "_msvcrt",
+        SimpleNamespace(LK_NBLCK=1, LK_UNLCK=2),
+        raising=False,
+    )
 
     root = WorkspaceManager().create(tmp_path / "retention-no-advisory-lock")
     target = root.with_scope_node("executions", "exec-no-advisory-lock")
@@ -2451,6 +2457,279 @@ async def test_retention_inspection_defers_without_advisory_lock_support(
         "workspace.retention.advisory_lock_unsupported"
     ]
     _assert_zero_actual_accounting(cast(dict[str, Any], result))
+
+
+@pytest.mark.asyncio
+async def test_advisory_lock_symlink_carrier_defers_without_touching_target(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-lock-symlink")
+    execution_id = "exec-lock-symlink"
+    target = root.with_scope_node("executions", execution_id)
+    await target.put(
+        {"process": "unsafe lock carrier"},
+        collection="observations",
+        kind="process",
+    )
+    ready = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    assert ready["status"] == "ready"
+    lock_path = root.root / ".workspace.mutation.lock"
+    lock_path.unlink()
+    outside = tmp_path / "outside-lock-target.txt"
+    outside.write_bytes(b"outside lock target must stay unchanged")
+    lock_path.symlink_to(outside)
+
+    inspected = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    applied = await target.apply_retention(ready)
+
+    assert inspected["status"] == "deferred"
+    assert [item.get("code") for item in inspected["diagnostics"]] == [
+        "workspace.retention.advisory_lock_invalid"
+    ]
+    assert inspected["diagnostics"][0].get("retryable") is False
+    assert applied["status"] == "deferred"
+    assert [item.get("code") for item in applied["diagnostics"]] == [
+        "workspace.retention.advisory_lock_invalid"
+    ]
+    _assert_zero_actual_accounting(cast(dict[str, Any], applied))
+    assert outside.read_bytes() == b"outside lock target must stay unchanged"
+    assert lock_path.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_advisory_lock_directory_carrier_returns_typed_apply_deferral(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-lock-directory")
+    execution_id = "exec-lock-directory"
+    target = root.with_scope_node("executions", execution_id)
+    await target.put(
+        {"process": "directory lock carrier"},
+        collection="observations",
+        kind="process",
+    )
+    ready = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    assert ready["status"] == "ready"
+    lock_path = root.root / ".workspace.mutation.lock"
+    lock_path.unlink()
+    lock_path.mkdir()
+
+    inspected = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    applied = await target.apply_retention(ready)
+
+    assert inspected["status"] == "deferred"
+    assert [item.get("code") for item in inspected["diagnostics"]] == [
+        "workspace.retention.advisory_lock_invalid"
+    ]
+    assert applied["status"] == "deferred"
+    assert [item.get("code") for item in applied["diagnostics"]] == [
+        "workspace.retention.advisory_lock_invalid"
+    ]
+    _assert_zero_actual_accounting(cast(dict[str, Any], applied))
+    assert lock_path.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_advisory_lock_identity_race_returns_typed_apply_deferral(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    root = WorkspaceManager().create(tmp_path / "retention-lock-identity-race")
+    execution_id = "exec-lock-identity-race"
+    target = root.with_scope_node("executions", execution_id)
+    await target.put(
+        {"process": "lock identity race"},
+        collection="observations",
+        kind="process",
+    )
+    ready = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    original_verify = local_backend_module._PosixAdvisoryLockWaiter._verify_named_identity
+    verification_count = 0
+
+    def fail_post_lock_verification(waiter):
+        nonlocal verification_count
+        verification_count += 1
+        if verification_count == 2:
+            raise OSError(errno.EIO, "injected post-lock identity read failure")
+        return original_verify(waiter)
+
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "_verify_named_identity",
+        fail_post_lock_verification,
+    )
+
+    applied = await target.apply_retention(ready)
+
+    assert applied["status"] == "deferred"
+    assert [item.get("code") for item in applied["diagnostics"]] == [
+        "workspace.retention.advisory_lock_failed"
+    ]
+    assert applied["diagnostics"][0].get("retryable") is False
+    _assert_zero_actual_accounting(cast(dict[str, Any], applied))
+
+
+@pytest.mark.asyncio
+async def test_advisory_lock_waiter_reuses_one_descriptor_with_bounded_backoff(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    if not local_backend_module._NativeAdvisoryLock.supported():
+        pytest.skip("native advisory locking is unavailable")
+    lock_path = tmp_path / "retention-lock-waiter" / ".workspace.mutation.lock"
+    lock_path.parent.mkdir()
+    first_guard = local_backend_module._RootMutationGuard(lock_path)
+    second_guard = local_backend_module._RootMutationGuard(lock_path)
+    original_open_waiter = local_backend_module._PosixAdvisoryLockWaiter.open
+    original_flock = local_backend_module._fcntl.flock
+    waiters: list[Any] = []
+    nonblocking_attempts = 0
+
+    def tracked_open_waiter(cls, path, *, create):
+        waiter = original_open_waiter(path, create=create)
+        if waiter is not None:
+            waiters.append(waiter)
+        return waiter
+
+    def tracked_flock(fd, operation):
+        nonlocal nonblocking_attempts
+        if operation & local_backend_module._fcntl.LOCK_NB:
+            nonblocking_attempts += 1
+        return original_flock(fd, operation)
+
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "open",
+        classmethod(tracked_open_waiter),
+    )
+    monkeypatch.setattr(local_backend_module._fcntl, "flock", tracked_flock)
+
+    async def wait_for_second() -> None:
+        async with second_guard.acquire():
+            raise AssertionError("second guard acquired before cancellation")
+
+    async with first_guard.acquire():
+        waiter_task = asyncio.create_task(wait_for_second())
+        await asyncio.sleep(0.09)
+        assert waiter_task.done() is False
+        waiter_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter_task
+
+    assert len(waiters) == 2
+    assert 3 <= nonblocking_attempts <= 8
+
+
+@pytest.mark.asyncio
+async def test_advisory_lock_waiter_closes_descriptor_on_cancellation(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    if not local_backend_module._NativeAdvisoryLock.supported():
+        pytest.skip("native advisory locking is unavailable")
+    lock_path = tmp_path / "retention-lock-cancel" / ".workspace.mutation.lock"
+    lock_path.parent.mkdir()
+    first_guard = local_backend_module._RootMutationGuard(lock_path)
+    second_guard = local_backend_module._RootMutationGuard(lock_path)
+    original_open_waiter = local_backend_module._PosixAdvisoryLockWaiter.open
+    waiters: list[Any] = []
+    carrier_fds: list[int] = []
+
+    def tracked_open_waiter(cls, path, *, create):
+        waiter = original_open_waiter(path, create=create)
+        if waiter is not None:
+            waiters.append(waiter)
+            carrier_fds.append(waiter._carrier_fd)
+        return waiter
+
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "open",
+        classmethod(tracked_open_waiter),
+    )
+
+    async def wait_for_second() -> None:
+        async with second_guard.acquire():
+            raise AssertionError("second guard acquired before cancellation")
+
+    async with first_guard.acquire():
+        waiter_task = asyncio.create_task(wait_for_second())
+        await asyncio.sleep(0.02)
+        assert len(waiters) == 2
+        waiter_fd = carrier_fds[1]
+        assert os.fstat(waiter_fd).st_ino > 0
+        waiter_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter_task
+        with pytest.raises(OSError) as closed:
+            os.fstat(waiter_fd)
+        assert closed.value.errno == errno.EBADF
+
+
+@pytest.mark.asyncio
+async def test_advisory_lock_release_failure_preserves_committed_accounting(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    root = WorkspaceManager().create(tmp_path / "retention-lock-release-failure")
+    execution_id = "exec-lock-release-failure"
+    target = root.with_scope_node("executions", execution_id)
+    discarded = await target.put(
+        {"process": "committed before lock release"},
+        collection="observations",
+        kind="process",
+    )
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    original_release = local_backend_module._AdvisoryLockHandle.release
+
+    def fail_after_release(handle):
+        original_release(handle)
+        raise local_backend_module._AdvisoryLockReleaseError(
+            "injected release failure after descriptor close"
+        )
+
+    monkeypatch.setattr(
+        local_backend_module._AdvisoryLockHandle,
+        "release",
+        fail_after_release,
+    )
+
+    result = await target.apply_retention(preview)
+
+    assert result["status"] == "deferred"
+    assert [item.get("code") for item in result["diagnostics"]] == [
+        "workspace.retention.advisory_lock_release_failed"
+    ]
+    assert "rolled back" not in str(result["diagnostics"][0].get("message"))
+    assert result["accounting"]["logical_bytes_deleted"] > 0
+    assert result["accounting"]["entities"]["record_ids"] > 0
+    assert await cast(Any, root.backend).get_record(discarded["id"]) is None
 
 
 @pytest.mark.asyncio
