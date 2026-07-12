@@ -178,8 +178,7 @@ class Action:
                 "digest is not enough."
             ),
             kwargs={
-                "artifact_id": (str, "Artifact id from a previous Action execution digest."),
-                "action_call_id": (str, "Optional Action call id that should own this artifact."),
+                "selection_key": (str, "Host-issued selection key from a previous Action execution digest."),
             },
             func=self.async_read_action_artifact,
             side_effect_level="read",
@@ -193,25 +192,30 @@ class Action:
 
     async def async_read_action_artifact(
         self,
-        artifact_id: str,
+        artifact_id: str | None = None,
         action_call_id: str | None = None,
+        selection_key: str | None = None,
     ) -> dict[str, Any]:
         from agently.base import async_emit_runtime
         from agently.types.data import ObservationEvent
 
-        artifact = self._action_artifacts.get(str(artifact_id))
+        resolved_artifact_id = str(artifact_id or "")
+        if selection_key:
+            resolved_artifact_id = self._artifact_manager.get_artifact_id_for_selection(selection_key) or ""
+        artifact = self._artifact_manager.get_artifact(resolved_artifact_id)
         if artifact is None:
             result = {
                 "ok": False,
                 "status": "not_found",
-                "artifact_id": str(artifact_id),
+                "artifact_id": resolved_artifact_id,
+                "selection_key": str(selection_key or ""),
                 "error": "Action artifact was not found or is no longer retained.",
             }
         elif action_call_id and str(artifact.get("action_call_id", "")) != str(action_call_id):
             result = {
                 "ok": False,
                 "status": "forbidden",
-                "artifact_id": str(artifact_id),
+                "artifact_id": resolved_artifact_id,
                 "action_call_id": str(action_call_id),
                 "error": "Action artifact does not belong to the requested action_call_id.",
             }
@@ -220,7 +224,8 @@ class Action:
             result = {
                 "ok": True,
                 "status": "success",
-                "artifact_id": str(artifact_id),
+                "artifact_id": resolved_artifact_id,
+                "selection_key": artifact.get("selection_key", ""),
                 "action_call_id": artifact.get("action_call_id", ""),
                 "artifact_type": artifact.get("artifact_type", ""),
                 "label": artifact.get("label", ""),
@@ -236,9 +241,10 @@ class Action:
                 event_type="action.artifact_read",
                 source="ActionRuntime",
                 level="INFO" if result.get("ok") else "WARNING",
-                message=f"Action artifact '{ artifact_id }' read.",
+                message=f"Action artifact '{ resolved_artifact_id }' read.",
                 payload={
-                    "artifact_id": str(artifact_id),
+                    "artifact_id": resolved_artifact_id,
+                    "selection_key": selection_key,
                     "action_call_id": action_call_id,
                     "status": result.get("status"),
                     "ok": result.get("ok"),
@@ -624,6 +630,10 @@ class Action:
     @classmethod
     def to_model_visible_records(cls, records: list["ActionResult"] | None):
         return ActionArtifactManager.to_model_visible_records(records)
+
+    @classmethod
+    def _to_action_flow_return_records(cls, records: list["ActionResult"] | None):
+        return ActionArtifactManager._to_action_flow_return_records(records)
 
     @classmethod
     def _to_runtime_visible_observation(cls, observation: dict[str, Any]) -> dict[str, Any]:
@@ -1244,7 +1254,7 @@ class Action:
 
     @staticmethod
     def to_action_results(records: list["ActionResult"]):
-        return to_action_results(records)
+        return to_action_results(ActionArtifactManager.to_model_visible_records(records))
 
     @staticmethod
     def _should_continue(decision: "ActionDecision", *, round_index: int, max_rounds: int | None):

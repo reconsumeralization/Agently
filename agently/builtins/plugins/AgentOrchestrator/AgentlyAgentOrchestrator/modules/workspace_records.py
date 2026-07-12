@@ -52,14 +52,68 @@ async def record_workspace(
             "Standard Agents include a lazy Workspace; call agent.use_workspace(...) "
             "only when you need an explicit root, mode, or provider."
         )
+    if purpose in {"process", "recovery"}:
+        async with owner._workspace_record_lock:
+            if owner._completed or owner.status != "running":
+                phase = "post-terminal" if owner._completed else "non-active"
+                raise RuntimeError(
+                    f"AgentExecution {phase} Workspace writes reject purpose={purpose!r}; "
+                    "process and recovery writes require an active running execution."
+                )
+            return await _record_workspace_locked(
+                owner,
+                purpose=purpose,
+                collection=collection,
+                kind=kind,
+                content=content,
+                summary=summary,
+                scope=scope,
+                source=source,
+                meta=meta,
+                checkpoint=checkpoint,
+                checkpoint_state=checkpoint_state,
+                checkpoint_step_id=checkpoint_step_id,
+                profile=profile,
+                post_terminal=False,
+            )
     if not owner._completed:
         await owner.async_get_data()
-    post_terminal = owner._completed
-    if post_terminal and purpose in {"process", "recovery"}:
-        raise RuntimeError(
-            f"AgentExecution post-terminal Workspace writes reject purpose={purpose!r}; "
-            "only governed deliverable or explicitly retained audit writes are allowed."
+    async with owner._workspace_record_lock:
+        return await _record_workspace_locked(
+            owner,
+            purpose=purpose,
+            collection=collection,
+            kind=kind,
+            content=content,
+            summary=summary,
+            scope=scope,
+            source=source,
+            meta=meta,
+            checkpoint=checkpoint,
+            checkpoint_state=checkpoint_state,
+            checkpoint_step_id=checkpoint_step_id,
+            profile=profile,
+            post_terminal=owner._completed,
         )
+
+
+async def _record_workspace_locked(
+    owner: "AgentExecution",
+    *,
+    purpose: AgentExecutionWorkspacePurpose,
+    collection: str,
+    kind: str | None,
+    content: Any,
+    summary: str | None,
+    scope: dict[str, Any] | None,
+    source: dict[str, Any] | None,
+    meta: dict[str, Any] | None,
+    checkpoint: bool,
+    checkpoint_state: dict[str, Any] | None,
+    checkpoint_step_id: str | None,
+    profile: str,
+    post_terminal: bool,
+) -> AgentExecutionWorkspaceRecord:
     owner._refresh_diagnostics()
 
     record_scope = workspace_scope(owner, scope)
@@ -98,9 +152,8 @@ async def record_workspace(
 
     checkpoint_ref = None
     if checkpoint:
-        checkpoint_run_id = str(record_scope.get("task_id") or owner.lineage.get("task_id") or owner.id)
         checkpoint_ref = await owner.workspace.put_checkpoint(
-            checkpoint_run_id,
+            owner.id,
             checkpoint_state or default_checkpoint_state(owner, record_ref),
             step_id=checkpoint_step_id or owner.lineage.get("step_id"),
         )
@@ -132,7 +185,10 @@ async def record_workspace(
         )
         await apply_agent_execution_terminal_retention(
             owner,
-            status="completed" if owner.status in {"success", "completed"} else "failed",
+            status=(
+                owner._terminal_status
+                or ("completed" if owner.status in {"success", "completed"} else "cancelled" if owner.status == "cancelled" else "failed")
+            ),
         )
     return response
 

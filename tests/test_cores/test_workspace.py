@@ -982,6 +982,22 @@ async def test_workspace_db_store_provider_delegates_record_behavior(tmp_path):
             _ = args, kwargs
             return []
 
+        async def get_retention_lifecycle(
+            self,
+            execution_id: str,
+            *,
+            status: str,
+            terminal_at: str,
+        ) -> WorkspaceRetentionLifecycle:
+            return {
+                "execution_id": execution_id,
+                "status": cast(Any, status),
+                "terminal_at": terminal_at,
+                "state_version": None,
+                "recovery_active": False,
+                "lease_active": False,
+            }
+
         async def inspect_retention(
             self,
             scope: dict[str, Any],

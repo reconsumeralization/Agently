@@ -233,11 +233,17 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     )
                 elif callable(reader):
                     for ref in refs:
+                        selection_key = str(ref.get("selection_key") or "")
                         artifact_id = str(ref.get("artifact_id") or "")
                         action_call_id = str(ref.get("action_call_id") or "")
                         try:
+                            read_request = (
+                                reader(selection_key=selection_key)
+                                if selection_key
+                                else reader(artifact_id, action_call_id or None)
+                            )
                             raw_readback = await self._await_taskboard_card_execution(
-                                cast(Awaitable[Any], reader(artifact_id, action_call_id or None)),
+                                cast(Awaitable[Any], read_request),
                                 card_id=context.card.id,
                                 stage="readback",
                             )
@@ -245,6 +251,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                             raw_readback = {
                                 "ok": False,
                                 "status": "error",
+                                "selection_key": selection_key,
                                 "artifact_id": artifact_id,
                                 "action_call_id": action_call_id,
                                 "error": (
@@ -564,18 +571,20 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         for item in raw_refs:
             if not isinstance(item, Mapping):
                 continue
+            selection_key = str(item.get("selection_key") or "").strip()
             artifact_id = str(item.get("artifact_id") or "").strip()
-            if not artifact_id:
+            if not selection_key and not artifact_id:
                 continue
             action_call_id = str(item.get("action_call_id") or "").strip()
-            key = (artifact_id, action_call_id)
+            key = (selection_key or artifact_id, action_call_id)
             if key in seen:
                 continue
             seen.add(key)
             refs.append(
                 {
-                    "artifact_id": artifact_id,
-                    "action_call_id": action_call_id,
+                    **({"selection_key": selection_key} if selection_key else {}),
+                    **({"artifact_id": artifact_id} if artifact_id else {}),
+                    **({"action_call_id": action_call_id} if action_call_id else {}),
                     "artifact_type": str(item.get("artifact_type") or ""),
                     "role": str(item.get("role") or ""),
                     "label": str(item.get("label") or ""),
@@ -583,6 +592,8 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     "bytes": item.get("bytes", item.get("size")),
                     "sha256": item.get("sha256"),
                     "truncated": bool(item.get("truncated")),
+                    "preview_omitted": bool(item.get("preview_omitted")),
+                    "readback_action_id": str(item.get("readback_action_id") or ""),
                     "full_value_available": bool(item.get("full_value_available", item.get("available", False))),
                 }
             )
@@ -993,15 +1004,16 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
 
     @staticmethod
     def _taskboard_dependency_ref_needs_readback(ref: Mapping[str, Any]) -> bool:
+        selection_key = str(ref.get("selection_key") or "").strip()
         artifact_id = str(ref.get("artifact_id") or "").strip()
-        if not artifact_id:
+        if not selection_key and not artifact_id:
             return False
         role = str(ref.get("role") or "").strip().lower()
         if role and role not in {"output", "result", "artifact"}:
             return False
         if not bool(ref.get("available", True)) and not bool(ref.get("full_value_available")):
             return False
-        if bool(ref.get("truncated")):
+        if bool(ref.get("truncated")) or bool(ref.get("preview_omitted")):
             return True
         try:
             size = int(ref.get("bytes", ref.get("size", 0)) or 0)
@@ -1055,7 +1067,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             },
             evidence_requirements=tuple(
                 {
-                    "artifact_id": str(ref.get("artifact_id") or ""),
+                    **(
+                        {"selection_key": str(ref.get("selection_key") or "")}
+                        if ref.get("selection_key")
+                        else {"artifact_id": str(ref.get("artifact_id") or "")}
+                    ),
                     "action_call_id": str(ref.get("action_call_id") or ""),
                     "source": "taskboard_dependency_readback",
                 }
@@ -1083,7 +1099,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             "step_instruction": "Read bounded dependency Action artifact previews before executing the card.",
             "expected_evidence": [
                 {
-                    "artifact_id": str(ref.get("artifact_id") or ""),
+                    **(
+                        {"selection_key": str(ref.get("selection_key") or "")}
+                        if ref.get("selection_key")
+                        else {"artifact_id": str(ref.get("artifact_id") or "")}
+                    ),
                     "action_call_id": str(ref.get("action_call_id") or ""),
                 }
                 for ref in refs
@@ -1112,11 +1132,17 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 )
             else:
                 for ref in refs:
+                    selection_key = str(ref.get("selection_key") or "")
                     artifact_id = str(ref.get("artifact_id") or "")
                     action_call_id = str(ref.get("action_call_id") or "")
                     try:
+                        read_request = (
+                            reader(selection_key=selection_key)
+                            if selection_key
+                            else reader(artifact_id, action_call_id or None)
+                        )
                         raw_readback = await self._await_taskboard_card_execution(
-                            cast(Awaitable[Any], reader(artifact_id, action_call_id or None)),
+                            cast(Awaitable[Any], read_request),
                             card_id=card_id,
                             stage="dependency_readback",
                         )
@@ -1124,6 +1150,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                         raw_readback = {
                             "ok": False,
                             "status": "error",
+                            "selection_key": selection_key,
                             "artifact_id": artifact_id,
                             "action_call_id": action_call_id,
                             "error": (
@@ -1361,7 +1388,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             add(f"action_{action_call_id}")
         ref = readback.get("ref")
         if isinstance(ref, Mapping):
-            for field in ("path", "label", "artifact_type", "role"):
+            for field in ("selection_key", "path", "label", "artifact_type", "role"):
                 add(ref.get(field))
         return aliases[:16]
 
@@ -1379,6 +1406,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "status": "invalid_result",
                 "error": f"Action artifact reader returned { type(readback).__name__ }.",
             }
+        selection_key = str(readback.get("selection_key") or ref.get("selection_key") or "")
         artifact_id = str(readback.get("artifact_id") or ref.get("artifact_id") or "")
         action_call_id = str(readback.get("action_call_id") or ref.get("action_call_id") or "")
         value = readback.get("value", readback.get("data", readback.get("result")))
@@ -1388,6 +1416,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         compact: dict[str, Any] = {
             "ok": bool(readback.get("ok")),
             "status": str(readback.get("status") or ""),
+            "selection_key": selection_key,
             "artifact_id": artifact_id,
             "action_call_id": action_call_id,
             "artifact_type": str(readback.get("artifact_type") or ref.get("artifact_type") or ""),

@@ -10,6 +10,12 @@ import pytest
 from agently import Agently
 
 
+def _canonical_action_ref(manager: Any, ref: dict[str, Any], scope: dict[str, str]) -> dict[str, Any]:
+    transfer = manager.read_selection_transfer(ref["selection_key"], expected_scope=scope)
+    assert transfer is not None
+    return transfer[0]
+
+
 def test_action_artifact_scope_is_private_and_returned_values_are_defensive() -> None:
     agent: Any = Agently.create_agent("action-artifact-private-scope")
     manager = agent.action._artifact_manager
@@ -76,11 +82,16 @@ async def test_direct_action_entry_releases_success_and_failure_scopes(tmp_path,
     assert returned_ref["available"] is False
     assert returned_ref["full_value_available"] is False
     assert returned_ref.get("preview") or returned_ref.get("preview_omitted") is True
-    assert returned_ref["sha256"]
+    assert returned_ref["selection_key"]
+    assert returned_ref["artifact_id"]
+    assert len(returned_ref["sha256"]) == 64
+    model_visible = next(iter(agent.action.to_action_results([record]).values()))
+    assert set(model_visible["artifact_refs"][0]).isdisjoint(
+        {"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"}
+    )
     assert record["model_digest"]
     readback = agent.action.read_action_artifact(
-        artifact_id=returned_ref["artifact_id"],
-        action_call_id=returned_ref["action_call_id"],
+        selection_key=returned_ref["selection_key"],
     )
     assert readback["ok"] is False
     assert readback["status"] == "not_found"
@@ -92,7 +103,9 @@ async def test_direct_action_entry_releases_success_and_failure_scopes(tmp_path,
     def fail_after_registration(result: Any, *, artifact_scope: dict[str, str] | None = None) -> Any:
         nonlocal captured_id
         finalized = original_finalize(result, artifact_scope=artifact_scope)
-        captured_id = finalized["artifact_refs"][0]["artifact_id"]
+        captured_id = agent.action._artifact_manager.get_artifact_id_for_selection(
+            finalized["artifact_refs"][0]["selection_key"]
+        ) or ""
         raise RuntimeError("finalization failed after artifact registration")
 
     monkeypatch.setattr(agent.action, "_finalize_action_result", fail_after_registration)
@@ -241,18 +254,27 @@ async def test_large_action_output_stays_in_memory_and_runtime_event_is_bounded(
     )
     artifact_refs = record["artifact_refs"]
     assert len(artifact_refs) == 1
-    artifact_id = artifact_refs[0]["artifact_id"]
-    assert artifact_refs[0]["meta"]["artifact_scope"] == {
-        "kind": "action_call",
-        "id": "large-action-call",
-    }
+    selection_key = artifact_refs[0]["selection_key"]
+    assert artifact_refs[0]["artifact_id"]
+    assert artifact_refs[0]["action_call_id"] == "large-action-call"
     assert len(agent.action._artifact_manager._artifacts) == 1
-    assert agent.action._artifact_manager.get_artifact_value(artifact_id) == {"body": large_body}
-    assert large_body not in json.dumps(record, ensure_ascii=False)
+    transfer = agent.action._artifact_manager.read_selection_transfer(
+        selection_key,
+        expected_scope={"kind": "action_call", "id": "large-action-call"},
+    )
+    assert transfer is not None
+    canonical_ref, exact_value = transfer
+    assert canonical_ref["artifact_id"] == artifact_refs[0]["artifact_id"]
+    assert exact_value == {"body": large_body}
+    assert record["result"]["body"] == large_body
+    assert record["data"]["body"] == large_body
 
     visible_record = agent.action._to_model_visible_record(record)
     assert large_body not in json.dumps(visible_record, ensure_ascii=False)
-    assert visible_record["artifact_refs"][0]["artifact_id"] == artifact_id
+    assert visible_record["artifact_refs"][0]["selection_key"] == selection_key
+    assert set(visible_record["artifact_refs"][0]).isdisjoint(
+        {"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"}
+    )
     assert visible_record["result"]["result_preview_meta"]["truncated"] is True
 
     captured: list[Any] = []
@@ -277,8 +299,71 @@ async def test_large_action_output_stays_in_memory_and_runtime_event_is_bounded(
     event_payload = captured[0].payload
     event_record = event_payload["record"]
     assert large_body not in json.dumps(event_payload, ensure_ascii=False)
-    assert event_record["artifact_refs"][0]["artifact_id"] == artifact_id
+    assert event_record["artifact_refs"] == visible_record["artifact_refs"]
     assert event_record["result"]["result_preview_meta"]["truncated"] is True
+
+
+def test_external_artifact_ids_are_scope_local_and_preserved_only_as_provenance() -> None:
+    agent: Any = Agently.create_agent("action-artifact-external-id-scope")
+    manager = agent.action._artifact_manager
+    scope_a = {"kind": "agent_execution", "id": "execution-a"}
+    scope_b = {"kind": "agent_execution", "id": "execution-b"}
+    provider_ref_a = {"artifact_id": "provider-shared-id", "path": "a/report.json", "bytes": 11}
+    provider_ref_b = {"artifact_id": "provider-shared-id", "path": "b/report.json", "bytes": 13}
+
+    ref_a = manager.register_external_artifact_ref(
+        action_call_id="call-a",
+        artifact_type="external_ref",
+        label="A",
+        ref=provider_ref_a,
+        artifact_scope=scope_a,
+    )
+    ref_b = manager.register_external_artifact_ref(
+        action_call_id="call-b",
+        artifact_type="external_ref",
+        label="B",
+        ref=provider_ref_b,
+        artifact_scope=scope_b,
+    )
+
+    assert ref_a["artifact_id"] != ref_b["artifact_id"]
+    assert ref_a["artifact_id"] != "provider-shared-id"
+    assert ref_b["artifact_id"] != "provider-shared-id"
+    assert ref_a["meta"]["external_artifact_id"] == "provider-shared-id"
+    assert ref_b["meta"]["external_artifact_id"] == "provider-shared-id"
+    assert manager.get_artifact_value(ref_a["artifact_id"]) == provider_ref_a
+    assert manager.get_artifact_value(ref_b["artifact_id"]) == provider_ref_b
+    assert manager.release_scope(scope_a) == 1
+    assert manager.get_artifact_value(ref_a["artifact_id"]) is None
+    assert manager.get_artifact_value(ref_b["artifact_id"]) == provider_ref_b
+
+
+def test_small_explicit_artifact_model_projection_hides_canonical_identity() -> None:
+    agent: Any = Agently.create_agent("action-artifact-small-model-projection")
+    scope = {"kind": "agent_execution", "id": "small-projection"}
+    canonical_ref = agent.action._artifact_manager.register_external_artifact_ref(
+        action_call_id="small-call",
+        artifact_type="external_ref",
+        label="Small external artifact",
+        ref={"artifact_id": "provider-id", "path": "small/report.json", "bytes": 3},
+        artifact_scope=scope,
+    )
+    record = {
+        "action_call_id": "small-call",
+        "action_id": "small_action",
+        "status": "success",
+        "success": True,
+        "result": {"ok": True},
+        "artifact_refs": [],
+        "artifacts": [canonical_ref],
+    }
+
+    visible = agent.action._to_model_visible_record(record)
+
+    assert visible["artifact_refs"][0]["selection_key"] == canonical_ref["selection_key"]
+    assert set(visible["artifact_refs"][0]).isdisjoint(
+        {"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"}
+    )
 
 
 @pytest.mark.asyncio
@@ -327,29 +412,36 @@ async def test_selected_action_artifact_run_scope_release_is_concurrent_and_smal
     )
     expected_first_scope = {"kind": "agent_execution", "id": first_execution.id}
     expected_second_scope = {"kind": "agent_execution", "id": second_execution.id}
-    assert [ref["meta"]["artifact_scope"] for ref in first_refs] == [
+    first_canonical_refs = [
+        _canonical_action_ref(agent.action._artifact_manager, ref, expected_first_scope)
+        for ref in first_refs
+    ]
+    second_canonical_ref = _canonical_action_ref(
+        agent.action._artifact_manager, second_ref, expected_second_scope
+    )
+    assert [ref["meta"]["artifact_scope"] for ref in first_canonical_refs] == [
         expected_first_scope,
         expected_first_scope,
     ]
-    assert second_ref["meta"]["artifact_scope"] == expected_second_scope
+    assert second_canonical_ref["meta"]["artifact_scope"] == expected_second_scope
 
     selected_ref, unselected_ref = first_refs
     first_execution.logs["artifact_refs"] = first_refs
     first_execution.result = {
         "accepted": True,
-        "artifact_refs": [selected_ref],
+        "artifact_refs": [{"selection_key": selected_ref["selection_key"]}],
         "reply": "small accepted wrapper",
     }
     first_execution.status = "success"
 
     await _finalize_terminal_execution(first_execution, terminal_status="completed")
 
-    assert agent.action._artifact_manager.get_artifact_value(selected_ref["artifact_id"]) is None
-    assert agent.action._artifact_manager.get_artifact_value(unselected_ref["artifact_id"]) is None
-    assert agent.action._artifact_manager.get_artifact_value(second_ref["artifact_id"]) is not None
+    assert agent.action._artifact_manager.get_artifact_value(first_canonical_refs[0]["artifact_id"]) is None
+    assert agent.action._artifact_manager.get_artifact_value(first_canonical_refs[1]["artifact_id"]) is None
+    assert agent.action._artifact_manager.get_artifact_value(second_canonical_ref["artifact_id"]) is not None
     assert first_execution.diagnostics["action_artifact_release"]["released_count"] == 4
     terminal_result = first_execution.close_snapshot["terminal_result"]
-    assert selected_ref["artifact_id"] not in json.dumps(terminal_result, ensure_ascii=False)
+    assert first_canonical_refs[0]["artifact_id"] not in json.dumps(terminal_result, ensure_ascii=False)
     promoted_ref = terminal_result["artifact_refs"][0]
     assert promoted_ref["id"]
     stored = await first_execution.workspace.search(filters={"id": promoted_ref["id"]})
@@ -469,7 +561,7 @@ async def test_custom_action_execution_handler_callback_binds_agent_execution_ar
     owner.logs["artifact_refs"] = [callback_ref]
     owner.result = {
         "accepted": True,
-        "artifact_refs": [callback_ref],
+        "artifact_refs": [{"selection_key": callback_ref["selection_key"]}],
         "records": records,
         "reply": "bounded",
     }
@@ -478,7 +570,12 @@ async def test_custom_action_execution_handler_callback_binds_agent_execution_ar
     await _finalize_terminal_execution(owner, terminal_status="completed")
 
     assert agent.action._artifact_manager.get_artifact_value(callback_ref["artifact_id"]) is None
-    assert agent.action._artifact_manager.get_artifact_value(concurrent_ref["artifact_id"]) is not None
+    concurrent_canonical_ref = _canonical_action_ref(
+        agent.action._artifact_manager,
+        concurrent_ref,
+        {"kind": "agent_execution", "id": concurrent.id},
+    )
+    assert agent.action._artifact_manager.get_artifact_value(concurrent_canonical_ref["artifact_id"]) is not None
 
 
 @pytest.mark.asyncio
@@ -525,8 +622,27 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
         ref for ref in unselected_record["artifact_refs"] if ref.get("artifact_type") == "action_output"
     )
     owner.logs["artifact_refs"] = [owner_ref, unselected_ref]
-    owner.result = {"accepted": True, "artifact_refs": [owner_ref], "reply": "bounded"}
+    owner.result = {
+        "accepted": True,
+        "artifact_refs": [{"selection_key": owner_ref["selection_key"]}],
+        "reply": "bounded",
+    }
     owner.status = "success"
+    owner_canonical_ref = _canonical_action_ref(
+        agent.action._artifact_manager,
+        owner_ref,
+        {"kind": "agent_execution", "id": owner.id},
+    )
+    concurrent_canonical_ref = _canonical_action_ref(
+        agent.action._artifact_manager,
+        concurrent_ref,
+        {"kind": "agent_execution", "id": concurrent.id},
+    )
+    unselected_canonical_ref = _canonical_action_ref(
+        agent.action._artifact_manager,
+        unselected_ref,
+        {"kind": "agent_execution", "id": owner.id},
+    )
 
     if failure_stage == "promotion":
         async def fail_promotion(*_args: Any, **_kwargs: Any) -> Any:
@@ -544,16 +660,16 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
     await _finalize_terminal_execution(owner, terminal_status="completed")
 
     if failure_stage == "promotion":
-        assert agent.action._artifact_manager.get_artifact_value(owner_ref["artifact_id"]) is not None
+        assert agent.action._artifact_manager.get_artifact_value(owner_canonical_ref["artifact_id"]) is not None
     else:
-        assert agent.action._artifact_manager.get_artifact_value(owner_ref["artifact_id"]) is None
-    assert agent.action._artifact_manager.get_artifact_value(unselected_ref["artifact_id"]) is None
-    assert agent.action._artifact_manager.get_artifact_value(concurrent_ref["artifact_id"]) is not None
+        assert agent.action._artifact_manager.get_artifact_value(owner_canonical_ref["artifact_id"]) is None
+    assert agent.action._artifact_manager.get_artifact_value(unselected_canonical_ref["artifact_id"]) is None
+    assert agent.action._artifact_manager.get_artifact_value(concurrent_canonical_ref["artifact_id"]) is not None
     release_diagnostic = owner.diagnostics["action_artifact_release"]
     assert release_diagnostic["status"] == ("deferred" if failure_stage == "promotion" else "released")
     assert release_diagnostic["scope"] == {"kind": "agent_execution", "id": owner.id}
     assert release_diagnostic["preserved_artifact_ids"] == (
-        [owner_ref["artifact_id"]] if failure_stage == "promotion" else []
+        [owner_canonical_ref["artifact_id"]] if failure_stage == "promotion" else []
     )
     retention_diagnostics = owner.diagnostics["workspace_retention"]["diagnostics"]
     assert retention_diagnostics

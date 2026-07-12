@@ -381,7 +381,10 @@ async def test_task_dag_runtime_events_project_recovery_facts(tmp_path):
         ],
     }
     compiled = TaskDAGExecutor({"artifact": artifact_task, "local": local_task}).compile(graph)
-    execution = compiled.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    execution = compiled.create_execution(
+        auto_close=False,
+        runtime_resources={"workspace": workspace, "runtime_event_store": workspace},
+    )
 
     await execution.async_start({"doc": "policy"})
     await execution.async_close(timeout=1)

@@ -242,7 +242,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "contains bounded readback previews for dependency Action artifacts that were "
                 "structurally truncated or marked full_value_available; inspect those before declaring dependency "
                 "evidence missing. If available_readback lists Action artifact refs and the prefetched previews are "
-                "still insufficient, call read_action_artifact with the artifact_id and action_call_id before blocking "
+                "still insufficient, call read_action_artifact with the host-issued selection_key before blocking "
                 "on missing evidence. If scoped_retrieval_results is present, those are already executed bounded "
                 "Workspace search facts; use visible evidence_snippet content only within the excerpt, and treat "
                 "locator_ref records as targets for later readback/search rather than source-content proof. "

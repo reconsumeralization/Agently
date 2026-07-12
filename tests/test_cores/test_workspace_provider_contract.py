@@ -7,6 +7,7 @@ import inspect
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from pathlib import Path
 from typing import Any, Literal, cast, get_args
 
 import pytest
@@ -1077,6 +1078,30 @@ def test_workspace_retention_data_contract_is_exported_with_exact_shapes():
     assert hints["inline_result"] is Any
     assert hints["retained_refs"] == list[workspace_types.WorkspaceRetainedReference]
     assert hints["status"] == Literal["ready", "deferred"]
+
+
+def test_lazy_workspace_retention_lifecycle_is_fully_typed_and_in_public_inventory():
+    from agently.core import LazyWorkspace
+
+    signature = inspect.signature(LazyWorkspace.get_retention_lifecycle)
+    assert tuple(signature.parameters) == ("self", "execution_id", "status", "terminal_at")
+    assert signature.parameters["execution_id"].annotation == "str"
+    assert signature.parameters["status"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["terminal_at"].kind is inspect.Parameter.KEYWORD_ONLY
+    hints = get_type_hints(LazyWorkspace.get_retention_lifecycle)
+    assert hints == {
+        "execution_id": str,
+        "status": workspace_types.WorkspaceRetentionTerminalStatus,
+        "terminal_at": str | None,
+        "return": workspace_types.WorkspaceRetentionLifecycle,
+    }
+    inventory = json.loads(
+        (Path(__file__).resolve().parents[2] / "compatibility/public-typing-allowlist.json").read_text()
+    )
+    assert (
+        "agently.core.Workspace.LazyWorkspace.LazyWorkspace.get_retention_lifecycle"
+        in inventory.get("required_typed_callables", [])
+    )
 
 
 def test_workspace_retention_protocols_and_fake_provider_use_exact_signatures():

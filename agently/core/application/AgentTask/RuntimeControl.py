@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from agently.types.data import WorkspaceRetentionTerminalStatus
+
 from .TaskShared import *
 
 # A bounded AgentTask step should hand inconclusive action evidence back to the
@@ -47,6 +49,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 return self.result
             self.status = "running"
             execution = self._flow.create_execution(auto_close=False, workspace=False)
+            terminal_retention_status: WorkspaceRetentionTerminalStatus | None = None
             try:
                 await self._record_phase(
                     "configured",
@@ -90,8 +93,8 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     await self._emit("agent_task.blocked", self.result)
                 await self._ensure_final_reflection()
                 await self._emit("result", self.result)
-                await self._apply_terminal_workspace_retention(
-                    status="completed" if self.status == "completed" else "failed"
+                terminal_retention_status = (
+                    "completed" if self.status == "completed" else "failed"
                 )
                 return self.result
             except asyncio.CancelledError as error:
@@ -114,7 +117,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     "agent_task.cancelled",
                     {"status": "cancelled", "task_id": self.id, "message": "AgentTask was cancelled by its host."},
                 )
-                await self._apply_terminal_workspace_retention(status="cancelled")
+                terminal_retention_status = "cancelled"
                 raise
             except BaseException as error:
                 self.status = "timed_out" if self._is_timeout_error(error) else "error"
@@ -124,6 +127,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     {"type": error.__class__.__name__, "message": message, "status": self.status}
                 )
                 await self._emit("agent_task.error", self.diagnostics["errors"][-1])
+                terminal_retention_status = "failed"
                 raise
             finally:
                 # Always close the auto_close=False execution so its runtime is
@@ -132,6 +136,10 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     await execution.async_close()
                 except Exception:
                     pass
+                if terminal_retention_status is not None:
+                    await self._apply_terminal_workspace_retention(
+                        status=terminal_retention_status
+                    )
                 self.completed_at = time.time()
                 self._completed = True
                 await self._close_streams()

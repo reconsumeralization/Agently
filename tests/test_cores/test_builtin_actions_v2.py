@@ -1214,7 +1214,15 @@ def test_instruction_heavy_direct_action_releases_historical_artifact_refs(tmp_p
     visible = prompt_results["Inspect cwd"]
     assert isinstance(visible, dict)
     assert visible.get("action_call_id") == result.get("action_call_id")
-    assert visible.get("artifact_refs") == artifact_refs
+    visible_refs = visible.get("artifact_refs")
+    assert isinstance(visible_refs, list)
+    assert [ref.get("selection_key") for ref in visible_refs] == [
+        ref.get("selection_key") for ref in artifact_refs
+    ]
+    assert all(
+        set(ref).isdisjoint({"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"})
+        for ref in visible_refs
+    )
 
 
 @pytest.mark.asyncio
@@ -1349,11 +1357,13 @@ async def test_action_loop_keeps_large_outputs_cold_then_releases_standalone_sco
         for ref in records[0].get("artifact_refs", [])
         if ref.get("artifact_type") == "action_output"
     )
-    artifact_id = str(output_ref.get("artifact_id") or "")
-    assert artifact_id
+    assert output_ref.get("selection_key")
+    assert set(output_ref).isdisjoint(
+        {"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"}
+    )
     assert output_ref.get("available") is False
     assert output_ref.get("full_value_available") is False
-    assert agent.action._artifact_manager.get_artifact_value(artifact_id) is None
+    assert agent.action._artifact_manager._artifacts == {}
     assert len(seen_rounds) >= 2
     second_round = seen_rounds[1]
     hot_context = json.dumps(

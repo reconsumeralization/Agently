@@ -437,6 +437,7 @@ class DAGActionFlow:
                 action._release_artifact_scope(artifact_scope)
         if artifact_scope.get("kind") != "agent_execution":
             normalized = action._project_released_artifact_scope(normalized, artifact_scope)
+        normalized = action._to_action_flow_return_records(normalized)
         with bind_runtime_context(
             parent_run_context=action_loop_run,
             tool_phase_run_context=action_loop_run,

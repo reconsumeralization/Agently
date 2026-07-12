@@ -261,6 +261,7 @@ async def _finalize_terminal_execution(
     terminal_status: Literal["completed", "failed", "cancelled"],
     terminal_projection: tuple[Any, list[Any]] | None = None,
 ) -> None:
+    owner._terminal_status = terminal_status
     try:
         event_result, retained_refs = (
             terminal_projection
@@ -292,7 +293,8 @@ async def _finalize_terminal_execution(
                 code="agent_execution.retention.terminal_event_delivery_failed",
                 error=error,
             )
-        await apply_agent_execution_terminal_retention(owner, status=terminal_status)
+        async with owner._workspace_record_lock:
+            await apply_agent_execution_terminal_retention(owner, status=terminal_status)
     finally:
         action = getattr(owner.agent, "action", None)
         release_scope = getattr(action, "_release_artifact_scope_except", None)

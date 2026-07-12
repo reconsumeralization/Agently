@@ -400,7 +400,7 @@ async def test_selected_action_artifact_is_promoted_once_and_unselected_artifact
     unselected_ref = unselected_record["artifact_refs"][0]
     execution.logs["artifact_refs"] = [selected_ref, unselected_ref]
     execution.result = {
-        "artifact_refs": [selected_ref],
+        "artifact_refs": [{"selection_key": selected_ref["selection_key"]}],
         "reply": "r" * 5000,
     }
     execution.status = "success"
@@ -430,7 +430,7 @@ async def test_selected_action_artifact_is_promoted_once_and_unselected_artifact
     assert await execution.workspace.search(
         filters={"kind": "agent_execution_action_artifact", "scope.execution_id": execution.id}
     ) == retained_records
-    assert unselected_ref["artifact_id"] not in str(
+    assert unselected_ref["selection_key"] not in str(
         await execution.workspace.search(filters={"collection": "artifacts"})
     )
 
@@ -467,7 +467,11 @@ async def test_business_accepted_field_cannot_authorize_action_artifact_selectio
     assert await execution.workspace.search(
         filters={"kind": "agent_execution_action_artifact", "scope.execution_id": execution.id}
     ) == []
-    assert agent.action._artifact_manager.get_artifact_value(artifact_ref["artifact_id"]) == value
+    transfer = agent.action._artifact_manager.read_selection_transfer(
+        artifact_ref["selection_key"],
+        expected_scope={"kind": "agent_execution", "id": execution.id},
+    )
+    assert transfer is not None and transfer[1] == value
 
 
 @pytest.mark.asyncio
@@ -490,21 +494,25 @@ async def test_selected_action_artifact_defers_when_store_identity_no_longer_mat
         artifact_scope={"kind": "agent_execution", "id": execution.id},
     )
     selected_ref = record["artifact_refs"][0]
-    agent.action._artifact_manager.register_external_artifact_ref(
-        action_call_id="replacement-call",
-        artifact_type="external_ref",
-        label="Replacement with a colliding artifact id",
-        ref={
-            "artifact_id": selected_ref["artifact_id"],
-            "path": "external/replacement.json",
-            "bytes": 1,
-            "sha256": "0" * 64,
-        },
-    )
     execution.logs["artifact_refs"] = [selected_ref]
-    execution.result = {"accepted": True, "artifact_refs": [selected_ref], "reply": "r" * 5000}
+    execution.result = {
+        "accepted": True,
+        "artifact_refs": [{"selection_key": selected_ref["selection_key"]}],
+        "reply": "r" * 5000,
+    }
     execution.status = "success"
     execution.route_info["selected_route"] = "model_request"
+
+    original_read = agent.action._artifact_manager.read_selection_transfer
+
+    def mismatched_read(selection_key: str, *, expected_scope: dict[str, str]):
+        transfer = original_read(selection_key, expected_scope=expected_scope)
+        assert transfer is not None
+        identity, value = transfer
+        identity["selection_key"] = "sel_replaced"
+        return identity, value
+
+    agent.action._artifact_manager.read_selection_transfer = mismatched_read
 
     event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
 
@@ -514,6 +522,64 @@ async def test_selected_action_artifact_defers_when_store_identity_no_longer_mat
     assert await execution.workspace.search(
         filters={"kind": "agent_execution_action_artifact", "scope.execution_id": execution.id}
     ) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "selection_refs",
+    [
+        [{"selection_key": "sel_unknown"}],
+        [{"selection_key": "{key}"}, {"selection_key": "{key}"}],
+        [{"artifact_id": "{artifact_id}", "action_call_id": "selected-call"}],
+    ],
+    ids=["unknown", "duplicate", "copied-canonical-identity"],
+)
+async def test_action_artifact_selection_rejects_untrusted_or_duplicated_keys(
+    tmp_path,
+    selection_refs: list[dict[str, str]],
+) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        prepare_agent_execution_terminal_retention,
+    )
+
+    agent: Any = Agently.create_agent("result-view-reject-action-selection").use_workspace(tmp_path / "run")
+    execution: Any = agent.input("Reject an invalid selection.").create_execution().strategy("direct")
+    record = agent.action._finalize_action_result(
+        {
+            "action_call_id": "selected-call",
+            "action_id": "candidate",
+            "status": "success",
+            "success": True,
+            "result": {"body": "s" * (1024 * 1024)},
+            "data": {"body": "s" * (1024 * 1024)},
+        },
+        artifact_scope={"kind": "agent_execution", "id": execution.id},
+    )
+    offered_ref = record["artifact_refs"][0]
+    execution.logs["artifact_refs"] = [offered_ref]
+    execution.result = {
+        "artifact_refs": [
+            {
+                key: (
+                    offered_ref["selection_key"]
+                    if value == "{key}"
+                    else offered_ref.get("artifact_id", "copied-id")
+                    if value == "{artifact_id}"
+                    else value
+                )
+                for key, value in ref.items()
+            }
+            for ref in selection_refs
+        ]
+    }
+    execution.status = "success"
+    execution.route_info["selected_route"] = "model_request"
+
+    event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+
+    assert retained_records == []
+    assert event_result["kind"] == "agent_execution_terminal_result_untrusted"
+    assert execution._terminal_retention_deferred is True
 
 
 @pytest.mark.asyncio
@@ -537,10 +603,12 @@ async def test_selected_action_artifact_defers_when_candidate_forges_manager_sco
         artifact_scope={"kind": "agent_execution", "id": other_execution.id},
     )
     stored_ref = record["artifact_refs"][0]
-    forged_ref = copy.deepcopy(stored_ref)
-    forged_ref["meta"]["artifact_scope"] = {"kind": "agent_execution", "id": execution.id}
-    execution.logs["artifact_refs"] = [forged_ref]
-    execution.result = {"accepted": True, "artifact_refs": [forged_ref], "reply": "bounded"}
+    execution.logs["artifact_refs"] = [stored_ref]
+    execution.result = {
+        "accepted": True,
+        "artifact_refs": [{"selection_key": stored_ref["selection_key"]}],
+        "reply": "bounded",
+    }
     execution.status = "success"
     execution.route_info["selected_route"] = "model_request"
 
@@ -549,7 +617,11 @@ async def test_selected_action_artifact_defers_when_candidate_forges_manager_sco
     assert retained_records == []
     assert event_result["kind"] == "agent_execution_terminal_result_untrusted"
     assert execution._terminal_retention_deferred is True
-    assert agent.action._artifact_manager.get_artifact_value(stored_ref["artifact_id"]) is not None
+    transfer = agent.action._artifact_manager.read_selection_transfer(
+        stored_ref["selection_key"],
+        expected_scope={"kind": "agent_execution", "id": other_execution.id},
+    )
+    assert transfer is not None and transfer[1] is not None
     assert await execution.workspace.search(
         filters={"kind": "agent_execution_action_artifact", "scope.execution_id": execution.id}
     ) == []
@@ -830,6 +902,22 @@ async def test_agent_execution_cancellation_emits_bounded_terminal_projection_an
     ]
     assert terminal_types == ["agent_execution.cancelled"]
     assert terminal_events[-1].payload["status"] == "cancelled"
+
+    lifecycle_statuses: list[str] = []
+    original_late_inspect = execution.workspace.inspect_retention
+
+    async def capture_late_status(*args: Any, **kwargs: Any) -> Any:
+        lifecycle_statuses.append(str(kwargs["lifecycle"]["status"]))
+        return await original_late_inspect(*args, **kwargs)
+
+    monkeypatch.setattr(execution.workspace, "inspect_retention", capture_late_status)
+    late_record = await execution.async_record_workspace(
+        purpose="deliverable",
+        content={"late": "cancelled deliverable"},
+    )
+
+    assert late_record["record"]["meta"]["workspace_purpose"] == "deliverable"
+    assert lifecycle_statuses == ["cancelled"]
 
 
 @pytest.mark.asyncio

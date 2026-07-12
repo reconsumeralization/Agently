@@ -73,6 +73,7 @@ class ActionArtifactManager:
     def __init__(self, *, registry: Any = None):
         self._artifacts: dict[str, dict[str, Any]] = {}
         self._artifact_scopes: dict[str, tuple[str, str]] = {}
+        self._selection_index: dict[str, str] = {}
         self._artifact_lock = RLock()
         self._registry = registry
 
@@ -108,6 +109,31 @@ class ActionArtifactManager:
             identity = {key: deepcopy(value) for key, value in artifact.items() if key != "value"}
             return identity, deepcopy(artifact.get("value"))
 
+    def read_selection_transfer(
+        self,
+        selection_key: str,
+        *,
+        expected_scope: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], Any] | None:
+        """Resolve one host-issued selection key to canonical identity and value."""
+
+        scope = self._normalize_artifact_scope(expected_scope, fallback_id="")
+        if scope is None:
+            return None
+        with self._artifact_lock:
+            artifact_id = self._selection_index.get(str(selection_key))
+            artifact = self._artifacts.get(artifact_id or "")
+            stored_scope = self._artifact_scopes.get(artifact_id or "")
+            if artifact is None or stored_scope != (scope["kind"], scope["id"]):
+                return None
+            identity = {key: deepcopy(value) for key, value in artifact.items() if key != "value"}
+            return identity, deepcopy(artifact.get("value"))
+
+    def get_artifact_id_for_selection(self, selection_key: str) -> str | None:
+        with self._artifact_lock:
+            artifact_id = self._selection_index.get(str(selection_key))
+            return str(artifact_id) if artifact_id is not None else None
+
     def get_artifact_scope(self, artifact_id: str) -> dict[str, str] | None:
         with self._artifact_lock:
             scope = self._artifact_scopes.get(str(artifact_id))
@@ -134,8 +160,10 @@ class ActionArtifactManager:
                 if owner_scope == scope_key and artifact_id not in retained_ids
             ]
             for artifact_id in artifact_ids:
-                self._artifacts.pop(artifact_id, None)
+                artifact = self._artifacts.pop(artifact_id, None)
                 self._artifact_scopes.pop(artifact_id, None)
+                if isinstance(artifact, dict):
+                    self._selection_index.pop(str(artifact.get("selection_key") or ""), None)
             return len(artifact_ids)
 
     @classmethod
@@ -161,7 +189,10 @@ class ActionArtifactManager:
                 seen.add(item_id)
                 meta = item.get("meta")
                 item_scope = meta.get("artifact_scope") if isinstance(meta, dict) else None
-                if item.get("artifact_id") and item_scope == normalized_scope:
+                if (
+                    item.get("selection_key")
+                    or item.get("artifact_id") and item_scope == normalized_scope
+                ):
                     item["available"] = False
                     item["full_value_available"] = False
                 for nested in item.values():
@@ -373,6 +404,7 @@ class ActionArtifactManager:
         artifact_scope: Mapping[str, Any] | None = None,
     ) -> ActionArtifact:
         artifact_id = f"act_art_{uuid.uuid4().hex}"
+        selection_key = f"sel_{uuid.uuid4().hex}"
         exact_value = deepcopy(value)
         safe_value = self._redact_value(exact_value)
         preview = self._compact_value(safe_value, limit=4000)
@@ -388,6 +420,7 @@ class ActionArtifactManager:
         resolved_scope = cast(dict[str, str], resolved_meta["artifact_scope"])
         stored = {
             "artifact_id": artifact_id,
+            "selection_key": selection_key,
             "action_call_id": action_call_id,
             "artifact_type": artifact_type,
             "role": role,
@@ -402,8 +435,10 @@ class ActionArtifactManager:
         with self._artifact_lock:
             self._artifacts[artifact_id] = stored
             self._artifact_scopes[artifact_id] = (resolved_scope["kind"], resolved_scope["id"])
+            self._selection_index[selection_key] = artifact_id
         return {
             "artifact_id": artifact_id,
+            "selection_key": selection_key,
             "action_call_id": action_call_id,
             "artifact_type": artifact_type,
             "role": role,
@@ -431,12 +466,16 @@ class ActionArtifactManager:
         meta: dict[str, Any] | None = None,
         artifact_scope: Mapping[str, Any] | None = None,
     ) -> ActionArtifact:
-        artifact_id = str(ref.get("artifact_id") or f"act_art_{uuid.uuid4().hex}")
+        artifact_id = f"act_art_{uuid.uuid4().hex}"
+        selection_key = f"sel_{uuid.uuid4().hex}"
         role = self._artifact_role(artifact_type)
         preview = self._compact_value(ref, limit=4000)
         preview_size = self._safe_json_size(preview)
         path = ref.get("path") or ref.get("uri") or ref.get("url")
         resolved_meta = dict(meta or {})
+        external_artifact_id = str(ref.get("artifact_id") or "").strip()
+        if external_artifact_id:
+            resolved_meta["external_artifact_id"] = external_artifact_id
         resolved_meta["artifact_scope"] = self._normalize_artifact_scope(
             artifact_scope,
             fallback_id=action_call_id,
@@ -444,6 +483,7 @@ class ActionArtifactManager:
         resolved_scope = cast(dict[str, str], resolved_meta["artifact_scope"])
         stored = {
             "artifact_id": artifact_id,
+            "selection_key": selection_key,
             "action_call_id": action_call_id,
             "artifact_type": artifact_type,
             "role": role,
@@ -460,9 +500,11 @@ class ActionArtifactManager:
         with self._artifact_lock:
             self._artifacts[artifact_id] = stored
             self._artifact_scopes[artifact_id] = (resolved_scope["kind"], resolved_scope["id"])
+            self._selection_index[selection_key] = artifact_id
 
         artifact_ref: ActionArtifact = {
             "artifact_id": artifact_id,
+            "selection_key": selection_key,
             "action_call_id": action_call_id,
             "artifact_type": artifact_type,
             "role": role,
@@ -508,9 +550,18 @@ class ActionArtifactManager:
             if key in seen:
                 return
             seen.add(key)
-            if prefer_existing or item.get("artifact_id"):
-                normalized.append(cast(ActionArtifact, item))
-                return
+            if prefer_existing and item.get("artifact_id"):
+                expected_scope = self._normalize_artifact_scope(artifact_scope, fallback_id=action_call_id)
+                if expected_scope is not None:
+                    transfer = self.read_artifact_transfer(
+                        str(item["artifact_id"]),
+                        expected_scope=expected_scope,
+                    )
+                    if transfer is not None:
+                        canonical, _value = transfer
+                        if str(canonical.get("selection_key") or "") == str(item.get("selection_key") or ""):
+                            normalized.append(cast(ActionArtifact, item))
+                            return
             if "value" in item:
                 registered = self.register_execution_artifact(
                     action_call_id=action_call_id,
@@ -526,7 +577,7 @@ class ActionArtifactManager:
                     registered["path"] = str(path)
                 normalized.append(registered)
                 return
-            if any(key in item for key in ("path", "uri", "url")):
+            if any(key in item for key in ("artifact_id", "path", "uri", "url")):
                 normalized.append(
                     self.register_external_artifact_ref(
                         action_call_id=action_call_id,
@@ -712,7 +763,11 @@ class ActionArtifactManager:
             artifact_refs=artifact_refs,
             redaction_report=redaction_report,
         )
-        return self._to_model_visible_record(record) if result_exceeds_inline_limit else record
+        # Keep the host-facing ActionResult complete in process. Model and
+        # RuntimeEvent boundaries call the explicit projection helpers; doing
+        # that here would collapse the authoritative host result and mix the
+        # carrier policy into artifact finalization.
+        return record
 
     def normalize_execution_records(
         self,
@@ -748,9 +803,9 @@ class ActionArtifactManager:
             return record
         digest = record.get("model_digest")
         if not isinstance(digest, dict):
-            return record
+            return cls._project_model_artifact_refs(record)
         if digest.get("same_as") == "result" and isinstance(record.get("result"), dict):
-            return record
+            return cls._project_model_artifact_refs(record)
         visible_digest = cls._to_hot_path_digest(digest)
         visible = cast(ActionResult, {
             "action_call_id": record.get("action_call_id", visible_digest.get("action_call_id", "")),
@@ -782,7 +837,13 @@ class ActionArtifactManager:
             visible["data"] = visible_digest
             visible["model_digest"] = visible_digest
         artifact_refs = visible_digest.get("artifact_refs", [])
-        visible["artifact_refs"] = artifact_refs if isinstance(artifact_refs, list) else []
+        visible["artifact_refs"] = [
+            cls._to_model_selection_candidate(ref)
+            for ref in artifact_refs
+            if isinstance(ref, dict)
+        ] if isinstance(artifact_refs, list) else []
+        if isinstance(visible.get("result"), dict):
+            visible["result"]["artifact_refs"] = visible["artifact_refs"]
         visible["artifacts"] = visible["artifact_refs"]
         if record.get("error"):
             visible["error"] = cls._compact_text(record.get("error"), limit=1200)
@@ -793,6 +854,34 @@ class ActionArtifactManager:
         if not isinstance(records, list):
             return []
         return [cls._to_model_visible_record(record) for record in records]
+
+    @classmethod
+    def _to_action_flow_return_records(
+        cls,
+        records: list[ActionResult] | None,
+    ) -> list[ActionResult]:
+        """Bound large ActionFlow results without collapsing small host results."""
+
+        if not isinstance(records, list):
+            return []
+        projected: list[ActionResult] = []
+        for record in records:
+            digest = record.get("model_digest") if isinstance(record, dict) else None
+            preview_meta = digest.get("result_preview_meta") if isinstance(digest, dict) else None
+            meta = record.get("meta") if isinstance(record, dict) else None
+            output_was_bounded = (
+                isinstance(preview_meta, dict)
+                and preview_meta.get("truncated") is True
+            ) or (
+                isinstance(meta, dict)
+                and meta.get("max_output_bytes_exceeded") is True
+            )
+            projected.append(
+                cls._to_model_visible_record(record)
+                if output_was_bounded
+                else record
+            )
+        return projected
 
     @classmethod
     def _to_hot_path_digest(cls, digest: dict[str, Any]) -> dict[str, Any]:
@@ -834,26 +923,52 @@ class ActionArtifactManager:
     @classmethod
     def _compact_hot_path_artifact_ref(cls, ref: dict[str, Any]) -> dict[str, Any]:
         keep_keys = (
-            "artifact_id",
-            "action_call_id",
+            "selection_key",
             "artifact_type",
             "role",
             "label",
             "media_type",
             "available",
             "full_value_available",
-            "size",
-            "bytes",
-            "sha256",
             "truncated",
             "preview_size",
-            "meta",
+            "preview_omitted",
+            "readback_action_id",
         )
         compact = {key: ref.get(key) for key in keep_keys if key in ref}
         if "preview" in ref:
             compact["preview_omitted"] = True
             compact["readback_action_id"] = cls._RECALL_ACTION_ID
         return compact
+
+    @classmethod
+    def _to_model_selection_candidate(cls, ref: Mapping[str, Any]) -> ActionArtifact:
+        ref_data = dict(ref)
+        candidate = cls._compact_hot_path_artifact_ref(ref_data)
+        if "preview" in ref and "preview_omitted" not in candidate:
+            candidate["preview"] = cls._compact_value(ref.get("preview"), limit=1200)
+        return cast(ActionArtifact, candidate)
+
+    @classmethod
+    def _project_model_artifact_refs(cls, record: ActionResult) -> ActionResult:
+        visible = cast(ActionResult, deepcopy(record))
+        artifact_refs = record.get("artifact_refs")
+        refs = (
+            artifact_refs
+            if isinstance(artifact_refs, list) and artifact_refs
+            else record.get("artifacts", [])
+        )
+        visible_refs: list[ActionArtifact] = [
+            cls._to_model_selection_candidate(ref)
+            for ref in refs
+            if isinstance(ref, dict)
+        ] if isinstance(refs, list) else []
+        # Always overwrite both public aliases, including the empty case, so a
+        # malformed or partially normalized record cannot leave canonical
+        # identities visible through the other alias.
+        visible["artifact_refs"] = visible_refs
+        visible["artifacts"] = visible_refs
+        return visible
 
     # ── recall action injection ────────────────────────────────────────────
 

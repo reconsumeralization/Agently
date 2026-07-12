@@ -206,6 +206,7 @@ class AgentExecution:
         self._terminal_selected_action_artifact_ids: set[str] = set()
         self._terminal_preserved_action_artifact_ids: set[str] = set()
         self._terminal_error_projection: dict[str, Any] | None = None
+        self._terminal_status: Literal["completed", "failed", "cancelled"] | None = None
         self._model_request_result: Any = None
         self.status = "created"
         self._started = False
@@ -220,6 +221,7 @@ class AgentExecution:
         self.execution_prompt_snapshot: dict[str, Any] = self._snapshot_execution_prompt()
 
         self._start_lock = asyncio.Lock()
+        self._workspace_record_lock = asyncio.Lock()
         self.route_planner = HybridRoutePlanner(self.agent, prompt_snapshot=self.prompt_snapshot, execution=self)
         self.stream = AgentExecutionStream(
             execution_id=self.id,

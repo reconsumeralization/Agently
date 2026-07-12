@@ -55,6 +55,7 @@ class ActionApproval(TypedDict, total=False):
 
 
 class ActionArtifact(TypedDict, total=False):
+    selection_key: str
     artifact_id: str
     action_call_id: str
     label: str

@@ -321,6 +321,19 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 WorkspaceRetentionPolicy | None,
                 self._agent_task_option("workspace_retention_policy", None),
             )
+            # A failed task may have a compact resume snapshot from its last
+            # completed iteration. Anchor that verified Workspace record before
+            # destructive cleanup so failure discards transient process data
+            # without destroying the task's recovery point. Successful and
+            # cancelled runs do not gain this recovery root by default.
+            if status == "failed":
+                resume_ref = await self.workspace.latest_snapshot(self._resume_run_id(self.id))
+                if resume_ref is not None:
+                    await self.workspace.add_retention_anchor(
+                        self._workspace_execution_id,
+                        anchor_type="recovery",
+                        record_ref=resume_ref,
+                    )
             lifecycle = await self.workspace.get_retention_lifecycle(
                 self._workspace_execution_id,
                 status=status,
@@ -1418,11 +1431,13 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
     def _workspace_artifact_ref_has_trusted_readback(ref: Mapping[str, Any]) -> bool:
         path = str(ref.get("path") or "").strip()
         sha256 = str(ref.get("sha256") or "").strip()
-        try:
-            byte_count = int(ref.get("bytes") or 0)
-        except (TypeError, ValueError):
-            byte_count = 0
-        return bool(path and sha256 and byte_count > 0)
+        raw_byte_count = ref.get("bytes") if "bytes" in ref else None
+        byte_count = (
+            raw_byte_count
+            if isinstance(raw_byte_count, int) and not isinstance(raw_byte_count, bool)
+            else -1
+        )
+        return bool(path and sha256 and byte_count >= 0)
 
     @classmethod
     def _artifact_readback_evidence_ids(cls, refs: Any) -> list[str]:

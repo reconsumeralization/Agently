@@ -68,6 +68,7 @@ class ExecutionExchangeManager:
         self.register_routing_handler("posture", self._posture_handler, replace=True)
 
         self.respond = FunctionShifter.syncify(self.async_respond)
+        self.abandon = FunctionShifter.syncify(self.async_abandon)
         self.hot_wait_pending = FunctionShifter.syncify(self.async_hot_wait_pending)
 
     # ------------------------------------------------------------------ #
@@ -216,6 +217,8 @@ class ExecutionExchangeManager:
         execution: Any,
         interrupt_id: str,
         exchange_id: str | None = None,
+        on_resolved: Any = None,
+        on_closed: Any = None,
     ) -> str:
         try:
             loop = asyncio.get_running_loop()
@@ -229,11 +232,35 @@ class ExecutionExchangeManager:
             "loop": loop,
             "event": asyncio.Event(),
             "registered_at": time.time(),
+            "on_resolved": on_resolved,
+            "on_closed": on_closed,
         }
         keys = self._wait_keys(entry["execution_id"], entry["interrupt_id"], entry["exchange_id"])
         for key in keys:
             self._live_waits[key] = entry
+        if callable(on_closed) and loop is not None:
+            entry["close_watcher"] = loop.create_task(self._watch_live_execution(entry))
         return keys[0]
+
+    async def _call_live_wait_hook(self, hook: Any) -> None:
+        if not callable(hook):
+            return
+        result = hook()
+        if inspect.isawaitable(result):
+            await result
+
+    async def _watch_live_execution(self, entry: dict[str, Any]) -> None:
+        execution = entry["execution"]
+        try:
+            await execution._async_wait_for_close_snapshot()
+            await self._call_live_wait_hook(entry.get("on_closed"))
+        finally:
+            self._unregister_execution_live_waits(entry["execution_id"])
+
+    def _unregister_execution_live_waits(self, execution_id: str) -> None:
+        for key, entry in list(self._live_waits.items()):
+            if str(entry.get("execution_id") or "") == str(execution_id):
+                self._live_waits.pop(key, None)
 
     def unregister_live_wait(self, *, execution_id: str, interrupt_id: str, exchange_id: str | None = None):
         for key in self._wait_keys(str(execution_id), str(interrupt_id), exchange_id):
@@ -287,6 +314,7 @@ class ExecutionExchangeManager:
                 resume_request_id=resolved_resume_request_id,
                 actor=actor,
             )
+            await self._call_live_wait_hook(entry.get("on_resolved"))
 
         try:
             current_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
@@ -320,6 +348,30 @@ class ExecutionExchangeManager:
             exchange_id=entry.get("exchange_id"),
         )
         return view
+
+    async def async_abandon(self, exchange_key: str, *, reason: str = "abandoned") -> None:
+        """Close a live exchange execution and run its owner cleanup hook."""
+
+        entry = self._live_waits.get(str(exchange_key))
+        if entry is None:
+            raise KeyError(f"No live pending exchange found for '{ exchange_key }'.")
+        execution = entry["execution"]
+        owner_loop: asyncio.AbstractEventLoop | None = entry.get("loop")
+
+        async def _close() -> None:
+            await execution.async_close(reason=reason, pending_interrupts="cancel")
+            await self._call_live_wait_hook(entry.get("on_closed"))
+            self._unregister_execution_live_waits(entry["execution_id"])
+
+        current_loop = asyncio.get_running_loop()
+        if owner_loop is None or owner_loop is current_loop:
+            await _close()
+        elif owner_loop.is_closed():
+            raise RuntimeError(
+                f"Can not abandon exchange '{ exchange_key }': its owning event loop is closed."
+            )
+        else:
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_close(), owner_loop))
 
     # ------------------------------------------------------------------ #
     # Hot wait (connected mode driver, called by execution-handle owners)

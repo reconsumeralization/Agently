@@ -1352,7 +1352,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             if isinstance(record, Mapping):
                 key = "|".join(
                     str(record.get(field) or "")
-                    for field in ("artifact_id", "action_call_id", "path", "sha256", "source_url")
+                    for field in ("selection_key", "artifact_id", "action_call_id", "path", "sha256", "source_url")
                 )
                 if not key.strip("|"):
                     key = json.dumps(DataFormatter.sanitize(record), ensure_ascii=False, sort_keys=True)

@@ -705,6 +705,33 @@ class TriggerFlowActionFlow:
         execution = flow.create_execution(parent_run_context=action_loop_run, auto_close=False)
         exchange_paused = False
         action_loop_completed = False
+        standalone_scope_released = False
+
+        def release_standalone_artifact_scope_once() -> None:
+            nonlocal standalone_scope_released
+            if artifact_scope.get("kind") == "agent_execution" or standalone_scope_released:
+                return
+            standalone_scope_released = True
+            action._release_artifact_scope(artifact_scope)
+
+        async def finalize_live_exchange_execution() -> None:
+            from agently.base import execution_exchange
+
+            pending = execution.get_pending_interrupts()
+            if pending:
+                for pending_interrupt in pending.values():
+                    pending_envelope = pending_interrupt.get("external_wait_request")
+                    pending_envelope = pending_envelope if isinstance(pending_envelope, dict) else {}
+                    execution_exchange.register_live_wait(
+                        execution=execution,
+                        interrupt_id=str(pending_interrupt.get("id", "")),
+                        exchange_id=pending_envelope.get("exchange_id"),
+                        on_resolved=finalize_live_exchange_execution,
+                        on_closed=release_standalone_artifact_scope_once,
+                    )
+                return
+            await execution.async_close(reason="action_loop_exchange_resolved")
+            release_standalone_artifact_scope_once()
         try:
             with bind_runtime_context(
                 parent_run_context=action_loop_run,
@@ -737,6 +764,8 @@ class TriggerFlowActionFlow:
                                 execution=execution,
                                 interrupt_id=str(pending_interrupt.get("id", "")),
                                 exchange_id=pending_envelope.get("exchange_id"),
+                                on_resolved=finalize_live_exchange_execution,
+                                on_closed=release_standalone_artifact_scope_once,
                             )
                         )
                     pending_action = execution.get_state("pending_policy_approval_action", {})
@@ -952,12 +981,12 @@ class TriggerFlowActionFlow:
                 and not exchange_paused
                 and not action_loop_completed
             ):
-                action._release_artifact_scope(artifact_scope)
+                release_standalone_artifact_scope_once()
         if isinstance(result, dict):
             result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
             if artifact_scope.get("kind") != "agent_execution" and not exchange_paused:
-                action._release_artifact_scope(artifact_scope)
+                release_standalone_artifact_scope_once()
             return []
         try:
             normalized = [
@@ -969,9 +998,10 @@ class TriggerFlowActionFlow:
             ]
         finally:
             if artifact_scope.get("kind") != "agent_execution" and not exchange_paused:
-                action._release_artifact_scope(artifact_scope)
+                release_standalone_artifact_scope_once()
         if artifact_scope.get("kind") != "agent_execution" and not exchange_paused:
             normalized = action._project_released_artifact_scope(normalized, artifact_scope)
+        normalized = action._to_action_flow_return_records(normalized)
         with bind_runtime_context(
             parent_run_context=action_loop_run,
             tool_phase_run_context=action_loop_run,

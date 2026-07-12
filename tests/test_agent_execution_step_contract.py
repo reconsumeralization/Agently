@@ -108,6 +108,15 @@ class MockAgentExecutionRetryStatusRequester(MockAgentExecutionRequester):
         yield "done", response_text
 
 
+class MockFailingAgentExecutionRequester(MockAgentExecutionRequester):
+    name = "MockFailingAgentExecutionRequester"
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        _ = request_data
+        raise RuntimeError("real-route-provider-failure:" + "故障" * 5000)
+        yield  # pragma: no cover
+
+
 class _FakeStreamForGeneratorCancel:
     def __init__(self) -> None:
         self.items: list[Any] = []
@@ -398,6 +407,13 @@ def _create_retry_status_agent(name: str = "agent-execution-retry-status-test"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockAgentExecutionRetryStatusRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_failing_agent(name: str = "agent-execution-failing-test"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockFailingAgentExecutionRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -1933,12 +1949,11 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
                 "risk_notes": [],
             }
         elif "next_action" in text and "execution_commands" in text:
-            artifact_id_match = re.search(r"act_art_[0-9a-f]+", text)
-            action_call_id_match = re.search(r"act_call_[0-9a-f]+", text)
+            selection_key_match = re.search(r"sel_[0-9a-f]+", text)
             if (
                 "Review evidence by reading cold artifact refs" in text
                 and "read_action_artifact" in text
-                and artifact_id_match is not None
+                and selection_key_match is not None
             ):
                 MockTaskBoardReadbackRequester.review_planning_prompt = text
                 MockTaskBoardReadbackRequester.readback_planning_seen = True
@@ -1952,8 +1967,9 @@ class MockTaskBoardReadbackRequester(MockAgentExecutionRequester):
                                 "purpose": "Read dependency cold artifact.",
                                 "action_id": "read_action_artifact",
                                 "action_input": {
-                                    "artifact_id": artifact_id_match.group(0) if artifact_id_match else "missing",
-                                    "action_call_id": action_call_id_match.group(0) if action_call_id_match else "",
+                                    "selection_key": (
+                                        selection_key_match.group(0) if selection_key_match else "missing"
+                                    ),
                                 },
                             }
                         ],
@@ -8348,7 +8364,7 @@ async def test_two_bounded_step_executions_can_be_correlated_as_developer_loop()
 
 
 @pytest.mark.asyncio
-async def test_fresh_agent_execution_process_checkpoint_is_rejected_after_internal_completion(tmp_path):
+async def test_fresh_non_active_agent_execution_rejects_process_checkpoint_without_starting(tmp_path):
     agent = _create_agent("task-step-workspace-binding").use_workspace(tmp_path / "run")
     execution = (
         agent.input("workspace-bound step")
@@ -8364,14 +8380,14 @@ async def test_fresh_agent_execution_process_checkpoint_is_rejected_after_intern
         )
     )
 
-    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+    with pytest.raises(RuntimeError, match="non-active.*process|process.*non-active"):
         await execution.async_record_workspace(
             content={"stage": "requested-before-terminal"},
             summary="workspace-bound task-step record",
             checkpoint=True,
         )
 
-    assert execution.status == "success"
+    assert execution.status == "created"
     assert execution.workspace_refs["observations"] == []
     assert execution.workspace_refs["checkpoints"] == []
 
@@ -8381,13 +8397,13 @@ async def test_agent_execution_workspace_purpose_defaults_to_process(tmp_path):
     agent = _create_agent("task-step-workspace-process-purpose").use_workspace(tmp_path / "run")
     execution = agent.input("record process workspace data").create_execution().strategy("direct")
 
-    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+    with pytest.raises(RuntimeError, match="non-active.*process|process.*non-active"):
         await execution.async_record_workspace(
             content={"stage": "working"},
             meta={"workspace_purpose": "audit"},
         )
 
-    assert execution.status == "success"
+    assert execution.status == "created"
 
 
 @pytest.mark.asyncio
@@ -8510,15 +8526,15 @@ async def test_agent_execution_workspace_record_uses_execution_scoped_lazy_defau
         .create_execution(limits={"max_model_requests": 1})
     )
 
-    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+    with pytest.raises(RuntimeError, match="non-active.*process|process.*non-active"):
         await execution.async_record_workspace()
 
     assert getattr(workspace, "is_materialized") is False
-    assert getattr(execution.workspace, "is_materialized") is True
-    assert execution.workspace.root.exists()
+    assert getattr(execution.workspace, "is_materialized") is False
+    assert execution.workspace.root.exists() is False
 
 
-def test_agent_execution_record_workspace_sync_wrapper_rejects_post_terminal_process(tmp_path):
+def test_agent_execution_record_workspace_sync_wrapper_rejects_non_active_process(tmp_path):
     agent = _create_agent("task-step-workspace-sync").use_workspace(tmp_path / "run")
     execution = (
         agent.input("workspace-bound sync step")
@@ -8529,5 +8545,99 @@ def test_agent_execution_record_workspace_sync_wrapper_rejects_post_terminal_pro
         )
     )
 
-    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+    with pytest.raises(RuntimeError, match="non-active.*process|process.*non-active"):
         execution.record_workspace(content={"sync": True}, checkpoint=True)
+
+
+@pytest.mark.asyncio
+async def test_real_direct_route_emits_one_canonical_agent_execution_terminal_event(tmp_path):
+    events: list[Any] = []
+    agent = _create_agent("real-route-single-terminal-success").use_workspace(tmp_path / "success")
+    execution: Any = agent.input("Return one result.").create_execution().strategy("direct")
+
+    async def capture(event: Any) -> None:
+        if event.run is not None and event.run.execution_id == execution.id:
+            if event.event_type in {"agent_execution.completed", "agent_execution.failed"}:
+                events.append(event)
+
+    hook_name = "test.real_route_single_terminal_success"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        result = await execution.async_get_data()
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    assert "ok-" in str(result)
+    assert [event.event_type for event in events] == ["agent_execution.completed"]
+    assert [event.source for event in events] == ["BaseAgent"]
+    assert events[0].payload["close_snapshot"]["terminal_result"] == result
+
+
+@pytest.mark.asyncio
+async def test_real_direct_route_failure_emits_one_bounded_canonical_terminal_event(tmp_path):
+    events: list[Any] = []
+    agent = _create_failing_agent("real-route-single-terminal-failure").use_workspace(tmp_path / "failure")
+    execution: Any = agent.input("Fail through the real requester.").create_execution().strategy("direct")
+
+    async def capture(event: Any) -> None:
+        if event.run is not None and event.run.execution_id == execution.id:
+            if event.event_type in {"agent_execution.completed", "agent_execution.failed"}:
+                events.append(event)
+
+    hook_name = "test.real_route_single_terminal_failure"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        with pytest.raises(RuntimeError, match="real-route-provider-failure"):
+            await execution.async_get_data(max_retries=0)
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    assert [event.event_type for event in events] == ["agent_execution.failed"]
+    assert [event.source for event in events] == ["BaseAgent"]
+    close_snapshot = events[0].payload["close_snapshot"]
+    assert close_snapshot["terminal_result"]["status"] == "error"
+    assert len(str(close_snapshot).encode("utf-8")) <= 4096
+
+
+@pytest.mark.asyncio
+async def test_active_agent_execution_process_and_recovery_writes_use_execution_lifecycle_id(tmp_path):
+    agent = _create_agent("active-workspace-write").use_workspace(tmp_path / "workspace")
+    execution: Any = agent.input("Wait for active writes.").create_execution(
+        lineage={"task_id": "different-task-id", "step_id": "active-write"}
+    ).strategy("direct")
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def active_route(**_kwargs: Any) -> tuple[str, dict[str, str]]:
+        execution.route_info["selected_route"] = "model_request"
+        started.set()
+        await finish.wait()
+        return "model_request", {"answer": "done"}
+
+    execution._async_execute_route = active_route  # type: ignore[method-assign]
+    run = asyncio.create_task(execution.async_get_data())
+    await started.wait()
+    process_record = await asyncio.wait_for(
+        execution.async_record_workspace(purpose="process", content={"stage": "active"}),
+        timeout=1,
+    )
+    recovery_record = await asyncio.wait_for(
+        execution.async_record_workspace(
+            purpose="recovery",
+            content={"stage": "checkpoint"},
+            checkpoint=True,
+            checkpoint_state={"state_version": 11, "interrupts": {}, "intervention": {"ledger": {}}},
+        ),
+        timeout=1,
+    )
+
+    assert process_record["record"]["scope"]["execution_id"] == execution.id
+    assert recovery_record["checkpoint"] is not None
+    history = await execution.workspace.checkpoint_history(execution.id, step_id="active-write")
+    assert [item["id"] for item in history] == [recovery_record["checkpoint"]["id"]]
+    assert await execution.workspace.checkpoint_history("different-task-id") == []
+
+    finish.set()
+    assert await run == {"answer": "done"}
+    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+        await execution.async_record_workspace(purpose="process", content={"late": True})

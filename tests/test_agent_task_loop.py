@@ -3724,6 +3724,47 @@ async def test_agent_task_cancellation_applies_cancelled_retention_and_reraises(
     assert len(str(cancelled_items[0].value).encode("utf-8")) <= 4096
 
 
+@pytest.mark.asyncio
+async def test_agent_task_general_failure_applies_terminal_retention_once(tmp_path, monkeypatch):
+    agent = _create_agent("agent-task-failed-retention").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-failed-retention",
+        goal="Fail after writing process state.",
+        success_criteria=["Failure cleanup is recorded."],
+        execution="flat",
+    )
+    process_ref = await task.workspace.put(
+        {"process": "discard on failure"},
+        collection="observations",
+        kind="failed_task_process",
+    )
+    await task.workspace.write_file("working/failure.txt", "discard on failure")
+    apply_calls = 0
+    original_apply = task.workspace.apply_retention
+
+    async def fail_iteration(_iteration_index: int) -> dict[str, Any]:
+        raise RuntimeError("real AgentTask iteration failure")
+
+    async def count_apply(*args: Any, **kwargs: Any) -> Any:
+        nonlocal apply_calls
+        apply_calls += 1
+        return await original_apply(*args, **kwargs)
+
+    monkeypatch.setattr(cast(Any, task), "_run_iteration", fail_iteration)
+    monkeypatch.setattr(task.workspace, "apply_retention", count_apply)
+
+    with pytest.raises(RuntimeError, match="real AgentTask iteration failure"):
+        await task.async_run()
+
+    assert apply_calls == 1
+    assert task.status == "error"
+    assert task.diagnostics["workspace_retention"]["status"] in {"applied", "noop"}
+    assert await task.workspace.search(filters={"id": process_ref["id"]}) == []
+    with pytest.raises(FileNotFoundError):
+        await task.workspace.read_file("working/failure.txt")
+
+
 def test_agent_task_terminal_final_result_is_bounded_and_file_body_free(tmp_path):
     agent = _create_agent("agent-task-terminal-result-bounds").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -3810,7 +3851,10 @@ async def test_agent_task_terminal_retention_accepts_verified_zero_byte_file(tmp
         "role": "workspace_artifact",
     }
 
-    promoted = await task._register_terminal_deliverables([file_ref])
+    assert task._trusted_terminal_refs({"artifact_refs": [{**file_ref, "bytes": True}]}) == []
+    selected = task._trusted_terminal_refs({"artifact_refs": [file_ref]})
+    assert selected == [file_ref]
+    promoted = await task._register_terminal_deliverables(selected)
 
     assert len(promoted) == 1
     assert await task.workspace.get_data(promoted[0]) == file_ref
@@ -9106,7 +9150,6 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
         workspace=workspace_dir,
         max_iterations=3,
     )
-
     async def crash_on_second_iteration(iteration_index, plan, context_pack):
         if iteration_index >= 2:
             raise RuntimeError("simulated process crash")
@@ -9125,8 +9168,9 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
     assert snapshot is not None
     assert snapshot["iteration"] == 1
     assert snapshot["manifest"]["goal"].startswith("Repair a legacy")
-    # The bare task_id checkpoint history is unaffected by resume snapshots.
-    assert len(await agent.workspace.checkpoint_history("resumable-task")) == 1
+    # Failed-run cleanup discards ordinary process checkpoints while the
+    # explicitly anchored compact resume snapshot remains available.
+    assert await agent.workspace.checkpoint_history("resumable-task") == []
 
     # Second run: a fresh AgentExecution resumes from the snapshot and completes.
     MockAgentTaskRequester.reset()

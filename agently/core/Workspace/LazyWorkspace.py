@@ -22,6 +22,7 @@ from agently.types.data import (
     WorkspaceRetentionLifecycle,
     WorkspaceRetentionPreview,
     WorkspaceRetentionResult,
+    WorkspaceRetentionTerminalStatus,
 )
 from agently.types.plugins import WorkspaceBackend
 
@@ -146,10 +147,16 @@ class LazyWorkspace:
 
     async def get_retention_lifecycle(
         self,
-        *args: Any,
-        **kwargs: Any,
+        execution_id: str,
+        *,
+        status: WorkspaceRetentionTerminalStatus,
+        terminal_at: str | None = None,
     ) -> WorkspaceRetentionLifecycle:
-        return await self._materialize().get_retention_lifecycle(*args, **kwargs)
+        return await self._materialize().get_retention_lifecycle(
+            execution_id,
+            status=status,
+            terminal_at=terminal_at,
+        )
 
     async def apply_retention(
         self,

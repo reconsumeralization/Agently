@@ -1681,7 +1681,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 if basename and basename not in aliases:
                     aliases.append(basename)
 
-        for key in ("id", "cite_as", "path", "artifact_id", "action_call_id"):
+        for key in ("id", "cite_as", "path", "selection_key", "artifact_id", "action_call_id"):
             add(ref.get(key))
         raw_aliases = ref.get("aliases")
         if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, str | bytes | bytearray):
@@ -3027,6 +3027,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if not isinstance(ref, Mapping):
             return cls._compact_verifier_prompt_value(ref, max_chars=600)
         keep_keys = (
+            "selection_key",
             "artifact_id",
             "action_call_id",
             "path",
