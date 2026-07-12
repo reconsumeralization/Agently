@@ -24,6 +24,7 @@ from agently.types.data import (
     WorkspaceFileRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
+    WorkspaceRetentionPolicy,
     WorkspaceRetentionResult,
     WorkspaceRetentionTerminalStatus,
 )
@@ -32,12 +33,28 @@ from .AcceptanceLocator import build_workspace_artifact_acceptance_locator_items
 from .TaskShared import *
 
 _WORKSPACE_ARTIFACT_LOCATOR_SCAN_BYTES = 5_000_000
+_AGENT_TASK_TERMINAL_FINAL_RESULT_CHARS = 1600
 
 
 _PUBLIC_DELTA_RETRY_MARKER_RE = re.compile(r"\A<\$retry(?::(?P<label>[^>]*)?)?>(?P<body>.*?)</\$retry>\Z", re.DOTALL)
 
 
 class AgentTaskArtifactMixin(AgentTaskMixinBase):
+    def _compact_terminal_final_result(
+        self,
+        value: Any,
+        *,
+        trusted_file_refs: Sequence[Mapping[str, Any]] = (),
+    ) -> Any:
+        """Keep one useful bounded result, or a pointer for file-backed output."""
+
+        if trusted_file_refs:
+            return self._workspace_artifact_final_result_from_refs(trusted_file_refs)
+        return self._compact_value_for_meta(
+            DataFormatter.sanitize(value),
+            max_chars=_AGENT_TASK_TERMINAL_FINAL_RESULT_CHARS,
+        )
+
     async def _register_terminal_deliverables(
         self,
         refs: Sequence[WorkspaceFileRef | WorkspaceRecordRef | WorkspaceReferenceEnvelope],
@@ -223,6 +240,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             }
             return result
         try:
+            retention_policy = cast(
+                WorkspaceRetentionPolicy | None,
+                self._agent_task_option("workspace_retention_policy", None),
+            )
             preview = await self.workspace.inspect_retention(
                 {},
                 lifecycle={
@@ -235,6 +256,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 },
                 retained_refs=list(getattr(self, "_terminal_retained_refs", []) or []),
                 inline_result=DataFormatter.sanitize(self.result),
+                policy=retention_policy,
             )
             if preview["status"] == "ready":
                 result = await self.workspace.apply_retention(preview)
@@ -276,25 +298,73 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         return result
 
     @classmethod
-    def _trusted_terminal_file_refs(cls, *values: Any) -> list[dict[str, Any]]:
-        """Collect only explicit trusted ref fields from known terminal carriers."""
+    def _trusted_terminal_refs(
+        cls,
+        *values: Any,
+    ) -> list[WorkspaceFileRef | WorkspaceRecordRef | WorkspaceReferenceEnvelope]:
+        """Collect explicit, provenance-bearing Workspace refs from terminal carriers."""
 
-        refs: list[dict[str, Any]] = []
-        seen: set[tuple[str, int, str]] = set()
+        refs: list[WorkspaceFileRef | WorkspaceRecordRef | WorkspaceReferenceEnvelope] = []
+        seen: set[str] = set()
+
+        def append_ref(
+            value: Mapping[str, Any],
+            *,
+            identity: str,
+        ) -> None:
+            if identity in seen:
+                return
+            refs.append(
+                cast(
+                    WorkspaceFileRef | WorkspaceRecordRef | WorkspaceReferenceEnvelope,
+                    dict(DataFormatter.sanitize(dict(value))),
+                )
+            )
+            seen.add(identity)
+
+        def is_artifact_record_ref(value: Mapping[str, Any]) -> bool:
+            meta = value.get("meta")
+            source = value.get("source")
+            return (
+                bool(str(value.get("id") or ""))
+                and str(value.get("collection") or "") == "artifacts"
+                and isinstance(meta, Mapping)
+                and meta.get("artifact_ref") is True
+                and isinstance(source, Mapping)
+                and source.get("type") == "workspace"
+                and source.get("name") == "artifact_ref"
+            )
+
+        def is_artifact_reference_envelope(value: Mapping[str, Any]) -> bool:
+            return (
+                bool(str(value.get("workspace_id") or ""))
+                and bool(str(value.get("record_id") or ""))
+                and str(value.get("collection") or "") == "artifacts"
+                and bool(str(value.get("digest") or ""))
+                and value.get("content_ref") not in (None, "")
+            )
 
         def collect(value: Any) -> None:
             if isinstance(value, Mapping):
                 if cls._workspace_artifact_ref_has_trusted_readback(value) and cls._is_trusted_workspace_artifact_ref(
                     value
                 ):
-                    key = (
-                        str(value.get("path") or ""),
-                        int(value.get("bytes") or 0),
-                        str(value.get("sha256") or ""),
+                    append_ref(
+                        value,
+                        identity=(
+                            f"file:{value.get('path')}:{int(value.get('bytes') or 0)}:"
+                            f"{value.get('sha256')}"
+                        ),
                     )
-                    if key not in seen:
-                        refs.append(dict(DataFormatter.sanitize(dict(value))))
-                        seen.add(key)
+                    return
+                if is_artifact_record_ref(value):
+                    append_ref(value, identity=f"record:{value.get('id')}")
+                    return
+                if is_artifact_reference_envelope(value):
+                    append_ref(
+                        value,
+                        identity=f"envelope:{value.get('workspace_id')}:{value.get('record_id')}",
+                    )
                     return
                 for key in ("file_refs", "artifact_refs"):
                     nested = value.get(key)
@@ -312,6 +382,16 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         for value in values:
             collect(value)
         return refs
+
+    @classmethod
+    def _trusted_terminal_file_refs(cls, *values: Any) -> list[dict[str, Any]]:
+        """Return the file-backed subset used for compact user-facing pointers."""
+
+        return [
+            dict(ref)
+            for ref in cls._trusted_terminal_refs(*values)
+            if "workspace_id" not in ref and "id" not in ref
+        ]
 
     @staticmethod
     def _workspace_artifact_manifest_path(manifest: Mapping[str, Any] | None) -> str:

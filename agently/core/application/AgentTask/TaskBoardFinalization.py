@@ -556,11 +556,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         candidate_final_result = self._taskboard_candidate_final_result(revision)
         final_refs = self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view))
         final_refs = await self._taskboard_materialize_required_final_deliverable_refs(final_refs)
-        trusted_final_refs = [
-            ref
-            for ref in final_refs
-            if isinstance(ref, Mapping) and self._is_trusted_workspace_artifact_ref(ref)
-        ]
+        trusted_terminal_refs = self._trusted_terminal_refs(final_refs)
+        trusted_final_refs = self._trusted_terminal_file_refs(trusted_terminal_refs)
         can_attempt_degraded_final = self._taskboard_can_attempt_degraded_final(revision, schedule)
         if result_status != "completed" and not can_attempt_degraded_final:
             self.status = "blocked" if result_status == "blocked" else "error"
@@ -955,10 +952,11 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             completion_notes=completion_notes,
         )
         self.status = "completed" if accepted else "blocked"
-        promoted_refs = await self._register_terminal_deliverables(trusted_final_refs)
-        compact_final_result = final.get("final_result", "")
-        if trusted_final_refs:
-            compact_final_result = self._workspace_artifact_final_result_from_refs(trusted_final_refs)
+        promoted_refs = await self._register_terminal_deliverables(trusted_terminal_refs)
+        compact_final_result = self._compact_terminal_final_result(
+            final.get("final_result", ""),
+            trusted_file_refs=trusted_final_refs,
+        )
         self._terminal_taskboard_state = {
             "revision": revision.to_dict(),
             "schedule": schedule.to_dict(),

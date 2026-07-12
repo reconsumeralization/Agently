@@ -13,7 +13,12 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.core.orchestration import TaskBoard, build_task_board_acceptance_index, build_task_board_evidence_view
+from agently.core.orchestration import (
+    TaskBoard,
+    build_task_board_acceptance_index,
+    build_task_board_evidence_view,
+    resolve_task_board_planning_policy,
+)
 from agently.core.application.AgentTask.BlockCarrier import (
     WorkUnitIntent,
     WorkUnitResult,
@@ -33,6 +38,7 @@ from agently.types.data import (
     TaskBoardCardResult,
     TaskBoardGraph,
     TaskBoardRevision,
+    WorkspaceRetentionPolicy,
 )
 from agently.utils import DataFormatter, Settings
 from examples.agent_task.interview_question_preparation import judge_interview_semantics
@@ -3100,45 +3106,86 @@ async def test_agent_task_internal_flow_workspace_isolated_until_terminal_retent
         success_criteria=["The bounded result is returned."],
         execution="flat",
     )
-    create_execution_kwargs: dict[str, Any] = {}
+    process_ref: dict[str, Any] | None = None
+    process_visible_before_retention = False
+    canonical_file_ref: dict[str, Any] = {}
+    flow_execution_observation: dict[str, Any] = {}
 
-    class _Execution:
-        async def async_start(self, _input: Any) -> None:
-            task.status = "completed"
-            task.result = {
-                "status": "completed",
-                "accepted": True,
-                "artifact_status": "accepted",
-                "task_id": task.id,
-                "execution_strategy": "flat",
-                "effective_execution_strategy": "flat",
-                "final_response": "Completed.",
-                "final_result": "Completed.",
-                "artifact_refs": [],
-                "reason": "",
-                "missing_criteria": [],
+    async def terminal_business_stage(_iteration_index: int) -> dict[str, Any]:
+        nonlocal process_ref, process_visible_before_retention, canonical_file_ref
+        active_executions = list(cast(Any, task._flow)._executions.values())
+        assert len(active_executions) == 1
+        active_execution = active_executions[0]
+        flow_execution_observation.update(
+            {
+                "id": active_execution.id,
+                "run_context": active_execution.run_context,
+                "flow_name": active_execution.run_context.meta["flow_name"],
+                "workspace": active_execution._get_runtime_resource("workspace", None),
             }
+        )
+        created_process_ref = await task.workspace.put(
+            {"process": "visible until the unified terminal retention call"},
+            collection="observations",
+            kind="agent_task_observation",
+        )
+        process_ref = created_process_ref
+        await task.workspace.put_checkpoint(task.id, {"status": "running"}, step_id="business-stage")
+        await task.workspace.write_file("working/draft.md", "temporary working file")
+        await task.workspace.write_file("reports/final.md", "# Final\n\nCanonical deliverable.\n")
+        readback = await task.workspace.read_file("reports/final.md", max_bytes=128)
+        canonical_file_ref = {
+            "path": "reports/final.md",
+            "bytes": int(readback["bytes"]),
+            "sha256": str(readback["sha256"]),
+            "media_type": readback.get("media_type"),
+            "content_kind": str(readback.get("content_kind") or "text"),
+            "role": "workspace_artifact",
+        }
+        promoted = await task._register_terminal_deliverables([cast(Any, canonical_file_ref)])
+        process_visible_before_retention = (
+            await cast(Any, task.workspace.backend).get_record(created_process_ref["id"])
+        ) is not None
+        task.status = "completed"
+        task.result = {
+            "status": "completed",
+            "accepted": True,
+            "artifact_status": "accepted",
+            "task_id": task.id,
+            "execution_strategy": "flat",
+            "effective_execution_strategy": "flat",
+            "final_response": "Completed: reports/final.md",
+            "final_result": "Workspace artifact delivered at reports/final.md.",
+            "artifact_refs": promoted,
+            "reason": "",
+            "missing_criteria": [],
+        }
+        await task._emit("agent_task.completed", task.result)
+        return {"terminal": True, "status": "completed"}
 
-        async def async_close(self) -> None:
-            return None
-
-    class _Flow:
-        def create_execution(self, **kwargs: Any) -> _Execution:
-            create_execution_kwargs.update(kwargs)
-            return _Execution()
-
-    async def noop(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    cast(Any, task)._flow = _Flow()
-    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
-    monkeypatch.setattr(cast(Any, task), "_ensure_final_reflection", noop)
-    monkeypatch.setattr(cast(Any, task), "_apply_terminal_workspace_retention", noop, raising=False)
+    monkeypatch.setattr(cast(Any, task), "_run_iteration", terminal_business_stage)
 
     result = await task.async_run()
 
     assert result["status"] == "completed"
-    assert create_execution_kwargs == {"auto_close": False, "workspace": False}
+    assert process_visible_before_retention is True
+    assert process_ref is not None
+    assert await cast(Any, task.workspace.backend).get_record(process_ref["id"]) is None
+    assert await task.workspace.checkpoint_history(task.id) == []
+    assert task.workspace.resolve_file_path("working/draft.md").exists() is False
+    final_readback = await task.workspace.read_file("reports/final.md", max_bytes=128)
+    assert final_readback["sha256"] == canonical_file_ref["sha256"]
+    assert await task.workspace.get_data(result["artifact_refs"][0]) == canonical_file_ref
+    manifest_id = cast(Any, task.workspace.backend)._terminal_manifest_record_id(task.id)
+    assert await cast(Any, task.workspace.backend).get_record(manifest_id) is not None
+
+    assert flow_execution_observation["flow_name"] == "agent-task"
+    assert flow_execution_observation["workspace"] is None
+    assert cast(Any, task._flow)._executions == {}
+    default_flow_workspace = Agently.create_workspace(
+        cast(Any, task._flow)._default_execution_workspace_root(flow_execution_observation["run_context"])
+    )
+    assert await default_flow_workspace.query_runtime_events(flow_execution_observation["id"]) == []
 
 
 @pytest.mark.asyncio
@@ -3208,6 +3255,153 @@ async def test_agent_task_terminal_retention_promotes_trusted_file_ref(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_agent_task_terminal_selector_retains_explicit_record_and_envelope_refs(tmp_path):
+    agent = _create_agent("agent-task-terminal-record-envelope").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-record-envelope",
+        goal="Retain explicit canonical Workspace refs.",
+        success_criteria=["Both explicit Workspace refs remain retention roots."],
+        execution="flat",
+    )
+    record_ref = await task.workspace.put_artifact_ref(
+        task.id,
+        {"kind": "record deliverable", "value": "one"},
+        metadata={"scope": {"task_id": task.id}, "kind": "agent_task_deliverable"},
+    )
+    envelope_record = await task.workspace.put_artifact_ref(
+        task.id,
+        {"kind": "envelope deliverable", "value": "two"},
+        metadata={"scope": {"task_id": task.id}, "kind": "agent_task_deliverable"},
+    )
+    envelope = await task.workspace.ref_envelope(envelope_record)
+    structured_result = {"artifact_refs": [record_ref, envelope]}
+
+    selector = getattr(task, "_trusted_terminal_refs", None)
+    assert callable(selector), "AgentTask terminal selector must accept explicit canonical Workspace refs."
+    selected = cast(Any, selector)(structured_result)
+    promoted = await task._register_terminal_deliverables(cast(Any, selected))
+    anchors = await task.workspace.retention_anchors(task.id, anchor_type="deliverable")
+
+    assert selected == [record_ref, envelope]
+    assert promoted == [record_ref]
+    assert len(anchors) == 2
+    anchored_record_ids = {anchor["record_ref"]["record_id"] for anchor in anchors}
+    assert anchored_record_ids == {record_ref["id"], envelope_record["id"]}
+    retained = cast(list[dict[str, Any]], task._terminal_retained_refs)
+    assert any(ref.get("id") == record_ref["id"] for ref in retained)
+    assert any(ref.get("record_id") == envelope_record["id"] for ref in retained)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_taskboard_async_run_promotes_and_retains_canonical_deliverable(tmp_path, monkeypatch):
+    agent = _create_agent("agent-task-taskboard-terminal-retention").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-taskboard-terminal-retention",
+        goal="Produce the final TaskBoard report.",
+        success_criteria=["The report is written, read back, and retained."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Write the final report.",
+            "required_outputs": ["Final report"],
+        }
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-0",
+            "graph": {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]},
+        }
+    )
+    planning_policy = resolve_task_board_planning_policy(
+        "medium",
+        metadata={"execution_strategy": "taskboard", "task_id": task.id},
+    )
+    final_body = "TASKBOARD_FILE_BODY_MUST_STAY_IN_WORKSPACE\n" + ("report section\n" * 500)
+    process_ref: dict[str, Any] | None = None
+
+    async def build_context() -> dict[str, Any]:
+        return {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}}
+
+    async def request_plan(_context_pack: Mapping[str, Any]) -> SimpleNamespace:
+        return SimpleNamespace(revision=revision, planning_policy=planning_policy)
+
+    async def run_card(context: Any, _context_pack: Mapping[str, Any]) -> TaskBoardCardResult:
+        nonlocal process_ref
+        process_ref = await task.workspace.put(
+            {"process": "TaskBoard card process state"},
+            collection="observations",
+            kind="agent_task_taskboard_card_process",
+        )
+        await task.workspace.write_file("working/taskboard/draft.md", "temporary TaskBoard draft")
+        await task.workspace.write_file("reports/final.md", final_body)
+        readback = await task.workspace.read_file("reports/final.md", max_bytes=128)
+        ref = {
+            "path": "reports/final.md",
+            "bytes": int(readback["bytes"]),
+            "sha256": str(readback["sha256"]),
+            "media_type": readback.get("media_type"),
+            "content_kind": str(readback.get("content_kind") or "text"),
+            "role": "workspace_artifact",
+            "source": "agent_task.workspace_artifact.taskboard_test",
+            "preview": str(readback.get("content") or ""),
+            "truncated": bool(readback.get("truncated")),
+            "read_bytes": int(readback.get("read_bytes") or 0),
+        }
+        return TaskBoardCardResult(
+            card_id=context.card.id,
+            status="completed",
+            preview={"status": "completed", "final_result": final_body, "remaining_work": []},
+            file_refs=(ref,),
+        )
+
+    async def verify_final(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        execution_result = kwargs["execution_result"]
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "TaskBoard final artifact passed verification.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": execution_result["final_result"],
+        }
+
+    async def fail_finalizer(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("The completed terminal card should be promoted without another finalizer request.")
+
+    monkeypatch.setattr(cast(Any, task), "_build_context", build_context)
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_plan", request_plan)
+    monkeypatch.setattr(cast(Any, task), "_run_taskboard_card", run_card)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", verify_final)
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+
+    result = await task.async_run()
+
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert len(result["artifact_refs"]) == 1
+    assert result["final_result"].startswith("Workspace artifact delivered at reports/final.md")
+    assert "TASKBOARD_FILE_BODY_MUST_STAY_IN_WORKSPACE" not in json.dumps(result, ensure_ascii=False)
+    assert "taskboard" not in result
+    assert process_ref is not None
+    assert await cast(Any, task.workspace.backend).get_record(process_ref["id"]) is None
+    assert await task.workspace.checkpoint_history(task.id) == []
+    assert task.workspace.resolve_file_path("working/taskboard/draft.md").exists() is False
+    readback = await task.workspace.read_file("reports/final.md", max_bytes=len(final_body.encode("utf-8")) + 1)
+    assert readback["content"] == final_body
+    assert task.diagnostics["workspace_retention"]["status"] in {"applied", "noop"}
+
+
+@pytest.mark.asyncio
 async def test_agent_task_terminal_retention_defers_on_deliverable_digest_mismatch(tmp_path):
     agent = _create_agent("agent-task-terminal-retention-mismatch").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -3256,6 +3450,83 @@ async def test_agent_task_terminal_retention_defers_on_deliverable_digest_mismat
     assert await cast(Any, task.workspace.backend).get_record(process_ref["id"]) is not None
     changed = await task.workspace.read_file("reports/final.md", max_bytes=64)
     assert changed["content"] == "changed after trusted readback"
+
+
+@pytest.mark.asyncio
+async def test_agent_task_terminal_retention_passes_workspace_policy_override(tmp_path):
+    policy = cast(
+        WorkspaceRetentionPolicy,
+        {"rules": [{"category": "records", "representation": "hot"}]},
+    )
+    agent = _create_agent("agent-task-terminal-retention-policy").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-retention-policy",
+        goal="Keep terminal process records by explicit Workspace policy.",
+        success_criteria=["The explicit Workspace policy is applied."],
+        execution="flat",
+        options={"agent_task": {"workspace_retention_policy": policy}},
+    )
+    process_ref = await task.workspace.put(
+        {"process": "explicitly retained by policy"},
+        collection="observations",
+        kind="agent_task_observation",
+    )
+    await task.workspace.write_file("working/transient.txt", "discard by default file policy")
+    task.result = {
+        "status": "completed",
+        "accepted": True,
+        "artifact_status": "accepted",
+        "task_id": task.id,
+        "execution_strategy": "flat",
+        "effective_execution_strategy": "flat",
+        "final_response": "Completed.",
+        "final_result": "Completed.",
+        "artifact_refs": [],
+        "reason": "",
+        "missing_criteria": [],
+    }
+
+    retention_result = await task._apply_terminal_workspace_retention(status="completed")
+
+    assert retention_result is not None
+    assert retention_result["status"] in {"applied", "noop"}
+    assert await cast(Any, task.workspace.backend).get_record(process_ref["id"]) is not None
+    assert task.workspace.resolve_file_path("working/transient.txt").exists() is False
+    assert retention_result["accounting"]["entities"]["record_ids"] == 0
+
+
+def test_agent_task_terminal_final_result_is_bounded_and_file_body_free(tmp_path):
+    agent = _create_agent("agent-task-terminal-result-bounds").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-result-bounds",
+        goal="Return a bounded terminal result.",
+        success_criteria=["The result remains useful without duplicating file bodies."],
+        execution="flat",
+    )
+    body = "FILE_BODY_MUST_NOT_REACH_TERMINAL_RESULT\n" + ("section body\n" * 800)
+    file_ref = {
+        "path": "reports/final.md",
+        "bytes": len(body.encode("utf-8")),
+        "sha256": "a" * 64,
+        "media_type": "text/markdown",
+        "content_kind": "text",
+        "role": "workspace_artifact",
+    }
+    compact = getattr(task, "_compact_terminal_final_result", None)
+    assert callable(compact), "AgentTask must own one bounded terminal final_result compactor."
+
+    file_result = cast(Any, compact)(body, trusted_file_refs=[file_ref])
+    natural_result = cast(Any, compact)("BUSINESS_RESULT_START\n" + ("useful detail\n" * 800))
+
+    assert isinstance(file_result, str)
+    assert file_result.startswith("Workspace artifact delivered at reports/final.md")
+    assert "FILE_BODY_MUST_NOT_REACH_TERMINAL_RESULT" not in file_result
+    assert isinstance(natural_result, Mapping)
+    assert natural_result["truncated"] is True
+    assert str(natural_result["preview"]).startswith("BUSINESS_RESULT_START")
+    assert len(json.dumps(natural_result, ensure_ascii=False)) < 2200
 
 
 @pytest.mark.asyncio
