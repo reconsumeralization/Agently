@@ -729,6 +729,9 @@ class LocalWorkspaceBackend:
         self.content_root = self.root / "content"
         self.files_root = self.root / "files"
         self.db_path = self.root / "workspace.db"
+        self._retention_full_vacuum_min_bytes = 64 * 1024 * 1024
+        self._retention_full_vacuum_ratio = 0.25
+        self._retention_incremental_vacuum_pages = 1024
         self._root_mutation_guard = _root_mutation_guard(self.root)
         self.mode = mode
         self.read_only = mode in {"read", "read_only", "readonly"}
@@ -1181,7 +1184,11 @@ class LocalWorkspaceBackend:
             "supports_range_read": True,
             "supports_stream_read": True,
             "supports_retention": supports_retention,
-            "supports_physical_reclamation": False,
+            "supports_physical_reclamation": bool(
+                retention_provider is self
+                and isinstance(self.db_path, Path)
+                and hasattr(os.stat_result, "st_blocks")
+            ),
             "supports_compaction_anchor": True,
             "supports_remote_backend": False,
         }
@@ -4403,6 +4410,16 @@ class LocalWorkspaceBackend:
             "attempts": max(current_attempts, proposed_attempts),
             "last_error": last_error,
         }
+        current_accounting = cast(Mapping[str, Any], current["accounting"])
+        proposed_accounting = cast(Mapping[str, Any], proposed["accounting"])
+        current_physical = int(current_accounting["physical_bytes_reclaimed"]) + int(
+            current_accounting["physical_bytes_pending"]
+        )
+        proposed_physical = int(
+            proposed_accounting["physical_bytes_reclaimed"]
+        ) + int(proposed_accounting["physical_bytes_pending"])
+        if proposed_physical >= current_physical:
+            merged["accounting"] = dict(proposed_accounting)
         return merged
 
     @staticmethod
@@ -4694,6 +4711,160 @@ class LocalWorkspaceBackend:
             accounting=cast(Mapping[str, Any], meta["accounting"]),
         )
 
+    def _sqlite_allocated_bytes(self) -> int:
+        total = 0
+        for path in (
+            self.db_path,
+            Path(f"{self.db_path}-wal"),
+            Path(f"{self.db_path}-shm"),
+        ):
+            try:
+                allocated = path.stat().st_blocks * 512
+            except FileNotFoundError:
+                continue
+            total += int(allocated)
+        return total
+
+    def _sqlite_pending_bytes_sync(self) -> int:
+        with sqlite3.connect(self.db_path) as conn:
+            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+            freelist = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+        return max(0, page_size * freelist)
+
+    def _checkpoint_sqlite_wal_sync(self, mode: str) -> None:
+        with sqlite3.connect(self.db_path, timeout=0.1) as conn:
+            row = conn.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+            if row is not None and int(row[0]) != 0:
+                raise sqlite3.OperationalError(
+                    f"SQLite WAL {mode} checkpoint is busy."
+                )
+
+    def _run_sqlite_physical_maintenance_sync(self) -> None:
+        attempted_vacuum = False
+        with sqlite3.connect(self.db_path, timeout=0.1) as conn:
+            checkpoint = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            if checkpoint is not None and int(checkpoint[0]) != 0:
+                raise sqlite3.OperationalError(
+                    "SQLite WAL PASSIVE checkpoint is busy."
+                )
+            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+            freelist = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+            auto_vacuum = int(conn.execute("PRAGMA auto_vacuum").fetchone()[0])
+            free_bytes = page_size * freelist
+            db_allocated = (
+                int(self.db_path.stat().st_blocks * 512)
+                if self.db_path.exists()
+                else 0
+            )
+            if auto_vacuum == 2 and freelist > 0:
+                pages = min(freelist, self._retention_incremental_vacuum_pages)
+                conn.execute(f"PRAGMA incremental_vacuum({pages})")
+                attempted_vacuum = True
+            elif free_bytes > 0 and (
+                free_bytes >= self._retention_full_vacuum_min_bytes
+                or free_bytes >= db_allocated * self._retention_full_vacuum_ratio
+            ):
+                conn.execute("VACUUM")
+                attempted_vacuum = True
+        if attempted_vacuum:
+            self._checkpoint_sqlite_wal_sync("TRUNCATE")
+
+    async def _finalize_sqlite_physical_reclamation(
+        self,
+        result: WorkspaceRetentionResult,
+        *,
+        allocated_before: int,
+    ) -> WorkspaceRetentionResult:
+        manifest_ref = result["manifest_ref"]
+        if manifest_ref is None:
+            return result
+        maintenance_error: Exception | None = None
+        try:
+            await asyncio.to_thread(self._run_sqlite_physical_maintenance_sync)
+        except (sqlite3.Error, OSError) as error:
+            maintenance_error = error
+
+        async def measured_accounting() -> dict[str, Any]:
+            pending_total = await asyncio.to_thread(self._sqlite_pending_bytes_sync)
+            allocated_after = self._sqlite_allocated_bytes()
+            reclaimed = max(0, allocated_before - allocated_after)
+            accounting = dict(result["accounting"])
+            accounting["physical_bytes_reclaimed"] = reclaimed
+            accounting["physical_bytes_pending"] = max(0, pending_total - reclaimed)
+            return accounting
+
+        try:
+            accounting = await measured_accounting()
+        except (sqlite3.Error, OSError) as error:
+            diagnostic = retention_diagnostic(
+                "workspace.retention.physical_measurement_failed",
+                f"Workspace logical cleanup applied but physical allocation measurement failed: {error}",
+                entity=str(manifest_ref["id"]),
+                detail={"error_type": type(error).__name__},
+            )
+            diagnostic["retryable"] = True
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=result["plan_fingerprint"],
+                manifest_ref=manifest_ref,
+                retained_refs=result["retained_refs"],
+                accounting=result["accounting"],
+                diagnostics=[diagnostic],
+            )
+        updated_ref = manifest_ref
+        try:
+            for _ in range(2):
+                meta = cast(dict[str, Any], dict(updated_ref["meta"]))
+                meta["accounting"] = accounting
+                updated_ref = self._update_terminal_manifest_meta(updated_ref, meta)
+                next_accounting = await measured_accounting()
+                if next_accounting == accounting:
+                    break
+                accounting = next_accounting
+        except (
+            sqlite3.Error,
+            OSError,
+            _TerminalManifestLedgerError,
+            _TerminalManifestPlanConflict,
+        ) as error:
+            diagnostic = retention_diagnostic(
+                "workspace.retention.physical_accounting_persist_failed",
+                f"Workspace physical accounting could not be persisted after logical cleanup: {error}",
+                entity=str(manifest_ref["id"]),
+                detail={"error_type": type(error).__name__},
+            )
+            return self._retention_result(
+                status="deferred",
+                plan_fingerprint=result["plan_fingerprint"],
+                manifest_ref=updated_ref,
+                retained_refs=result["retained_refs"],
+                accounting=accounting,
+                diagnostics=[diagnostic],
+            )
+        if maintenance_error is not None:
+            diagnostic = retention_diagnostic(
+                "workspace.retention.physical_maintenance_failed",
+                f"Workspace logical cleanup applied but SQLite physical maintenance failed: {maintenance_error}",
+                entity=str(updated_ref["id"]),
+                detail={"error_type": type(maintenance_error).__name__},
+            )
+            diagnostic["retryable"] = True
+            return self._retention_result(
+                status="applied",
+                plan_fingerprint=result["plan_fingerprint"],
+                manifest_ref=updated_ref,
+                retained_refs=result["retained_refs"],
+                accounting=accounting,
+                diagnostics=[diagnostic],
+            )
+        return self._retention_result(
+            status="applied",
+            plan_fingerprint=result["plan_fingerprint"],
+            manifest_ref=updated_ref,
+            retained_refs=result["retained_refs"],
+            accounting=accounting,
+        )
+
     async def apply_retention(
         self,
         preview: WorkspaceRetentionPreview,
@@ -4721,7 +4892,13 @@ class LocalWorkspaceBackend:
                     )
                 else:
                     try:
+                        allocated_before = self._sqlite_allocated_bytes()
                         result = await self._apply_retention_unlocked(preview)
+                        if result["status"] == "applied":
+                            result = await self._finalize_sqlite_physical_reclamation(
+                                result,
+                                allocated_before=allocated_before,
+                            )
                     except (sqlite3.Error, OSError) as error:
                         diagnostic = retention_diagnostic(
                             "workspace.retention.apply_failed",

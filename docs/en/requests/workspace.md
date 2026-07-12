@@ -372,7 +372,12 @@ checkpoint, RuntimeEvent storage, ref resolution, retention policy, text index,
 policy, and vector index. It also reports capability flags such as
 `supports_event_sequence`, `supports_range_read`, `supports_stream_read`,
 `supports_retention`, `supports_compaction_anchor`, `supports_cas`,
-`supports_lease`, `supports_artifact_refs`, and `supports_remote_backend`.
+`supports_lease`, `supports_artifact_refs`, `supports_physical_reclamation`, and
+`supports_remote_backend`. The built-in local SQLite backend reports physical
+reclamation only when exact filesystem block allocation and safe maintenance
+are available. Retention accounting measures the SQLite DB/WAL/SHM files; the
+stable Workspace mutation-lock file remains fixed system overhead and is never
+reported as reclaimed bytes.
 Distributed recovery should fail closed when the selected provider lacks the
 required flags or the matching provider methods.
 

@@ -68,6 +68,29 @@ def _assert_zero_actual_accounting(result: dict[str, Any]) -> None:
     assert all(count == 0 for count in accounting["entities"].values())
 
 
+def _sqlite_allocated_bytes(db_path: Path) -> int:
+    return sum(
+        path.stat().st_blocks * 512
+        for path in (
+            db_path,
+            Path(f"{db_path}-wal"),
+            Path(f"{db_path}-shm"),
+        )
+        if path.exists()
+    )
+
+
+async def _seed_large_sqlite_retention_scope(target, *, count: int = 48) -> None:
+    padding = "x" * 32768
+    for index in range(count):
+        await target.put(
+            {"row": index},
+            collection="observations",
+            kind="large_sqlite_row",
+            meta={"padding": padding, "index": index},
+        )
+
+
 def test_inspect_retention_default_policy_and_helpers_are_canonical():
     policy = resolve_retention_policy(None)
     assert policy == {
@@ -1476,9 +1499,9 @@ async def test_apply_retention_atomically_cleans_all_selected_carriers_and_is_id
         "attempts": 1,
         "last_error": None,
     }
-    assert result["accounting"] == preview["accounting"]
-    assert result["accounting"]["physical_bytes_reclaimed"] == 0
-    assert result["accounting"]["physical_bytes_pending"] == 0
+    assert result["accounting"]["entities"] == preview["accounting"]["entities"]
+    assert result["accounting"]["logical_bytes_deleted"] == preview["accounting"]["logical_bytes_deleted"]
+    assert manifest_ref["meta"]["accounting"] == result["accounting"]
 
     with backend._connect() as conn:
         manifest_rows = conn.execute(
@@ -3286,6 +3309,229 @@ async def test_workspace_profile_can_fan_out_public_puts_without_guard_deadlock(
 
 
 @pytest.mark.asyncio
+async def test_physical_reclamation_below_threshold_reports_pending_blocks(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-physical-pending")
+    execution_id = "exec-physical-pending"
+    target = root.with_scope_node("executions", execution_id)
+    backend = cast(Any, root.backend)
+    backend._retention_full_vacuum_min_bytes = 1 << 40
+    backend._retention_full_vacuum_ratio = 2.0
+    checkpoint_modes: list[str] = []
+    original_checkpoint = backend._checkpoint_sqlite_wal_sync
+
+    def track_checkpoint(mode: str):
+        checkpoint_modes.append(mode)
+        return original_checkpoint(mode)
+
+    monkeypatch.setattr(backend, "_checkpoint_sqlite_wal_sync", track_checkpoint)
+    await _seed_large_sqlite_retention_scope(target)
+    preview = await target.inspect_retention(
+        {}, lifecycle={**_terminal_lifecycle(execution_id), "state_version": None}
+    )
+    before = _sqlite_allocated_bytes(backend.db_path)
+
+    result = await target.apply_retention(preview)
+    after = _sqlite_allocated_bytes(backend.db_path)
+
+    assert result["status"] == "applied"
+    assert result["accounting"]["physical_bytes_reclaimed"] == max(0, before - after)
+    assert result["accounting"]["physical_bytes_pending"] > 0
+    manifest_ref = result["manifest_ref"]
+    assert manifest_ref is not None
+    assert manifest_ref["meta"]["accounting"] == result["accounting"]
+    lock_path = root.root / ".workspace.mutation.lock"
+    assert lock_path.is_file()
+    assert lock_path.stat().st_blocks * 512 >= 0
+    assert "TRUNCATE" not in checkpoint_modes
+
+
+@pytest.mark.asyncio
+async def test_forced_full_vacuum_reports_exact_allocated_block_reclaim(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-physical-full")
+    execution_id = "exec-physical-full"
+    target = root.with_scope_node("executions", execution_id)
+    backend = cast(Any, root.backend)
+    backend._retention_full_vacuum_min_bytes = 1
+    backend._retention_full_vacuum_ratio = 0.0
+    checkpoint_modes: list[str] = []
+    original_checkpoint = backend._checkpoint_sqlite_wal_sync
+
+    def track_checkpoint(mode: str):
+        checkpoint_modes.append(mode)
+        return original_checkpoint(mode)
+
+    monkeypatch.setattr(backend, "_checkpoint_sqlite_wal_sync", track_checkpoint)
+    await _seed_large_sqlite_retention_scope(target, count=64)
+    preview = await target.inspect_retention(
+        {}, lifecycle={**_terminal_lifecycle(execution_id), "state_version": None}
+    )
+    before = _sqlite_allocated_bytes(backend.db_path)
+
+    result = await target.apply_retention(preview)
+    after = _sqlite_allocated_bytes(backend.db_path)
+
+    assert result["status"] == "applied"
+    assert before > after
+    assert result["accounting"]["physical_bytes_reclaimed"] == before - after
+    assert result["accounting"]["physical_bytes_pending"] >= 0
+    manifest_ref = result["manifest_ref"]
+    assert manifest_ref is not None
+    assert manifest_ref["meta"]["accounting"] == result["accounting"]
+    assert checkpoint_modes == ["TRUNCATE"]
+
+
+@pytest.mark.asyncio
+async def test_incremental_vacuum_is_bounded_and_keeps_remaining_pending(tmp_path):
+    root = WorkspaceManager().create(tmp_path / "retention-physical-incremental")
+    execution_id = "exec-physical-incremental"
+    target = root.with_scope_node("executions", execution_id)
+    backend = cast(Any, root.backend)
+    with backend._connect() as conn:
+        conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        conn.execute("VACUUM")
+    backend._retention_incremental_vacuum_pages = 1
+    await _seed_large_sqlite_retention_scope(target, count=64)
+    preview = await target.inspect_retention(
+        {}, lifecycle={**_terminal_lifecycle(execution_id), "state_version": None}
+    )
+
+    result = await target.apply_retention(preview)
+
+    with backend._connect() as conn:
+        auto_vacuum = int(conn.execute("PRAGMA auto_vacuum").fetchone()[0])
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        freelist = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+    assert auto_vacuum == 2
+    assert result["status"] == "applied"
+    assert freelist > 0
+    assert result["accounting"]["physical_bytes_pending"] == max(
+        0,
+        freelist * page_size - result["accounting"]["physical_bytes_reclaimed"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_physical_maintenance_failure_preserves_logical_apply(tmp_path, monkeypatch):
+    root = WorkspaceManager().create(tmp_path / "retention-physical-failure")
+    execution_id = "exec-physical-failure"
+    target = root.with_scope_node("executions", execution_id)
+    backend = cast(Any, root.backend)
+    discarded = await target.put(
+        {"row": "maintenance failure"},
+        collection="observations",
+        kind="large_sqlite_row",
+        meta={"padding": "x" * 65536},
+    )
+    preview = await target.inspect_retention(
+        {}, lifecycle={**_terminal_lifecycle(execution_id), "state_version": None}
+    )
+
+    def fail_maintenance(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is busy during maintenance")
+
+    monkeypatch.setattr(
+        backend,
+        "_run_sqlite_physical_maintenance_sync",
+        fail_maintenance,
+        raising=False,
+    )
+    result = await target.apply_retention(preview)
+
+    assert result["status"] == "applied"
+    assert await backend.get_record(discarded["id"]) is None
+    assert [item.get("code") for item in result["diagnostics"]] == [
+        "workspace.retention.physical_maintenance_failed"
+    ]
+    assert result["diagnostics"][0].get("retryable") is True
+    assert result["accounting"]["logical_bytes_deleted"] > 0
+    assert result["accounting"]["physical_bytes_pending"] > 0
+
+
+@pytest.mark.asyncio
+async def test_physical_measurement_failure_is_postcommit_typed_deferred(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-physical-measurement-failure")
+    execution_id = "exec-physical-measurement-failure"
+    target = root.with_scope_node("executions", execution_id)
+    backend = cast(Any, root.backend)
+    discarded = await target.put(
+        {"row": "measurement failure"},
+        collection="observations",
+        kind="large_sqlite_row",
+        meta={"padding": "x" * 65536},
+    )
+    preview = await target.inspect_retention(
+        {}, lifecycle={**_terminal_lifecycle(execution_id), "state_version": None}
+    )
+
+    def fail_measurement():
+        raise OSError(errno.EIO, "injected allocated-block measurement failure")
+
+    monkeypatch.setattr(backend, "_sqlite_pending_bytes_sync", fail_measurement)
+    result = await target.apply_retention(preview)
+
+    assert result["status"] == "deferred"
+    assert await backend.get_record(discarded["id"]) is None
+    assert [item.get("code") for item in result["diagnostics"]] == [
+        "workspace.retention.physical_measurement_failed"
+    ]
+    assert "rolled back" not in str(result["diagnostics"][0].get("message"))
+    assert result["accounting"]["logical_bytes_deleted"] > 0
+
+
+@pytest.mark.asyncio
+async def test_physical_accounting_cas_failure_is_postcommit_deferred(
+    tmp_path,
+    monkeypatch,
+):
+    root = WorkspaceManager().create(tmp_path / "retention-physical-cas-failure")
+    execution_id = "exec-physical-cas-failure"
+    target = root.with_scope_node("executions", execution_id)
+    backend = cast(Any, root.backend)
+    backend._retention_full_vacuum_min_bytes = 1 << 40
+    backend._retention_full_vacuum_ratio = 2.0
+    discarded = await target.put(
+        {"row": "physical accounting CAS failure"},
+        collection="observations",
+        kind="large_sqlite_row",
+        meta={"padding": "x" * 131072},
+    )
+    preview = await target.inspect_retention(
+        {}, lifecycle={**_terminal_lifecycle(execution_id), "state_version": None}
+    )
+    original_update = backend._update_terminal_manifest_meta
+
+    def fail_physical_update(manifest_ref, meta):
+        accounting = cast(dict[str, Any], meta["accounting"])
+        if (
+            manifest_ref["meta"]["state"] == "applied"
+            and accounting["physical_bytes_pending"] > 0
+        ):
+            raise sqlite3.OperationalError("injected physical accounting CAS failure")
+        return original_update(manifest_ref, meta)
+
+    monkeypatch.setattr(backend, "_update_terminal_manifest_meta", fail_physical_update)
+    result = await target.apply_retention(preview)
+
+    assert result["status"] == "deferred"
+    assert await backend.get_record(discarded["id"]) is None
+    assert [item.get("code") for item in result["diagnostics"]] == [
+        "workspace.retention.physical_accounting_persist_failed"
+    ]
+    assert "rolled back" not in str(result["diagnostics"][0].get("message"))
+    assert result["accounting"]["logical_bytes_deleted"] > 0
+    assert result["accounting"]["physical_bytes_pending"] > 0
+
+
+@pytest.mark.asyncio
 async def test_apply_retention_does_not_convert_programming_errors_to_deferred(
     tmp_path,
     monkeypatch,
@@ -3627,7 +3873,7 @@ def test_local_retention_capabilities_require_inspect_and_apply_methods(tmp_path
     root = WorkspaceManager().create(tmp_path / "retention-capabilities")
     backend = cast(Any, root.backend)
     assert backend.capabilities()["features"]["supports_retention"] is True
-    assert backend.capabilities()["features"]["supports_physical_reclamation"] is False
+    assert backend.capabilities()["features"]["supports_physical_reclamation"] is True
 
     async def anchors_only(*_args: Any, **_kwargs: Any):
         return []
