@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import gc
 import hashlib
 import importlib
 import json
@@ -2813,6 +2814,113 @@ async def test_advisory_handle_root_close_failure_does_not_leak_native_lock(
     assert result["accounting"]["logical_bytes_deleted"] > 0
     assert await cast(Any, root.backend).get_record(discarded["id"]) is None
     assert await cast(Any, root.backend).get_record(followup["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_uncertain_native_release_poisons_root_guard_across_backend_gc(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    workspace_path = tmp_path / "retention-lock-poison"
+    root = WorkspaceManager().create(workspace_path)
+    execution_id = "exec-lock-poison"
+    target = root.with_scope_node("executions", execution_id)
+    await target.put(
+        {"process": "poison uncertain native release"},
+        collection="observations",
+        kind="process",
+    )
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    original_flock = local_backend_module._fcntl.flock
+    original_close = local_backend_module.os.close
+    original_open_waiter = local_backend_module._PosixAdvisoryLockWaiter.open
+    handles: list[Any] = []
+    waiter_open_count = 0
+
+    def tracked_open_waiter(cls, path, *, create):
+        nonlocal waiter_open_count
+        waiter_open_count += 1
+        return original_open_waiter(path, create=create)
+
+    def fail_unlock(fd, operation):
+        if operation == local_backend_module._fcntl.LOCK_UN:
+            raise OSError(errno.EIO, "injected native unlock failure")
+        return original_flock(fd, operation)
+
+    def fail_carrier_close(fd):
+        if handles and fd == handles[0].carrier_fd:
+            raise OSError(errno.EIO, "injected native carrier close failure")
+        return original_close(fd)
+
+    original_set_handle = local_backend_module._RootMutationGuard._set_advisory_handle
+
+    def track_handle(guard, owner, handle):
+        handles.append(handle)
+        return original_set_handle(guard, owner, handle)
+
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "open",
+        classmethod(tracked_open_waiter),
+    )
+    monkeypatch.setattr(local_backend_module._fcntl, "flock", fail_unlock)
+    monkeypatch.setattr(local_backend_module.os, "close", fail_carrier_close)
+    monkeypatch.setattr(
+        local_backend_module._RootMutationGuard,
+        "_set_advisory_handle",
+        track_handle,
+    )
+
+    try:
+        result = await target.apply_retention(preview)
+        opens_after_poison = waiter_open_count
+        with pytest.raises(
+            local_backend_module._AdvisoryLockReleaseError,
+            match="poison|release",
+        ):
+            await asyncio.wait_for(
+                target.put(
+                    {"process": "must fail fast"},
+                    collection="observations",
+                    kind="process",
+                ),
+                timeout=0.1,
+            )
+        assert waiter_open_count == opens_after_poison
+
+        del target
+        del root
+        gc.collect()
+        with pytest.raises(
+            local_backend_module._AdvisoryLockReleaseError,
+            match="poison|release",
+        ):
+            WorkspaceManager().create(workspace_path, create=False)
+
+        assert result["status"] == "deferred"
+        assert [item.get("code") for item in result["diagnostics"]] == [
+            "workspace.retention.advisory_lock_release_failed"
+        ]
+        assert result["accounting"]["logical_bytes_deleted"] > 0
+    finally:
+        monkeypatch.setattr(local_backend_module._fcntl, "flock", original_flock)
+        monkeypatch.setattr(local_backend_module.os, "close", original_close)
+        for handle in handles:
+            try:
+                original_flock(handle.carrier_fd, local_backend_module._fcntl.LOCK_UN)
+            except OSError:
+                pass
+            for fd in (handle.carrier_fd, handle.root_fd):
+                try:
+                    original_close(fd)
+                except OSError:
+                    pass
 
 
 @pytest.mark.asyncio

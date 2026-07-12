@@ -164,7 +164,14 @@ class _AdvisoryLockCarrierError(_AdvisoryLockAcquisitionError):
 
 
 class _AdvisoryLockReleaseError(WorkspaceConfigurationError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        native_release_uncertain: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.native_release_uncertain = native_release_uncertain
 
 
 def _close_advisory_descriptors(descriptors: Sequence[int | None]) -> list[OSError]:
@@ -186,18 +193,35 @@ class _AdvisoryLockHandle:
     path: Path
 
     def release(self) -> None:
-        errors: list[OSError] = []
+        unlock_error: OSError | None = None
         try:
             _fcntl.flock(self.carrier_fd, _fcntl.LOCK_UN)
         except OSError as error:
-            errors.append(error)
-        errors.extend(
-            _close_advisory_descriptors((self.carrier_fd, self.root_fd))
-        )
+            unlock_error = error
+        carrier_close_error: OSError | None = None
+        root_close_error: OSError | None = None
+        try:
+            os.close(self.carrier_fd)
+        except OSError as error:
+            carrier_close_error = error
+        try:
+            os.close(self.root_fd)
+        except OSError as error:
+            root_close_error = error
+        errors = [
+            error
+            for error in (unlock_error, carrier_close_error, root_close_error)
+            if error is not None
+        ]
         if errors:
             failures = "; ".join(str(error) for error in errors)
             raise _AdvisoryLockReleaseError(
-                f"Workspace advisory lock release failed for {self.path}: {failures}"
+                f"Workspace advisory lock release failed for {self.path}: {failures}",
+                native_release_uncertain=(
+                    unlock_error is not None
+                    and carrier_close_error is not None
+                    and carrier_close_error.errno != errno.EBADF
+                ),
             )
 
 
@@ -413,6 +437,7 @@ class _RootMutationGuard:
         self._depth = 0
         self._lock_path = lock_path
         self._advisory_handle: _AdvisoryLockHandle | None = None
+        self._poison_error: _AdvisoryLockReleaseError | None = None
 
     @staticmethod
     def _owner_token() -> object:
@@ -426,6 +451,8 @@ class _RootMutationGuard:
 
     def _try_reserve(self, owner: object) -> bool | None:
         with self._state_lock:
+            if self._poison_error is not None:
+                raise self._poison_error
             if self._owner is None:
                 self._owner = owner
                 self._depth = 1
@@ -436,17 +463,32 @@ class _RootMutationGuard:
             return None
 
     def _release(self, owner: object) -> None:
-        advisory_handle: _AdvisoryLockHandle | None = None
         with self._state_lock:
             if self._owner != owner or self._depth <= 0:
                 raise RuntimeError("Workspace mutation guard release ownership mismatch.")
             self._depth -= 1
-            if self._depth == 0:
-                self._owner = None
-                advisory_handle = self._advisory_handle
-                self._advisory_handle = None
-        if advisory_handle is not None:
-            advisory_handle.release()
+            if self._depth > 0:
+                return
+            advisory_handle = self._advisory_handle
+            if advisory_handle is not None:
+                try:
+                    advisory_handle.release()
+                except _AdvisoryLockReleaseError as error:
+                    if error.native_release_uncertain:
+                        poison_error = _AdvisoryLockReleaseError(
+                            "Workspace root mutation guard is permanently poisoned "
+                            f"after uncertain native lock release: {error}",
+                            native_release_uncertain=True,
+                        )
+                        self._poison_error = poison_error
+                        _retain_poisoned_root_mutation_guard(self)
+                        self._owner = None
+                        raise poison_error
+                    self._owner = None
+                    self._advisory_handle = None
+                    raise
+            self._owner = None
+            self._advisory_handle = None
 
     def _set_advisory_handle(
         self,
@@ -573,13 +615,22 @@ class _RootMutationGuard:
 _ROOT_MUTATION_GUARDS: weakref.WeakValueDictionary[str, _RootMutationGuard] = (
     weakref.WeakValueDictionary()
 )
+_POISONED_ROOT_MUTATION_GUARDS: dict[str, _RootMutationGuard] = {}
 _ROOT_MUTATION_GUARDS_LOCK = threading.Lock()
+
+
+def _retain_poisoned_root_mutation_guard(guard: _RootMutationGuard) -> None:
+    key = str(guard._lock_path.parent.expanduser().resolve())
+    with _ROOT_MUTATION_GUARDS_LOCK:
+        _POISONED_ROOT_MUTATION_GUARDS[key] = guard
 
 
 def _root_mutation_guard(root: Path) -> _RootMutationGuard:
     key = str(root.expanduser().resolve())
     with _ROOT_MUTATION_GUARDS_LOCK:
-        guard = _ROOT_MUTATION_GUARDS.get(key)
+        guard = _POISONED_ROOT_MUTATION_GUARDS.get(key)
+        if guard is None:
+            guard = _ROOT_MUTATION_GUARDS.get(key)
         if guard is None:
             guard = _RootMutationGuard(Path(key) / ".workspace.mutation.lock")
             _ROOT_MUTATION_GUARDS[key] = guard
@@ -4695,12 +4746,19 @@ class LocalWorkspaceBackend:
                 ],
             )
         except _AdvisoryLockReleaseError as error:
-            diagnostic = retention_diagnostic(
-                "workspace.retention.advisory_lock_release_failed",
-                (
+            if result is None:
+                message = (
+                    "Workspace retention could not start because the root mutation "
+                    f"guard has an uncertain native lock release: {error}"
+                )
+            else:
+                message = (
                     "Workspace retention completed its operation but advisory lock "
                     f"release reported a failure: {error}"
-                ),
+                )
+            diagnostic = retention_diagnostic(
+                "workspace.retention.advisory_lock_release_failed",
+                message,
                 entity=entity,
                 detail={
                     "error_type": type(error).__name__,
