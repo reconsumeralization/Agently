@@ -1069,8 +1069,19 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 "meta": {"execution_id": self.id},
             }
         )
-        await self._persist_runtime_event(event)
-        await async_emit_runtime(event)
+        persistence_error: BaseException | None = None
+        try:
+            await self._persist_runtime_event(event)
+        except BaseException as error:
+            persistence_error = error
+        try:
+            await async_emit_runtime(event)
+        except BaseException as delivery_error:
+            if persistence_error is not None:
+                raise persistence_error from delivery_error
+            raise
+        if persistence_error is not None:
+            raise persistence_error
 
     async def _emit_runtime_definition_event(self):
         if self._runtime_definition_emitted:
@@ -1506,24 +1517,71 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             self._set_runtime_resource(str(key), value)
         return self
 
+    def _recovery_provider_candidate(self) -> Any | None:
+        durable_provider = self._get_runtime_resource("durable_provider")
+        if durable_provider is not None:
+            return durable_provider
+        return self._get_runtime_resource("workspace")
+
+    def _activate_recovery_durability(self, *, reason: str) -> Any | None:
+        provider = self._recovery_provider_candidate()
+        supports_snapshot = callable(getattr(provider, "put_snapshot", None))
+        supports_runtime_events = callable(
+            getattr(provider, "append_runtime_event", None)
+        )
+        if provider is not None:
+            if self._snapshot_store is None and supports_snapshot:
+                self._bind_snapshot_store(provider)
+            if self._runtime_event_store is None and supports_runtime_events:
+                self._bind_runtime_event_store(provider)
+        if (
+            self._snapshot_store is not None or self._runtime_event_store is not None
+        ) and self._system_runtime_data.get(
+            "recovery_durability_activation", None, inherit=False
+        ) is None:
+            self._system_runtime_data.set(
+                "recovery_durability_activation",
+                {
+                    "reason": str(reason),
+                    "activated_at_state_version": self._state_version,
+                },
+            )
+        return provider
+
+    async def _async_activate_recovery_durability(
+        self,
+        *,
+        reason: str,
+        persist_snapshot: bool = False,
+        step_id: str | None = None,
+    ) -> Any | None:
+        provider = self._activate_recovery_durability(reason=reason)
+        if persist_snapshot and self._snapshot_store is None:
+            raise RuntimeError(
+                "TriggerFlow recovery snapshot persistence requires a snapshot store."
+            )
+        if persist_snapshot:
+            await self.async_save(step_id=step_id)
+        return provider
+
+    def _bind_configured_durability_resources(self) -> None:
+        durable_provider = self._get_runtime_resource("durable_provider")
+        snapshot_store = self._get_runtime_resource("snapshot_store")
+        runtime_event_store = self._get_runtime_resource("runtime_event_store")
+        if snapshot_store is not None:
+            self._bind_snapshot_store(snapshot_store)
+        elif callable(getattr(durable_provider, "put_snapshot", None)):
+            self._bind_snapshot_store(durable_provider)
+        if runtime_event_store is not None:
+            self._bind_runtime_event_store(runtime_event_store)
+        elif callable(getattr(durable_provider, "append_runtime_event", None)):
+            self._bind_runtime_event_store(durable_provider)
+
     def _bind_durable_provider_resource(self, key: str, value: Any):
         if key == "workspace":
-            if self._snapshot_store is None and hasattr(value, "put_snapshot"):
-                self._bind_snapshot_store(value)
-            if self._runtime_event_store is None and hasattr(value, "append_runtime_event"):
-                self._bind_runtime_event_store(value)
             return
-        if key == "durable_provider":
-            if hasattr(value, "put_snapshot"):
-                self._bind_snapshot_store(value)
-            if hasattr(value, "append_runtime_event"):
-                self._bind_runtime_event_store(value)
-            return
-        if key == "snapshot_store":
-            self._bind_snapshot_store(value)
-            return
-        if key == "runtime_event_store":
-            self._bind_runtime_event_store(value)
+        if key in {"durable_provider", "snapshot_store", "runtime_event_store"}:
+            self._bind_configured_durability_resources()
 
     def _clear_runtime_resources(self):
         self._runtime_resources.clear()
@@ -2083,7 +2141,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         )
 
     def _bind_snapshot_store(self, snapshot_store: "TriggerFlowExecutionSnapshotStore | None"):
-        if snapshot_store is not None and not hasattr(snapshot_store, "put_snapshot"):
+        if snapshot_store is not None and not callable(
+            getattr(snapshot_store, "put_snapshot", None)
+        ):
             raise TypeError(
                 "TriggerFlow snapshot_store must expose async put_snapshot(run_id, state, step_id=...)."
             )
@@ -2091,7 +2151,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return self
 
     def _bind_runtime_event_store(self, runtime_event_store: "RuntimeEventStore | None"):
-        if runtime_event_store is not None and not hasattr(runtime_event_store, "append_runtime_event"):
+        if runtime_event_store is not None and not callable(
+            getattr(runtime_event_store, "append_runtime_event", None)
+        ):
             raise TypeError(
                 "TriggerFlow runtime_event_store must expose async append_runtime_event(execution_id, event, ...)."
             )

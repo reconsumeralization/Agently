@@ -307,6 +307,11 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         )
         if execution_runtime_resources:
             execution.update_runtime_resources(execution_runtime_resources)
+        execution._bind_configured_durability_resources()
+        if intervention_mode in {"planned", "auto"}:
+            execution._activate_recovery_durability(
+                reason=f"intervention_mode:{ intervention_mode }",
+            )
         self._executions[execution_id] = execution
         return cast("TriggerFlowExecution[InputT, StreamT, ResultT]", execution)
 
