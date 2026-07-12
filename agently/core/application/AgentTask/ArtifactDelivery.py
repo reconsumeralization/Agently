@@ -187,7 +187,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     continue
                 try:
                     await self.workspace.add_retention_anchor(
-                        self.id,
+                        self._workspace_execution_id,
                         anchor_type="deliverable",
                         record_ref=record_ref,
                     )
@@ -203,10 +203,12 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
 
             path = str(raw_ref.get("path") or "").strip()
             expected_digest = str(raw_ref.get("sha256") or "").strip()
-            try:
-                expected_size = int(raw_ref.get("bytes") or 0)
-            except (TypeError, ValueError):
-                expected_size = 0
+            raw_size = raw_ref.get("bytes") if "bytes" in raw_ref else None
+            expected_size = (
+                raw_size
+                if isinstance(raw_size, int) and not isinstance(raw_size, bool)
+                else -1
+            )
             if not path or not expected_digest or expected_size < 0:
                 defer(
                     "agent_task.retention.deliverable_ref_invalid",
@@ -258,7 +260,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     },
                 )
                 await self.workspace.add_retention_anchor(
-                    self.id,
+                    self._workspace_execution_id,
                     anchor_type="deliverable",
                     record_ref=record_ref,
                 )
@@ -319,16 +321,14 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 WorkspaceRetentionPolicy | None,
                 self._agent_task_option("workspace_retention_policy", None),
             )
+            lifecycle = await self.workspace.get_retention_lifecycle(
+                self._workspace_execution_id,
+                status=status,
+                terminal_at=datetime.now(timezone.utc).isoformat(),
+            )
             preview = await self.workspace.inspect_retention(
                 {},
-                lifecycle={
-                    "execution_id": self.id,
-                    "status": status,
-                    "terminal_at": datetime.now(timezone.utc).isoformat(),
-                    "state_version": self._workspace_state_version,
-                    "recovery_active": self._workspace_recovery_active,
-                    "lease_active": self._workspace_lease_active,
-                },
+                lifecycle=lifecycle,
                 retained_refs=list(getattr(self, "_terminal_retained_refs", []) or []),
                 inline_result=DataFormatter.sanitize(self.result),
                 policy=retention_policy,

@@ -866,6 +866,49 @@ class RemoteAuditWorkspaceBackend:
         ]
         return anchors[:limit] if limit is not None else anchors
 
+    async def get_retention_lifecycle(
+        self,
+        execution_id: str,
+        *,
+        status: workspace_types.WorkspaceRetentionTerminalStatus,
+        terminal_at: str,
+    ) -> workspace_types.WorkspaceRetentionLifecycle:
+        self.operations.append("get_retention_lifecycle")
+        states = self._checkpoint_states.get(execution_id, [])
+        state = states[-1] if states else {}
+        interrupts = state.get("interrupts") if isinstance(state, dict) else None
+        recovery_active = bool(
+            isinstance(interrupts, dict)
+            and any(
+                isinstance(item, dict) and item.get("status") == "waiting"
+                for item in interrupts.values()
+            )
+        )
+        intervention = state.get("intervention") if isinstance(state, dict) else None
+        intervention_ledger = (
+            intervention.get("ledger") if isinstance(intervention, dict) else None
+        )
+        recovery_active = recovery_active or bool(
+            isinstance(intervention_ledger, dict)
+            and any(
+                isinstance(item, dict) and item.get("status") == "pending"
+                for item in intervention_ledger.values()
+            )
+        )
+        lease = self._leases.get(execution_id)
+        return {
+            "execution_id": execution_id,
+            "status": status,
+            "terminal_at": terminal_at,
+            "state_version": self._latest_checkpoint_state_version(execution_id),
+            "recovery_active": recovery_active,
+            "lease_active": bool(
+                lease is not None
+                and lease.get("released_at") is None
+                and float(lease.get("lease_until") or 0) > time.time()
+            ),
+        }
+
     async def inspect_retention(
         self,
         scope: dict[str, Any],
@@ -1135,6 +1178,59 @@ def test_workspace_manager_requires_provider_methods_to_be_callable():
 
     with pytest.raises(TypeError, match="inspect_retention"):
         WorkspaceManager()._validate_db_store_provider(provider)
+
+
+@pytest.mark.asyncio
+async def test_workspace_retention_lifecycle_reads_generic_provider_snapshot_and_lease(tmp_path):
+    provider = RemoteAuditWorkspaceBackend("retention-lifecycle")
+
+    async def prune_scope(
+        scope: dict[str, Any],
+        *,
+        remove_files: bool = True,
+    ) -> dict[str, Any]:
+        _ = scope, remove_files
+        return {}
+
+    provider.prune_scope = prune_scope  # type: ignore[attr-defined]
+    workspace = WorkspaceManager().create(
+        tmp_path / "retention-lifecycle",
+        db_store_provider=provider,
+        vector_store_provider="sqlite",
+    )
+    execution_id = "exec-provider-lifecycle"
+    await workspace.put_snapshot(
+        execution_id,
+        {
+            "state_version": 29,
+            "interrupts": {},
+            "intervention": {
+                "ledger": {"revise": {"status": "pending"}},
+            },
+        },
+    )
+    await workspace.claim_lease(
+        execution_id,
+        "provider-worker",
+        ttl=30,
+        expected_state_version=29,
+    )
+
+    lifecycle = await workspace.get_retention_lifecycle(
+        execution_id,
+        status="completed",
+        terminal_at="2026-07-12T09:00:00Z",
+    )
+
+    assert lifecycle == {
+        "execution_id": execution_id,
+        "status": "completed",
+        "terminal_at": "2026-07-12T09:00:00Z",
+        "state_version": 29,
+        "recovery_active": True,
+        "lease_active": True,
+    }
+    assert "get_retention_lifecycle" in provider.operations
 
 
 def test_workspace_manager_proves_vector_delete_is_async_without_calling_it():
@@ -1576,17 +1672,28 @@ async def test_remote_audit_workspace_backend_proves_provider_contract_across_co
     data = await agent_execution.async_get_data()
     workspace_record = await agent_execution.async_record_workspace(
         content={"answer": data["answer"]},
-        checkpoint=True,
+        purpose="deliverable",
     )
-    meta = await agent_execution.async_get_meta()
+    checkpoint = await workspace.put_checkpoint(
+        agent_execution.id,
+        {"record_ref": workspace_record["record"]},
+        step_id="record",
+    )
+    evidence_link = await workspace.link_evidence(
+        workspace_record["record"],
+        checkpoint,
+        relation="checkpointed_by",
+        execution_id=agent_execution.id,
+        checkpoint_id=checkpoint["id"],
+    )
     evidence_links = await workspace.links(workspace_record["record"], relation="checkpointed_by")
 
     assert data["answer"] == "remote-provider-proof"
-    assert workspace_record["checkpoint"] is not None
-    assert workspace_record["checkpoint"]["source"]["type"] == "remote_audit_provider"
-    assert [item["id"] for item in evidence_links] == meta["workspace_refs"]["verification_evidence"]
-    assert evidence_links[0]["target_id"] == workspace_record["checkpoint"]["id"]
-    assert evidence_links[0]["meta"]["evidence"]["execution_id"] == meta["execution_id"]
+    assert workspace_record["checkpoint"] is None
+    assert checkpoint["source"]["type"] == "remote_audit_provider"
+    assert [item["id"] for item in evidence_links] == [evidence_link["id"]]
+    assert evidence_links[0]["target_id"] == checkpoint["id"]
+    assert evidence_links[0]["meta"]["evidence"]["execution_id"] == agent_execution.id
     assert "link_evidence" in provider.operations
 
 
@@ -1642,7 +1749,12 @@ async def test_workspace_backend_provider_registration_resolves_custom_backend()
             await data.async_set_state("value", data.value)
 
         flow.to(remember)
-        execution = flow.create_execution(runtime_resources={"workspace": workspace})
+        execution = flow.create_execution(
+            runtime_resources={
+                "workspace": workspace,
+                "runtime_event_store": workspace,
+            }
+        )
         snapshot = await execution.async_start("registered-value")
         snapshot_ref = await execution.async_save(
             step_id="registered-provider",

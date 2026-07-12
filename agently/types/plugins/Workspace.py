@@ -32,6 +32,7 @@ from agently.types.data.workspace import (
     WorkspaceRetentionPolicy,
     WorkspaceRetentionPreview,
     WorkspaceRetentionResult,
+    WorkspaceRetentionTerminalStatus,
     WorkspaceRuntimeEventRecord,
     WorkspaceScratchLease,
 )
@@ -248,6 +249,14 @@ class RetentionPolicy(Protocol):
         anchor_type: str | None = None,
         limit: int | None = None,
     ) -> list[WorkspaceRetentionAnchor]: ...
+
+    async def get_retention_lifecycle(
+        self,
+        execution_id: str,
+        *,
+        status: WorkspaceRetentionTerminalStatus,
+        terminal_at: str,
+    ) -> WorkspaceRetentionLifecycle: ...
 
     async def inspect_retention(
         self,
@@ -507,6 +516,14 @@ class DBStoreProvider(Protocol):
         anchor_type: str | None = None,
         limit: int | None = None,
     ) -> list[WorkspaceRetentionAnchor]: ...
+
+    async def get_retention_lifecycle(
+        self,
+        execution_id: str,
+        *,
+        status: WorkspaceRetentionTerminalStatus,
+        terminal_at: str,
+    ) -> WorkspaceRetentionLifecycle: ...
 
     async def inspect_retention(
         self,
@@ -889,6 +906,14 @@ class WorkspaceBackend(Protocol):
         anchor_type: str | None = None,
         limit: int | None = None,
     ) -> list[WorkspaceRetentionAnchor]: ...
+
+    async def get_retention_lifecycle(
+        self,
+        execution_id: str,
+        *,
+        status: WorkspaceRetentionTerminalStatus,
+        terminal_at: str,
+    ) -> WorkspaceRetentionLifecycle: ...
 
     async def inspect_retention(
         self,

@@ -38,6 +38,7 @@ from agently.types.data import (
     TaskBoardCardResult,
     TaskBoardGraph,
     TaskBoardRevision,
+    WorkspaceFileRef,
     WorkspaceRetentionPolicy,
 )
 from agently.utils import DataFormatter, Settings
@@ -3645,9 +3646,25 @@ async def test_agent_task_terminal_retention_passes_real_active_lifecycle_facts(
         kind="active_lifecycle_process",
     )
     task.result = {"status": "completed", "final_response": "bounded", "artifact_refs": []}
-    task._workspace_state_version = 23
-    task._workspace_recovery_active = active_fact == "recovery"
-    task._workspace_lease_active = active_fact == "lease"
+    await task.workspace.put_snapshot(
+        task._workspace_execution_id,
+        {
+            "state_version": 23,
+            "interrupts": (
+                {"approval": {"status": "waiting"}}
+                if active_fact == "recovery"
+                else {}
+            ),
+            "intervention": {"ledger": []},
+        },
+    )
+    if active_fact == "lease":
+        await task.workspace.claim_lease(
+            task._workspace_execution_id,
+            "agent-task-worker",
+            ttl=30,
+            expected_state_version=23,
+        )
     captured: dict[str, Any] = {}
     original_inspect = task.workspace.inspect_retention
 
@@ -3717,7 +3734,7 @@ def test_agent_task_terminal_final_result_is_bounded_and_file_body_free(tmp_path
         execution="flat",
     )
     body = "FILE_BODY_MUST_NOT_REACH_TERMINAL_RESULT\n" + ("section body\n" * 800)
-    file_ref = {
+    file_ref: WorkspaceFileRef = {
         "path": "reports/final.md",
         "bytes": len(body.encode("utf-8")),
         "sha256": "a" * 64,
@@ -3784,7 +3801,7 @@ async def test_agent_task_terminal_retention_accepts_verified_zero_byte_file(tmp
     )
     await task.workspace.write_file("reports/empty.txt", "")
     readback = await task.workspace.read_file("reports/empty.txt", max_bytes=1)
-    file_ref = {
+    file_ref: WorkspaceFileRef = {
         "path": "reports/empty.txt",
         "bytes": 0,
         "sha256": readback["sha256"],

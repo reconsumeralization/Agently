@@ -51,6 +51,7 @@ from agently.types.data.workspace import (
     WorkspaceRetentionPolicy,
     WorkspaceRetentionPreview,
     WorkspaceRetentionResult,
+    WorkspaceRetentionTerminalStatus,
     WorkspaceRuntimeEventRecord,
     WorkspaceScratchLease,
 )
@@ -695,6 +696,7 @@ class LocalWorkspaceBackend:
             "get_file_policy",
             "add_retention_anchor",
             "retention_anchors",
+            "get_retention_lifecycle",
             "inspect_retention",
             "apply_retention",
             "prune_scope",
@@ -1633,6 +1635,31 @@ class LocalWorkspaceBackend:
             raise RuntimeError(f"Workspace lease conflict for run '{ run_id }'.")
         return cast(WorkspaceLeaseRef, lease)
 
+    @staticmethod
+    def _snapshot_recovery_active(state: Any) -> bool:
+        if not isinstance(state, dict):
+            return False
+        interrupts = state.get("interrupts")
+        if isinstance(interrupts, dict) and any(
+            isinstance(item, dict) and item.get("status") == "waiting"
+            for item in interrupts.values()
+        ):
+            return True
+        intervention = state.get("intervention")
+        intervention_ledger = (
+            intervention.get("ledger") if isinstance(intervention, dict) else None
+        )
+        if isinstance(intervention_ledger, dict) and any(
+            isinstance(item, dict) and item.get("status") == "pending"
+            for item in intervention_ledger.values()
+        ):
+            return True
+        pending_task_count = state.get("pending_task_count")
+        if isinstance(pending_task_count, int) and not isinstance(pending_task_count, bool):
+            if pending_task_count > 0:
+                return True
+        return False
+
     async def put(
         self,
         content: Any,
@@ -2105,6 +2132,42 @@ class LocalWorkspaceBackend:
         if row is None:
             return None
         return self._row_to_ref(row)
+
+    async def get_retention_lifecycle(
+        self,
+        execution_id: str,
+        *,
+        status: WorkspaceRetentionTerminalStatus,
+        terminal_at: str,
+    ) -> WorkspaceRetentionLifecycle:
+        if not execution_id:
+            raise ValueError("Workspace retention lifecycle requires a non-empty execution_id.")
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError(f"Unsupported Workspace retention terminal status: {status}.")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT state_json FROM checkpoints
+                WHERE run_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (execution_id,),
+            ).fetchone()
+            state = json_loads(row["state_json"], {}) if row is not None else {}
+            lease = self._manifest_from_conn(conn, self._lease_manifest_key(execution_id), None)
+        return {
+            "execution_id": execution_id,
+            "status": status,
+            "terminal_at": terminal_at,
+            "state_version": self._checkpoint_state_version(state) if row is not None else 0,
+            "recovery_active": self._snapshot_recovery_active(state),
+            "lease_active": bool(
+                isinstance(lease, dict)
+                and lease.get("released_at") is None
+                and float(lease.get("lease_until") or 0) > time.time()
+            ),
+        }
 
     async def put_artifact_ref(
         self,

@@ -205,9 +205,7 @@ class AgentExecution:
         self._terminal_task_handoff_refs: list[Any] = []
         self._terminal_selected_action_artifact_ids: set[str] = set()
         self._terminal_preserved_action_artifact_ids: set[str] = set()
-        self._workspace_state_version = 0
-        self._workspace_recovery_active = False
-        self._workspace_lease_active = False
+        self._terminal_error_projection: dict[str, Any] | None = None
         self._model_request_result: Any = None
         self.status = "created"
         self._started = False
@@ -457,7 +455,7 @@ class AgentExecution:
     async def _async_emit_agent_execution_terminal_event(
         self,
         *,
-        failed: bool = False,
+        terminal_status: Literal["completed", "failed", "cancelled"],
         close_snapshot: dict[str, Any] | None = None,
     ) -> None:
         if self.agent_execution_run_context is None:
@@ -470,7 +468,7 @@ class AgentExecution:
             strategy=self.strategy_name,
             task_refs=self.task_refs,
             close_snapshot=self.close_snapshot if close_snapshot is None else close_snapshot,
-            failed=failed,
+            terminal_status=terminal_status,
         )
 
     async def _async_emit_stream_runtime_event(self, item: AgentExecutionStreamData) -> None:
@@ -1137,7 +1135,6 @@ class AgentExecution:
                 event_type=path,
                 meta=meta,
             )
-        self._workspace_state_version += 1
         stream_meta = merge_stream_meta(
             meta,
             execution_id=self.id,
@@ -1431,8 +1428,8 @@ class AgentExecution:
     def _refresh_diagnostics(self) -> None:
         refresh_diagnostics(self)
 
-    def _record_error_diagnostic(self, error: BaseException) -> None:
-        record_error_diagnostic(self, error)
+    def _record_error_diagnostic(self, error: BaseException) -> dict[str, Any]:
+        return record_error_diagnostic(self, error)
 
     def raise_if_limit_exceeded(self) -> None:
         self.execution_context.raise_if_limit_exceeded()

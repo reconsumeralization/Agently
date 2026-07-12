@@ -58,21 +58,72 @@ def refresh_diagnostics(owner: "AgentExecution"):
         owner.diagnostics[key] = value or {}
 
 
-def record_error_diagnostic(owner: "AgentExecution", error: BaseException):
+def record_error_diagnostic(owner: "AgentExecution", error: BaseException) -> dict[str, Any]:
     _merge_context_action_records(owner)
+    item = bounded_error_projection(error)
+    owner._terminal_error_projection = item
     errors = owner.diagnostics.setdefault("errors", [])
     if isinstance(errors, list):
-        item = (
-            error.to_diagnostic()
-            if isinstance(error, (AgentExecutionLimitExceeded, RuntimeStageStallError))
-            else {"type": error.__class__.__name__, "message": str(error)}
-        )
         errors.append(item)
         if isinstance(error, RuntimeStageStallError):
             target_key = "timeouts" if error.status == "timed_out" else "stalls"
             target = owner.diagnostics.setdefault(target_key, [])
             if isinstance(target, list):
                 target.append(item)
+    return item
+
+
+def bounded_error_projection(
+    error: BaseException,
+    *,
+    message: str | None = None,
+) -> dict[str, Any]:
+    """Build the one bounded error carrier shared by every consumer surface."""
+
+    source = (
+        error.to_diagnostic()
+        if isinstance(error, (AgentExecutionLimitExceeded, RuntimeStageStallError))
+        else {"type": error.__class__.__name__}
+    )
+
+    def bounded_text(value: Any, limit: int) -> str:
+        text = str(value or "")
+        raw = text.encode("utf-8")
+        if len(raw) <= limit:
+            return text
+        suffix = " [truncated]"
+        budget = limit - len(suffix.encode("utf-8"))
+        return raw[:budget].decode("utf-8", errors="ignore").rstrip() + suffix
+
+    projection: dict[str, Any] = {}
+    type_key = "error_type" if "error_type" in source else "type"
+    projection[type_key] = bounded_text(source.get(type_key) or error.__class__.__name__, 160)
+    projection["message"] = bounded_text(
+        message if message is not None else (str(error).strip() or error.__class__.__name__),
+        1600,
+    )
+    for key in (
+        "limit_name",
+        "limit_value",
+        "used",
+        "stage",
+        "status",
+        "response_id",
+        "run_id",
+        "agent_name",
+        "elapsed_seconds",
+        "idle_seconds",
+        "timeout_seconds",
+        "last_progress_event",
+        "provider",
+        "model",
+        "planning_protocol",
+    ):
+        value = source.get(key)
+        if value is None:
+            continue
+        projection[key] = bounded_text(value, 160) if isinstance(value, str) else DataFormatter.sanitize(value)
+    return projection
 
 
 def _merge_context_action_records(owner: "AgentExecution") -> None:

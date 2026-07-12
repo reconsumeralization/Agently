@@ -90,7 +90,6 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     await self._emit("agent_task.blocked", self.result)
                 await self._ensure_final_reflection()
                 await self._emit("result", self.result)
-                self._capture_workspace_lifecycle_facts(execution)
                 await self._apply_terminal_workspace_retention(
                     status="completed" if self.status == "completed" else "failed"
                 )
@@ -98,7 +97,6 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             except asyncio.CancelledError as error:
                 self.status = "cancelled"
                 self._error = error
-                self._capture_workspace_lifecycle_facts(execution)
                 self.result = {
                     "status": "cancelled",
                     "accepted": False,
@@ -150,19 +148,6 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
             return True
         return getattr(error, "status", None) == "timed_out"
-
-    def _capture_workspace_lifecycle_facts(self, execution: Any) -> None:
-        self._workspace_state_version = int(getattr(execution, "_state_version", 0))
-        self._workspace_recovery_active = bool(
-            execution.get_pending_interrupts()
-            or execution.get_pending_interventions()
-        )
-        lease_until = getattr(execution, "_lease_until", None)
-        self._workspace_lease_active = bool(
-            getattr(execution, "_owner_id", None)
-            and lease_until is not None
-            and float(lease_until) > time.time()
-        )
 
     async def _terminate_timed_out(
         self,

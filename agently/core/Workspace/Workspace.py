@@ -51,6 +51,7 @@ from agently.types.data.workspace import (
     WorkspaceRetentionPolicy,
     WorkspaceRetentionPreview,
     WorkspaceRetentionResult,
+    WorkspaceRetentionTerminalStatus,
     WorkspaceRetrievalMethod,
     WorkspaceRetrievalPackage,
     WorkspaceRetrievalSelection,
@@ -1811,6 +1812,21 @@ class Workspace:
         limit: int | None = None,
     ) -> list[WorkspaceRetentionAnchor]:
         return await self.backend.retention_anchors(execution_id, anchor_type=anchor_type, limit=limit)
+
+    async def get_retention_lifecycle(
+        self,
+        execution_id: str,
+        *,
+        status: WorkspaceRetentionTerminalStatus,
+        terminal_at: str | None = None,
+    ) -> WorkspaceRetentionLifecycle:
+        """Read provider-owned retention lifecycle facts for one execution."""
+
+        return await self.backend.get_retention_lifecycle(
+            execution_id,
+            status=status,
+            terminal_at=terminal_at or utc_now(),
+        )
 
     @staticmethod
     def _retention_deferred_preview(

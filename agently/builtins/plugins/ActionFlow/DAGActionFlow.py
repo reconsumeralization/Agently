@@ -388,6 +388,7 @@ class DAGActionFlow:
         flow.when("DONE").to(finalize_loop)
 
         execution = flow.create_execution(parent_run_context=action_loop_run, auto_close=False)
+        action_loop_completed = False
         try:
             with bind_runtime_context(
                 parent_run_context=action_loop_run,
@@ -396,6 +397,7 @@ class DAGActionFlow:
             ):
                 await execution.async_start()
                 result = await execution.async_close(timeout=timeout)
+                action_loop_completed = True
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -414,19 +416,27 @@ class DAGActionFlow:
                 )
             raise
         finally:
-            if artifact_scope.get("kind") != "agent_execution":
+            if artifact_scope.get("kind") != "agent_execution" and not action_loop_completed:
                 action._release_artifact_scope(artifact_scope)
         if isinstance(result, dict):
             result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
+            if artifact_scope.get("kind") != "agent_execution":
+                action._release_artifact_scope(artifact_scope)
             return []
-        normalized = [
-            action._finalize_action_result(
-                action._normalize_execution_record(record, None, index),
-                artifact_scope=artifact_scope,
-            )
-            for index, record in enumerate(result)
-        ]
+        try:
+            normalized = [
+                action._finalize_action_result(
+                    action._normalize_execution_record(record, None, index),
+                    artifact_scope=artifact_scope,
+                )
+                for index, record in enumerate(result)
+            ]
+        finally:
+            if artifact_scope.get("kind") != "agent_execution":
+                action._release_artifact_scope(artifact_scope)
+        if artifact_scope.get("kind") != "agent_execution":
+            normalized = action._project_released_artifact_scope(normalized, artifact_scope)
         with bind_runtime_context(
             parent_run_context=action_loop_run,
             tool_phase_run_context=action_loop_run,

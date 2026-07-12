@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from agently import Agently
+from agently.types.data import WorkspaceFileRef
 
 
 def _terminal_payload(final_result: Any, *, strategy: str = "flat") -> dict[str, Any]:
@@ -24,7 +25,7 @@ def _terminal_payload(final_result: Any, *, strategy: str = "flat") -> dict[str,
 
 @pytest.mark.asyncio
 async def test_direct_result_get_data_and_get_full_data_share_business_view() -> None:
-    execution = (
+    execution: Any = (
         Agently.create_agent("result-view-direct")
         .input("Return a direct result.")
         .output({"reply": (str, "Reply", True), "path": (str, "Path", True)}, format="json")
@@ -54,7 +55,7 @@ async def test_direct_terminal_retention_keeps_small_result_inline(tmp_path) -> 
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent("result-view-direct-small-retention")
         .use_workspace(tmp_path / "run")
         .input("Return a small direct result.")
@@ -75,7 +76,7 @@ async def test_direct_large_result_terminal_retention_uses_exactly_one_canonical
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent("result-view-direct-large-retention")
         .use_workspace(tmp_path / "run")
         .input("Return a large direct result.")
@@ -87,15 +88,16 @@ async def test_direct_large_result_terminal_retention_uses_exactly_one_canonical
     event_result, retained_refs = await prepare_agent_execution_terminal_retention(execution)
 
     assert len(retained_refs) == 1
-    assert retained_refs[0]["kind"] == "agent_execution_terminal_result"
-    assert event_result["record_id"] == retained_refs[0]["id"]
+    retained_record = cast(dict[str, Any], retained_refs[0])
+    assert retained_record["kind"] == "agent_execution_terminal_result"
+    assert event_result["record_id"] == retained_record["id"]
     assert "x" * 100 not in str(event_result)
     assert execution.workspace is not None
-    assert await execution.workspace.get_data(retained_refs[0]) == execution.result
+    assert await execution.workspace.get_data(retained_record) == execution.result
     anchors = await execution.workspace.retention_anchors(execution.id, anchor_type="deliverable")
     assert len(anchors) == 1
     assert anchors[0]["record_ref"] is not None
-    assert anchors[0]["record_ref"]["record_id"] == retained_refs[0]["id"]
+    assert anchors[0]["record_ref"]["record_id"] == retained_record["id"]
 
 
 @pytest.mark.asyncio
@@ -104,7 +106,7 @@ async def test_terminal_retention_reuses_workspace_envelope_without_copying_larg
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent("result-view-envelope-retention")
         .use_workspace(tmp_path / "run")
         .input("Reuse an existing Workspace envelope.")
@@ -134,7 +136,7 @@ async def test_terminal_retention_accepts_only_verified_workspace_file_ref(tmp_p
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent("result-view-file-ref-retention")
         .use_workspace(tmp_path / "run")
         .input("Reuse a verified Workspace file ref.")
@@ -156,10 +158,11 @@ async def test_terminal_retention_accepts_only_verified_workspace_file_ref(tmp_p
 @pytest.mark.asyncio
 async def test_terminal_retention_accepts_verified_zero_byte_workspace_file_ref(tmp_path) -> None:
     from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        apply_agent_execution_terminal_retention,
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent("result-view-empty-file-ref-retention")
         .use_workspace(tmp_path / "run")
         .input("Reuse a verified empty Workspace file ref.")
@@ -170,12 +173,48 @@ async def test_terminal_retention_accepts_verified_zero_byte_workspace_file_ref(
     file_ref = write_result["file_refs"][0]
     assert file_ref["bytes"] == 0
     execution.result = {"artifact_refs": [file_ref], "reply": "empty deliverable"}
+    execution.status = "success"
+    execution.route_info["selected_route"] = "model_request"
 
     event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+    retention = await apply_agent_execution_terminal_retention(execution, status="completed")
 
     assert event_result == {"artifact_refs": [file_ref]}
     assert retained_records == [file_ref]
     assert execution._terminal_retained_refs == [file_ref]
+    assert retention is not None
+    assert retention["status"] in {"applied", "noop"}
+    assert (await execution.workspace.read_file("empty.txt"))["bytes"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_bytes", [True, False, None, "0"])
+async def test_terminal_selector_rejects_non_integer_or_missing_zero_byte_size(
+    tmp_path,
+    invalid_bytes: Any,
+) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        prepare_agent_execution_terminal_retention,
+    )
+
+    execution: Any = (
+        Agently.create_agent(f"result-view-invalid-empty-file-ref-{invalid_bytes!r}")
+        .use_workspace(tmp_path / str(invalid_bytes))
+        .input("Reject an invalid empty Workspace file selector.")
+        .create_execution()
+        .strategy("direct")
+    )
+    file_ref = dict((await execution.workspace.write_file("empty.txt", ""))["file_refs"][0])
+    if invalid_bytes is None:
+        file_ref.pop("bytes")
+    else:
+        file_ref["bytes"] = invalid_bytes
+    execution.result = {"artifact_refs": [file_ref]}
+
+    event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+
+    assert retained_records == []
+    assert event_result["kind"] == "agent_execution_terminal_result_untrusted"
 
 
 @pytest.mark.asyncio
@@ -186,7 +225,7 @@ async def test_terminal_retention_defers_forged_or_non_artifact_workspace_refs(t
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent(f"result-view-forged-retention-{forgery}")
         .use_workspace(tmp_path / forgery)
         .input("Reject an untrusted terminal ref.")
@@ -238,7 +277,7 @@ async def test_terminal_retention_keeps_small_file_backed_body_out_of_event_carr
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent("result-view-small-file-backed-retention")
         .use_workspace(tmp_path / "run")
         .input("Return a small file-backed body.")
@@ -270,7 +309,7 @@ async def test_terminal_retention_uses_policy_inline_limit_during_preparation(tm
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent("result-view-policy-inline-limit-retention")
         .use_workspace(tmp_path / "run")
         .input("Apply the explicit retention threshold.")
@@ -283,8 +322,9 @@ async def test_terminal_retention_uses_policy_inline_limit_during_preparation(tm
     retention_result = await apply_agent_execution_terminal_retention(execution, status="completed")
 
     assert len(retained_records) == 1
-    assert retained_records[0]["kind"] == "agent_execution_terminal_result"
-    assert event_result["record_id"] == retained_records[0]["id"]
+    retained_record = cast(dict[str, Any], retained_records[0])
+    assert retained_record["kind"] == "agent_execution_terminal_result"
+    assert event_result["record_id"] == retained_record["id"]
     assert retention_result is not None
     assert retention_result["status"] in {"applied", "noop"}
     assert execution.diagnostics["workspace_retention"]["status"] in {"applied", "noop"}
@@ -296,7 +336,7 @@ async def test_terminal_retention_reuses_explicit_action_workspace_ref_without_d
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent("result-view-action-ref-retention")
         .use_workspace(tmp_path / "run")
         .input("Reuse the explicit Action artifact ref.")
@@ -313,7 +353,7 @@ async def test_terminal_retention_reuses_explicit_action_workspace_ref_without_d
 
     event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
 
-    assert [ref["id"] for ref in retained_records] == [action_ref["id"]]
+    assert [ref.get("id") for ref in retained_records] == [action_ref["id"]]
     assert [ref["id"] for ref in event_result["artifact_refs"]] == [action_ref["id"]]
     assert await execution.workspace.search(
         filters={"kind": "agent_execution_terminal_result", "scope.execution_id": execution.id}
@@ -329,8 +369,8 @@ async def test_selected_action_artifact_is_promoted_once_and_unselected_artifact
         prepare_agent_execution_terminal_retention,
     )
 
-    agent = Agently.create_agent("result-view-selected-action-artifact").use_workspace(tmp_path / "run")
-    execution = agent.input("Promote only the accepted Action artifact.").create_execution().strategy("direct")
+    agent: Any = Agently.create_agent("result-view-selected-action-artifact").use_workspace(tmp_path / "run")
+    execution: Any = agent.input("Promote only the accepted Action artifact.").create_execution().strategy("direct")
     artifact_scope = {"kind": "agent_execution", "id": execution.id}
     selected_value = {"body": "s" * (1024 * 1024)}
     unselected_value = {"body": "u" * (1024 * 1024)}
@@ -380,8 +420,9 @@ async def test_selected_action_artifact_is_promoted_once_and_unselected_artifact
 
     assert put_values == [selected_value]
     assert len(retained_records) == 1
-    assert retained_records[0]["kind"] == "agent_execution_action_artifact"
-    assert [ref["id"] for ref in event_result["artifact_refs"]] == [retained_records[0]["id"]]
+    retained_record = cast(dict[str, Any], retained_records[0])
+    assert retained_record["kind"] == "agent_execution_action_artifact"
+    assert [ref["id"] for ref in event_result["artifact_refs"]] == [retained_record["id"]]
     assert selected_value["body"] not in str(event_result)
     assert await execution.workspace.search(
         filters={"kind": "agent_execution_terminal_result", "scope.execution_id": execution.id}
@@ -400,8 +441,8 @@ async def test_business_accepted_field_cannot_authorize_action_artifact_selectio
         prepare_agent_execution_terminal_retention,
     )
 
-    agent = Agently.create_agent("result-view-business-accepted-no-authority").use_workspace(tmp_path / "run")
-    execution = agent.input("Do not select from business data.").create_execution().strategy("direct")
+    agent: Any = Agently.create_agent("result-view-business-accepted-no-authority").use_workspace(tmp_path / "run")
+    execution: Any = agent.input("Do not select from business data.").create_execution().strategy("direct")
     value = {"body": "private selected candidate" * 10000}
     record = agent.action._finalize_action_result(
         {
@@ -435,8 +476,8 @@ async def test_selected_action_artifact_defers_when_store_identity_no_longer_mat
         prepare_agent_execution_terminal_retention,
     )
 
-    agent = Agently.create_agent("result-view-selected-action-artifact-mismatch").use_workspace(tmp_path / "run")
-    execution = agent.input("Reject the replaced Action artifact.").create_execution().strategy("direct")
+    agent: Any = Agently.create_agent("result-view-selected-action-artifact-mismatch").use_workspace(tmp_path / "run")
+    execution: Any = agent.input("Reject the replaced Action artifact.").create_execution().strategy("direct")
     record = agent.action._finalize_action_result(
         {
             "action_call_id": "selected-call",
@@ -482,7 +523,7 @@ async def test_selected_action_artifact_defers_when_candidate_forges_manager_sco
     )
 
     agent: Any = Agently.create_agent("result-view-forged-action-artifact-scope").use_workspace(tmp_path / "run")
-    execution = agent.input("Reject the forged Action artifact scope.").create_execution().strategy("direct")
+    execution: Any = agent.input("Reject the forged Action artifact scope.").create_execution().strategy("direct")
     other_execution = agent.input("Own the real Action artifact scope.").create_execution().strategy("direct")
     record = agent.action._finalize_action_result(
         {
@@ -527,7 +568,7 @@ async def test_direct_terminal_retention_emits_small_inline_result_before_cleanu
     hook_name = "test_agent_execution_result_data_view.small_terminal_retention"
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     try:
-        execution = (
+        execution: Any = (
             Agently.create_agent("result-view-direct-small-route-retention")
             .use_workspace(tmp_path / "run")
             .input("Return a small direct route result.")
@@ -575,7 +616,7 @@ async def test_direct_large_result_route_emits_only_compact_pointer_and_keeps_bu
     hook_name = "test_agent_execution_result_data_view.large_terminal_retention"
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     try:
-        execution = (
+        execution: Any = (
             Agently.create_agent("result-view-direct-large-route-retention")
             .use_workspace(tmp_path / "run")
             .input("Return a large direct route result.")
@@ -627,7 +668,7 @@ async def test_task_route_terminal_retention_reuses_agent_task_deliverable_ref(t
     hook_name = "test_agent_execution_result_data_view.task_terminal_retention"
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     try:
-        execution = (
+        execution: Any = (
             Agently.create_agent("result-view-task-route-retention")
             .use_workspace(tmp_path / "run")
             .input("Return an AgentTask deliverable ref.")
@@ -729,7 +770,16 @@ async def test_agent_execution_cancellation_emits_bounded_terminal_projection_an
     tmp_path,
     monkeypatch,
 ) -> None:
-    execution = (
+    terminal_events: list[Any] = []
+
+    async def capture(event: Any) -> None:
+        if event.run is not None and event.run.execution_id == execution.id:
+            if event.event_type.startswith("agent_execution."):
+                terminal_events.append(event)
+
+    hook_name = "test_agent_execution_result_data_view.cancelled_terminal_event"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    execution: Any = (
         Agently.create_agent("result-view-cancelled-terminal")
         .use_workspace(tmp_path / "run")
         .input("Wait until the host cancels.")
@@ -753,12 +803,15 @@ async def test_agent_execution_cancellation_emits_bounded_terminal_projection_an
 
     execution._async_execute_route = fake_route  # type: ignore[method-assign]
     monkeypatch.setattr(execution.workspace, "inspect_retention", capture_inspect)
-    run = __import__("asyncio").create_task(execution.async_get_data())
-    await route_started.wait()
-    run.cancel()
+    try:
+        run = __import__("asyncio").create_task(execution.async_get_data())
+        await route_started.wait()
+        run.cancel()
 
-    with pytest.raises(__import__("asyncio").CancelledError):
-        await run
+        with pytest.raises(__import__("asyncio").CancelledError):
+            await run
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
 
     assert execution.status == "cancelled"
     assert captured_lifecycle["status"] == "cancelled"
@@ -769,6 +822,69 @@ async def test_agent_execution_cancellation_emits_bounded_terminal_projection_an
     cancellation_items = [item for item in execution.stream.items if item.path == "cancelled"]
     assert len(cancellation_items) == 1
     assert len(str(cancellation_items[0].value).encode("utf-8")) <= 4096
+    terminal_types = [
+        event.event_type
+        for event in terminal_events
+        if event.event_type
+        in {"agent_execution.completed", "agent_execution.failed", "agent_execution.cancelled"}
+    ]
+    assert terminal_types == ["agent_execution.cancelled"]
+    assert terminal_events[-1].payload["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", ["limit", "general"])
+async def test_agent_execution_error_projection_is_shared_and_utf8_bounded(
+    tmp_path,
+    error_kind: str,
+) -> None:
+    from agently.core.application.AgentExecution import AgentExecutionLimitExceeded
+
+    captured: list[Any] = []
+
+    async def capture(event: Any) -> None:
+        if event.run is not None and event.run.execution_id == execution.id:
+            captured.append(event)
+
+    hook_name = f"test_agent_execution_result_data_view.bounded_error.{error_kind}"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    execution: Any = (
+        Agently.create_agent(f"result-view-bounded-error-{error_kind}")
+        .use_workspace(tmp_path / error_kind)
+        .input("Raise one oversized error.")
+        .create_execution()
+        .strategy("direct")
+    )
+    oversized_message = "oversized-error-body:" + ("界" * 20000)
+
+    async def fake_route(**_kwargs: Any) -> tuple[str, Any]:
+        if error_kind == "limit":
+            raise AgentExecutionLimitExceeded(
+                oversized_message,
+                limit_name="max_probe",
+                limit_value=1,
+                used=2,
+            )
+        raise RuntimeError(oversized_message)
+
+    execution._async_execute_route = fake_route  # type: ignore[method-assign]
+    try:
+        with pytest.raises((AgentExecutionLimitExceeded, RuntimeError)):
+            await execution.async_get_data()
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    error_item = next(item for item in execution.stream.items if item.path == "error")
+    diagnostic = execution.diagnostics["errors"][-1]
+    terminal_error = execution.close_snapshot["terminal_result"]["error"]
+    assert error_item.value == diagnostic == terminal_error
+    assert len(str(error_item.value).encode("utf-8")) <= 4096
+    assert len(str(execution.close_snapshot["terminal_result"]).encode("utf-8")) <= 4096
+    assert "界" * 2000 not in str(error_item.value)
+    terminal_event = next(
+        event for event in captured if event.event_type in {"agent_execution.failed", "agent_execution.cancelled"}
+    )
+    assert len(str(terminal_event.payload).encode("utf-8")) <= 4096
 
 
 @pytest.mark.asyncio
@@ -783,7 +899,7 @@ async def test_agent_execution_retention_passes_active_lifecycle_facts_and_prese
         prepare_agent_execution_terminal_retention,
     )
 
-    execution = (
+    execution: Any = (
         Agently.create_agent(f"result-view-active-{active_fact}")
         .use_workspace(tmp_path / active_fact)
         .input("Preserve active lifecycle state.")
@@ -798,9 +914,25 @@ async def test_agent_execution_retention_passes_active_lifecycle_facts_and_prese
     execution.result = {"reply": "bounded"}
     execution.status = "success"
     execution.route_info["selected_route"] = "model_request"
-    execution._workspace_state_version = 17
-    execution._workspace_recovery_active = active_fact == "recovery"
-    execution._workspace_lease_active = active_fact == "lease"
+    await execution.workspace.put_snapshot(
+        execution.id,
+        {
+            "state_version": 17,
+            "interrupts": (
+                {"approval": {"status": "waiting"}}
+                if active_fact == "recovery"
+                else {}
+            ),
+            "intervention": {"ledger": []},
+        },
+    )
+    if active_fact == "lease":
+        await execution.workspace.claim_lease(
+            execution.id,
+            "agent-execution-worker",
+            ttl=30,
+            expected_state_version=17,
+        )
     captured: dict[str, Any] = {}
     original_inspect = execution.workspace.inspect_retention
 
@@ -834,8 +966,8 @@ async def test_routed_agent_task_uses_execution_child_workspace_and_parent_reuse
     )
     from agently.core.application.AgentTask import AgentTask
 
-    agent = Agently.create_agent("result-view-real-routed-task-scope").use_workspace(tmp_path / "run")
-    execution = (
+    agent: Any = Agently.create_agent("result-view-real-routed-task-scope").use_workspace(tmp_path / "run")
+    execution: Any = (
         agent.input("Produce one canonical routed task file.")
         .goal("Produce the report.", ["The report is written and retained."])
         .create_execution()
@@ -846,9 +978,16 @@ async def test_routed_agent_task_uses_execution_child_workspace_and_parent_reuse
     async def routed_task_run(task: AgentTask) -> Any:
         task_observation["lineage"] = [dict(node) for node in task.workspace.scope_lineage]
         task_observation["files_root"] = task.workspace.files_root
+        process_ref = await task.workspace.put(
+            {"stage": "task process"},
+            collection="observations",
+            kind="routed_task_process",
+        )
+        task_observation["process_ref"] = process_ref
+        await task.workspace.write_file("working/process.txt", "discard routed task process")
         await task.workspace.write_file("reports/final.md", "canonical routed task body")
         readback = await task.workspace.read_file("reports/final.md", max_bytes=128)
-        file_ref = {
+        file_ref: WorkspaceFileRef = {
             "path": "reports/final.md",
             "bytes": readback["bytes"],
             "sha256": readback["sha256"],
@@ -872,7 +1011,15 @@ async def test_routed_agent_task_uses_execution_child_workspace_and_parent_reuse
             "reason": "",
             "missing_criteria": [],
         }
-        await task._apply_terminal_workspace_retention(status="completed")
+        task_observation["retention"] = await task._apply_terminal_workspace_retention(status="completed")
+        task_observation["process_record_after"] = await task.workspace.backend.get_record(process_ref["id"])
+        try:
+            await task.workspace.read_file("working/process.txt")
+        except FileNotFoundError:
+            task_observation["process_file_deleted"] = True
+        else:
+            task_observation["process_file_deleted"] = False
+        task_observation["final_after"] = await task.workspace.read_file("reports/final.md")
         task._completed = True
         await task._emit("result", task.result)
         await task._close_streams()
@@ -885,9 +1032,11 @@ async def test_routed_agent_task_uses_execution_child_workspace_and_parent_reuse
         scope={"execution_id": execution.id, "task_id": "live-sibling"},
         search_scope={"execution_id": execution.id, "task_id": "live-sibling"},
     )
+    await execution.workspace.write_file("working/parent-live.txt", "live parent state")
     await sibling.write_file("working/live.txt", "live sibling state")
 
     result = await run_agent_task_route(execution, {"strategy": "flat"})
+    parent_after_task_retention = await execution.workspace.read_file("working/parent-live.txt")
     sibling_after_task_retention = await sibling.read_file("working/live.txt")
     execution.result = result
     execution.status = "success"
@@ -899,11 +1048,19 @@ async def test_routed_agent_task_uses_execution_child_workspace_and_parent_reuse
         {"kind": "executions", "id": execution.id},
         {"kind": "tasks", "id": result["task_id"]},
     ]
+    assert task_observation["process_ref"]["scope"]["execution_id"] == execution.id
+    assert task_observation["process_ref"]["scope"]["task_id"] == result["task_id"]
     assert task_observation["files_root"].is_relative_to(execution.workspace.files_root.parent)
+    assert task_observation["retention"] is not None
+    assert task_observation["retention"]["status"] in {"applied", "noop"}
+    assert task_observation["process_record_after"] is None
+    assert task_observation["process_file_deleted"] is True
+    assert task_observation["final_after"]["content"] == "canonical routed task body"
     assert retained_records == [result["artifact_refs"][0]]
     assert carrier["artifact_refs"][0]["id"] == result["artifact_refs"][0]["id"]
     assert retention is not None
     assert await execution.workspace.get_data(result["artifact_refs"][0]) == task_observation["file_ref"]
+    assert parent_after_task_retention["content"] == "live parent state"
     assert sibling_after_task_retention["content"] == "live sibling state"
 
 

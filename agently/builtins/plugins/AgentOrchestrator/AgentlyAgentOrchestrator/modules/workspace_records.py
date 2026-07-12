@@ -46,12 +46,6 @@ async def record_workspace(
         raise ValueError("AgentExecution Workspace deliverable records cannot also be recovery checkpoints.")
     if purpose == "audit" and owner.options.get("workspace_retention_policy") is None:
         raise ValueError("AgentExecution Workspace audit records require an explicit retention policy override.")
-    post_terminal = owner._completed
-    if post_terminal and purpose in {"process", "recovery"}:
-        raise RuntimeError(
-            f"AgentExecution post-terminal Workspace writes reject purpose={purpose!r}; "
-            "only governed deliverable or explicitly retained audit writes are allowed."
-        )
     if owner.workspace is None:
         raise RuntimeError(
             "AgentExecution has no Workspace binding. "
@@ -60,6 +54,12 @@ async def record_workspace(
         )
     if not owner._completed:
         await owner.async_get_data()
+    post_terminal = owner._completed
+    if post_terminal and purpose in {"process", "recovery"}:
+        raise RuntimeError(
+            f"AgentExecution post-terminal Workspace writes reject purpose={purpose!r}; "
+            "only governed deliverable or explicitly retained audit writes are allowed."
+        )
     owner._refresh_diagnostics()
 
     record_scope = workspace_scope(owner, scope)
@@ -84,8 +84,6 @@ async def record_workspace(
         profile=profile,
     )
     append_workspace_ref(owner, collection, record_ref)
-    owner._workspace_state_version += 1
-
     if purpose == "deliverable":
         stored_ref = await owner.workspace.ref_envelope(record_ref)
         if stored_ref.get("record_id") != record_ref.get("id"):

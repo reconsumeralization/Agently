@@ -548,16 +548,16 @@ class BaseAgent:
         strategy: str | None,
         task_refs: dict[str, Any],
         close_snapshot: dict[str, Any],
-        failed: bool = False,
+        terminal_status: Literal["completed", "failed", "cancelled"],
     ) -> None:
         from agently.base import async_emit_runtime
 
-        event_type = "agent_execution.failed" if failed else "agent_execution.completed"
+        event_type = f"agent_execution.{terminal_status}"
         await async_emit_runtime(
             {
                 "event_type": event_type,
                 "source": "BaseAgent",
-                "message": f"AgentExecution { 'failed' if failed else 'completed' } for '{ self.name }'.",
+                "message": f"AgentExecution {terminal_status} for '{ self.name }'.",
                 "payload": {
                     "execution_id": execution_id,
                     "status": status,

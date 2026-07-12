@@ -6318,7 +6318,10 @@ async def test_flat_action_planning_stall_preserves_completed_action_logs(tmp_pa
 
     assert result["accepted"] is False
     assert iteration["execution_meta"]["status"] == "failed"
-    assert [item.get("action_id") for item in action_log_list] == ["probe_action"]
+    assert [item.get("action_id") for item in action_log_list] == ["probe_action"], (
+        iteration["execution_meta"].get("logs"),
+        iteration["execution_meta"].get("diagnostics"),
+    )
     assert action_log_list[0]["status"] in {"success", "succeeded"}
     assert action_log_list[0]["route"] == "model_request"
 
@@ -8345,7 +8348,7 @@ async def test_two_bounded_step_executions_can_be_correlated_as_developer_loop()
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace(tmp_path):
+async def test_fresh_agent_execution_process_checkpoint_is_rejected_after_internal_completion(tmp_path):
     agent = _create_agent("task-step-workspace-binding").use_workspace(tmp_path / "run")
     execution = (
         agent.input("workspace-bound step")
@@ -8361,34 +8364,16 @@ async def test_agent_execution_records_workspace_refs_from_bound_agent_workspace
         )
     )
 
-    workspace_record = await execution.async_record_workspace(
-        content={"stage": "requested-before-terminal"},
-        summary="workspace-bound task-step record",
-        checkpoint=True,
-    )
-    data = await execution.async_get_data()
-    meta = await execution.async_get_meta()
+    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+        await execution.async_record_workspace(
+            content={"stage": "requested-before-terminal"},
+            summary="workspace-bound task-step record",
+            checkpoint=True,
+        )
 
-    assert workspace_record["record"]["collection"] == "observations"
-    assert workspace_record["record"]["scope"]["task_id"] == "workspace-task"
-    assert workspace_record["record"]["scope"]["area"] == "agent-execution"
-    assert workspace_record["record"]["source"]["type"] == "agent_execution"
-    assert workspace_record["checkpoint"] is not None
-    assert meta["workspace_refs"]["observations"] == [workspace_record["record"]["id"]]
-    assert meta["workspace_refs"]["checkpoints"] == [workspace_record["checkpoint"]["id"]]
-    evidence_link_id = meta["workspace_refs"]["verification_evidence"][0]
-    assert agent.workspace is not None
-    assert data["answer"]
-    assert await agent.workspace.get_data(workspace_record["record"]) == {
-        "stage": "requested-before-terminal"
-    }
-    history = await agent.workspace.checkpoint_history("workspace-task", step_id="record")
-    assert [item["id"] for item in history] == [workspace_record["checkpoint"]["id"]]
-    evidence_links = await agent.workspace.links(workspace_record["record"], relation="checkpointed_by")
-    assert [item["id"] for item in evidence_links] == [evidence_link_id]
-    assert evidence_links[0]["target_id"] == workspace_record["checkpoint"]["id"]
-    assert evidence_links[0]["meta"]["evidence"]["execution_id"] == meta["execution_id"]
-    assert evidence_links[0]["meta"]["owner"] == "AgentExecution"
+    assert execution.status == "success"
+    assert execution.workspace_refs["observations"] == []
+    assert execution.workspace_refs["checkpoints"] == []
 
 
 @pytest.mark.asyncio
@@ -8396,18 +8381,29 @@ async def test_agent_execution_workspace_purpose_defaults_to_process(tmp_path):
     agent = _create_agent("task-step-workspace-process-purpose").use_workspace(tmp_path / "run")
     execution = agent.input("record process workspace data").create_execution().strategy("direct")
 
-    workspace_record = await execution.async_record_workspace(
-        content={"stage": "working"},
-        meta={"workspace_purpose": "audit"},
-    )
+    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+        await execution.async_record_workspace(
+            content={"stage": "working"},
+            meta={"workspace_purpose": "audit"},
+        )
 
-    assert workspace_record["record"]["meta"]["workspace_purpose"] == "process"
+    assert execution.status == "success"
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_workspace_purpose_deliverable_creates_verified_anchor(tmp_path):
+async def test_agent_execution_workspace_purpose_deliverable_applies_verified_retention(tmp_path):
     agent = _create_agent("task-step-workspace-deliverable-purpose").use_workspace(tmp_path / "run")
     execution = agent.input("record deliverable workspace data").create_execution().strategy("direct")
+    assert execution.workspace is not None
+    created_anchors: list[dict[str, Any]] = []
+    add_retention_anchor = execution.workspace.add_retention_anchor
+
+    async def capture_real_anchor(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        anchor = await add_retention_anchor(*args, **kwargs)
+        created_anchors.append(anchor)
+        return anchor
+
+    execution.workspace.add_retention_anchor = capture_real_anchor  # type: ignore[method-assign]
 
     workspace_record = await execution.async_record_workspace(
         content={"report": "accepted body"},
@@ -8415,12 +8411,28 @@ async def test_agent_execution_workspace_purpose_deliverable_creates_verified_an
     )
 
     assert workspace_record["record"]["meta"]["workspace_purpose"] == "deliverable"
-    assert execution.workspace is not None
     assert await execution.workspace.get_data(workspace_record["record"]) == {"report": "accepted body"}
-    anchors = await execution.workspace.retention_anchors(execution.id, anchor_type="deliverable")
-    assert len(anchors) == 1
-    assert anchors[0]["record_ref"] is not None
-    assert anchors[0]["record_ref"]["record_id"] == workspace_record["record"]["id"]
+    assert len(created_anchors) == 1
+    assert created_anchors[0]["record_ref"] is not None
+    assert created_anchors[0]["record_ref"]["record_id"] == workspace_record["record"]["id"]
+    assert await execution.workspace.retention_anchors(execution.id, anchor_type="deliverable") == []
+
+    retention = execution.diagnostics["workspace_retention"]
+    assert retention["status"] in {"applied", "noop"}
+    manifest_ref = retention["manifest_ref"]
+    assert manifest_ref is not None
+    retained_refs = manifest_ref["meta"]["retained_refs"]
+    assert len(retained_refs) == 1
+    retained_ref = retained_refs[0]
+    record_ref = workspace_record["record"]
+    assert retained_ref["record_id"] == record_ref["id"]
+    assert retained_ref["digest"] == record_ref["sha256"]
+    assert retained_ref["size"] == record_ref["size"]
+    assert record_ref["source"]["type"] == "agent_execution"
+    assert record_ref["meta"]["execution_id"] == execution.id
+    assert await execution.workspace.get_data(retained_ref["content_ref"]) == {
+        "report": "accepted body"
+    }
 
 
 @pytest.mark.asyncio
@@ -8498,15 +8510,15 @@ async def test_agent_execution_workspace_record_uses_execution_scoped_lazy_defau
         .create_execution(limits={"max_model_requests": 1})
     )
 
-    workspace_record = await execution.async_record_workspace()
+    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+        await execution.async_record_workspace()
 
     assert getattr(workspace, "is_materialized") is False
     assert getattr(execution.workspace, "is_materialized") is True
-    assert workspace_record["record"]["collection"] == "observations"
     assert execution.workspace.root.exists()
 
 
-def test_agent_execution_record_workspace_sync_wrapper_uses_function_shifter(tmp_path):
+def test_agent_execution_record_workspace_sync_wrapper_rejects_post_terminal_process(tmp_path):
     agent = _create_agent("task-step-workspace-sync").use_workspace(tmp_path / "run")
     execution = (
         agent.input("workspace-bound sync step")
@@ -8517,11 +8529,5 @@ def test_agent_execution_record_workspace_sync_wrapper_uses_function_shifter(tmp
         )
     )
 
-    workspace_record = execution.record_workspace(content={"sync": True}, checkpoint=True)
-    meta = execution.get_meta()
-
-    assert workspace_record["record"]["collection"] == "observations"
-    assert workspace_record["checkpoint"] is not None
-    assert meta["workspace_refs"]["observations"] == [workspace_record["record"]["id"]]
-    assert meta["workspace_refs"]["checkpoints"] == [workspace_record["checkpoint"]["id"]]
-    assert meta["workspace_refs"]["verification_evidence"]
+    with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
+        execution.record_workspace(content={"sync": True}, checkpoint=True)

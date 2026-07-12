@@ -155,23 +155,24 @@ async def start_execution(
                 route=route,
                 source="agent_execution",
             )
-            terminal_failed = owner.status not in {"success", "completed"}
             await _finalize_terminal_execution(
                 owner,
-                failed=terminal_failed,
+                terminal_status=(
+                    "completed" if owner.status in {"success", "completed"} else "failed"
+                ),
                 terminal_projection=terminal_projection,
             )
             return owner.result
         except RuntimeStageStallError as error:
             owner.status = "timed_out" if error.status == "timed_out" else "stalled"
             owner._error = error
-            owner._record_error_diagnostic(error)
+            error_projection = owner._record_error_diagnostic(error)
             await owner.emit_stream(
                 "error",
-                error.to_diagnostic(),
+                error_projection,
                 source="agent_execution",
             )
-            await _finalize_terminal_execution(owner, failed=True)
+            await _finalize_terminal_execution(owner, terminal_status="failed")
             raise
         except asyncio.TimeoutError as error:
             owner.status = "timed_out"
@@ -187,50 +188,46 @@ async def start_execution(
                 last_progress_event=(owner.execution_context.last_progress_event or {}).get("event_type"),
             )
             owner._error = timeout_error
-            owner._record_error_diagnostic(timeout_error)
+            error_projection = owner._record_error_diagnostic(timeout_error)
             await owner.emit_stream(
                 "error",
-                timeout_error.to_diagnostic(),
+                error_projection,
                 source="agent_execution",
             )
-            await _finalize_terminal_execution(owner, failed=True)
+            await _finalize_terminal_execution(owner, terminal_status="failed")
             raise timeout_error from error
         except AgentExecutionLimitExceeded as error:
             owner.status = "blocked"
             owner._error = error
-            owner._record_error_diagnostic(error)
+            error_projection = owner._record_error_diagnostic(error)
             await owner.emit_stream(
                 "error",
-                {"type": error.__class__.__name__, "message": str(error), "limit_name": error.limit_name},
+                error_projection,
                 source="agent_execution",
             )
-            await _finalize_terminal_execution(owner, failed=True)
+            await _finalize_terminal_execution(owner, terminal_status="failed")
             raise
         except asyncio.CancelledError as error:
             owner.status = "cancelled"
             owner._error = error
-            owner._record_error_diagnostic(error)
+            error_projection = owner._record_error_diagnostic(error)
             await owner.emit_stream(
                 "cancelled",
-                {
-                    "status": "cancelled",
-                    "type": error.__class__.__name__,
-                    "message": "AgentExecution was cancelled by its host.",
-                },
+                {**error_projection, "status": "cancelled"},
                 source="agent_execution",
             )
-            await _finalize_terminal_execution(owner, failed=True, cancelled=True)
+            await _finalize_terminal_execution(owner, terminal_status="cancelled")
             raise
         except BaseException as error:
             owner.status = "error"
             owner._error = error
-            owner._record_error_diagnostic(error)
+            error_projection = owner._record_error_diagnostic(error)
             await owner.emit_stream(
                 "error",
-                {"type": error.__class__.__name__, "message": str(error)},
+                error_projection,
                 source="agent_execution",
             )
-            await _finalize_terminal_execution(owner, failed=True)
+            await _finalize_terminal_execution(owner, terminal_status="failed")
             raise
         finally:
             owner._refresh_diagnostics()
@@ -261,8 +258,7 @@ async def _prepare_terminal_projection(
 async def _finalize_terminal_execution(
     owner: "AgentExecution",
     *,
-    failed: bool,
-    cancelled: bool = False,
+    terminal_status: Literal["completed", "failed", "cancelled"],
     terminal_projection: tuple[Any, list[Any]] | None = None,
 ) -> None:
     try:
@@ -287,7 +283,7 @@ async def _finalize_terminal_execution(
             terminal_close_snapshot["reason"] = str(reason)[:360]
         try:
             await owner._async_emit_agent_execution_terminal_event(
-                failed=failed,
+                terminal_status=terminal_status,
                 close_snapshot=terminal_close_snapshot,
             )
         except Exception as error:
@@ -296,9 +292,6 @@ async def _finalize_terminal_execution(
                 code="agent_execution.retention.terminal_event_delivery_failed",
                 error=error,
             )
-        terminal_status: Literal["completed", "failed", "cancelled"] = (
-            "cancelled" if cancelled else "failed" if failed else "completed"
-        )
         await apply_agent_execution_terminal_retention(owner, status=terminal_status)
     finally:
         action = getattr(owner.agent, "action", None)

@@ -92,6 +92,7 @@ _SIMPLE_EVENT_TYPES = {
             "agent_execution.started",
             "agent_execution.completed",
             "agent_execution.failed",
+            "agent_execution.cancelled",
             "agent_execution.stream",
             "runtime.print",
         }
@@ -446,6 +447,7 @@ def _resolve_agent_execution_stage(event: "ObservationEvent") -> str:
         "agent_execution.started": "Started",
         "agent_execution.completed": "Completed",
         "agent_execution.failed": "Failed",
+        "agent_execution.cancelled": "Cancelled",
         "agent_execution.stream": "Process",
         "agent_execution.stream.delta": "Streaming",
     }

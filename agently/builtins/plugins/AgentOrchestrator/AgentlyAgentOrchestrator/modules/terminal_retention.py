@@ -121,16 +121,14 @@ async def apply_agent_execution_terminal_retention(
         _record_deferred_diagnostics(owner)
         return None
     try:
+        lifecycle = await owner.workspace.get_retention_lifecycle(
+            owner.id,
+            status=status,
+            terminal_at=datetime.now(timezone.utc).isoformat(),
+        )
         preview = await owner.workspace.inspect_retention(
             {},
-            lifecycle={
-                "execution_id": owner.id,
-                "status": status,
-                "terminal_at": datetime.now(timezone.utc).isoformat(),
-                "state_version": owner._workspace_state_version,
-                "recovery_active": owner._workspace_recovery_active,
-                "lease_active": owner._workspace_lease_active,
-            },
+            lifecycle=lifecycle,
             retained_refs=[
                 ref
                 for ref in owner._terminal_retained_refs
@@ -192,12 +190,14 @@ def _terminal_result_value(owner: "AgentExecution") -> Any:
     error = owner._error
     if error is None:
         return {"status": owner.status}
+    projection = getattr(owner, "_terminal_error_projection", None)
     return {
         "status": owner.status,
-        "error": {
-            "type": error.__class__.__name__,
-            "message": _compact_error(error),
-        },
+        "error": DataFormatter.sanitize(
+            projection
+            if isinstance(projection, Mapping)
+            else {"type": error.__class__.__name__, "message": _compact_error(error)}
+        ),
     }
 
 
@@ -728,9 +728,8 @@ def _looks_like_record_ref(ref: Mapping[str, Any]) -> bool:
 def _looks_like_file_ref(ref: Mapping[str, Any]) -> bool:
     if "bytes" not in ref:
         return False
-    try:
-        size = int(ref["bytes"])
-    except (TypeError, ValueError):
+    size = ref["bytes"]
+    if not isinstance(size, int) or isinstance(size, bool):
         return False
     return bool(str(ref.get("path") or "") and str(ref.get("sha256") or "") and size >= 0)
 

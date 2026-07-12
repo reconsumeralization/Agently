@@ -18,7 +18,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from agently.types.data import WorkspaceRetentionPreview, WorkspaceRetentionResult
+from agently.types.data import (
+    WorkspaceRetentionLifecycle,
+    WorkspaceRetentionPreview,
+    WorkspaceRetentionResult,
+)
 from agently.types.plugins import WorkspaceBackend
 
 from ._defaults import (
@@ -139,6 +143,13 @@ class LazyWorkspace:
 
     async def inspect_retention(self, *args: Any, **kwargs: Any) -> WorkspaceRetentionPreview:
         return await self._materialize().inspect_retention(*args, **kwargs)
+
+    async def get_retention_lifecycle(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> WorkspaceRetentionLifecycle:
+        return await self._materialize().get_retention_lifecycle(*args, **kwargs)
 
     async def apply_retention(
         self,

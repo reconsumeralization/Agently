@@ -136,7 +136,46 @@ class ActionArtifactManager:
             for artifact_id in artifact_ids:
                 self._artifacts.pop(artifact_id, None)
                 self._artifact_scopes.pop(artifact_id, None)
-        return len(artifact_ids)
+            return len(artifact_ids)
+
+    @classmethod
+    def project_released_scope(
+        cls,
+        value: Any,
+        *,
+        artifact_scope: Mapping[str, Any],
+    ) -> Any:
+        """Return a defensive projection whose released refs are truthful."""
+
+        projected = deepcopy(value)
+        normalized_scope = cls._normalize_artifact_scope(artifact_scope, fallback_id="")
+        if normalized_scope is None:
+            return projected
+        seen: set[int] = set()
+
+        def visit(item: Any) -> None:
+            if isinstance(item, dict):
+                item_id = id(item)
+                if item_id in seen:
+                    return
+                seen.add(item_id)
+                meta = item.get("meta")
+                item_scope = meta.get("artifact_scope") if isinstance(meta, dict) else None
+                if item.get("artifact_id") and item_scope == normalized_scope:
+                    item["available"] = False
+                    item["full_value_available"] = False
+                for nested in item.values():
+                    visit(nested)
+            elif isinstance(item, list):
+                item_id = id(item)
+                if item_id in seen:
+                    return
+                seen.add(item_id)
+                for nested in item:
+                    visit(nested)
+
+        visit(projected)
+        return projected
 
     @staticmethod
     def _normalize_artifact_scope(

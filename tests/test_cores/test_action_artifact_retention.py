@@ -70,6 +70,20 @@ async def test_direct_action_entry_releases_success_and_failure_scopes(tmp_path,
 
     record = await agent.action.async_execute_action(action_id, {})
     assert record["artifact_refs"]
+    returned_ref = next(
+        ref for ref in record["artifact_refs"] if ref.get("artifact_type") == "action_output"
+    )
+    assert returned_ref["available"] is False
+    assert returned_ref["full_value_available"] is False
+    assert returned_ref.get("preview") or returned_ref.get("preview_omitted") is True
+    assert returned_ref["sha256"]
+    assert record["model_digest"]
+    readback = agent.action.read_action_artifact(
+        artifact_id=returned_ref["artifact_id"],
+        action_call_id=returned_ref["action_call_id"],
+    )
+    assert readback["ok"] is False
+    assert readback["status"] == "not_found"
     assert agent.action._artifact_manager._artifacts == {}
 
     captured_id = ""
@@ -128,6 +142,26 @@ async def test_standalone_action_flows_release_success_scope(
     )
 
     assert records
+    returned_refs: list[dict[str, Any]] = []
+
+    def collect_refs(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("artifact_type") == "action_output" and value.get("artifact_id"):
+                returned_refs.append(value)
+            for nested in value.values():
+                collect_refs(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect_refs(nested)
+
+    collect_refs(records)
+    serialized_records = json.dumps(records, ensure_ascii=False)
+    assert len(serialized_records.encode("utf-8")) <= 16000
+    assert "f" * 100 not in serialized_records
+    assert all(ref["available"] is False for ref in returned_refs)
+    assert all(ref["full_value_available"] is False for ref in returned_refs)
+    assert all(ref.get("preview") or ref.get("preview_omitted") is True for ref in returned_refs)
+    assert all(ref.get("sha256") for ref in returned_refs)
     assert agent.action._artifact_manager._artifacts == {}
 
 
@@ -308,7 +342,7 @@ async def test_selected_action_artifact_run_scope_release_is_concurrent_and_smal
     }
     first_execution.status = "success"
 
-    await _finalize_terminal_execution(first_execution, failed=False)
+    await _finalize_terminal_execution(first_execution, terminal_status="completed")
 
     assert agent.action._artifact_manager.get_artifact_value(selected_ref["artifact_id"]) is None
     assert agent.action._artifact_manager.get_artifact_value(unselected_ref["artifact_id"]) is None
@@ -441,7 +475,7 @@ async def test_custom_action_execution_handler_callback_binds_agent_execution_ar
     }
     owner.status = "success"
 
-    await _finalize_terminal_execution(owner, failed=False)
+    await _finalize_terminal_execution(owner, terminal_status="completed")
 
     assert agent.action._artifact_manager.get_artifact_value(callback_ref["artifact_id"]) is None
     assert agent.action._artifact_manager.get_artifact_value(concurrent_ref["artifact_id"]) is not None
@@ -507,7 +541,7 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
 
         monkeypatch.setattr(agent, "_async_emit_agent_execution_terminal_event", fail_terminal_event)
 
-    await _finalize_terminal_execution(owner, failed=False)
+    await _finalize_terminal_execution(owner, terminal_status="completed")
 
     if failure_stage == "promotion":
         assert agent.action._artifact_manager.get_artifact_value(owner_ref["artifact_id"]) is not None

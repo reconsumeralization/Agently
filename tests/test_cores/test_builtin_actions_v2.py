@@ -1160,7 +1160,7 @@ def test_agent_enable_sqlite_registers_managed_sqlite_action(tmp_path):
     assert data.get("rows") == [{"name": "Agently"}]
 
 
-def test_instruction_heavy_action_records_digest_and_artifact_recall(tmp_path):
+def test_instruction_heavy_direct_action_releases_historical_artifact_refs(tmp_path):
     agent = Agently.create_agent()
     agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="test_recall_bash", sandbox="trusted_local")
 
@@ -1193,19 +1193,22 @@ def test_instruction_heavy_action_records_digest_and_artifact_recall(tmp_path):
     assert isinstance(input_action_call_id, str)
     assert isinstance(output_artifact_id, str)
     assert isinstance(output_action_call_id, str)
+    assert all(ref.get("available") is False for ref in artifact_refs)
+    assert all(ref.get("full_value_available") is False for ref in artifact_refs)
 
     recalled_input = agent.action.read_action_artifact(
         artifact_id=input_artifact_id,
         action_call_id=input_action_call_id,
     )
-    assert recalled_input.get("value", {}).get("api_token") == "[REDACTED]"
+    assert recalled_input.get("ok") is False
+    assert recalled_input.get("status") == "not_found"
 
     recalled = agent.action.read_action_artifact(
         artifact_id=output_artifact_id,
         action_call_id=output_action_call_id,
     )
-    assert recalled.get("ok") is True
-    assert str(tmp_path) in str(recalled.get("value", {}).get("stdout", ""))
+    assert recalled.get("ok") is False
+    assert recalled.get("status") == "not_found"
 
     prompt_results = agent.action.to_action_results([result])
     visible = prompt_results["Inspect cwd"]
@@ -1215,7 +1218,7 @@ def test_instruction_heavy_action_records_digest_and_artifact_recall(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_action_loop_uses_digest_and_exposes_recall_after_artifacts(tmp_path):
+async def test_action_loop_exposes_live_recall_then_returns_historical_refs(tmp_path):
     agent = Agently.create_agent()
     tag = f"recall-loop-{agent.name}"
     action_id = "test_loop_recall_bash"
@@ -1276,12 +1279,22 @@ async def test_action_loop_uses_digest_and_exposes_recall_after_artifacts(tmp_pa
     second_round = seen_rounds[1]
     assert "read_action_artifact" in second_round["action_ids"]
     visible_record = second_round["last_round_records"][0]
-    assert visible_record.get("data") == records[0].get("model_digest")
-    assert visible_record.get("result") == records[0].get("model_digest")
+    live_digest = visible_record.get("data")
+    returned_digest = records[0].get("model_digest")
+    assert isinstance(live_digest, dict)
+    assert isinstance(returned_digest, dict)
+    assert {
+        key: value for key, value in live_digest.items() if key != "artifact_refs"
+    } == {
+        key: value for key, value in returned_digest.items() if key != "artifact_refs"
+    }
+    assert visible_record.get("result") == live_digest
+    assert all(ref.get("available") is True for ref in live_digest.get("artifact_refs", []))
+    assert all(ref.get("available") is False for ref in returned_digest.get("artifact_refs", []))
 
 
 @pytest.mark.asyncio
-async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_context():
+async def test_action_loop_keeps_large_outputs_cold_then_releases_standalone_scope():
     agent = Agently.create_agent()
     marker = "RAW_OUTPUT_SHOULD_STAY_COLD"
 
@@ -1333,11 +1346,14 @@ async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_contex
     assert marker not in json.dumps(records, ensure_ascii=False)
     output_ref = next(
         ref
-        for ref in records[0]["artifact_refs"]
+        for ref in records[0].get("artifact_refs", [])
         if ref.get("artifact_type") == "action_output"
     )
-    cold_output = agent.action._artifact_manager.get_artifact_value(output_ref["artifact_id"])
-    assert marker in json.dumps(cold_output, ensure_ascii=False)
+    artifact_id = str(output_ref.get("artifact_id") or "")
+    assert artifact_id
+    assert output_ref.get("available") is False
+    assert output_ref.get("full_value_available") is False
+    assert agent.action._artifact_manager.get_artifact_value(artifact_id) is None
     assert len(seen_rounds) >= 2
     second_round = seen_rounds[1]
     hot_context = json.dumps(

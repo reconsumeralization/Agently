@@ -89,6 +89,7 @@ class WorkspaceManager:
         "get_file_policy",
         "add_retention_anchor",
         "retention_anchors",
+        "get_retention_lifecycle",
         "inspect_retention",
         "apply_retention",
         "prune_scope",
@@ -240,7 +241,7 @@ class WorkspaceManager:
                 vector_store_options=vector_store_options,
             )
         return Workspace(
-            backend,
+            cast(WorkspaceBackend, backend),
             self,
             files_root=files_root,
             default_scope=default_scope,
