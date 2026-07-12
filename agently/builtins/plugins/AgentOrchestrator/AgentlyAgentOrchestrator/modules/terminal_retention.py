@@ -413,11 +413,19 @@ async def _promote_selected_action_artifact(
     artifact_manager = getattr(action, "_artifact_manager", None)
     get_artifact = getattr(artifact_manager, "get_artifact", None)
     get_artifact_value = getattr(artifact_manager, "get_artifact_value", None)
-    if not callable(get_artifact) or not callable(get_artifact_value):
+    get_artifact_scope = getattr(artifact_manager, "get_artifact_scope", None)
+    if not callable(get_artifact) or not callable(get_artifact_value) or not callable(get_artifact_scope):
         _defer_untrusted_ref(
             owner,
             "agent_execution.retention.action_artifact_store_unavailable",
             "Selected Action artifact store is unavailable for terminal promotion.",
+        )
+        return None
+    if get_artifact_scope(artifact_id) != expected_scope:
+        _defer_untrusted_ref(
+            owner,
+            "agent_execution.retention.action_artifact_stored_scope_mismatch",
+            "Selected Action artifact manager scope does not belong to this AgentExecution.",
         )
         return None
     stored_artifact = get_artifact(artifact_id)

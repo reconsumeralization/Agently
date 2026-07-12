@@ -25,6 +25,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Mapping
+from copy import deepcopy
 from threading import RLock
 from typing import Any, cast
 
@@ -71,6 +72,7 @@ class ActionArtifactManager:
 
     def __init__(self, *, registry: Any = None):
         self._artifacts: dict[str, dict[str, Any]] = {}
+        self._artifact_scopes: dict[str, tuple[str, str]] = {}
         self._artifact_lock = RLock()
         self._registry = registry
 
@@ -78,24 +80,33 @@ class ActionArtifactManager:
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         with self._artifact_lock:
-            return self._artifacts.get(str(artifact_id))
+            artifact = self._artifacts.get(str(artifact_id))
+            return deepcopy(artifact) if artifact is not None else None
 
     def get_artifact_value(self, artifact_id: str) -> Any | None:
-        artifact = self.get_artifact(artifact_id)
-        return artifact.get("value") if artifact is not None else None
+        with self._artifact_lock:
+            artifact = self._artifacts.get(str(artifact_id))
+            return deepcopy(artifact.get("value")) if artifact is not None else None
+
+    def get_artifact_scope(self, artifact_id: str) -> dict[str, str] | None:
+        with self._artifact_lock:
+            scope = self._artifact_scopes.get(str(artifact_id))
+            return {"kind": scope[0], "id": scope[1]} if scope is not None else None
 
     def release_scope(self, artifact_scope: Mapping[str, Any]) -> int:
         scope = self._normalize_artifact_scope(artifact_scope, fallback_id="")
         if scope is None:
             return 0
+        scope_key = (scope["kind"], scope["id"])
         with self._artifact_lock:
             artifact_ids = [
                 artifact_id
-                for artifact_id, artifact in self._artifacts.items()
-                if self._artifact_scope(artifact) == scope
+                for artifact_id, owner_scope in self._artifact_scopes.items()
+                if owner_scope == scope_key
             ]
             for artifact_id in artifact_ids:
                 self._artifacts.pop(artifact_id, None)
+                self._artifact_scopes.pop(artifact_id, None)
         return len(artifact_ids)
 
     @staticmethod
@@ -112,18 +123,6 @@ class ActionArtifactManager:
         if fallback_id:
             return {"kind": "action_call", "id": fallback_id}
         return None
-
-    @staticmethod
-    def _artifact_scope(artifact: Mapping[str, Any]) -> dict[str, str] | None:
-        meta = artifact.get("meta")
-        if not isinstance(meta, Mapping):
-            return None
-        scope = meta.get("artifact_scope")
-        if not isinstance(scope, Mapping):
-            return None
-        kind = str(scope.get("kind") or "").strip()
-        scope_id = str(scope.get("id") or "").strip()
-        return {"kind": kind, "id": scope_id} if kind and scope_id else None
 
     # ── redaction / compaction ─────────────────────────────────────────────
 
@@ -317,6 +316,7 @@ class ActionArtifactManager:
             artifact_scope,
             fallback_id=action_call_id,
         )
+        resolved_scope = cast(dict[str, str], resolved_meta["artifact_scope"])
         stored = {
             "artifact_id": artifact_id,
             "action_call_id": action_call_id,
@@ -325,13 +325,14 @@ class ActionArtifactManager:
             "label": label,
             "media_type": media_type,
             "value": safe_value,
-            "meta": resolved_meta,
+            "meta": deepcopy(resolved_meta),
             "size": size,
             "bytes": size,
             "sha256": hashlib.sha256(raw_bytes).hexdigest(),
         }
         with self._artifact_lock:
             self._artifacts[artifact_id] = stored
+            self._artifact_scopes[artifact_id] = (resolved_scope["kind"], resolved_scope["id"])
         return {
             "artifact_id": artifact_id,
             "action_call_id": action_call_id,
@@ -347,7 +348,7 @@ class ActionArtifactManager:
             "size": size,
             "bytes": size,
             "sha256": hashlib.sha256(raw_bytes).hexdigest(),
-            "meta": resolved_meta,
+            "meta": deepcopy(resolved_meta),
         }
 
     def register_external_artifact_ref(
@@ -371,6 +372,7 @@ class ActionArtifactManager:
             artifact_scope,
             fallback_id=action_call_id,
         )
+        resolved_scope = cast(dict[str, str], resolved_meta["artifact_scope"])
         stored = {
             "artifact_id": artifact_id,
             "action_call_id": action_call_id,
@@ -379,7 +381,7 @@ class ActionArtifactManager:
             "label": label,
             "media_type": media_type,
             "value": self._redact_value(ref),
-            "meta": resolved_meta,
+            "meta": deepcopy(resolved_meta),
             "size": int(ref.get("size", ref.get("bytes", 0)) or 0),
             "bytes": int(ref.get("bytes", ref.get("size", 0)) or 0),
             "sha256": str(ref.get("sha256", "")),
@@ -388,6 +390,7 @@ class ActionArtifactManager:
             stored["path"] = str(path)
         with self._artifact_lock:
             self._artifacts[artifact_id] = stored
+            self._artifact_scopes[artifact_id] = (resolved_scope["kind"], resolved_scope["id"])
 
         artifact_ref: ActionArtifact = {
             "artifact_id": artifact_id,
@@ -403,7 +406,7 @@ class ActionArtifactManager:
             "available": True,
             "size": stored["size"],
             "bytes": stored["bytes"],
-            "meta": resolved_meta,
+            "meta": deepcopy(resolved_meta),
         }
         if path is not None:
             artifact_ref["path"] = str(path)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -406,6 +407,43 @@ async def test_selected_action_artifact_defers_when_store_identity_no_longer_mat
     assert retained_records == []
     assert event_result["kind"] == "agent_execution_terminal_result_untrusted"
     assert execution._terminal_retention_deferred is True
+    assert await execution.workspace.search(
+        filters={"kind": "agent_execution_action_artifact", "scope.execution_id": execution.id}
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_selected_action_artifact_defers_when_candidate_forges_manager_scope(tmp_path) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
+        prepare_agent_execution_terminal_retention,
+    )
+
+    agent: Any = Agently.create_agent("result-view-forged-action-artifact-scope").use_workspace(tmp_path / "run")
+    execution = agent.input("Reject the forged Action artifact scope.").create_execution().strategy("direct")
+    other_execution = agent.input("Own the real Action artifact scope.").create_execution().strategy("direct")
+    record = agent.action._finalize_action_result(
+        {
+            "action_call_id": "forged-scope-call",
+            "action_id": "forged_scope_action_artifact",
+            "status": "success",
+            "success": True,
+            "result": {"body": "s" * (1024 * 1024)},
+            "data": {"body": "s" * (1024 * 1024)},
+        },
+        artifact_scope={"kind": "agent_execution", "id": other_execution.id},
+    )
+    stored_ref = record["artifact_refs"][0]
+    forged_ref = copy.deepcopy(stored_ref)
+    forged_ref["meta"]["artifact_scope"] = {"kind": "agent_execution", "id": execution.id}
+    execution.logs["artifact_refs"] = [forged_ref]
+    execution.result = {"accepted": True, "artifact_refs": [forged_ref], "reply": "bounded"}
+
+    event_result, retained_records = await prepare_agent_execution_terminal_retention(execution)
+
+    assert retained_records == []
+    assert event_result["kind"] == "agent_execution_terminal_result_untrusted"
+    assert execution._terminal_retention_deferred is True
+    assert agent.action._artifact_manager.get_artifact_value(stored_ref["artifact_id"]) is not None
     assert await execution.workspace.search(
         filters={"kind": "agent_execution_action_artifact", "scope.execution_id": execution.id}
     ) == []

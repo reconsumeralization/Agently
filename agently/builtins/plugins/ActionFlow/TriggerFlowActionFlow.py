@@ -170,6 +170,13 @@ class TriggerFlowActionFlow:
         )
         artifact_scope = action._artifact_scope_from_run_context(action_loop_run)
 
+        async def async_call_scoped_action(name: str, kwargs: dict[str, Any]) -> Any:
+            return await action._async_call_action_with_scope(
+                name,
+                kwargs,
+                artifact_scope=artifact_scope,
+            )
+
         async def publish_runtime_observation(
             kind: str,
             *,
@@ -596,7 +603,7 @@ class TriggerFlowActionFlow:
                     },
                     {
                         "action_calls": action_calls,
-                        "async_call_action": action.async_call_action,
+                        "async_call_action": async_call_scoped_action,
                         "concurrency": concurrency,
                         "timeout": timeout,
                         "trusted_policy_overrides": trusted_policy_overrides,

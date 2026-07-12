@@ -1,12 +1,46 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from typing import Any
 
 import pytest
 
 from agently import Agently
+
+
+def test_action_artifact_scope_is_private_and_returned_values_are_defensive() -> None:
+    agent: Any = Agently.create_agent("action-artifact-private-scope")
+    manager = agent.action._artifact_manager
+    scope_a = {"kind": "agent_execution", "id": "execution-a"}
+    scope_b = {"kind": "agent_execution", "id": "execution-b"}
+    artifact = manager.register_execution_artifact(
+        action_call_id="private-scope-call",
+        artifact_type="action_output",
+        label="Private scope artifact",
+        value={"nested": {"value": "original"}},
+        artifact_scope=scope_a,
+    )
+    artifact_id = artifact["artifact_id"]
+
+    artifact["meta"]["artifact_scope"] = scope_b
+    artifact["meta"]["external"] = True
+    first_read = manager.get_artifact(artifact_id)
+    assert first_read is not None
+    assert first_read["meta"]["artifact_scope"] == scope_a
+    assert "external" not in first_read["meta"]
+
+    first_read["meta"]["artifact_scope"] = scope_b
+    first_read["value"]["nested"]["value"] = "mutated"
+    first_value = manager.get_artifact_value(artifact_id)
+    first_value["nested"]["value"] = "mutated again"
+    assert manager.get_artifact_scope(artifact_id) == scope_a
+    assert manager.get_artifact_value(artifact_id) == {"nested": {"value": "original"}}
+    assert manager.release_scope(scope_b) == 0
+    assert manager.get_artifact_value(artifact_id) is not None
+    assert manager.release_scope(scope_a) == 1
+    assert manager.get_artifact_value(artifact_id) is None
 
 
 @pytest.mark.asyncio
@@ -147,6 +181,123 @@ async def test_selected_action_artifact_run_scope_release_is_concurrent_and_smal
     durable_value = json.loads(str(readback["content"]))
     assert durable_value["marker"] == "s"
     assert durable_value["body"] == "s" * (1024 * 1024)
+
+
+@pytest.mark.asyncio
+async def test_custom_action_execution_handler_callback_binds_agent_execution_artifact_scope(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.route_execution import (
+        _finalize_terminal_execution,
+    )
+
+    agent: Any = Agently.create_agent("action-artifact-custom-handler-scope").use_workspace(tmp_path / "run")
+    action_id = "produce_custom_handler_large_output"
+    action_tag = f"agent-{agent.name}"
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Produce a large Action artifact through a custom execution handler callback.",
+        kwargs={"marker": (str, "Execution scope marker.")},
+        func=lambda marker: {"marker": marker, "body": marker * (1024 * 1024)},
+        tags=[action_tag],
+    )
+    owner = agent.input("Run the custom Action execution handler.").create_execution().strategy("direct")
+    concurrent = agent.input("Keep a concurrent Action scope alive.").create_execution().strategy("direct")
+    callback_results: list[dict[str, Any]] = []
+    registered_refs: list[dict[str, Any]] = []
+    original_register_execution_artifact = agent.action._artifact_manager.register_execution_artifact
+
+    def capture_registered_artifact(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        artifact_ref = original_register_execution_artifact(*args, **kwargs)
+        registered_refs.append(copy.deepcopy(artifact_ref))
+        return artifact_ref
+
+    monkeypatch.setattr(
+        agent.action._artifact_manager,
+        "register_execution_artifact",
+        capture_registered_artifact,
+    )
+
+    async def planning_handler(context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        if context.get("done_plans"):
+            return {"next_action": "response", "action_calls": []}
+        return {
+            "next_action": "execute",
+            "action_calls": [
+                {
+                    "purpose": "produce scoped output",
+                    "action_id": action_id,
+                    "action_input": {"marker": "o"},
+                    "todo_suggestion": "finish",
+                }
+            ],
+        }
+
+    async def execution_handler(
+        _context: dict[str, Any],
+        request: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        callback_result = await request["async_call_action"](action_id, {"marker": "o"})
+        assert isinstance(callback_result, dict)
+        callback_results.append(callback_result)
+        return [
+            {
+                "action_call_id": "custom-handler-result",
+                "action_id": action_id,
+                "purpose": "produce scoped output",
+                "status": "success",
+                "success": True,
+                "ok": True,
+                "result": callback_result,
+                "data": callback_result,
+                "artifact_refs": callback_result.get("artifact_refs", []),
+            }
+        ]
+
+    records = await agent.action.async_plan_and_execute(
+        prompt=agent.request.prompt,
+        settings=agent.settings,
+        action_list=agent.action.get_action_list(tags=[action_tag]),
+        agent_name=agent.name,
+        parent_run_context=owner._ensure_agent_execution_run_context(),
+        planning_handler=planning_handler,
+        action_execution_handler=execution_handler,
+        max_rounds=2,
+    )
+    assert callback_results
+    callback_ref = next(
+        ref
+        for ref in registered_refs
+        if ref.get("artifact_type") == "action_output"
+    )
+    stored = agent.action._artifact_manager.get_artifact(callback_ref["artifact_id"])
+    assert stored is not None
+    assert stored["meta"]["artifact_scope"] == {"kind": "agent_execution", "id": owner.id}
+
+    concurrent_record = await agent.action.async_execute_action(
+        action_id,
+        {"marker": "c"},
+        artifact_scope={"kind": "agent_execution", "id": concurrent.id},
+    )
+    concurrent_ref = next(
+        ref
+        for ref in concurrent_record["artifact_refs"]
+        if ref.get("artifact_type") == "action_output"
+    )
+    owner.logs["artifact_refs"] = [callback_ref]
+    owner.result = {
+        "accepted": True,
+        "artifact_refs": [callback_ref],
+        "records": records,
+        "reply": "bounded",
+    }
+    owner.status = "success"
+
+    await _finalize_terminal_execution(owner, failed=False)
+
+    assert agent.action._artifact_manager.get_artifact_value(callback_ref["artifact_id"]) is None
+    assert agent.action._artifact_manager.get_artifact_value(concurrent_ref["artifact_id"]) is not None
 
 
 @pytest.mark.asyncio

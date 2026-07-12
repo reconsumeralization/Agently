@@ -774,11 +774,28 @@ class Action:
     def execute_action(self, name: str, kwargs: dict[str, Any], **kwargs_options):
         return FunctionShifter.syncify(self.async_execute_action)(name, kwargs, **kwargs_options)
 
-    async def async_call_action(self, name: str, kwargs: dict[str, Any]) -> Any:
+    async def _async_call_action_with_scope(
+        self,
+        name: str,
+        kwargs: dict[str, Any],
+        *,
+        artifact_scope: dict[str, str] | None,
+    ) -> Any:
         if not self.action_registry.has(name):
             return self._legacy_error(name, as_tool=False)
-        result = await self.async_execute_action(name, kwargs)
+        result = await self.async_execute_action(
+            name,
+            kwargs,
+            artifact_scope=artifact_scope,
+        )
         return self._legacy_result(result, as_tool=False)
+
+    async def async_call_action(self, name: str, kwargs: dict[str, Any]) -> Any:
+        return await self._async_call_action_with_scope(
+            name,
+            kwargs,
+            artifact_scope=None,
+        )
 
     def call_action(self, name: str, kwargs: dict[str, Any]) -> Any:
         return FunctionShifter.syncify(self.async_call_action)(name, kwargs)

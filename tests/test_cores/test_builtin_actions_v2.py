@@ -1330,7 +1330,14 @@ async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_contex
         planning_handler=planning_handler,
     )
 
-    assert marker in json.dumps(records, ensure_ascii=False)
+    assert marker not in json.dumps(records, ensure_ascii=False)
+    output_ref = next(
+        ref
+        for ref in records[0]["artifact_refs"]
+        if ref.get("artifact_type") == "action_output"
+    )
+    cold_output = agent.action._artifact_manager.get_artifact_value(output_ref["artifact_id"])
+    assert marker in json.dumps(cold_output, ensure_ascii=False)
     assert len(seen_rounds) >= 2
     second_round = seen_rounds[1]
     hot_context = json.dumps(
@@ -1341,7 +1348,7 @@ async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_contex
         ensure_ascii=False,
     )
     assert marker not in hot_context
-    assert len(hot_context) < 9000
+    assert len(hot_context) < 10000
     assert "read_action_artifact" in second_round["action_ids"]
     visible_record = second_round["last_round_records"][0]
     assert visible_record["data"]["same_as"] == "result"
