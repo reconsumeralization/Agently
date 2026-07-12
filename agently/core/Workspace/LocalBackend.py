@@ -167,28 +167,35 @@ class _AdvisoryLockReleaseError(WorkspaceConfigurationError):
     pass
 
 
+def _close_advisory_descriptors(descriptors: Sequence[int | None]) -> list[OSError]:
+    errors: list[OSError] = []
+    for descriptor in descriptors:
+        if descriptor is None:
+            continue
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            errors.append(error)
+    return errors
+
+
 @dataclass(frozen=True)
 class _AdvisoryLockHandle:
-    fd: int
+    carrier_fd: int
+    root_fd: int
     path: Path
 
     def release(self) -> None:
-        unlock_error: OSError | None = None
-        close_error: OSError | None = None
+        errors: list[OSError] = []
         try:
-            _fcntl.flock(self.fd, _fcntl.LOCK_UN)
+            _fcntl.flock(self.carrier_fd, _fcntl.LOCK_UN)
         except OSError as error:
-            unlock_error = error
-        try:
-            os.close(self.fd)
-        except OSError as error:
-            close_error = error
-        if unlock_error is not None or close_error is not None:
-            failures = ", ".join(
-                str(error)
-                for error in (unlock_error, close_error)
-                if error is not None
-            )
+            errors.append(error)
+        errors.extend(
+            _close_advisory_descriptors((self.carrier_fd, self.root_fd))
+        )
+        if errors:
+            failures = "; ".join(str(error) for error in errors)
             raise _AdvisoryLockReleaseError(
                 f"Workspace advisory lock release failed for {self.path}: {failures}"
             )
@@ -217,6 +224,8 @@ class _PosixAdvisoryLockWaiter:
     ) -> "_PosixAdvisoryLockWaiter | None":
         root_fd: int | None = None
         carrier_fd: int | None = None
+        waiter: _PosixAdvisoryLockWaiter | None = None
+        primary_error: _AdvisoryLockAcquisitionError | None = None
         try:
             root_fd = os.open(
                 path.parent,
@@ -246,31 +255,33 @@ class _PosixAdvisoryLockWaiter:
                 )
             except FileNotFoundError:
                 if not create:
-                    os.close(root_fd)
-                    return None
-                raise
-            waiter = cls(path=path, root_fd=root_fd, carrier_fd=carrier_fd)
-            waiter._verify_named_identity()
-            return waiter
-        except _AdvisoryLockAcquisitionError:
+                    carrier_fd = None
+                else:
+                    raise
             if carrier_fd is not None:
-                os.close(carrier_fd)
-            if root_fd is not None:
-                os.close(root_fd)
-            raise
+                waiter = cls(path=path, root_fd=root_fd, carrier_fd=carrier_fd)
+                waiter._verify_named_identity()
+                return waiter
+        except _AdvisoryLockAcquisitionError as error:
+            primary_error = error
         except OSError as error:
-            if carrier_fd is not None:
-                os.close(carrier_fd)
-            if root_fd is not None:
-                os.close(root_fd)
             error_type = (
                 _AdvisoryLockCarrierError
                 if error.errno in {errno.EISDIR, errno.ELOOP, errno.ENOTDIR}
                 else _AdvisoryLockAcquisitionError
             )
-            raise error_type(
+            primary_error = error_type(
                 f"Workspace advisory lock carrier open failed for {path}: {error}"
-            ) from error
+            )
+        close_errors = _close_advisory_descriptors((carrier_fd, root_fd))
+        if primary_error is not None:
+            raise primary_error
+        if close_errors:
+            raise _AdvisoryLockAcquisitionError(
+                f"Workspace advisory lock carrier close failed for {path}: "
+                + "; ".join(str(error) for error in close_errors)
+            )
+        return None
 
     def _verify_named_identity(self) -> None:
         if self._root_fd is None or self._carrier_fd is None:
@@ -328,19 +339,28 @@ class _PosixAdvisoryLockWaiter:
                 f"Workspace advisory lock identity verification failed for {self.path}: {error}"
             ) from error
         carrier_fd = self._carrier_fd
+        root_fd = self._root_fd
+        if root_fd is None:
+            raise RuntimeError("Workspace advisory lock root descriptor is closed.")
+        handle = _AdvisoryLockHandle(
+            carrier_fd=carrier_fd,
+            root_fd=root_fd,
+            path=self.path,
+        )
         self._carrier_fd = None
-        if self._root_fd is not None:
-            os.close(self._root_fd)
-            self._root_fd = None
-        return _AdvisoryLockHandle(fd=carrier_fd, path=self.path)
+        self._root_fd = None
+        return handle
 
     def close(self) -> None:
-        if self._carrier_fd is not None:
-            os.close(self._carrier_fd)
-            self._carrier_fd = None
-        if self._root_fd is not None:
-            os.close(self._root_fd)
-            self._root_fd = None
+        descriptors = (self._carrier_fd, self._root_fd)
+        self._carrier_fd = None
+        self._root_fd = None
+        errors = _close_advisory_descriptors(descriptors)
+        if errors:
+            failures = "; ".join(str(error) for error in errors)
+            raise _AdvisoryLockAcquisitionError(
+                f"Workspace advisory lock waiter close failed for {self.path}: {failures}"
+            )
 
 
 class _NativeAdvisoryLock:
@@ -377,7 +397,10 @@ class _NativeAdvisoryLock:
         except _AdvisoryLockAcquisitionError as error:
             return error
         if waiter is not None:
-            waiter.close()
+            try:
+                waiter.close()
+            except _AdvisoryLockAcquisitionError as error:
+                return error
         return None
 
 
@@ -471,13 +494,29 @@ class _RootMutationGuard:
             body_failed = True
             raise
         finally:
+            teardown_errors: list[WorkspaceConfigurationError] = []
             if waiter is not None:
-                waiter.close()
+                try:
+                    waiter.close()
+                except _AdvisoryLockAcquisitionError as error:
+                    teardown_errors.append(error)
             try:
                 self._release(owner)
-            except _AdvisoryLockReleaseError:
-                if not body_failed:
-                    raise
+            except _AdvisoryLockReleaseError as error:
+                teardown_errors.append(error)
+            if teardown_errors and not body_failed:
+                release_errors = [
+                    error
+                    for error in teardown_errors
+                    if isinstance(error, _AdvisoryLockReleaseError)
+                ]
+                if release_errors:
+                    raise _AdvisoryLockReleaseError(
+                        "; ".join(str(error) for error in teardown_errors)
+                    )
+                raise _AdvisoryLockAcquisitionError(
+                    "; ".join(str(error) for error in teardown_errors)
+                )
 
     @contextmanager
     def try_acquire_sync(self) -> Iterator[bool]:
@@ -486,18 +525,29 @@ class _RootMutationGuard:
         acquired = reservation is not None
         if reservation and _NativeAdvisoryLock.supported():
             waiter: _PosixAdvisoryLockWaiter | None = None
+            setup_error: Exception | None = None
+            cleanup_error: _AdvisoryLockAcquisitionError | None = None
+            handle: _AdvisoryLockHandle | None = None
             try:
                 waiter = _NativeAdvisoryLock.open_waiter(
                     self._lock_path,
                     create=True,
                 )
                 handle = waiter.try_acquire() if waiter is not None else None
-            except Exception:
-                self._release(owner)
-                raise
+            except Exception as error:
+                setup_error = error
             finally:
                 if waiter is not None:
-                    waiter.close()
+                    try:
+                        waiter.close()
+                    except _AdvisoryLockAcquisitionError as error:
+                        cleanup_error = error
+            if setup_error is not None or cleanup_error is not None:
+                self._release(owner)
+                if setup_error is not None:
+                    raise setup_error
+                if cleanup_error is not None:
+                    raise cleanup_error
             if handle is None:
                 self._release(owner)
                 acquired = False
@@ -511,11 +561,13 @@ class _RootMutationGuard:
             raise
         finally:
             if acquired:
+                teardown_errors: list[WorkspaceConfigurationError] = []
                 try:
                     self._release(owner)
-                except _AdvisoryLockReleaseError:
-                    if not body_failed:
-                        raise
+                except _AdvisoryLockReleaseError as error:
+                    teardown_errors.append(error)
+                if teardown_errors and not body_failed:
+                    raise teardown_errors[0]
 
 
 _ROOT_MUTATION_GUARDS: weakref.WeakValueDictionary[str, _RootMutationGuard] = (

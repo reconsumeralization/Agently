@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import errno
 import math
 import os
 import sqlite3
@@ -96,6 +97,7 @@ def delete_owned_file_descriptor_relative(
     if hasattr(os, "O_CLOEXEC"):
         directory_flags |= os.O_CLOEXEC
     descriptors: list[int] = []
+    body_failed = False
     try:
         try:
             descriptors.append(os.open(root, directory_flags))
@@ -158,9 +160,22 @@ def delete_owned_file_descriptor_relative(
             except OSError:
                 break
         return True
+    except BaseException:
+        body_failed = True
+        raise
     finally:
+        close_errors: list[OSError] = []
         for descriptor in reversed(descriptors):
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                close_errors.append(error)
+        if close_errors and not body_failed:
+            raise OSError(
+                errno.EIO,
+                "Workspace descriptor close failed: "
+                + "; ".join(str(error) for error in close_errors),
+            )
 
 
 def _coerce_embedding_vector(value: Sequence[float] | Sequence[Sequence[float]]) -> list[float]:

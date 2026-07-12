@@ -17,6 +17,7 @@ from typing import Any, cast
 import pytest
 
 from agently.core import LazyWorkspace, WorkspaceManager
+from agently.core.Workspace.Errors import WorkspacePolicyError
 from agently.core.Workspace.Retention import (
     canonical_retention_fingerprint,
     resolve_retention_policy,
@@ -2224,35 +2225,38 @@ async def test_root_mutation_guard_coordinates_public_mutations_across_processes
                     return
 
                 signal_a.write_text("started", encoding="utf-8")
-                file_result = await target.write_file(
-                    "reports/subprocess-late.txt",
-                    "late subprocess file",
-                )
-                record = await target.put(
-                    {"process": "late subprocess content"},
-                    collection="observations",
-                    kind="process",
-                    summary="subprocess late content",
-                )
-                event = await target.append_runtime_event(
-                    execution_id,
-                    {"event_type": "late.event", "event_id": "evt-subprocess-late"},
-                )
-                lease = await target.open_scratch(
-                    purpose="subprocess-late-scratch",
-                    cleanup_policy="on_scope_prune",
-                )
+                if role == "file":
+                    result = await target.write_file(
+                        "reports/subprocess-late.txt",
+                        "late subprocess file",
+                    )
+                elif role == "content":
+                    record = await target.put(
+                        {"process": "late subprocess content"},
+                        collection="observations",
+                        kind="process",
+                        summary="subprocess late content",
+                    )
+                    result = {"record_id": record["id"]}
+                elif role == "event":
+                    event = await target.append_runtime_event(
+                        execution_id,
+                        {"event_type": "late.event", "event_id": "evt-subprocess-late"},
+                    )
+                    result = {"event_id": event["event_id"]}
+                elif role == "scratch":
+                    lease = await target.open_scratch(
+                        purpose="subprocess-late-scratch",
+                        cleanup_policy="on_scope_prune",
+                    )
+                    result = {
+                        "lease_id": lease.get("lease_id"),
+                        "scratch_path": lease.get("local_path"),
+                    }
+                else:
+                    raise ValueError(f"unknown worker role: {role}")
                 result_path.write_text(
-                    json.dumps(
-                        {
-                            "file": file_result,
-                            "record_id": record["id"],
-                            "event_id": event["event_id"],
-                            "lease_id": lease.get("lease_id"),
-                            "scratch_path": lease.get("local_path"),
-                        },
-                        default=str,
-                    ),
+                    json.dumps(result, default=str),
                     encoding="utf-8",
                 )
 
@@ -2265,9 +2269,14 @@ async def test_root_mutation_guard_coordinates_public_mutations_across_processes
     apply_ready = tmp_path / "apply.ready"
     release_apply = tmp_path / "apply.release"
     apply_result = tmp_path / "apply.result.json"
-    mutation_started = tmp_path / "mutation.started"
     unused_signal = tmp_path / "mutation.unused"
-    mutation_result = tmp_path / "mutation.result.json"
+    mutation_roles = ("file", "content", "event", "scratch")
+    mutation_started = {
+        role: tmp_path / f"mutation-{role}.started" for role in mutation_roles
+    }
+    mutation_results = {
+        role: tmp_path / f"mutation-{role}.result.json" for role in mutation_roles
+    }
 
     async def wait_for_path(
         path: Path,
@@ -2331,28 +2340,31 @@ async def test_root_mutation_guard_coordinates_public_mutations_across_processes
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    mutation_process: asyncio.subprocess.Process | None = None
+    mutation_processes: dict[str, asyncio.subprocess.Process] = {}
     try:
         await wait_for_path(apply_ready, apply_process, role="apply")
-        mutation_process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(worker_path),
-            "mutate",
-            str(root.root),
-            execution_id,
-            str(mutation_started),
-            str(unused_signal),
-            str(mutation_result),
-            cwd=str(repository_root),
-            env=subprocess_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await wait_for_path(mutation_started, mutation_process, role="mutation")
+        for role in mutation_roles:
+            mutation_processes[role] = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(worker_path),
+                role,
+                str(root.root),
+                execution_id,
+                str(mutation_started[role]),
+                str(unused_signal),
+                str(mutation_results[role]),
+                cwd=str(repository_root),
+                env=subprocess_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        for role, process in mutation_processes.items():
+            await wait_for_path(mutation_started[role], process, role=role)
         await asyncio.sleep(0.3)
-        mutation_blocked = (
-            mutation_process.returncode is None and not mutation_result.exists()
-        )
+        mutations_blocked = {
+            role: process.returncode is None and not mutation_results[role].exists()
+            for role, process in mutation_processes.items()
+        }
         late_file = target.files_root / "reports" / "subprocess-late.txt"
         late_file_exists_before = late_file.exists()
         with backend._connect() as conn:
@@ -2376,21 +2388,21 @@ async def test_root_mutation_guard_coordinates_public_mutations_across_processes
             apply_process,
             role="apply",
         )
-        mutation_stdout, mutation_stderr = await communicate_worker(
-            mutation_process,
-            role="mutation",
-        )
+        mutation_outputs = {
+            role: await communicate_worker(process, role=role)
+            for role, process in mutation_processes.items()
+        }
     finally:
         release_apply.touch(exist_ok=True)
-        for process in (apply_process, mutation_process):
+        for process in (apply_process, *mutation_processes.values()):
             if process is not None and process.returncode is None:
                 process.kill()
                 await process.communicate()
 
-    assert mutation_process is not None
     assert apply_process.returncode == 0, (apply_stdout, apply_stderr)
-    assert mutation_process.returncode == 0, (mutation_stdout, mutation_stderr)
-    assert mutation_blocked is True
+    for role, process in mutation_processes.items():
+        assert process.returncode == 0, mutation_outputs[role]
+    assert mutations_blocked == {role: True for role in mutation_roles}
     assert late_file_exists_before is False
     assert late_file.exists()
     assert late_record_count == 0
@@ -2398,15 +2410,18 @@ async def test_root_mutation_guard_coordinates_public_mutations_across_processes
     assert late_leases_before == []
     applied = json.loads(apply_result.read_text(encoding="utf-8"))
     assert applied["status"] == "applied", applied["diagnostics"]
-    mutation = json.loads(mutation_result.read_text(encoding="utf-8"))
-    assert await backend.get_record(mutation["record_id"]) is not None
+    mutations = {
+        role: json.loads(path.read_text(encoding="utf-8"))
+        for role, path in mutation_results.items()
+    }
+    assert await backend.get_record(mutations["content"]["record_id"]) is not None
     assert await root.query_runtime_events(
         execution_id,
         event_id="evt-subprocess-late",
     )
-    lease = await backend.get_scratch_lease(mutation["lease_id"])
+    lease = await backend.get_scratch_lease(mutations["scratch"]["lease_id"])
     assert lease is not None
-    assert Path(mutation["scratch_path"]).is_dir()
+    assert Path(mutations["scratch"]["scratch_path"]).is_dir()
     lock_path = root.root / ".workspace.mutation.lock"
     assert lock_path.is_file()
     successor_preview = await target.inspect_retention(
@@ -2730,6 +2745,349 @@ async def test_advisory_lock_release_failure_preserves_committed_accounting(
     assert result["accounting"]["logical_bytes_deleted"] > 0
     assert result["accounting"]["entities"]["record_ids"] > 0
     assert await cast(Any, root.backend).get_record(discarded["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_advisory_handle_root_close_failure_does_not_leak_native_lock(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    root = WorkspaceManager().create(tmp_path / "retention-lock-real-close-failure")
+    execution_id = "exec-lock-real-close-failure"
+    target = root.with_scope_node("executions", execution_id)
+    discarded = await target.put(
+        {"process": "real root fd close failure"},
+        collection="observations",
+        kind="process",
+    )
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    original_open_waiter = local_backend_module._PosixAdvisoryLockWaiter.open
+    original_close = local_backend_module.os.close
+    waiters: list[Any] = []
+    root_fds: list[int] = []
+    failed = False
+
+    def tracked_open_waiter(cls, path, *, create):
+        waiter = original_open_waiter(path, create=create)
+        if waiter is not None:
+            waiters.append(waiter)
+            root_fds.append(waiter._root_fd)
+        return waiter
+
+    def fail_first_guard_root_close(fd):
+        nonlocal failed
+        target_fd = root_fds[0] if root_fds else None
+        original_close(fd)
+        if not failed and fd == target_fd:
+            failed = True
+            raise OSError(errno.EIO, "injected guard root fd close failure")
+
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "open",
+        classmethod(tracked_open_waiter),
+    )
+    monkeypatch.setattr(local_backend_module.os, "close", fail_first_guard_root_close)
+
+    result = await target.apply_retention(preview)
+    followup = await asyncio.wait_for(
+        target.put(
+            {"process": "lock available after close failure"},
+            collection="observations",
+            kind="process",
+        ),
+        timeout=1,
+    )
+
+    assert failed is True
+    assert result["status"] == "deferred"
+    assert [item.get("code") for item in result["diagnostics"]] == [
+        "workspace.retention.advisory_lock_release_failed"
+    ]
+    assert result["accounting"]["logical_bytes_deleted"] > 0
+    assert await cast(Any, root.backend).get_record(discarded["id"]) is None
+    assert await cast(Any, root.backend).get_record(followup["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_advisory_waiter_cancel_close_failure_releases_process_reservation(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    lock_path = tmp_path / "retention-lock-cancel-close" / ".workspace.mutation.lock"
+    lock_path.parent.mkdir()
+    first_guard = local_backend_module._RootMutationGuard(lock_path)
+    second_guard = local_backend_module._RootMutationGuard(lock_path)
+    original_open_waiter = local_backend_module._PosixAdvisoryLockWaiter.open
+    original_close = local_backend_module.os.close
+    waiters: list[Any] = []
+    carrier_fds: list[int] = []
+    failed = False
+
+    def tracked_open_waiter(cls, path, *, create):
+        waiter = original_open_waiter(path, create=create)
+        if waiter is not None:
+            waiters.append(waiter)
+            carrier_fds.append(waiter._carrier_fd)
+        return waiter
+
+    def fail_canceled_carrier_close(fd):
+        nonlocal failed
+        target_fd = carrier_fds[1] if len(carrier_fds) > 1 else None
+        original_close(fd)
+        if not failed and fd == target_fd:
+            failed = True
+            raise OSError(errno.EIO, "injected canceled waiter close failure")
+
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "open",
+        classmethod(tracked_open_waiter),
+    )
+    monkeypatch.setattr(local_backend_module.os, "close", fail_canceled_carrier_close)
+
+    async def contend() -> None:
+        async with second_guard.acquire():
+            return
+
+    async with first_guard.acquire():
+        task = asyncio.create_task(contend())
+        while len(waiters) < 2:
+            await asyncio.sleep(0.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    await asyncio.wait_for(contend(), timeout=1)
+    assert failed is True
+
+
+def test_descriptor_delete_close_failure_attempts_every_owned_descriptor(
+    tmp_path,
+    monkeypatch,
+):
+    stores_module = importlib.import_module("agently.core.Workspace.Stores")
+    owned_root = tmp_path / "descriptor-close-all"
+    target = owned_root / "a" / "b" / "target.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("delete me", encoding="utf-8")
+    original_open = stores_module.os.open
+    original_close = stores_module.os.close
+    opened: list[int] = []
+    closed: list[int] = []
+    failed = False
+
+    def tracked_open(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def fail_first_close_after_closing(fd):
+        nonlocal failed
+        closed.append(fd)
+        original_close(fd)
+        if not failed:
+            failed = True
+            raise OSError(errno.EIO, "injected descriptor close failure")
+
+    monkeypatch.setattr(stores_module.os, "open", tracked_open)
+    monkeypatch.setattr(stores_module.os, "close", fail_first_close_after_closing)
+
+    with pytest.raises(OSError, match="descriptor close"):
+        delete_owned_file_descriptor_relative(owned_root, "a/b/target.txt")
+
+    assert set(closed) == set(opened)
+    for fd in opened:
+        with pytest.raises(OSError) as released:
+            os.fstat(fd)
+        assert released.value.errno == errno.EBADF
+
+
+def test_descriptor_delete_body_error_wins_over_close_error(tmp_path, monkeypatch):
+    stores_module = importlib.import_module("agently.core.Workspace.Stores")
+    owned_root = tmp_path / "descriptor-body-priority"
+    target = owned_root / "a" / "target.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("keep me", encoding="utf-8")
+    original_close = stores_module.os.close
+
+    def fail_unlink(*_args, **_kwargs):
+        raise WorkspacePolicyError("injected delete body failure")
+
+    def close_then_fail(fd):
+        original_close(fd)
+        raise OSError(errno.EIO, "injected close teardown failure")
+
+    monkeypatch.setattr(stores_module.os, "unlink", fail_unlink)
+    monkeypatch.setattr(stores_module.os, "close", close_then_fail)
+
+    with pytest.raises(WorkspacePolicyError, match="delete body failure"):
+        delete_owned_file_descriptor_relative(owned_root, "a/target.txt")
+
+
+def test_advisory_waiter_open_preserves_acquisition_error_and_closes_all_fds(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    lock_path = tmp_path / "waiter-open-cleanup" / ".workspace.mutation.lock"
+    lock_path.parent.mkdir()
+    original_open = local_backend_module.os.open
+    original_close = local_backend_module.os.close
+    opened: list[int] = []
+    closed: list[int] = []
+    failed = False
+
+    def tracked_open(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def close_all_but_fail_first(fd):
+        nonlocal failed
+        closed.append(fd)
+        original_close(fd)
+        if not failed:
+            failed = True
+            raise OSError(errno.EIO, "injected waiter open cleanup failure")
+
+    def fail_identity(_waiter):
+        raise local_backend_module._AdvisoryLockCarrierError(
+            "injected acquisition identity failure"
+        )
+
+    monkeypatch.setattr(local_backend_module.os, "open", tracked_open)
+    monkeypatch.setattr(local_backend_module.os, "close", close_all_but_fail_first)
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "_verify_named_identity",
+        fail_identity,
+    )
+
+    with pytest.raises(
+        local_backend_module._AdvisoryLockCarrierError,
+        match="identity failure",
+    ):
+        local_backend_module._PosixAdvisoryLockWaiter.open(lock_path, create=True)
+
+    assert set(closed) == set(opened)
+
+
+def test_advisory_waiter_missing_preflight_close_failure_is_typed(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    lock_path = tmp_path / "waiter-missing-cleanup" / ".workspace.mutation.lock"
+    lock_path.parent.mkdir()
+    original_close = local_backend_module.os.close
+
+    def close_then_fail(fd):
+        original_close(fd)
+        raise OSError(errno.EIO, "injected missing preflight close failure")
+
+    monkeypatch.setattr(local_backend_module.os, "close", close_then_fail)
+
+    with pytest.raises(
+        local_backend_module._AdvisoryLockAcquisitionError,
+        match="close",
+    ):
+        local_backend_module._PosixAdvisoryLockWaiter.open(lock_path, create=False)
+
+
+def test_sync_advisory_guard_releases_reservation_once_when_cleanup_also_fails(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    lock_path = tmp_path / "sync-waiter-cleanup" / ".workspace.mutation.lock"
+    lock_path.parent.mkdir()
+    guard = local_backend_module._RootMutationGuard(lock_path)
+
+    def fail_acquire(_waiter):
+        raise local_backend_module._AdvisoryLockAcquisitionError(
+            "injected sync acquisition failure"
+        )
+
+    def fail_close(_waiter):
+        raise local_backend_module._AdvisoryLockAcquisitionError(
+            "injected sync cleanup failure"
+        )
+
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "try_acquire",
+        fail_acquire,
+    )
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "close",
+        fail_close,
+    )
+
+    with pytest.raises(
+        local_backend_module._AdvisoryLockAcquisitionError,
+        match="acquisition failure",
+    ):
+        with guard.try_acquire_sync():
+            pass
+
+    assert guard._owner is None
+    assert guard._depth == 0
+
+
+@pytest.mark.asyncio
+async def test_retention_preflight_waiter_close_failure_returns_typed_deferral(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    root = WorkspaceManager().create(tmp_path / "retention-preflight-close-failure")
+    execution_id = "exec-preflight-close-failure"
+    target = root.with_scope_node("executions", execution_id)
+    await target.put(
+        {"process": "preflight close failure"},
+        collection="observations",
+        kind="process",
+    )
+
+    def fail_close(_waiter):
+        raise local_backend_module._AdvisoryLockAcquisitionError(
+            "injected preflight waiter close failure"
+        )
+
+    monkeypatch.setattr(
+        local_backend_module._PosixAdvisoryLockWaiter,
+        "close",
+        fail_close,
+    )
+
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+
+    assert preview["status"] == "deferred"
+    assert [item.get("code") for item in preview["diagnostics"]] == [
+        "workspace.retention.advisory_lock_failed"
+    ]
 
 
 @pytest.mark.asyncio
