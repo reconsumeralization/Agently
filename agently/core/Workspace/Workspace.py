@@ -426,7 +426,6 @@ class Workspace:
         put_record_callable = cast(Callable[[WorkspaceRecordRef], Awaitable[WorkspaceRecordRef]], put_record)
         return await put_record_callable(cast(WorkspaceRecordRef, scoped_ref))
 
-    @_guard_workspace_mutation
     async def put(
         self,
         record_or_content: Any = _MISSING,

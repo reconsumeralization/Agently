@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import shutil
 import sqlite3
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -21,6 +24,7 @@ from agently.core.Workspace.Retention import (
 )
 from agently.core.Workspace.Stores import delete_owned_file_descriptor_relative
 from agently.types.data import (
+    WorkspaceRecordRef,
     WorkspaceRetentionLifecycle,
     WorkspaceRetentionPolicy,
     WorkspaceRetentionPreview,
@@ -2152,6 +2156,347 @@ async def test_root_mutation_guard_holds_compound_checkpoint_as_one_operation(
         )
     assert checkpoint_row["record_id"] == checkpoint["id"]
     assert latest_manifest["id"] == checkpoint["id"]
+
+
+@pytest.mark.asyncio
+async def test_root_mutation_guard_coordinates_public_mutations_across_processes(
+    tmp_path,
+):
+    root = WorkspaceManager().create(
+        tmp_path / "retention-subprocess-guard",
+        vector_store_provider="sqlite",
+    )
+    execution_id = "exec-subprocess-guard"
+    target = root.with_scope_node("executions", execution_id)
+    discarded = await target.put(
+        {"process": "subprocess lock holder"},
+        collection="observations",
+        kind="process",
+    )
+    backend = cast(Any, root.backend)
+    await backend.vector_store_provider.index_record(discarded, [1.0])
+    preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    preview_path = tmp_path / "preview.json"
+    preview_path.write_text(json.dumps(preview), encoding="utf-8")
+    worker_path = tmp_path / "workspace_guard_worker.py"
+    worker_path.write_text(
+        textwrap.dedent(
+            """
+            import asyncio
+            import json
+            import sys
+            from pathlib import Path
+
+            from agently.core import WorkspaceManager
+
+
+            async def main():
+                role = sys.argv[1]
+                root_path = Path(sys.argv[2])
+                execution_id = sys.argv[3]
+                signal_a = Path(sys.argv[4])
+                signal_b = Path(sys.argv[5])
+                result_path = Path(sys.argv[6])
+                root = WorkspaceManager().create(
+                    root_path,
+                    create=False,
+                    vector_store_provider="sqlite",
+                )
+                target = root.with_scope_node("executions", execution_id)
+                if role == "apply":
+                    preview = json.loads(Path(sys.argv[7]).read_text(encoding="utf-8"))
+                    provider = root.backend.vector_store_provider
+                    original_delete = provider.delete_records
+
+                    async def pause_after_commit(record_ids):
+                        signal_a.write_text("ready", encoding="utf-8")
+                        while not signal_b.exists():
+                            await asyncio.sleep(0.01)
+                        await original_delete(record_ids)
+
+                    provider.delete_records = pause_after_commit
+                    result = await target.apply_retention(preview)
+                    result_path.write_text(json.dumps(result, default=str), encoding="utf-8")
+                    return
+
+                signal_a.write_text("started", encoding="utf-8")
+                file_result = await target.write_file(
+                    "reports/subprocess-late.txt",
+                    "late subprocess file",
+                )
+                record = await target.put(
+                    {"process": "late subprocess content"},
+                    collection="observations",
+                    kind="process",
+                    summary="subprocess late content",
+                )
+                event = await target.append_runtime_event(
+                    execution_id,
+                    {"event_type": "late.event", "event_id": "evt-subprocess-late"},
+                )
+                lease = await target.open_scratch(
+                    purpose="subprocess-late-scratch",
+                    cleanup_policy="on_scope_prune",
+                )
+                result_path.write_text(
+                    json.dumps(
+                        {
+                            "file": file_result,
+                            "record_id": record["id"],
+                            "event_id": event["event_id"],
+                            "lease_id": lease.get("lease_id"),
+                            "scratch_path": lease.get("local_path"),
+                        },
+                        default=str,
+                    ),
+                    encoding="utf-8",
+                )
+
+
+            asyncio.run(main())
+            """
+        ),
+        encoding="utf-8",
+    )
+    apply_ready = tmp_path / "apply.ready"
+    release_apply = tmp_path / "apply.release"
+    apply_result = tmp_path / "apply.result.json"
+    mutation_started = tmp_path / "mutation.started"
+    unused_signal = tmp_path / "mutation.unused"
+    mutation_result = tmp_path / "mutation.result.json"
+
+    async def wait_for_path(
+        path: Path,
+        process: asyncio.subprocess.Process,
+        *,
+        role: str,
+    ) -> None:
+        deadline = asyncio.get_running_loop().time() + 5
+        while not path.exists():
+            if process.returncode is not None:
+                stdout, stderr = await process.communicate()
+                pytest.fail(
+                    f"{role} worker exited before {path.name}: "
+                    f"stdout={stdout!r}, stderr={stderr!r}"
+                )
+            if asyncio.get_running_loop().time() >= deadline:
+                process.kill()
+                stdout, stderr = await process.communicate()
+                pytest.fail(
+                    f"{role} worker timed out before {path.name}: "
+                    f"stdout={stdout!r}, stderr={stderr!r}"
+                )
+            await asyncio.sleep(0.01)
+
+    async def communicate_worker(
+        process: asyncio.subprocess.Process,
+        *,
+        role: str,
+    ) -> tuple[bytes, bytes]:
+        try:
+            return await asyncio.wait_for(process.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            process.kill()
+            stdout, stderr = await process.communicate()
+            pytest.fail(
+                f"{role} worker timed out during completion: "
+                f"stdout={stdout!r}, stderr={stderr!r}"
+            )
+
+    repository_root = Path(__file__).resolve().parents[2]
+    subprocess_env = os.environ.copy()
+    subprocess_env["PYTHONPATH"] = os.pathsep.join(
+        filter(
+            None,
+            (str(repository_root), subprocess_env.get("PYTHONPATH")),
+        )
+    )
+
+    apply_process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(worker_path),
+        "apply",
+        str(root.root),
+        execution_id,
+        str(apply_ready),
+        str(release_apply),
+        str(apply_result),
+        str(preview_path),
+        cwd=str(repository_root),
+        env=subprocess_env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    mutation_process: asyncio.subprocess.Process | None = None
+    try:
+        await wait_for_path(apply_ready, apply_process, role="apply")
+        mutation_process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(worker_path),
+            "mutate",
+            str(root.root),
+            execution_id,
+            str(mutation_started),
+            str(unused_signal),
+            str(mutation_result),
+            cwd=str(repository_root),
+            env=subprocess_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await wait_for_path(mutation_started, mutation_process, role="mutation")
+        await asyncio.sleep(0.3)
+        mutation_blocked = (
+            mutation_process.returncode is None and not mutation_result.exists()
+        )
+        late_file = target.files_root / "reports" / "subprocess-late.txt"
+        late_file_exists_before = late_file.exists()
+        with backend._connect() as conn:
+            late_record_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM records WHERE summary = ?",
+                    ("subprocess late content",),
+                ).fetchone()["count"]
+            )
+        late_events_before = await root.query_runtime_events(
+            execution_id,
+            event_id="evt-subprocess-late",
+        )
+        late_leases_before = [
+            lease
+            for lease in await backend.list_scratch_leases()
+            if lease.get("purpose") == "subprocess-late-scratch"
+        ]
+        release_apply.write_text("release", encoding="utf-8")
+        apply_stdout, apply_stderr = await communicate_worker(
+            apply_process,
+            role="apply",
+        )
+        mutation_stdout, mutation_stderr = await communicate_worker(
+            mutation_process,
+            role="mutation",
+        )
+    finally:
+        release_apply.touch(exist_ok=True)
+        for process in (apply_process, mutation_process):
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.communicate()
+
+    assert mutation_process is not None
+    assert apply_process.returncode == 0, (apply_stdout, apply_stderr)
+    assert mutation_process.returncode == 0, (mutation_stdout, mutation_stderr)
+    assert mutation_blocked is True
+    assert late_file_exists_before is False
+    assert late_file.exists()
+    assert late_record_count == 0
+    assert late_events_before == []
+    assert late_leases_before == []
+    applied = json.loads(apply_result.read_text(encoding="utf-8"))
+    assert applied["status"] == "applied", applied["diagnostics"]
+    mutation = json.loads(mutation_result.read_text(encoding="utf-8"))
+    assert await backend.get_record(mutation["record_id"]) is not None
+    assert await root.query_runtime_events(
+        execution_id,
+        event_id="evt-subprocess-late",
+    )
+    lease = await backend.get_scratch_lease(mutation["lease_id"])
+    assert lease is not None
+    assert Path(mutation["scratch_path"]).is_dir()
+    lock_path = root.root / ".workspace.mutation.lock"
+    assert lock_path.is_file()
+    successor_preview = await target.inspect_retention(
+        {},
+        lifecycle={**_terminal_lifecycle(execution_id), "state_version": None},
+    )
+    assert lock_path.name not in json.dumps(successor_preview["selected"])
+
+
+@pytest.mark.asyncio
+async def test_retention_inspection_defers_without_advisory_lock_support(
+    tmp_path,
+    monkeypatch,
+):
+    local_backend_module = importlib.import_module(
+        "agently.core.Workspace.LocalBackend"
+    )
+    monkeypatch.setattr(local_backend_module, "_fcntl", None, raising=False)
+    monkeypatch.setattr(local_backend_module, "_msvcrt", None, raising=False)
+
+    root = WorkspaceManager().create(tmp_path / "retention-no-advisory-lock")
+    target = root.with_scope_node("executions", "exec-no-advisory-lock")
+    await target.put(
+        {"process": "ordinary mutation remains available"},
+        collection="observations",
+        kind="process",
+    )
+
+    preview = await target.inspect_retention(
+        {},
+        lifecycle=_terminal_lifecycle("exec-no-advisory-lock"),
+    )
+
+    assert preview["status"] == "deferred"
+    assert [diagnostic.get("code") for diagnostic in preview["diagnostics"]] == [
+        "workspace.retention.advisory_lock_unsupported"
+    ]
+    assert preview["diagnostics"][0].get("retryable") is False
+    assert cast(Any, root.backend).capabilities()["features"]["supports_retention"] is False
+    result = await target.apply_retention(preview)
+    assert result["status"] == "deferred"
+    assert [diagnostic.get("code") for diagnostic in result["diagnostics"]] == [
+        "workspace.retention.advisory_lock_unsupported"
+    ]
+    _assert_zero_actual_accounting(cast(dict[str, Any], result))
+
+
+@pytest.mark.asyncio
+async def test_workspace_profile_can_fan_out_public_puts_without_guard_deadlock(tmp_path):
+    manager = WorkspaceManager()
+    workspace = manager.create(tmp_path / "retention-profile-fanout")
+
+    class ParallelProfile:
+        async def ingest(self, *, workspace, **_kwargs: Any):
+            return await asyncio.gather(
+                workspace.put(
+                    {"parallel": "left"},
+                    collection="observations",
+                    kind="parallel",
+                    summary="parallel profile left",
+                ),
+                workspace.put(
+                    {"parallel": "right"},
+                    collection="observations",
+                    kind="parallel",
+                    summary="parallel profile right",
+                ),
+            )
+
+    manager.register_profile("parallel", cast(Any, ParallelProfile()))
+    refs = cast(
+        list[dict[str, Any]],
+        await asyncio.wait_for(
+            workspace.put(
+                {"request": "fan out"},
+                collection="observations",
+                profile="parallel",
+            ),
+            timeout=1,
+        ),
+    )
+
+    assert len(refs) == 2
+    assert {ref["summary"] for ref in refs} == {
+        "parallel profile left",
+        "parallel profile right",
+    }
+    resolved = [
+        await workspace.get(cast(WorkspaceRecordRef, ref)) for ref in refs
+    ]
+    assert all(value is not None for value in resolved)
 
 
 @pytest.mark.asyncio

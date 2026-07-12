@@ -15,7 +15,10 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
+import importlib
+import os
 import re
 import shutil
 import sqlite3
@@ -93,6 +96,17 @@ from ._defaults import (
 from ._utils import json_dumps, json_loads, slug, utc_now
 
 
+try:
+    _fcntl: Any = importlib.import_module("fcntl")
+except ImportError:
+    _fcntl = None
+
+try:
+    _msvcrt: Any = importlib.import_module("msvcrt")
+except ImportError:
+    _msvcrt = None
+
+
 @dataclass(frozen=True)
 class _RetentionSQLiteSnapshot:
     all_record_rows: list[sqlite3.Row]
@@ -147,13 +161,68 @@ class _DerivedCleanupOperationalError(RuntimeError):
         self.error = error
 
 
-class _RootMutationGuard:
-    """Loop-neutral, asyncio-task-reentrant mutation ownership for one root."""
+@dataclass(frozen=True)
+class _AdvisoryLockHandle:
+    fd: int
+    mechanism: str
 
-    def __init__(self) -> None:
+    def release(self) -> None:
+        try:
+            if self.mechanism == "fcntl":
+                _fcntl.flock(self.fd, _fcntl.LOCK_UN)
+            elif self.mechanism == "msvcrt":
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                _msvcrt.locking(self.fd, _msvcrt.LK_UNLCK, 1)
+            else:
+                raise RuntimeError(
+                    f"Unknown Workspace advisory lock mechanism: {self.mechanism}"
+                )
+        finally:
+            os.close(self.fd)
+
+
+class _NativeAdvisoryLock:
+    """Small portability seam for non-blocking process-owned file locks."""
+
+    @staticmethod
+    def supported() -> bool:
+        return _fcntl is not None or _msvcrt is not None
+
+    @staticmethod
+    def try_acquire(path: Path) -> _AdvisoryLockHandle | None:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            if _fcntl is not None:
+                _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                return _AdvisoryLockHandle(fd=fd, mechanism="fcntl")
+            if _msvcrt is not None:
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
+                return _AdvisoryLockHandle(fd=fd, mechanism="msvcrt")
+            raise RuntimeError("Workspace advisory locking is unavailable.")
+        except OSError as error:
+            os.close(fd)
+            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                return None
+            raise WorkspaceConfigurationError(
+                f"Workspace advisory lock acquisition failed for {path}: {error}"
+            ) from error
+        except Exception:
+            os.close(fd)
+            raise
+
+
+class _RootMutationGuard:
+    """Task-reentrant process and OS mutation ownership for one canonical root."""
+
+    def __init__(self, lock_path: Path) -> None:
         self._state_lock = threading.Lock()
         self._owner: object | None = None
         self._depth = 0
+        self._lock_path = lock_path
+        self._advisory_handle: _AdvisoryLockHandle | None = None
 
     @staticmethod
     def _owner_token() -> object:
@@ -165,7 +234,7 @@ class _RootMutationGuard:
             return task
         return ("thread", threading.get_ident())
 
-    def _try_acquire(self, owner: object) -> bool:
+    def _try_reserve(self, owner: object) -> bool | None:
         with self._state_lock:
             if self._owner is None:
                 self._owner = owner
@@ -173,23 +242,51 @@ class _RootMutationGuard:
                 return True
             if self._owner == owner:
                 self._depth += 1
-                return True
-            return False
+                return False
+            return None
 
     def _release(self, owner: object) -> None:
+        advisory_handle: _AdvisoryLockHandle | None = None
         with self._state_lock:
             if self._owner != owner or self._depth <= 0:
                 raise RuntimeError("Workspace mutation guard release ownership mismatch.")
             self._depth -= 1
             if self._depth == 0:
                 self._owner = None
+                advisory_handle = self._advisory_handle
+                self._advisory_handle = None
+        if advisory_handle is not None:
+            advisory_handle.release()
+
+    def _set_advisory_handle(
+        self,
+        owner: object,
+        handle: _AdvisoryLockHandle,
+    ) -> None:
+        with self._state_lock:
+            if self._owner != owner or self._depth <= 0:
+                handle.release()
+                raise RuntimeError(
+                    "Workspace mutation guard lost ownership during advisory lock acquisition."
+                )
+            self._advisory_handle = handle
 
     @asynccontextmanager
     async def acquire(self) -> AsyncIterator[None]:
         owner = self._owner_token()
-        while not self._try_acquire(owner):
+        reservation: bool | None = None
+        while reservation is None:
+            reservation = self._try_reserve(owner)
+            if reservation is not None:
+                break
             await asyncio.sleep(0.001)
         try:
+            if reservation and _NativeAdvisoryLock.supported():
+                handle = _NativeAdvisoryLock.try_acquire(self._lock_path)
+                while handle is None:
+                    await asyncio.sleep(0.001)
+                    handle = _NativeAdvisoryLock.try_acquire(self._lock_path)
+                self._set_advisory_handle(owner, handle)
             yield
         finally:
             self._release(owner)
@@ -197,7 +294,19 @@ class _RootMutationGuard:
     @contextmanager
     def try_acquire_sync(self) -> Iterator[bool]:
         owner = self._owner_token()
-        acquired = self._try_acquire(owner)
+        reservation = self._try_reserve(owner)
+        acquired = reservation is not None
+        if reservation and _NativeAdvisoryLock.supported():
+            try:
+                handle = _NativeAdvisoryLock.try_acquire(self._lock_path)
+            except Exception:
+                self._release(owner)
+                raise
+            if handle is None:
+                self._release(owner)
+                acquired = False
+            else:
+                self._set_advisory_handle(owner, handle)
         try:
             yield acquired
         finally:
@@ -216,7 +325,7 @@ def _root_mutation_guard(root: Path) -> _RootMutationGuard:
     with _ROOT_MUTATION_GUARDS_LOCK:
         guard = _ROOT_MUTATION_GUARDS.get(key)
         if guard is None:
-            guard = _RootMutationGuard()
+            guard = _RootMutationGuard(Path(key) / ".workspace.mutation.lock")
             _ROOT_MUTATION_GUARDS[key] = guard
         return guard
 
@@ -303,6 +412,8 @@ class LocalWorkspaceBackend:
         initialize_default_vector_store_provider: bool = True,
     ):
         self.root = Path(root).expanduser().resolve()
+        if create:
+            self.root.mkdir(parents=True, exist_ok=True)
         self.content_root = self.root / "content"
         self.files_root = self.root / "files"
         self.db_path = self.root / "workspace.db"
@@ -357,6 +468,10 @@ class LocalWorkspaceBackend:
     @staticmethod
     def _supports_descriptor_relative_delete() -> bool:
         return supports_descriptor_relative_delete()
+
+    @staticmethod
+    def _supports_advisory_lock() -> bool:
+        return _NativeAdvisoryLock.supported()
 
     def _initialize(self):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -726,9 +841,11 @@ class LocalWorkspaceBackend:
         if isinstance(vector_index, VectorIndexPipeline):
             vector_search = self.embedding_provider is not None and self.vector_store_provider is not None
         retention_provider = self.db_store_provider
-        supports_retention = callable(
-            getattr(retention_provider, "inspect_retention", None)
-        ) and callable(getattr(retention_provider, "apply_retention", None))
+        supports_retention = (
+            callable(getattr(retention_provider, "inspect_retention", None))
+            and callable(getattr(retention_provider, "apply_retention", None))
+            and self._supports_advisory_lock()
+        )
         return {
             "structured_get_data": True,
             "links_query": True,
@@ -3339,6 +3456,22 @@ class LocalWorkspaceBackend:
                     )
                 ],
             )
+        if not self._supports_advisory_lock():
+            diagnostic = self._retention_diagnostic(
+                "workspace.retention.advisory_lock_unsupported",
+                "Workspace retention requires a native OS advisory lock mechanism.",
+                entity=str(normalized_scope.get("execution_id") or "workspace"),
+            )
+            diagnostic["retryable"] = False
+            return self._retention_preview(
+                status="deferred",
+                scope=normalized_scope,
+                lifecycle=lifecycle,
+                policy=resolved_policy,
+                retained_refs=list(retained_refs),
+                inline_result=inline_result,
+                diagnostics=[diagnostic],
+            )
         if not self._supports_descriptor_relative_delete():
             diagnostic = self._retention_diagnostic(
                 "workspace.retention.derived_delete_unsupported",
@@ -4219,6 +4352,25 @@ class LocalWorkspaceBackend:
         preview: WorkspaceRetentionPreview,
     ) -> WorkspaceRetentionResult:
         async with self._mutation_guard():
+            if not self._supports_advisory_lock():
+                diagnostic = retention_diagnostic(
+                    "workspace.retention.advisory_lock_unsupported",
+                    "Workspace retention requires a native OS advisory lock mechanism.",
+                    entity=str(
+                        preview["scope"].get("execution_id") or "workspace"
+                    ),
+                )
+                diagnostic["retryable"] = False
+                return self._retention_result(
+                    status="deferred",
+                    plan_fingerprint=preview["plan_fingerprint"],
+                    manifest_ref=None,
+                    retained_refs=preview["retained_refs"],
+                    accounting=self._zero_retention_accounting(
+                        preview["accounting"]
+                    ),
+                    diagnostics=[diagnostic],
+                )
             try:
                 return await self._apply_retention_unlocked(preview)
             except (sqlite3.Error, OSError) as error:
