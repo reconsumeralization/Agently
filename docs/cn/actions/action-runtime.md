@@ -388,7 +388,10 @@ decision aliases 重复复制 command；command observation 使用 canonical
 bounded records，不会携带私有的完整 Action value。同一个 carrier budget 同时覆盖
 `payload` 与 `error`：raw exception 会在 direct callback 之前转成一份有界、脱敏且
 兼容 ErrorInfo 的 mapping；官方 `action.*` 和兼容 `tool.*` 事件直接复用该 mapping，
-不会再从原始异常重建完整 message 或 traceback。
+不会再从原始异常重建完整 message 或 traceback。opaque string/bytes 异常参数不会保留
+任何原始前缀，只会投影为固定脱敏摘要、原始 UTF-8 字节数与 SHA-256 digest。显式结构化
+参数可在敏感键脱敏后保留有界事实。投影后的 traceback 只包含结构化 frame 事实，不包含
+格式化异常行、源码行、notes、locals、cause 或 context。
 
 没有 legacy positional 签名 —— 公开契约只是 `(context, request)`。
 

@@ -437,7 +437,12 @@ also carry bounded records, never the private complete Action values. The same
 carrier budget covers `payload` and `error`: a raw exception becomes one
 bounded/redacted ErrorInfo-compatible mapping before the direct callback, and
 official `action.*` plus compatibility `tool.*` events reuse that mapping
-without rebuilding the original message or traceback.
+without rebuilding the original message or traceback. Opaque string or bytes
+exception arguments never preserve a raw prefix: they project to a fixed
+redacted summary plus the original UTF-8 byte length and SHA-256 digest.
+Explicitly structured arguments may retain bounded facts after sensitive-key
+redaction. Projected tracebacks contain structural frame facts only and exclude
+the formatted exception line, source line, notes, locals, cause, and context.
 
 There is no legacy positional handler signature — the public contract is `(context, request)` only.
 

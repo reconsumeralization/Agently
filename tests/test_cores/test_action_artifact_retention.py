@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import inspect
 import json
 from types import SimpleNamespace
@@ -1282,20 +1283,24 @@ async def test_triggerflow_failure_convergence_callback_receives_bounded_records
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("flow_name", ["TriggerFlowActionFlow", "DAGActionFlow"])
+@pytest.mark.parametrize("error_shape", ["structured", "opaque_string"])
 async def test_action_flow_failure_bounds_complete_error_observation_carriers(
     tmp_path,
     flow_name: str,
+    error_shape: str,
 ) -> None:
     message_tail = f"{flow_name}_ERROR_MESSAGE_TAIL"
     traceback_tail = f"{flow_name}_ERROR_TRACEBACK_TAIL"
     secret_value = f"{flow_name}-error-secret"
-    agent: Any = Agently.create_agent(f"error-observation-{flow_name}").use_workspace(
-        tmp_path / flow_name
+    opaque_message = secret_value + ("u" * (1024 * 1024)) + message_tail
+    body_probe = "u" * 128 if error_shape == "opaque_string" else "m" * 128
+    agent: Any = Agently.create_agent(f"error-observation-{flow_name}-{error_shape}").use_workspace(
+        tmp_path / flow_name / error_shape
     )
     flow = agent.action._flow_controller.create_named_action_flow(flow_name)
     direct_observations: list[dict[str, Any]] = []
     runtime_events: list[Any] = []
-    hook_name = f"test.error_observation.{flow_name}"
+    hook_name = f"test.error_observation.{flow_name}.{error_shape}"
     Agently.event_center.register_hook(
         lambda event: runtime_events.append(event),
         event_types=["action.loop_failed", "tool.loop_failed"],
@@ -1307,6 +1312,8 @@ async def test_action_flow_failure_bounds_complete_error_observation_carriers(
         await agent.action._flow_controller.async_emit_action_flow_observation(observation)
 
     async def planning_handler(_context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        if error_shape == "opaque_string":
+            raise RuntimeError(opaque_message)
         try:
             raise ValueError(
                 {
@@ -1367,11 +1374,15 @@ async def test_action_flow_failure_bounds_complete_error_observation_carriers(
             "message_tail": message_tail.encode("utf-8") in serialized,
             "traceback_tail": traceback_tail.encode("utf-8") in serialized,
             "secret": secret_value.encode("utf-8") in serialized,
+            "body": body_probe.encode("utf-8") in serialized,
             "error_is_mapping": error_is_mapping,
         }
         if (
             len(serialized) > 16000
-            or any(measurements[name][key] for key in ("message_tail", "traceback_tail", "secret"))
+            or any(
+                measurements[name][key]
+                for key in ("message_tail", "traceback_tail", "secret", "body")
+            )
             or not error_is_mapping
         ):
             violations.append(name)
@@ -1381,10 +1392,21 @@ async def test_action_flow_failure_bounds_complete_error_observation_carriers(
     assert projected_errors["direct"] == projected_errors["action"] == projected_errors["tool"]
     assert len(projected_errors["direct"]["message"].encode("utf-8")) <= 2400
     assert len(projected_errors["direct"]["traceback"].encode("utf-8")) <= 6000
+    probes = (message_tail, traceback_tail, secret_value, body_probe)
+    for projected_error in projected_errors.values():
+        assert all(probe not in projected_error["message"] for probe in probes)
+        assert all(probe not in projected_error["traceback"] for probe in probes)
+    if error_shape == "opaque_string":
+        details = projected_errors["direct"]["details"]
+        assert projected_errors["direct"]["message"] == "Opaque exception message redacted."
+        assert details["message_bytes"] == len(opaque_message.encode("utf-8"))
+        assert details["message_sha256"] == hashlib.sha256(opaque_message.encode("utf-8")).hexdigest()
     for carrier in carriers.values():
         serialized = json.dumps(carrier, ensure_ascii=False, default=str)
         assert serialized.count('"error":') == 1
         assert "error" not in carrier.get("payload", {})
+        payload = json.dumps(carrier.get("payload", {}), ensure_ascii=False, default=str)
+        assert all(probe not in payload for probe in probes)
 
 
 @pytest.mark.asyncio

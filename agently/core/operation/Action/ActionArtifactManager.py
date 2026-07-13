@@ -837,6 +837,65 @@ class ActionArtifactManager:
         return prefix + suffix
 
     @classmethod
+    def _to_runtime_error_argument_fact(cls, value: Any, *, depth: int = 0) -> Any:
+        if isinstance(value, str):
+            encoded = value.encode("utf-8", errors="replace")
+            return {
+                "type": "string",
+                "bytes": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "summary": "[OPAQUE TEXT REDACTED]",
+            }
+        if isinstance(value, (bytes, bytearray)):
+            encoded = bytes(value)
+            return {
+                "type": "bytes",
+                "bytes": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "summary": "[OPAQUE BYTES REDACTED]",
+            }
+        if isinstance(value, Mapping):
+            if depth >= 3:
+                return {"type": "mapping", "field_count": len(value), "details_omitted": True}
+            fields: dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= 20:
+                    break
+                key_text = str(key)
+                if len(key_text.encode("utf-8", errors="replace")) > 160:
+                    key_bytes = key_text.encode("utf-8", errors="replace")
+                    key_text = f"field_sha256:{hashlib.sha256(key_bytes).hexdigest()}"
+                if cls._is_sensitive_key(key):
+                    fields[key_text] = "[REDACTED]"
+                else:
+                    fields[key_text] = cls._to_runtime_error_argument_fact(item, depth=depth + 1)
+            return {
+                "type": "mapping",
+                "field_count": len(value),
+                "fields": fields,
+                "omitted_field_count": max(0, len(value) - len(fields)),
+            }
+        if isinstance(value, (list, tuple, set)):
+            items = list(value)
+            if depth >= 3:
+                return {"type": "sequence", "item_count": len(items), "details_omitted": True}
+            return {
+                "type": "sequence",
+                "item_count": len(items),
+                "items": [
+                    cls._to_runtime_error_argument_fact(item, depth=depth + 1)
+                    for item in items[:20]
+                ],
+                "omitted_item_count": max(0, len(items) - 20),
+            }
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return {
+            "type": value.__class__.__name__,
+            "summary": "[OPAQUE VALUE REDACTED]",
+        }
+
+    @classmethod
     def _to_runtime_visible_error(cls, error: Any) -> dict[str, Any] | None:
         if error is None:
             return None
@@ -847,6 +906,7 @@ class ActionArtifactManager:
             details = error.get("details", {})
             if not isinstance(details, Mapping):
                 details = {}
+            safe_details = cls._redact_value(dict(details))
             return {
                 "type": cls._bounded_runtime_text(error.get("type", "Error"), max_bytes=160),
                 "message": cls._bounded_runtime_text(error.get("message", "Error"), max_bytes=2400),
@@ -867,9 +927,10 @@ class ActionArtifactManager:
                     if error.get("code") is not None
                     else None
                 ),
-                "details": cls._compact_hot_path_field(
-                    cls._redact_value(dict(details)),
-                    max_bytes=1200,
+                "details": (
+                    safe_details
+                    if cls._safe_json_size(safe_details) <= 1200
+                    else cls._compact_hot_path_field(safe_details, max_bytes=1200)
                 ),
             }
         if not isinstance(error, BaseException):
@@ -884,21 +945,13 @@ class ActionArtifactManager:
                 "details": {},
             }
 
-        redacted_args = cls._redact_value(list(error.args))
-        if not redacted_args:
-            message_value: Any = error.__class__.__name__
-        elif len(redacted_args) == 1:
-            message_value = redacted_args[0]
-        else:
-            message_value = redacted_args
-        compact_message = cls._compact_hot_path_field(message_value, max_bytes=2200)
-        if isinstance(compact_message, str):
-            message = cls._bounded_runtime_text(compact_message, max_bytes=2400)
-        else:
-            message = cls._bounded_runtime_text(
-                cls._json_bytes(compact_message).decode("utf-8", errors="replace"),
-                max_bytes=2400,
-            )
+        argument_facts = [cls._to_runtime_error_argument_fact(value) for value in error.args]
+        opaque_arguments = [value for value in error.args if isinstance(value, (str, bytes, bytearray))]
+        message = (
+            "Opaque exception message redacted."
+            if opaque_arguments
+            else "Structured exception details redacted."
+        )
 
         traceback_lines: list[str] = []
         current: BaseException | None = error
@@ -917,6 +970,15 @@ class ActionArtifactManager:
                 next_error = current.__context__
             current = next_error
         traceback_text = cls._bounded_runtime_text("\n".join(traceback_lines), max_bytes=6000)
+        details: dict[str, Any] = {
+            "argument_count": len(error.args),
+            "opaque_argument_count": len(opaque_arguments),
+            "arguments": argument_facts,
+        }
+        if len(error.args) == 1 and isinstance(error.args[0], str):
+            message_bytes = error.args[0].encode("utf-8", errors="replace")
+            details["message_bytes"] = len(message_bytes)
+            details["message_sha256"] = hashlib.sha256(message_bytes).hexdigest()
         return {
             "type": cls._bounded_runtime_text(error.__class__.__name__, max_bytes=160),
             "message": message,
@@ -925,10 +987,7 @@ class ActionArtifactManager:
             "retryable": None,
             "fatal": None,
             "code": None,
-            "details": {
-                "redacted_paths": cls._redaction_report_for_value(list(error.args))[:20],
-                "argument_count": len(error.args),
-            },
+            "details": details,
         }
 
     @classmethod
