@@ -1092,6 +1092,195 @@ async def test_custom_triggerflow_handler_bounds_every_agent_execution_consumer(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("flow_name", ["TriggerFlowActionFlow", "DAGActionFlow"])
+async def test_action_flow_observations_bound_and_redact_every_delivery_path(
+    tmp_path,
+    flow_name: str,
+) -> None:
+    input_marker = f"{flow_name}_OBSERVATION_INPUT_TAIL"
+    output_marker = f"{flow_name}_OBSERVATION_OUTPUT_TAIL"
+    secret_value = f"{flow_name}-secret-value"
+    agent: Any = Agently.create_agent(f"observation-bounds-{flow_name}").use_workspace(
+        tmp_path / flow_name
+    )
+    action_id = f"observation_bounds_{flow_name}"
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Exercise every Action observation delivery path.",
+        kwargs={
+            "code": (str, "Large instruction body."),
+            "api_key": (str, "Sensitive credential."),
+        },
+        func=lambda code, api_key: {
+            "body": ("o" * (1024 * 1024)) + output_marker,
+            "api_key": api_key,
+            "received_bytes": len(code.encode("utf-8")),
+        },
+    )
+    flow = agent.action._flow_controller.create_named_action_flow(flow_name)
+    large_input = ("i" * (1024 * 1024)) + input_marker
+    direct_observations: list[dict[str, Any]] = []
+    runtime_events: list[Any] = []
+    hook_name = f"test.observation_bounds.{flow_name}"
+    Agently.event_center.register_hook(
+        lambda event: runtime_events.append(event),
+        event_types=[
+            "action.plan_ready",
+            "tool.plan_ready",
+            "action.started",
+            "action.completed",
+        ],
+        hook_name=hook_name,
+    )
+
+    async def observation_handler(observation: dict[str, Any]) -> None:
+        direct_observations.append(copy.deepcopy(observation))
+        await agent.action._flow_controller.async_emit_action_flow_observation(observation)
+
+    async def planning_handler(context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        if context.get("done_plans"):
+            return {"next_action": "response", "action_calls": []}
+        return {
+            "next_action": "execute",
+            "action_calls": [
+                {
+                    "purpose": "exercise observation projection",
+                    "action_id": action_id,
+                    "action_input": {"code": large_input, "api_key": secret_value},
+                }
+            ],
+        }
+
+    async def execution_handler(
+        context: dict[str, Any],
+        request: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        return [
+            await agent.action.async_execute_action(
+                str(command["action_id"]),
+                dict(command.get("action_input") or {}),
+                purpose=str(command.get("purpose") or ""),
+                artifact_scope=context["artifact_scope"],
+            )
+            for command in request["action_calls"]
+        ]
+
+    try:
+        records = await flow.async_run(
+            action=agent.action,
+            prompt=agent.request.prompt,
+            settings=agent.settings,
+            action_list=agent.action.get_action_list(),
+            planning_handler=planning_handler,
+            execution_handler=execution_handler,
+            max_rounds=2,
+            runtime_observation_handler=observation_handler,
+        )
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    assert records
+    expected_event_types = {
+        "action.plan_ready",
+        "tool.plan_ready",
+        "action.started",
+        "action.completed",
+    }
+    assert expected_event_types.issubset({event.event_type for event in runtime_events})
+    measurements: dict[str, dict[str, Any]] = {}
+    violations: list[str] = []
+    for index, observation in enumerate(direct_observations):
+        serialized = json.dumps(observation, ensure_ascii=False, default=str).encode("utf-8")
+        key = f"direct:{index}:{observation.get('kind')}"
+        measurements[key] = {
+            "bytes": len(serialized),
+            "input_marker": input_marker.encode("utf-8") in serialized,
+            "output_marker": output_marker.encode("utf-8") in serialized,
+            "secret": secret_value.encode("utf-8") in serialized,
+        }
+        if len(serialized) > 16000 or any(measurements[key][name] for name in ("input_marker", "output_marker", "secret")):
+            violations.append(key)
+    for index, event in enumerate(runtime_events):
+        serialized = json.dumps(event.payload, ensure_ascii=False, default=str).encode("utf-8")
+        key = f"event:{index}:{event.event_type}"
+        measurements[key] = {
+            "bytes": len(serialized),
+            "input_marker": input_marker.encode("utf-8") in serialized,
+            "output_marker": output_marker.encode("utf-8") in serialized,
+            "secret": secret_value.encode("utf-8") in serialized,
+        }
+        if len(serialized) > 16000 or any(measurements[key][name] for name in ("input_marker", "output_marker", "secret")):
+            violations.append(key)
+    assert violations == [], json.dumps(measurements, sort_keys=True)
+
+    plan_event = next(event for event in runtime_events if event.event_type == "action.plan_ready")
+    decision = plan_event.payload["decision"]
+    assert {
+        key
+        for key in ("execution_actions", "action_calls", "execution_commands", "tool_commands")
+        if key in decision
+    } == {"action_calls"}
+
+
+@pytest.mark.asyncio
+async def test_triggerflow_failure_convergence_callback_receives_bounded_records(tmp_path) -> None:
+    marker = "FAILURE_CONVERGENCE_RAW_RECORD_TAIL"
+    agent: Any = Agently.create_agent("failure-convergence-bounded").use_workspace(tmp_path / "workspace")
+    action_id = "failure_convergence_action"
+    flow = agent.action._flow_controller.create_named_action_flow("TriggerFlowActionFlow")
+    observations: list[dict[str, Any]] = []
+
+    async def planning_handler(_context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "next_action": "execute",
+            "action_calls": [{"action_id": action_id, "action_input": {}, "purpose": "fail repeatedly"}],
+        }
+
+    async def execution_handler(
+        _context: dict[str, Any],
+        _request: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        payload = {"body": ("f" * (1024 * 1024)) + marker}
+        return [
+            {
+                "action_call_id": "failure-convergence-call",
+                "action_id": action_id,
+                "purpose": "fail repeatedly",
+                "status": "failed",
+                "success": False,
+                "ok": False,
+                "result": payload,
+                "data": payload,
+                "error": "expected failure",
+            }
+        ]
+
+    async def observation_handler(observation: dict[str, Any]) -> None:
+        observations.append(copy.deepcopy(observation))
+
+    records = await flow.async_run(
+        action=agent.action,
+        prompt=agent.request.prompt,
+        settings=agent.settings,
+        action_list=[{"action_id": action_id, "desc": "fail", "kwargs": {}}],
+        planning_handler=planning_handler,
+        execution_handler=execution_handler,
+        max_rounds=4,
+        runtime_observation_handler=observation_handler,
+    )
+
+    assert records
+    convergence = next(
+        observation
+        for observation in observations
+        if observation.get("kind") == "loop_failed_action_converged"
+    )
+    serialized = json.dumps(convergence, ensure_ascii=False, default=str).encode("utf-8")
+    assert len(serialized) <= 16000, len(serialized)
+    assert marker.encode("utf-8") not in serialized
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["promotion", "terminal_event"])
 async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
     tmp_path,

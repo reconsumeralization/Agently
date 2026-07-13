@@ -136,17 +136,19 @@ class DAGActionFlow:
             if runtime_observation_handler is None:
                 return
             result = runtime_observation_handler(
-                {
-                    "kind": kind,
-                    "source": "DAGActionFlow",
-                    "level": level,
-                    "message": message,
-                    "payload": payload,
-                    "error": error,
-                    "run": action_loop_run if run is None else run,
-                    "compat_event_family": compat_event_family,
-                    "compat_message": compat_message,
-                }
+                action._to_runtime_visible_observation(
+                    {
+                        "kind": kind,
+                        "source": "DAGActionFlow",
+                        "level": level,
+                        "message": message,
+                        "payload": payload,
+                        "error": error,
+                        "run": action_loop_run if run is None else run,
+                        "compat_event_family": compat_event_family,
+                        "compat_message": compat_message,
+                    }
+                )
             )
             if inspect.isawaitable(result):
                 await result
@@ -340,7 +342,8 @@ class DAGActionFlow:
                 artifact_scope=artifact_scope,
             )
 
-            for record_index, record in enumerate(records):
+            bounded_records = action._to_action_flow_return_records(records)
+            for record_index, record in enumerate(bounded_records):
                 action_id = record.get("action_id", record.get("tool_name", "unknown"))
                 success = bool(record.get("success"))
                 status = str(record.get("status", "") or "")
@@ -384,7 +387,7 @@ class DAGActionFlow:
                     run=action_run,
                 )
 
-            state_records = action._to_action_flow_return_records(records)
+            state_records = bounded_records
             done_plans.extend(state_records)
             data.set_state("done_plans", done_plans)
             data.set_state("last_round_records", state_records)

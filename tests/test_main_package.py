@@ -574,9 +574,17 @@ async def test_action_runtime_structured_planning_timeout_is_typed_stage_stall()
 
 
 @pytest.mark.asyncio
-async def test_action_runtime_action_completion_refreshes_execution_progress():
+async def test_action_runtime_action_completion_refreshes_execution_progress(monkeypatch):
     agent = Agently.create_agent("action-runtime-action-progress-agent")
     runtime = agent.action.action_runtime
+    execution_workspace_args = []
+    original_create_execution = TriggerFlow.create_execution
+
+    def capture_internal_execution_workspace(flow, *args, **kwargs):
+        execution_workspace_args.append(kwargs.get("workspace"))
+        return original_create_execution(flow, *args, **kwargs)
+
+    monkeypatch.setattr(TriggerFlow, "create_execution", capture_internal_execution_workspace)
 
     @agent.action_func
     async def slow_first_action():
@@ -618,6 +626,7 @@ async def test_action_runtime_action_completion_refreshes_execution_progress():
         "slow_first_action",
         "slow_second_action",
     ]
+    assert execution_workspace_args == [False]
 
 
 @pytest.mark.asyncio

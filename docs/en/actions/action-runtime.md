@@ -306,7 +306,8 @@ Oversized direct Action and ActionFlow carriers are compacted as complete
 records before they enter a TriggerFlow state or return boundary. This covers
 large kwargs/instructions as well as large output fields and avoids retaining
 duplicate `data`, `result`, and `model_digest` payloads. Finite internal
-ActionFlow and TaskDAG executions do not bind a Workspace. A
+ActionRuntime execution flows, ActionFlows, and TaskDAG executions do not bind a
+Workspace. A
 `TriggerFlowActionFlow` binds a lazy Workspace only when an approval pause needs
 save/resume recovery.
 
@@ -426,6 +427,14 @@ plain observation dictionaries to that handler instead of emitting official
 `action.*` or `tool.*` RuntimeEvents directly; core maps those observations to
 the official event stream.
 
+The built-in `TriggerFlowActionFlow` and `DAGActionFlow` apply the same
+Action-owned bounded/redacted projection before invoking that handler and before
+core emits official or compatibility events. Plan observations expose one
+canonical `decision.action_calls` list rather than copying commands through the
+legacy decision aliases; command observations use canonical `action_id` and
+bounded/redacted `action_input` fields. Repeated-failure convergence observations
+also carry bounded records, never the private complete Action values.
+
 There is no legacy positional handler signature — the public contract is `(context, request)` only.
 
 Custom execution-handler results pass through the same complete-record bound as
@@ -452,10 +461,12 @@ release their exact `action_call` or `action_run` scope in `finally` on success,
 failure, and cancellation. A standalone AgentTask releases its exact task scope
 in its own terminal seam. A routed AgentTask explicitly transfers that scope to
 its parent AgentExecution, which keeps it live through terminal selection and
-promotion and releases it afterward; child ActionFlows never release that
-inherited scope early. If selected promotion fails, the selected source is
-kept with bounded retry diagnostics while unselected artifacts from that exact
-scope are released.
+promotion and releases it afterward; on parent cancellation or timeout, the
+routed task's stream owner cancels and joins the child before that release, so
+the child cannot create a late artifact or Workspace process record. Child
+ActionFlows never release that inherited scope early. If selected promotion
+fails, the selected source is kept with bounded retry diagnostics while
+unselected artifacts from that exact scope are released.
 
 A durable standalone `TriggerFlowActionFlow` pause keeps its scope while the
 exchange is pending. Response/resume closes the flow after the final interrupt;

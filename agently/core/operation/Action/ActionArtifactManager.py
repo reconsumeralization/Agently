@@ -825,6 +825,185 @@ class ActionArtifactManager:
     # ── model-visible transformation ───────────────────────────────────────
 
     @classmethod
+    def _to_runtime_visible_command(cls, command: Mapping[str, Any]) -> dict[str, Any]:
+        """Project one command to the canonical, bounded observation shape."""
+
+        action_input = command.get("action_input", command.get("tool_kwargs", {}))
+        if not isinstance(action_input, dict):
+            action_input = {}
+        policy_override = command.get("policy_override", {})
+        if not isinstance(policy_override, dict):
+            policy_override = {}
+        return {
+            "purpose": cls._compact_text(command.get("purpose", ""), limit=800),
+            "action_id": cls._compact_text(
+                command.get("action_id", command.get("tool_name", "")),
+                limit=400,
+            ),
+            "action_input": cls._compact_hot_path_field(
+                cls._redact_value(action_input),
+                max_bytes=2400,
+            ),
+            "policy_override": cls._compact_hot_path_field(
+                cls._redact_value(policy_override),
+                max_bytes=800,
+            ),
+            "source_protocol": cls._compact_text(command.get("source_protocol", ""), limit=200),
+            "todo_suggestion": cls._compact_text(
+                command.get("todo_suggestion", command.get("next", "")),
+                limit=800,
+            ),
+        }
+
+    @classmethod
+    def _to_runtime_visible_commands(
+        cls,
+        commands: Sequence[Any] | None,
+        *,
+        max_bytes: int = 10000,
+    ) -> tuple[list[dict[str, Any]], int]:
+        if not isinstance(commands, Sequence) or isinstance(commands, (str, bytes, bytearray)):
+            return [], 0
+        projected: list[dict[str, Any]] = []
+        command_items = list(commands)
+        for command in command_items:
+            if not isinstance(command, Mapping):
+                continue
+            candidate = cls._to_runtime_visible_command(command)
+            if cls._safe_json_size([*projected, candidate]) > max_bytes:
+                break
+            projected.append(candidate)
+        return projected, max(0, len(command_items) - len(projected))
+
+    @classmethod
+    def _to_runtime_visible_decision(cls, decision: Mapping[str, Any]) -> dict[str, Any]:
+        raw_commands: Sequence[Any] | None = None
+        for key in ("action_calls", "execution_actions", "execution_commands", "tool_commands"):
+            candidate = decision.get(key)
+            if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
+                raw_commands = candidate
+                break
+        action_calls, omitted_count = cls._to_runtime_visible_commands(raw_commands)
+        projected = {
+            "next_action": cls._compact_text(decision.get("next_action", "response"), limit=80),
+            "use_action": bool(decision.get("use_action", decision.get("use_tool", False))),
+            "next": cls._compact_text(
+                decision.get("next", decision.get("todo_suggestion", "")),
+                limit=800,
+            ),
+            "action_calls": action_calls,
+            "diagnostics": cls._compact_hot_path_field(
+                cls._redact_value(decision.get("diagnostics", [])),
+                max_bytes=1200,
+            ),
+        }
+        if omitted_count:
+            projected["omitted_action_call_count"] = omitted_count
+        return projected
+
+    @classmethod
+    def _to_runtime_visible_record(cls, record: ActionResult) -> ActionResult:
+        visible = cast(ActionResult, cls._redact_value(cls._to_model_visible_record(record)))
+        if cls._safe_json_size(visible) <= 12000:
+            return visible
+        compact = cast(
+            ActionResult,
+            {
+                key: deepcopy(visible.get(key))
+                for key in (
+                    "action_call_id",
+                    "action_id",
+                    "tool_name",
+                    "purpose",
+                    "status",
+                    "success",
+                    "ok",
+                    "todo_suggestion",
+                    "next",
+                    "executor_type",
+                )
+                if key in visible
+            },
+        )
+        compact["result"] = cls._compact_hot_path_field(visible.get("result"), max_bytes=2400)
+        compact["artifact_refs"] = cast(
+            list[ActionArtifact],
+            [
+                cls._compact_hot_path_artifact_ref(dict(ref))
+                for ref in (visible.get("artifact_refs") or [])[:8]
+                if isinstance(ref, Mapping)
+            ],
+        )
+        if visible.get("error"):
+            compact["error"] = cls._compact_text(visible.get("error"), limit=1200)
+        return compact
+
+    @classmethod
+    def _to_runtime_visible_records(
+        cls,
+        records: Sequence[Any] | None,
+        *,
+        max_bytes: int = 12000,
+    ) -> list[ActionResult]:
+        if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
+            return []
+        projected: list[ActionResult] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            candidate = cls._to_runtime_visible_record(cast(ActionResult, record))
+            if cls._safe_json_size([*projected, candidate]) > max_bytes:
+                break
+            projected.append(candidate)
+        return projected
+
+    @classmethod
+    def _to_runtime_visible_observation(cls, observation: Mapping[str, Any]) -> dict[str, Any]:
+        """Bound and redact every Action observation delivery from one owner."""
+
+        visible_observation = dict(observation)
+        raw_payload = observation.get("payload")
+        if not isinstance(raw_payload, Mapping):
+            return visible_observation
+        payload = dict(raw_payload)
+        decision = payload.get("decision")
+        if isinstance(decision, Mapping):
+            payload["decision"] = cls._to_runtime_visible_decision(decision)
+        command = payload.get("command")
+        if isinstance(command, Mapping):
+            payload["command"] = cls._to_runtime_visible_command(command)
+        commands = payload.get("commands")
+        if isinstance(commands, Sequence) and not isinstance(commands, (str, bytes, bytearray)):
+            payload["commands"], omitted_count = cls._to_runtime_visible_commands(commands)
+            if omitted_count:
+                payload["omitted_command_count"] = omitted_count
+        record = payload.get("record")
+        if isinstance(record, dict):
+            payload["record"] = cls._to_runtime_visible_record(cast(ActionResult, record))
+        records = payload.get("records")
+        if isinstance(records, Sequence) and not isinstance(records, (str, bytes, bytearray)):
+            payload["records"] = cls._to_runtime_visible_records(records)
+
+        payload = cast(dict[str, Any], cls._redact_value(payload))
+        if cls._safe_json_size(payload) > cls._ACTION_CARRIER_MAX_BYTES:
+            bounded_payload: dict[str, Any] = {}
+            for key, value in payload.items():
+                candidate = value
+                if cls._safe_json_size(candidate) > 2400:
+                    candidate = cls._compact_hot_path_field(candidate, max_bytes=2400)
+                if cls._safe_json_size({**bounded_payload, str(key): candidate}) > cls._ACTION_CARRIER_MAX_BYTES:
+                    candidate = {
+                        "omitted": True,
+                        "original_size": cls._safe_json_size(value),
+                    }
+                if cls._safe_json_size({**bounded_payload, str(key): candidate}) > cls._ACTION_CARRIER_MAX_BYTES:
+                    break
+                bounded_payload[str(key)] = candidate
+            payload = bounded_payload
+        visible_observation["payload"] = payload
+        return visible_observation
+
+    @classmethod
     def _to_model_visible_record(cls, record: ActionResult) -> ActionResult:
         if not isinstance(record, dict):
             return record

@@ -195,17 +195,19 @@ class TriggerFlowActionFlow:
             if runtime_observation_handler is None:
                 return
             result = runtime_observation_handler(
-                {
-                    "kind": kind,
-                    "source": "ActionFlow",
-                    "level": level,
-                    "message": message,
-                    "payload": payload,
-                    "error": error,
-                    "run": action_loop_run if run is None else run,
-                    "compat_event_family": compat_event_family,
-                    "compat_message": compat_message,
-                }
+                action._to_runtime_visible_observation(
+                    {
+                        "kind": kind,
+                        "source": "ActionFlow",
+                        "level": level,
+                        "message": message,
+                        "payload": payload,
+                        "error": error,
+                        "run": action_loop_run if run is None else run,
+                        "compat_event_family": compat_event_family,
+                        "compat_message": compat_message,
+                    }
+                )
             )
             if inspect.isawaitable(result):
                 await result
@@ -693,7 +695,7 @@ class TriggerFlowActionFlow:
                         "agent_name": agent_name,
                         "round_index": round_index,
                         "max_consecutive_failed_rounds_per_action": max_consecutive_failed_rounds_per_action,
-                        "records": records,
+                        "records": bounded_records,
                     },
                 )
                 await data.async_emit("DONE", done_plans)

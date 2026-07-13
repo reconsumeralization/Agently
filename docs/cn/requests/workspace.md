@@ -257,7 +257,8 @@ readiness；这些语义仍由 TriggerFlow、PolicyApproval、ExecutionExchange 
 AgentExecution 所有。
 这项存储是显式启用的：普通 observation 应进入已配置的日志/DevTools 链路。只有需要
 durable Workspace event replay 或 audit 时才绑定 `runtime_event_store`。因此有限的
-内部 ActionFlow execution 默认不会留下 Workspace event archive。
+内部 ActionRuntime execution flow 与 ActionFlow execution 默认不会留下
+Workspace event archive。
 
 Workspace-backed durable provider 也提供 TriggerFlow-facing snapshot CAS、lease
 和 artifact-ref helpers：

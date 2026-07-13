@@ -290,8 +290,8 @@ decide pause/resume, approval, retry, or DAG readiness; those semantics remain
 owned by TriggerFlow, PolicyApproval, ExecutionExchange, and AgentExecution.
 It is opt-in: ordinary observation belongs in the configured logging/DevTools
 path. Bind `runtime_event_store` only when durable Workspace event replay or
-audit is required. Finite internal ActionFlow executions therefore keep no
-Workspace event archive by default.
+audit is required. Finite internal ActionRuntime execution flows and ActionFlows
+therefore keep no Workspace event archive by default.
 
 Workspace-backed durable providers also expose TriggerFlow-facing snapshot CAS,
 lease, and artifact-ref helpers:

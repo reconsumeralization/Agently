@@ -7650,6 +7650,134 @@ async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task(tmp_path):
     assert "plan stage" in result["reason"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_exit", ["cancellation", "timeout"])
+async def test_routed_parent_joins_agent_task_before_releasing_transferred_action_scope(
+    tmp_path,
+    monkeypatch,
+    parent_exit: str,
+):
+    agent = _create_agent(f"execution-routed-child-join-{parent_exit}").use_workspace(
+        tmp_path / parent_exit
+    )
+    action_id = f"late_child_action_{parent_exit}"
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Produce a late large artifact only if the routed child outlives its parent.",
+        kwargs={},
+        func=lambda: {"body": "l" * (1024 * 1024)},
+    )
+    execution = agent.create_task(
+        goal="Prove routed child shutdown is joined before parent terminal cleanup.",
+        success_criteria=["No child work runs after parent terminal cleanup."],
+        execution="flat",
+        max_iterations=1,
+    )
+    child_started = asyncio.Event()
+    allow_late_work = asyncio.Event()
+    late_work_created = asyncio.Event()
+    release_scopes: list[dict[str, str]] = []
+    original_release_scope_except = agent.action._release_artifact_scope_except
+
+    def capture_release_scope(
+        artifact_scope: dict[str, str],
+        *,
+        retained_artifact_ids: set[str],
+    ) -> int:
+        release_scopes.append(dict(artifact_scope))
+        return original_release_scope_except(
+            artifact_scope,
+            retained_artifact_ids=retained_artifact_ids,
+        )
+
+    monkeypatch.setattr(agent.action, "_release_artifact_scope_except", capture_release_scope)
+
+    async def delayed_plan(_iteration_index: int, _context_pack: Any) -> dict[str, Any]:
+        child_started.set()
+        await allow_late_work.wait()
+        return {
+            "execution_shape": "direct",
+            "step_instruction": "Attempt late child work.",
+            "expected_evidence": "No late work is created.",
+            "rationale": "This continuation must be cancelled with the routed parent.",
+        }
+
+    async def create_late_work(
+        _iteration_index: int,
+        _plan: dict[str, Any],
+        _context_pack: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        task = cast(AgentTask, execution.task_record)
+        await agent.action.async_execute_action(
+            action_id,
+            {},
+            artifact_scope={"kind": "agent_task", "id": task.id},
+        )
+        await task.workspace.put(
+            {"late": True},
+            collection="observations",
+            kind="late_child_process",
+        )
+        late_work_created.set()
+        return (
+            {
+                "step_result": "late work created",
+                "evidence": ["late work"],
+                "remaining_work": [],
+                "ready_for_final_verification": True,
+            },
+            {
+                "execution_id": f"late-child-{parent_exit}",
+                "status": "completed",
+                "route": {"selected_route": "model_request"},
+                "logs": {},
+            },
+        )
+
+    async def complete_verification(_iteration_index: int, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "late child work completed",
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result": "late child result",
+        }
+
+    cast(Any, execution)._agent_task_step_overrides = {
+        "_request_plan": delayed_plan,
+        "_execute_step": create_late_work,
+        "_request_verification": complete_verification,
+    }
+
+    run = asyncio.create_task(execution.async_get_full_data())
+    await asyncio.wait_for(child_started.wait(), timeout=3)
+    if parent_exit == "cancellation":
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    else:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(run, timeout=0.1)
+
+    task = cast(AgentTask, execution.task_record)
+    task_scope = {"kind": "agent_task", "id": task.id}
+    assert execution.status == "cancelled"
+    assert task._action_artifact_scope_transferred_to_execution_id == execution.id
+    assert release_scopes.count(task_scope) == 1
+
+    allow_late_work.set()
+    await asyncio.sleep(0.2)
+
+    assert late_work_created.is_set() is False
+    assert task._completed is True
+    assert all(
+        scope != ("agent_task", task.id)
+        for scope in agent.action._artifact_manager._artifact_scopes.values()
+    )
+    assert await task.workspace.search(filters={"kind": "late_child_process"}) == []
+
+
 def test_execution_first_chain_allows_capabilities_before_goal(tmp_path):
     skill_pack = _install_site_skill(tmp_path)
     agent = _create_agent("execution-first-skill-first").use_workspace(tmp_path / "workspace")

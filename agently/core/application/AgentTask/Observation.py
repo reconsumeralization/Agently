@@ -506,6 +506,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             await queue.put(item)
         self._stream_queues.append(queue)
         start_task = asyncio.create_task(self.async_run())
+        start_task_joined = False
         try:
             while True:
                 item = await queue.get()
@@ -515,7 +516,17 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 if projected is not None:
                     yield projected
             await start_task
+            start_task_joined = True
         finally:
+            if not start_task_joined:
+                if not start_task.done():
+                    start_task.cancel()
+                try:
+                    await start_task
+                except BaseException:
+                    # Joining is cleanup: the generator's original cancellation,
+                    # close, or child failure remains the caller-visible error.
+                    pass
             if queue in self._stream_queues:
                 self._stream_queues.remove(queue)
 

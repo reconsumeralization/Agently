@@ -645,21 +645,7 @@ class Action:
 
     @classmethod
     def _to_runtime_visible_observation(cls, observation: dict[str, Any]) -> dict[str, Any]:
-        visible_observation = dict(observation)
-        raw_payload = observation.get("payload")
-        if not isinstance(raw_payload, dict):
-            return visible_observation
-        payload = dict(raw_payload)
-        record = payload.get("record")
-        if isinstance(record, dict):
-            payload["record"] = cls._to_model_visible_record(cast("ActionResult", record))
-        records = payload.get("records")
-        if isinstance(records, list):
-            payload["records"] = cls.to_model_visible_records(
-                [cast("ActionResult", item) for item in records if isinstance(item, dict)]
-            )
-        visible_observation["payload"] = payload
-        return visible_observation
+        return ActionArtifactManager._to_runtime_visible_observation(observation)
 
     def _with_action_artifact_recall_action(self, action_list: list[dict[str, Any]], records: list["ActionResult"] | None):
         return self._artifact_manager.with_action_artifact_recall_action(action_list, records)

@@ -526,7 +526,7 @@ class AgentlyActionRuntime:
 
         flow = TriggerFlow(name="action-runtime-execute-actions")
         flow.for_each(concurrency=concurrency).to(run_one).end_for_each().to(collect_results)
-        execution = flow.create_execution(auto_close=False)
+        execution = flow.create_execution(auto_close=False, workspace=False)
         await execution.async_start(list(action_calls))
         close_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
         snapshot = await execution.async_close(timeout=close_timeout)
