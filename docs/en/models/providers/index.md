@@ -87,9 +87,43 @@ Agently.set_settings("OpenAICompatible", {
 
 ## MiniMax
 
+MiniMax provides OpenAI-compatible and Anthropic-compatible endpoints in both global and China regions.
+
+OpenAI-compatible global endpoint:
+
 ```python
 Agently.set_settings("OpenAICompatible", {
-    "base_url": "https://api.minimax.chat/v1",
+    "base_url": "https://api.minimax.io/v1",
+    "api_key": "${ENV.MINIMAX_API_KEY}",
+    "model": "${ENV.MINIMAX_MODEL}",
+})
+```
+
+OpenAI-compatible China endpoint:
+
+```python
+Agently.set_settings("OpenAICompatible", {
+    "base_url": "https://api.minimaxi.com/v1",
+    "api_key": "${ENV.MINIMAX_API_KEY}",
+    "model": "${ENV.MINIMAX_MODEL}",
+})
+```
+
+Anthropic-compatible global endpoint:
+
+```python
+Agently.set_settings("AnthropicCompatible", {
+    "base_url": "https://api.minimax.io/anthropic/v1",
+    "api_key": "${ENV.MINIMAX_API_KEY}",
+    "model": "${ENV.MINIMAX_MODEL}",
+})
+```
+
+Anthropic-compatible China endpoint:
+
+```python
+Agently.set_settings("AnthropicCompatible", {
+    "base_url": "https://api.minimaxi.com/anthropic/v1",
     "api_key": "${ENV.MINIMAX_API_KEY}",
     "model": "${ENV.MINIMAX_MODEL}",
 })
