@@ -143,6 +143,134 @@ results = await agent.workspace.retrieve(
 - 调用方仍可用 `rerank=True` 强制启用，或用 `rerank=False` 关闭；
 - 模型 rerank 重试后仍失败时，会保留确定性候选并记录诊断。
 
+### 自然语言答案中的检索引用
+
+后续模型答案需要引用选中的检索结果时，完整 source record 应留在宿主代码中。每个
+source 只给模型一个短可信 `ref_id`，以及回答所需的 title/snippet；要求正文使用
+application-level token `[[ref:<ref_id>]]`，例如 `[[ref:r1]]`。AgentTask 场景可以
+直接把 evidence ledger 的 `cite_as`（例如 `e1`）作为 token id。
+
+不要使用裸 `${ref_id}`：`${...}` 已属于 Agently prompt 和 TaskDAG placeholder
+家族。`[[ref:...]]` 只是应用渲染约定，不是新的 Workspace 或 Agently public API。
+
+下面的模式会校验模型引用、把 token 转为 Markdown link、发送答案，再发送应用明确
+允许的完整 source-card 详情，供前端渲染 hover card、来源列表或回复后的附加结果卡。
+raw provider/Workspace record 继续留在宿主侧；发出 card 字段前应完成权限校验和脱敏：
+
+```python
+from __future__ import annotations
+
+import re
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any
+from urllib.parse import urlparse
+
+from agently import Agently
+
+
+REF_TOKEN = re.compile(r"\[\[ref:([A-Za-z0-9._:-]+)\]\]")
+
+
+def prepare_refs(
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, str]], dict[str, dict[str, Any]]]:
+    refs_by_id: dict[str, dict[str, Any]] = {}
+    model_refs: list[dict[str, str]] = []
+    for index, record in enumerate(records, start=1):
+        ref_id = f"r{index}"
+        full_record = {**dict(record), "ref_id": ref_id}
+        refs_by_id[ref_id] = full_record
+        model_refs.append({
+            "ref_id": ref_id,
+            "title": str(record.get("title", "")),
+            "snippet": str(record.get("snippet", "")),
+        })
+    return model_refs, refs_by_id
+
+
+def build_source_card(record: Mapping[str, Any]) -> dict[str, Any]:
+    # 按应用需要扩展这个显式前端契约；不要直接发送 raw record。
+    fields = ("ref_id", "title", "url", "snippet", "source_name", "published_at")
+    return {field: record[field] for field in fields if field in record}
+
+
+def trusted_http_url(value: Any) -> str:
+    url = str(value)
+    if urlparse(url).scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported source URL: {url}")
+    return url
+
+
+def render_refs(
+    answer: str,
+    refs_by_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    used_ids: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        ref_id = match.group(1)
+        record = refs_by_id.get(ref_id)
+        if record is None:
+            raise ValueError(f"unknown retrieval ref: {ref_id}")
+        used_ids.append(ref_id)
+        label = str(record.get("title") or ref_id).replace("\\", "\\\\").replace("]", "\\]")
+        return f"[{label}]({trusted_http_url(record.get('url'))})"
+
+    rendered = REF_TOKEN.sub(replace, answer)
+    unique_ids = list(dict.fromkeys(used_ids))
+    return rendered, [build_source_card(refs_by_id[ref_id]) for ref_id in unique_ids]
+
+
+async def answer_with_refs(
+    question: str,
+    retrieved_records: Sequence[Mapping[str, Any]],
+    emit: Callable[[dict[str, Any]], Awaitable[None]],
+) -> None:
+    model_refs, refs_by_id = prepare_refs(retrieved_records)
+
+    def validate_refs(data: dict[str, Any], _ctx: Any) -> bool | dict[str, Any]:
+        cited_ids = REF_TOKEN.findall(data.get("answer", ""))
+        if not cited_ids:
+            return {"ok": False, "reason": "answer must cite at least one offered ref"}
+        unknown = {
+            ref_id
+            for ref_id in cited_ids
+            if ref_id not in refs_by_id
+        }
+        if unknown:
+            return {"ok": False, "reason": f"unknown refs: {sorted(unknown)}"}
+        return True
+
+    result = (
+        Agently.create_agent()
+        .input({"question": question, "retrieval_results": model_refs})
+        .instruct([
+            "根据 retrieval_results 回答。",
+            "引用来源时写 [[ref:<ref_id>]]，且只能使用已提供的 ref_id。",
+            "不要把 source URL 或隐藏 metadata 抄进答案。",
+        ])
+        .output({
+            "answer": (
+                str,
+                "带内联 [[ref:<ref_id>]] 引用的自然语言答案",
+                True,
+            ),
+        })
+        .validate(validate_refs)
+        .get_result()
+    )
+
+    # 这里没有 progressive consumer，所以直接读取最终 data。
+    data = await result.async_get_data()
+    rendered_answer, source_cards = render_refs(data["answer"], refs_by_id)
+
+    await emit({"type": "answer", "text": rendered_answer})
+    await emit({"type": "retrieval_refs", "items": source_cards})
+```
+
+这个协议让引用选择保持 model-owned，同时让身份校验、链接拼装、已授权 source detail
+传输与前端渲染保持 deterministic、host-owned。
+
 `retrieve(...)` 是 Workspace 的检索策略，不是 Session memory 独占能力。Session
 memory、文本片段检索和文件检索都可以复用它。
 

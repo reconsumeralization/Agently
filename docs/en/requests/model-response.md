@@ -181,6 +181,46 @@ slot. If a CLI must print several paths into one terminal area in a fixed human
 order, keep a small state flag or buffer in the consumer and flush the later
 path only after the earlier path's `.is_complete` event has been handled.
 
+### No progressive consumer: read final data directly
+
+If the caller does not publish deltas, update UI/state, record stream events, or
+use provisional fields for explicitly cancelable/idempotent preparation, do not
+open a stream. Await the final parsed object directly:
+
+```python
+result = (
+    agent
+    .input("Classify this support ticket.")
+    .output({"route": (str, "billing | technical | other", True)})
+    .get_result()
+)
+
+data = await result.async_get_data()
+```
+
+This discard-only `instant` drain loop is an anti-pattern:
+
+```python
+# Anti-pattern: no item is published or used.
+async for _item in result.get_async_generator(type="instant"):
+    pass
+
+data = await result.async_get_data()
+```
+
+It does not issue a second model request, but it still adds stream queue,
+iteration, event-object, and parser work without creating consumer value. Use a
+generator only when its items drive a real consumer. If streaming is needed,
+publish or apply the items and then read the durable final object from the same
+result:
+
+```python
+async for item in result.get_async_generator(type="instant"):
+    await publish_structured_patch(item)
+
+data = await result.async_get_data()
+```
+
 ### High-value pattern: stream fields to UI, then read the durable result
 
 Use `instant` when the application can show or route individual structured

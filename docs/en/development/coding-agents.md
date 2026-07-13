@@ -130,6 +130,21 @@ When you audit or author guidance for Agently `4.1+`, these are the defaults cod
 - Execution style: prefer async-first for services, streaming, and workflows. Treat sync APIs as wrappers for scripts, REPL use, or compatibility bridges.
 - Complex execution planning: map real serial and parallel dependencies before choosing a topology. Use async Agently APIs, provisional `instant` structured streams for UI or cancelable/idempotent preparation, and TriggerFlow signals/joins for application-owned coordination; wait for the final parsed result and configured validation before business decisions or irreversible effects. Run independent work concurrently with bounded execution, operator, model-scheduler, and host admission limits; expose host worker/thread-pool settings when blocking code is present. An unexamined all-serial design is an anti-pattern.
 - Result reuse: when one model call must be consumed as text, parsed data, metadata, or structured stream updates, prefer `get_result()` and reuse the same result object rather than re-requesting.
+- Result consumption: if no caller actually consumes progressive output, await
+  `result.async_get_data()` directly. A discard-only
+  `get_async_generator(type="instant")` loop followed by the final getter is an
+  anti-pattern: it adds stream queue, iteration, and parser work without
+  publishing or using any intermediate value. Stream only when the application
+  forwards deltas, updates UI/state, records events, or starts explicitly
+  cancelable/idempotent preparation; then read final data from the same result.
+- Retrieval citations: give the model one short trusted `ref_id` (or an existing
+  evidence `cite_as`) per selected source and require inline
+  `[[ref:<ref_id>]]` tokens such as `[[ref:r1]]`. Host code validates and
+  resolves those tokens, renders safe links, and separately emits complete
+  authorized source-card records for hover cards, source lists, or attached
+  result cards. Avoid bare `${ref_id}` because `${...}` is already Agently
+  placeholder syntax; do not ask the model to reproduce URLs or full retrieval
+  metadata.
 - Task execution quality: when a goal-pursuit task must use a particular capability (an Action, Skill, or Skill pack), do not lean on a strong instruction in the prompt or a business-specific special case to force or check it. Express the requirement as framework contract: make capabilities visible to the planner (`planner_capabilities`), bound action steps with structured `step_scope` that reaches the ActionRuntime boundary, and require completion evidence with a structured `capability_evidence_requirements` entry. For Skills steps that may produce long artifact text, configure the Skills route output format instead of forcing large raw content through JSON streaming. If a Skills step needs file writes, reads, shell calls, HTTP calls, or other side effects, explicitly grant the action/tool scope through route/effort configuration, declare required side-effect actions when the React strategy should stop after they succeed, and require `action_succeeded` evidence for the host actions; Skills provide guidance, while ActionRuntime owns callable execution and evidence. Prior-step Workspace context must preserve action evidence before bulky execution metadata. TaskDAG / DynamicTask is not an AgentTask bounded-step strategy; use TaskDAG / DynamicTask separately when the application or visual automation surface owns the submitted graph. The AgentTask host guard checks requirements deterministically against execution evidence; the prompt is explanatory, not the guarantee. Keep scenario-specific checks (visual fingerprints, domain names, source choices) in examples and tests, never in framework paths.
 
 ## When to write your own skill

@@ -168,6 +168,139 @@ Defaults are conservative:
 - if model rerank fails after retry, retrieval keeps deterministic candidates
   and records diagnostics.
 
+### Retrieval references in natural-language answers
+
+When a later model answer cites selected retrieval results, keep full source
+records in host code. Give the model one short trusted `ref_id` per source plus
+only the title/snippet facts it needs, and require inline tokens in the
+application-level form `[[ref:<ref_id>]]`, for example `[[ref:r1]]`. AgentTask
+code can reuse an evidence-ledger `cite_as` such as `e1` as the token id.
+
+Do not use a bare `${ref_id}` token: `${...}` already belongs to Agently prompt
+and TaskDAG placeholder families. The `[[ref:...]]` protocol is an application
+rendering convention, not a new Workspace or Agently public API.
+
+The following pattern validates model citations, turns them into Markdown links,
+emits the answer, and then emits complete application-approved source-card
+details for hover cards, a source list, or reply-attached result cards. Keep raw
+provider/Workspace records host-side and apply authorization and redaction
+before emitting card fields:
+
+```python
+from __future__ import annotations
+
+import re
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any
+from urllib.parse import urlparse
+
+from agently import Agently
+
+
+REF_TOKEN = re.compile(r"\[\[ref:([A-Za-z0-9._:-]+)\]\]")
+
+
+def prepare_refs(
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, str]], dict[str, dict[str, Any]]]:
+    refs_by_id: dict[str, dict[str, Any]] = {}
+    model_refs: list[dict[str, str]] = []
+    for index, record in enumerate(records, start=1):
+        ref_id = f"r{index}"
+        full_record = {**dict(record), "ref_id": ref_id}
+        refs_by_id[ref_id] = full_record
+        model_refs.append({
+            "ref_id": ref_id,
+            "title": str(record.get("title", "")),
+            "snippet": str(record.get("snippet", "")),
+        })
+    return model_refs, refs_by_id
+
+
+def build_source_card(record: Mapping[str, Any]) -> dict[str, Any]:
+    # Extend this explicit frontend contract as needed; do not emit the raw record.
+    fields = ("ref_id", "title", "url", "snippet", "source_name", "published_at")
+    return {field: record[field] for field in fields if field in record}
+
+
+def trusted_http_url(value: Any) -> str:
+    url = str(value)
+    if urlparse(url).scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported source URL: {url}")
+    return url
+
+
+def render_refs(
+    answer: str,
+    refs_by_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    used_ids: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        ref_id = match.group(1)
+        record = refs_by_id.get(ref_id)
+        if record is None:
+            raise ValueError(f"unknown retrieval ref: {ref_id}")
+        used_ids.append(ref_id)
+        label = str(record.get("title") or ref_id).replace("\\", "\\\\").replace("]", "\\]")
+        return f"[{label}]({trusted_http_url(record.get('url'))})"
+
+    rendered = REF_TOKEN.sub(replace, answer)
+    unique_ids = list(dict.fromkeys(used_ids))
+    return rendered, [build_source_card(refs_by_id[ref_id]) for ref_id in unique_ids]
+
+
+async def answer_with_refs(
+    question: str,
+    retrieved_records: Sequence[Mapping[str, Any]],
+    emit: Callable[[dict[str, Any]], Awaitable[None]],
+) -> None:
+    model_refs, refs_by_id = prepare_refs(retrieved_records)
+
+    def validate_refs(data: dict[str, Any], _ctx: Any) -> bool | dict[str, Any]:
+        cited_ids = REF_TOKEN.findall(data.get("answer", ""))
+        if not cited_ids:
+            return {"ok": False, "reason": "answer must cite at least one offered ref"}
+        unknown = {
+            ref_id
+            for ref_id in cited_ids
+            if ref_id not in refs_by_id
+        }
+        if unknown:
+            return {"ok": False, "reason": f"unknown refs: {sorted(unknown)}"}
+        return True
+
+    result = (
+        Agently.create_agent()
+        .input({"question": question, "retrieval_results": model_refs})
+        .instruct([
+            "Answer from retrieval_results.",
+            "Cite a source inline as [[ref:<ref_id>]] using only an offered ref_id.",
+            "Do not copy source URLs or hidden metadata into the answer.",
+        ])
+        .output({
+            "answer": (
+                str,
+                "Natural-language answer with inline [[ref:<ref_id>]] citations",
+                True,
+            ),
+        })
+        .validate(validate_refs)
+        .get_result()
+    )
+
+    # No progressive consumer here, so read final data directly.
+    data = await result.async_get_data()
+    rendered_answer, source_cards = render_refs(data["answer"], refs_by_id)
+
+    await emit({"type": "answer", "text": rendered_answer})
+    await emit({"type": "retrieval_refs", "items": source_cards})
+```
+
+This protocol keeps citation choice model-owned while identity validation,
+link construction, authorized source-detail transport, and frontend rendering
+stay deterministic and host-owned.
+
 `retrieve(...)` is a Workspace strategy, not a Session-memory-only feature.
 Session memory, text fragments, and file retrieval can all use it.
 
