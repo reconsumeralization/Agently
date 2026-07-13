@@ -172,6 +172,10 @@ class AgentTask(
         self._terminal_deliverable_refs: list[WorkspaceRecordRef] = []
         self._terminal_retained_refs: list[Any] = []
         self._terminal_retention_deferred = False
+        # Routed AgentTask construction transfers this exact task-owned Action
+        # artifact scope to its parent AgentExecution. Standalone tasks keep the
+        # value unset and release the scope in their own terminal seam.
+        self._action_artifact_scope_transferred_to_execution_id: str | None = None
         self._terminal_taskboard_state: dict[str, Any] | None = None
         self._stream_items: list[AgentExecutionStreamData] = []
         self._stream_queues: list[asyncio.Queue[Any]] = []

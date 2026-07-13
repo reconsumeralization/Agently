@@ -620,17 +620,18 @@ class TriggerFlowActionFlow:
                 action_calls,
                 artifact_scope=artifact_scope,
             )
+            bounded_records = action._to_action_flow_return_records(records)
             agent_execution_context = get_current_agent_execution_context()
             record_action_records = getattr(agent_execution_context, "record_action_records", None)
             if callable(record_action_records):
-                record_action_records(records, source="ActionFlow")
+                record_action_records(bounded_records, source="ActionFlow")
             should_stop_after_failed_actions = self._update_failed_action_counts(
                 data,
-                records,
+                bounded_records,
                 max_consecutive_failed_rounds_per_action=max_consecutive_failed_rounds_per_action,
             )
 
-            for record_index, record in enumerate(records):
+            for record_index, record in enumerate(bounded_records):
                 action_id = record.get("action_id", record.get("tool_name", "unknown"))
                 success = bool(record.get("success"))
                 status = str(record.get("status", "") or "")
@@ -678,7 +679,7 @@ class TriggerFlowActionFlow:
                     run=action_run,
                 )
 
-            state_records = action._to_action_flow_return_records(records)
+            state_records = bounded_records
             done_plans.extend(state_records)
             data.set_state("done_plans", done_plans)
             data.set_state("last_round_records", state_records)

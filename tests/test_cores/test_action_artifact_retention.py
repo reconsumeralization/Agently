@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently
+from agently.core.application.AgentTask import AgentTask
 
 
 def _canonical_action_ref(manager: Any, ref: dict[str, Any], scope: dict[str, str]) -> dict[str, Any]:
@@ -852,6 +853,242 @@ async def test_custom_action_execution_handler_callback_binds_agent_execution_ar
         {"kind": "agent_execution", "id": concurrent.id},
     )
     assert agent.action._artifact_manager.get_artifact_value(concurrent_canonical_ref["artifact_id"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_mode", ["success", "failure", "cancellation", "timeout"])
+async def test_standalone_agent_task_releases_exact_action_artifact_scope_at_terminal(
+    tmp_path,
+    monkeypatch,
+    terminal_mode: str,
+) -> None:
+    agent: Any = Agently.create_agent(f"standalone-task-artifact-{terminal_mode}").use_workspace(
+        tmp_path / terminal_mode
+    )
+    action_id = f"standalone_task_large_output_{terminal_mode}"
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Produce a real large Action value owned by one standalone AgentTask.",
+        kwargs={},
+        func=lambda: {"body": terminal_mode * (1024 * 1024)},
+    )
+    task = AgentTask(
+        agent,
+        task_id=f"standalone-task-{terminal_mode}",
+        goal="Exercise standalone AgentTask terminal Action cleanup.",
+        success_criteria=["The exact task scope is released."],
+        execution="flat",
+    )
+    task_scope = {"kind": "agent_task", "id": task.id}
+    action_record = await agent.action.async_execute_action(
+        action_id,
+        {},
+        artifact_scope=task_scope,
+    )
+    output_ref = next(
+        ref for ref in action_record["artifact_refs"] if ref.get("artifact_type") == "action_output"
+    )
+    canonical_ref = _canonical_action_ref(agent.action._artifact_manager, output_ref, task_scope)
+    assert agent.action._artifact_manager.get_artifact_value(canonical_ref["artifact_id"]) is not None
+
+    class _TerminalExecution:
+        async def async_start(self, _value: Any) -> None:
+            if terminal_mode == "success":
+                task.status = "completed"
+                task.result = {
+                    "status": "completed",
+                    "accepted": True,
+                    "artifact_status": "accepted",
+                    "final_result": "done",
+                    "artifact_refs": [],
+                }
+                return
+            if terminal_mode == "failure":
+                raise RuntimeError("standalone AgentTask failed")
+            if terminal_mode == "cancellation":
+                raise asyncio.CancelledError()
+            raise TimeoutError("standalone AgentTask timed out")
+
+        async def async_close(self) -> None:
+            return None
+
+    monkeypatch.setattr(task._flow, "create_execution", lambda **_kwargs: _TerminalExecution())
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_ensure_final_reflection", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+
+    if terminal_mode == "success":
+        result = await task.async_run()
+        assert result["status"] == "completed"
+    elif terminal_mode == "cancellation":
+        with pytest.raises(asyncio.CancelledError):
+            await task.async_run()
+        assert task.status == "cancelled"
+    elif terminal_mode == "timeout":
+        with pytest.raises(TimeoutError, match="timed out"):
+            await task.async_run()
+        assert task.status == "timed_out"
+    else:
+        with pytest.raises(RuntimeError, match="failed"):
+            await task.async_run()
+        assert task.status == "error"
+
+    assert agent.action._artifact_manager.get_artifact_value(canonical_ref["artifact_id"]) is None
+    assert agent.action._artifact_manager.release_scope(task_scope) == 0
+
+
+@pytest.mark.asyncio
+async def test_custom_triggerflow_handler_bounds_every_agent_execution_consumer(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agently import TriggerFlow
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.diagnostics import (
+        build_execution_meta,
+    )
+    from agently.core.runtime import bind_runtime_context
+
+    marker = "CUSTOM_HANDLER_RAW_TAIL_MUST_STAY_PRIVATE"
+    agent: Any = Agently.create_agent("custom-handler-all-consumers").use_workspace(tmp_path / "workspace")
+    action_id = "custom_handler_large_output"
+    agent.action.register_action(
+        action_id=action_id,
+        desc="Produce one large value through a custom TriggerFlow execution handler.",
+        kwargs={},
+        func=lambda: {"body": ("z" * (1024 * 1024)) + marker},
+    )
+    owner = agent.input("Run one custom Action handler.").create_execution().strategy("direct")
+    captured_executions: list[Any] = []
+    original_create_execution = TriggerFlow.create_execution
+
+    def capture_execution(trigger_flow: Any, **kwargs: Any) -> Any:
+        execution = original_create_execution(trigger_flow, **kwargs)
+        captured_executions.append(execution)
+        return execution
+
+    monkeypatch.setattr(TriggerFlow, "create_execution", capture_execution)
+    callback_records: list[dict[str, Any]] = []
+    captured_events: list[Any] = []
+    hook_name = "test.custom_handler_all_consumers"
+    Agently.event_center.register_hook(
+        lambda event: captured_events.append(event),
+        event_types="action.completed",
+        hook_name=hook_name,
+    )
+
+    async def planning_handler(context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        if context.get("done_plans"):
+            return {"next_action": "response", "action_calls": []}
+        return {
+            "next_action": "execute",
+            "action_calls": [{"action_id": action_id, "action_input": {}, "purpose": "produce large output"}],
+        }
+
+    async def execution_handler(
+        _context: dict[str, Any],
+        request: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        action_result = await request["async_call_action"](action_id, {})
+        callback_records.append(action_result)
+        return [
+            {
+                "action_call_id": "custom-handler-composite",
+                "action_id": action_id,
+                "purpose": "produce large output",
+                "status": "success",
+                "success": True,
+                "ok": True,
+                "result": action_result,
+                "data": action_result,
+                "model_digest": action_result,
+                "raw": action_result,
+                "artifact_refs": action_result.get("artifact_refs", []),
+            }
+        ]
+
+    try:
+        with bind_runtime_context(agent_execution_context=owner.execution_context):
+            records = await agent.action.async_plan_and_execute(
+                prompt=agent.request.prompt,
+                settings=agent.settings,
+                action_list=agent.action.get_action_list(),
+                agent_name=agent.name,
+                parent_run_context=owner._ensure_agent_execution_run_context(),
+                planning_handler=planning_handler,
+                action_execution_handler=execution_handler,
+                max_rounds=2,
+            )
+        owner._refresh_diagnostics()
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    scope = {"kind": "agent_execution", "id": owner.id}
+    exact_values = [
+        agent.action._artifact_manager.get_artifact_value(artifact_id)
+        for artifact_id, artifact_scope in agent.action._artifact_manager._artifact_scopes.items()
+        if artifact_scope == (scope["kind"], scope["id"])
+    ]
+    assert any(isinstance(value, dict) and marker in json.dumps(value, ensure_ascii=False) for value in exact_values)
+
+    action_loop_execution = next(
+        execution
+        for execution in captured_executions
+        if execution.get_state("round_index", None) is not None
+    )
+    meta = build_execution_meta(owner)
+    carriers: dict[str, tuple[Any, int]] = {
+        "context_records": (owner.execution_context.action_records, 16000),
+        "owner_logs": (owner.logs, 16000),
+        "owner_diagnostics": (owner.diagnostics, 16000),
+        "owner_meta": (meta, 32000),
+        "runtime_events": ([event.payload for event in captured_events], 16000),
+        "public_return": (records, 16000),
+        "done_plans": (action_loop_execution.get_state("done_plans", []), 16000),
+        "last_round_records": (action_loop_execution.get_state("last_round_records", []), 16000),
+        "action_loop_result": (action_loop_execution.get_state("action_loop_result", []), 16000),
+    }
+    measurements: dict[str, dict[str, Any]] = {}
+    violations: list[str] = []
+    for carrier_name, (carrier, max_bytes) in carriers.items():
+        carrier_bytes = json.dumps(carrier, ensure_ascii=False, default=str).encode("utf-8")
+        marker_present = marker.encode("utf-8") in carrier_bytes
+        measurements[carrier_name] = {
+            "bytes": len(carrier_bytes),
+            "max_bytes": max_bytes,
+            "marker_present": marker_present,
+        }
+        if len(carrier_bytes) > max_bytes or marker_present:
+            violations.append(carrier_name)
+    assert violations == [], measurements
+
+    action_logs = owner.logs["action_logs"]
+    assert len(action_logs) == 1
+    semantic_log = action_logs[0]
+    assert "raw" not in semantic_log, json.dumps(measurements, sort_keys=True)
+    assert sum(
+        key in semantic_log and semantic_log[key] not in (None, {}, [])
+        for key in ("data", "result", "model_digest")
+    ) <= 1
+
+    internal_workspace = action_loop_execution._get_runtime_resource("workspace", None)
+    stored_content_bytes = 0
+    if internal_workspace is not None:
+        for stored_ref in await internal_workspace.search():
+            stored_content_bytes += len(
+                json.dumps(stored_ref, ensure_ascii=False, default=str).encode("utf-8")
+            )
+            if stored_ref.get("path"):
+                stored_value = await internal_workspace.get_data(stored_ref)
+                stored_content_bytes += len(
+                    json.dumps(stored_value, ensure_ascii=False, default=str).encode("utf-8")
+                )
+    assert internal_workspace is None
+    assert stored_content_bytes == 0
+    agent.action._release_artifact_scope(scope)
 
 
 @pytest.mark.asyncio

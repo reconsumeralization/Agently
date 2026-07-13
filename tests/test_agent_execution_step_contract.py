@@ -7109,7 +7109,8 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
+    task_record = cast(AgentTask, execution.task_record)
+    taskboard = cast(dict[str, Any], task_record._terminal_taskboard_state)
     review_result = taskboard["revision"]["card_results"]["review"]
     readbacks = review_result["preview"]["readbacks"]
 
@@ -7117,6 +7118,16 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
     assert result["accepted"] is True
     assert result["final_result"] == "taskboard readback accepted result"
     assert review_result["status"] == "completed"
+    assert task_record._action_artifact_scope_transferred_to_execution_id == execution.id
+    assert task_record.diagnostics["action_artifact_release"] == {
+        "status": "transferred",
+        "scope": {"kind": "agent_task", "id": task_record.id},
+        "owner": {"kind": "agent_execution", "id": execution.id},
+    }
+    assert meta["diagnostics"]["action_artifact_release"]["scope"] == {
+        "kind": "agent_task",
+        "id": task_record.id,
+    }
     assert agent.action._artifact_manager._artifacts == {}
     assert review_result["metadata"]["execution_kind"] == "taskboard_artifact_readback"
     block_carrier = review_result["metadata"]["block_carrier"]

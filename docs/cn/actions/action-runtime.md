@@ -382,6 +382,12 @@ observation 映射到官方事件流。
 
 没有 legacy positional 签名 —— 公开契约只是 `(context, request)`。
 
+Custom execution handler 的结果与内置 handler 使用同一个完整 record byte bound：进入
+AgentExecution context、ActionFlow RuntimeEvent、TriggerFlow state、日志、metadata 或公开
+返回值前就完成压缩。route log 只保留一个 bounded semantic payload，不会在 `raw` 下再存一份
+complete record，也不会同时在 `data` 与 `model_digest` 中复制它。精确值只存在于仍存活的
+private Action artifact scope。
+
 ## Action artifact 生命周期
 
 大型 Action value 会以 exact value 保存在私有 `ActionArtifactManager` 中。敏感字段
@@ -394,8 +400,10 @@ artifact id 只作为 provenance 保存，每个 scope 都会得到新的 local 
 
 Standalone direct Action call、`TriggerFlowActionFlow` 与 `DAGActionFlow` 会在
 success、failure 和 cancellation 的 `finally` 中释放精确 `action_call` 或
-`action_run` scope。AgentExecution-owned 或 AgentTask-owned scope 会 transfer 给对应
-terminal owner，child ActionFlow 不会提前释放继承的 scope。若 selected promotion 失败，selected source 会连同 bounded retry diagnostics
+`action_run` scope。standalone AgentTask 会在自己的 terminal seam 释放精确 task scope；
+routed AgentTask 会把该 scope 显式 transfer 给 parent AgentExecution，由 parent 保持到
+terminal selection/promotion 完成后再释放。child ActionFlow 不会提前释放继承的 scope。
+若 selected promotion 失败，selected source 会连同 bounded retry diagnostics
 一起保留，而同一精确 scope 中未选择的 artifacts 会被释放。
 
 Standalone `TriggerFlowActionFlow` 的 durable pause 会在 exchange pending 期间保留

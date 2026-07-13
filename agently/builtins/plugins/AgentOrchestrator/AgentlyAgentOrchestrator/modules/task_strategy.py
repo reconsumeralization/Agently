@@ -152,6 +152,11 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             options=cast(Any, agent_task_options),
             task_id=cast(Any, task_options.get("task_id") or execution.lineage.get("task_id")),
         )
+    # This is the exact host-owned transfer seam: a routed task keeps its
+    # agent_task Action artifact scope live until the parent AgentExecution has
+    # completed terminal selection/promotion and releases it. Standalone tasks
+    # never receive this transfer marker and clean up in AgentTask finalization.
+    task._action_artifact_scope_transferred_to_execution_id = execution.id
     # Advanced/test step-stage override channel. Callers may set an explicit
     # `execution._agent_task_step_overrides = {"_request_plan": ..., ...}` before
     # running to drive the plan/execute/verify stages deterministically. This is

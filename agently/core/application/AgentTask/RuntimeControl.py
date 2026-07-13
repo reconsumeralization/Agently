@@ -45,6 +45,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 await self._apply_terminal_workspace_retention(
                     status="completed" if self.status == "completed" else "failed"
                 )
+                self._release_terminal_action_artifact_scope()
                 await self._close_streams()
                 return self.result
             self.status = "running"
@@ -140,6 +141,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     await self._apply_terminal_workspace_retention(
                         status=terminal_retention_status
                     )
+                    self._release_terminal_action_artifact_scope()
                 self.completed_at = time.time()
                 self._completed = True
                 await self._close_streams()
@@ -150,6 +152,46 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         except RuntimeError:
             return asyncio.run(self.async_run())
         return self.async_run()
+
+    def _release_terminal_action_artifact_scope(self) -> None:
+        """Release an untransferred task scope without changing task outcome."""
+
+        transferred_to = str(
+            getattr(self, "_action_artifact_scope_transferred_to_execution_id", "") or ""
+        ).strip()
+        artifact_scope = {"kind": "agent_task", "id": self.id}
+        if transferred_to:
+            self.diagnostics["action_artifact_release"] = {
+                "status": "transferred",
+                "scope": artifact_scope,
+                "owner": {"kind": "agent_execution", "id": transferred_to},
+            }
+            return
+        action = getattr(self.agent, "action", None)
+        release_scope = getattr(action, "_release_artifact_scope", None)
+        if not callable(release_scope):
+            return
+        try:
+            released = release_scope(artifact_scope)
+            self.diagnostics["action_artifact_release"] = {
+                "status": "released",
+                "scope": artifact_scope,
+                "released_count": released if isinstance(released, int) else 0,
+            }
+        except Exception as error:
+            self.diagnostics["action_artifact_release"] = {
+                "status": "failed",
+                "scope": artifact_scope,
+                "diagnostics": [
+                    {
+                        "code": "agent_task.action_artifact_release_failed",
+                        "message": _compact_agent_task_error_message(
+                            error,
+                            fallback=error.__class__.__name__,
+                        ),
+                    }
+                ],
+            }
 
     @staticmethod
     def _is_timeout_error(error: BaseException) -> bool:

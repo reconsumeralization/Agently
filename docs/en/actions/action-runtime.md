@@ -428,6 +428,13 @@ the official event stream.
 
 There is no legacy positional handler signature — the public contract is `(context, request)` only.
 
+Custom execution-handler results pass through the same complete-record bound as
+built-in handlers before they enter AgentExecution context, ActionFlow
+RuntimeEvents, TriggerFlow state, logs, metadata, or the public return. Route
+logs keep one bounded semantic payload; they do not retain another complete
+record under `raw` or duplicate it across `data` and `model_digest`. The exact
+value remains only in the live private Action artifact scope.
+
 ## Action Artifact Lifetime
 
 Large Action values stay exact in the private `ActionArtifactManager`. Sensitive
@@ -442,8 +449,10 @@ only as provenance while each scope receives a fresh local artifact id.
 
 Standalone direct Action calls, `TriggerFlowActionFlow`, and `DAGActionFlow`
 release their exact `action_call` or `action_run` scope in `finally` on success,
-failure, and cancellation. An AgentExecution- or AgentTask-owned scope is
-transferred to its terminal owner; child ActionFlows never release that
+failure, and cancellation. A standalone AgentTask releases its exact task scope
+in its own terminal seam. A routed AgentTask explicitly transfers that scope to
+its parent AgentExecution, which keeps it live through terminal selection and
+promotion and releases it afterward; child ActionFlows never release that
 inherited scope early. If selected promotion fails, the selected source is
 kept with bounded retry diagnostics while unselected artifacts from that exact
 scope are released.
