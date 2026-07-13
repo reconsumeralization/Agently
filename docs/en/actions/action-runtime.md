@@ -433,7 +433,11 @@ core emits official or compatibility events. Plan observations expose one
 canonical `decision.action_calls` list rather than copying commands through the
 legacy decision aliases; command observations use canonical `action_id` and
 bounded/redacted `action_input` fields. Repeated-failure convergence observations
-also carry bounded records, never the private complete Action values.
+also carry bounded records, never the private complete Action values. The same
+carrier budget covers `payload` and `error`: a raw exception becomes one
+bounded/redacted ErrorInfo-compatible mapping before the direct callback, and
+official `action.*` plus compatibility `tool.*` events reuse that mapping
+without rebuilding the original message or traceback.
 
 There is no legacy positional handler signature — the public contract is `(context, request)` only.
 

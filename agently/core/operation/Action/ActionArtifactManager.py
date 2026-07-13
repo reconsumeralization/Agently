@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import traceback
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -825,6 +826,140 @@ class ActionArtifactManager:
     # ── model-visible transformation ───────────────────────────────────────
 
     @classmethod
+    def _bounded_runtime_text(cls, value: Any, *, max_bytes: int) -> str:
+        raw = str(value).encode("utf-8", errors="replace")
+        if len(raw) <= max_bytes:
+            return raw.decode("utf-8", errors="replace")
+        suffix = f"... [truncated {len(raw) - max_bytes} bytes]"
+        suffix_bytes = suffix.encode("utf-8")
+        prefix_budget = max(0, max_bytes - len(suffix_bytes))
+        prefix = raw[:prefix_budget].decode("utf-8", errors="ignore")
+        return prefix + suffix
+
+    @classmethod
+    def _to_runtime_visible_error(cls, error: Any) -> dict[str, Any] | None:
+        if error is None:
+            return None
+        model_dump = getattr(error, "model_dump", None)
+        if callable(model_dump):
+            error = model_dump(mode="python")
+        if isinstance(error, Mapping):
+            details = error.get("details", {})
+            if not isinstance(details, Mapping):
+                details = {}
+            return {
+                "type": cls._bounded_runtime_text(error.get("type", "Error"), max_bytes=160),
+                "message": cls._bounded_runtime_text(error.get("message", "Error"), max_bytes=2400),
+                "module": (
+                    cls._bounded_runtime_text(error.get("module"), max_bytes=240)
+                    if error.get("module") is not None
+                    else None
+                ),
+                "traceback": (
+                    cls._bounded_runtime_text(error.get("traceback"), max_bytes=6000)
+                    if error.get("traceback") is not None
+                    else None
+                ),
+                "retryable": error.get("retryable") if isinstance(error.get("retryable"), bool) else None,
+                "fatal": error.get("fatal") if isinstance(error.get("fatal"), bool) else None,
+                "code": (
+                    cls._bounded_runtime_text(error.get("code"), max_bytes=240)
+                    if error.get("code") is not None
+                    else None
+                ),
+                "details": cls._compact_hot_path_field(
+                    cls._redact_value(dict(details)),
+                    max_bytes=1200,
+                ),
+            }
+        if not isinstance(error, BaseException):
+            return {
+                "type": "Error",
+                "message": cls._bounded_runtime_text(error, max_bytes=2400),
+                "module": None,
+                "traceback": None,
+                "retryable": None,
+                "fatal": None,
+                "code": None,
+                "details": {},
+            }
+
+        redacted_args = cls._redact_value(list(error.args))
+        if not redacted_args:
+            message_value: Any = error.__class__.__name__
+        elif len(redacted_args) == 1:
+            message_value = redacted_args[0]
+        else:
+            message_value = redacted_args
+        compact_message = cls._compact_hot_path_field(message_value, max_bytes=2200)
+        if isinstance(compact_message, str):
+            message = cls._bounded_runtime_text(compact_message, max_bytes=2400)
+        else:
+            message = cls._bounded_runtime_text(
+                cls._json_bytes(compact_message).decode("utf-8", errors="replace"),
+                max_bytes=2400,
+            )
+
+        traceback_lines: list[str] = []
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen and len(seen) < 4:
+            seen.add(id(current))
+            traceback_lines.append(
+                f"{current.__class__.__module__}.{current.__class__.__name__}: stack frames"
+            )
+            for frame in traceback.extract_tb(current.__traceback__, limit=20):
+                traceback_lines.append(
+                    f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}'
+                )
+            next_error = current.__cause__
+            if next_error is None and not current.__suppress_context__:
+                next_error = current.__context__
+            current = next_error
+        traceback_text = cls._bounded_runtime_text("\n".join(traceback_lines), max_bytes=6000)
+        return {
+            "type": cls._bounded_runtime_text(error.__class__.__name__, max_bytes=160),
+            "message": message,
+            "module": cls._bounded_runtime_text(error.__class__.__module__, max_bytes=240),
+            "traceback": traceback_text,
+            "retryable": None,
+            "fatal": None,
+            "code": None,
+            "details": {
+                "redacted_paths": cls._redaction_report_for_value(list(error.args))[:20],
+                "argument_count": len(error.args),
+            },
+        }
+
+    @classmethod
+    def _bound_runtime_mapping(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        if max_bytes <= 2:
+            return {}
+        resolved = dict(value)
+        if cls._safe_json_size(resolved) <= max_bytes:
+            return resolved
+        bounded: dict[str, Any] = {}
+        field_budget = max(200, min(2400, max_bytes // 2))
+        for key, item in resolved.items():
+            candidate = item
+            if cls._safe_json_size(candidate) > field_budget:
+                candidate = cls._compact_hot_path_field(candidate, max_bytes=field_budget)
+            if cls._safe_json_size({**bounded, str(key): candidate}) > max_bytes:
+                candidate = {
+                    "omitted": True,
+                    "original_size": cls._safe_json_size(item),
+                }
+            if cls._safe_json_size({**bounded, str(key): candidate}) > max_bytes:
+                break
+            bounded[str(key)] = candidate
+        return bounded
+
+    @classmethod
     def _to_runtime_visible_command(cls, command: Mapping[str, Any]) -> dict[str, Any]:
         """Project one command to the canonical, bounded observation shape."""
 
@@ -963,9 +1098,7 @@ class ActionArtifactManager:
 
         visible_observation = dict(observation)
         raw_payload = observation.get("payload")
-        if not isinstance(raw_payload, Mapping):
-            return visible_observation
-        payload = dict(raw_payload)
+        payload = dict(raw_payload) if isinstance(raw_payload, Mapping) else {}
         decision = payload.get("decision")
         if isinstance(decision, Mapping):
             payload["decision"] = cls._to_runtime_visible_decision(decision)
@@ -984,23 +1117,32 @@ class ActionArtifactManager:
         if isinstance(records, Sequence) and not isinstance(records, (str, bytes, bytearray)):
             payload["records"] = cls._to_runtime_visible_records(records)
 
-        payload = cast(dict[str, Any], cls._redact_value(payload))
-        if cls._safe_json_size(payload) > cls._ACTION_CARRIER_MAX_BYTES:
-            bounded_payload: dict[str, Any] = {}
-            for key, value in payload.items():
-                candidate = value
-                if cls._safe_json_size(candidate) > 2400:
-                    candidate = cls._compact_hot_path_field(candidate, max_bytes=2400)
-                if cls._safe_json_size({**bounded_payload, str(key): candidate}) > cls._ACTION_CARRIER_MAX_BYTES:
-                    candidate = {
-                        "omitted": True,
-                        "original_size": cls._safe_json_size(value),
-                    }
-                if cls._safe_json_size({**bounded_payload, str(key): candidate}) > cls._ACTION_CARRIER_MAX_BYTES:
-                    break
-                bounded_payload[str(key)] = candidate
-            payload = bounded_payload
+        payload = cls._bound_runtime_mapping(
+            cast(dict[str, Any], cls._redact_value(payload)),
+            max_bytes=cls._ACTION_CARRIER_MAX_BYTES,
+        )
         visible_observation["payload"] = payload
+        visible_observation["message"] = cls._bounded_runtime_text(
+            visible_observation.get("message", ""),
+            max_bytes=1200,
+        )
+        if visible_observation.get("compat_message") is not None:
+            visible_observation["compat_message"] = cls._bounded_runtime_text(
+                visible_observation.get("compat_message"),
+                max_bytes=1200,
+            )
+        visible_observation["error"] = cls._to_runtime_visible_error(observation.get("error"))
+        if cls._safe_json_size(visible_observation) > cls._ACTION_CARRIER_MAX_BYTES:
+            without_payload = dict(visible_observation)
+            without_payload["payload"] = {}
+            payload_budget = max(
+                0,
+                cls._ACTION_CARRIER_MAX_BYTES - cls._safe_json_size(without_payload) - 64,
+            )
+            visible_observation["payload"] = cls._bound_runtime_mapping(
+                payload,
+                max_bytes=payload_budget,
+            )
         return visible_observation
 
     @classmethod

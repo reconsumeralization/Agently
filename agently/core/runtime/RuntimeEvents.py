@@ -434,7 +434,7 @@ async def async_emit_action_flow_observation(observation: dict[str, Any]) -> Non
         level=observation.get("level", "INFO"),
         message=observation.get("message"),
         payload=resolved_payload,
-        error=ErrorInfo.from_exception(error) if isinstance(error, BaseException) else error,
+        error=error,
         run=observation.get("run"),
     )
     await async_emit_runtime(primary_event)

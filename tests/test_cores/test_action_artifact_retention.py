@@ -1281,6 +1281,113 @@ async def test_triggerflow_failure_convergence_callback_receives_bounded_records
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("flow_name", ["TriggerFlowActionFlow", "DAGActionFlow"])
+async def test_action_flow_failure_bounds_complete_error_observation_carriers(
+    tmp_path,
+    flow_name: str,
+) -> None:
+    message_tail = f"{flow_name}_ERROR_MESSAGE_TAIL"
+    traceback_tail = f"{flow_name}_ERROR_TRACEBACK_TAIL"
+    secret_value = f"{flow_name}-error-secret"
+    agent: Any = Agently.create_agent(f"error-observation-{flow_name}").use_workspace(
+        tmp_path / flow_name
+    )
+    flow = agent.action._flow_controller.create_named_action_flow(flow_name)
+    direct_observations: list[dict[str, Any]] = []
+    runtime_events: list[Any] = []
+    hook_name = f"test.error_observation.{flow_name}"
+    Agently.event_center.register_hook(
+        lambda event: runtime_events.append(event),
+        event_types=["action.loop_failed", "tool.loop_failed"],
+        hook_name=hook_name,
+    )
+
+    async def observation_handler(observation: dict[str, Any]) -> None:
+        direct_observations.append(observation)
+        await agent.action._flow_controller.async_emit_action_flow_observation(observation)
+
+    async def planning_handler(_context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        try:
+            raise ValueError(
+                {
+                    "body": ("t" * (1024 * 1024)) + traceback_tail,
+                    "api_key": secret_value,
+                }
+            )
+        except ValueError as cause:
+            raise RuntimeError(
+                {
+                    "body": ("m" * (1024 * 1024)) + message_tail,
+                    "api_key": secret_value,
+                }
+            ) from cause
+
+    async def execution_handler(
+        _context: dict[str, Any],
+        _request: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        return []
+
+    try:
+        with pytest.raises(RuntimeError):
+            await flow.async_run(
+                action=agent.action,
+                prompt=agent.request.prompt,
+                settings=agent.settings,
+                action_list=[{"action_id": "never_runs", "desc": "never runs", "kwargs": {}}],
+                planning_handler=planning_handler,
+                execution_handler=execution_handler,
+                max_rounds=1,
+                runtime_observation_handler=observation_handler,
+            )
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    direct_failure = next(
+        observation
+        for observation in direct_observations
+        if observation.get("kind") == "loop_failed"
+    )
+    action_event = next(event for event in runtime_events if event.event_type == "action.loop_failed")
+    tool_event = next(event for event in runtime_events if event.event_type == "tool.loop_failed")
+    carriers = {
+        "direct": direct_failure,
+        "action": action_event.model_dump(mode="json"),
+        "tool": tool_event.model_dump(mode="json"),
+    }
+    measurements: dict[str, dict[str, Any]] = {}
+    violations: list[str] = []
+    projected_errors: dict[str, dict[str, Any]] = {}
+    for name, carrier in carriers.items():
+        serialized = json.dumps(carrier, ensure_ascii=False, default=str).encode("utf-8")
+        projected_error = carrier.get("error")
+        error_is_mapping = isinstance(projected_error, dict)
+        measurements[name] = {
+            "bytes": len(serialized),
+            "message_tail": message_tail.encode("utf-8") in serialized,
+            "traceback_tail": traceback_tail.encode("utf-8") in serialized,
+            "secret": secret_value.encode("utf-8") in serialized,
+            "error_is_mapping": error_is_mapping,
+        }
+        if (
+            len(serialized) > 16000
+            or any(measurements[name][key] for key in ("message_tail", "traceback_tail", "secret"))
+            or not error_is_mapping
+        ):
+            violations.append(name)
+        if error_is_mapping:
+            projected_errors[name] = projected_error
+    assert violations == [], json.dumps(measurements, sort_keys=True)
+    assert projected_errors["direct"] == projected_errors["action"] == projected_errors["tool"]
+    assert len(projected_errors["direct"]["message"].encode("utf-8")) <= 2400
+    assert len(projected_errors["direct"]["traceback"].encode("utf-8")) <= 6000
+    for carrier in carriers.values():
+        serialized = json.dumps(carrier, ensure_ascii=False, default=str)
+        assert serialized.count('"error":') == 1
+        assert "error" not in carrier.get("payload", {})
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["promotion", "terminal_event"])
 async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
     tmp_path,

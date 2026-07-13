@@ -385,7 +385,10 @@ observation 映射到官方事件流。
 plan observation 只暴露一份 canonical `decision.action_calls`，不再通过 legacy
 decision aliases 重复复制 command；command observation 使用 canonical
 `action_id` 与有界、脱敏的 `action_input`。重复失败收敛 observation 也只携带
-bounded records，不会携带私有的完整 Action value。
+bounded records，不会携带私有的完整 Action value。同一个 carrier budget 同时覆盖
+`payload` 与 `error`：raw exception 会在 direct callback 之前转成一份有界、脱敏且
+兼容 ErrorInfo 的 mapping；官方 `action.*` 和兼容 `tool.*` 事件直接复用该 mapping，
+不会再从原始异常重建完整 message 或 traceback。
 
 没有 legacy positional 签名 —— 公开契约只是 `(context, request)`。
 
