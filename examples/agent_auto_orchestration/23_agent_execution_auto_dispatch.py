@@ -310,17 +310,33 @@ def artifact_preview_from_task_envelope(data: Any) -> str:
 
 
 def task_artifact_text(data: dict[str, Any], runtime_root: Path, task_id: str, pointer: str) -> str:
+    _ = task_id
     preview = artifact_preview_from_task_envelope(data)
     if preview:
         return preview
     artifact_paths: list[str] = []
+
+    def collect_file_refs(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "file" and isinstance(value.get("path"), str):
+                artifact_paths.append(str(value["path"]))
+            for nested in value.values():
+                collect_file_refs(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect_file_refs(nested)
+
+    collect_file_refs(data.get("artifact_refs", []))
     match = re.search(r"Workspace artifact delivered at ([^;]+)", pointer)
     if match:
         artifact_paths.append(match.group(1).strip())
     artifact_paths.append("final.md")
-    task_files_root = runtime_root / "files" / "lineage" / "tasks" / task_id / "files"
     for relative_path in artifact_paths:
-        candidate = task_files_root / relative_path
+        candidate = (runtime_root / relative_path).resolve()
+        try:
+            candidate.relative_to(runtime_root.resolve())
+        except ValueError:
+            continue
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8").strip()
     return ""

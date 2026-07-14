@@ -38,6 +38,7 @@ _REF_FIELDS = (
     "href",
     "path",
     "record_id",
+    "selection_key",
     "artifact_id",
     "ref",
 )
@@ -46,6 +47,7 @@ _ALIAS_FIELDS = (
     "cite_as",
     "path",
     "record_id",
+    "selection_key",
     "source_url",
     "selected_url",
     "requested_url",

@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agently import Agently, TriggerFlow
-from agently.core import LazyWorkspace
+from agently.core import Workspace
 
 
 def build_flow(agent):
@@ -100,14 +100,16 @@ async def main():
         previous_cwd = os.getcwd()
         os.chdir(temp_dir)
         try:
-            agent = Agently.create_agent("workspace-loop-example")
+            agent = Agently.create_agent("workspace-loop-example").use_workspace(temp_dir)
             workspace = agent.workspace
-            assert isinstance(workspace, LazyWorkspace)
-            assert workspace.is_materialized is False
+            assert isinstance(workspace, Workspace)
+            assert workspace.root == Path(temp_dir).resolve()
+            assert not (workspace.root / ".agently").exists()
             flow = build_flow(agent)
             execution = flow.create_execution(
                 auto_close=False,
                 workspace=workspace,
+                runtime_resources={"runtime_event_store": workspace},
             )
             await execution.async_start({"task_id": "issue-123"})
             state = await execution.async_close()
@@ -115,7 +117,8 @@ async def main():
             runtime_events = await workspace.query_runtime_events(execution.id)
             summary = {
                 **state["workspace_summary"],
-                "lazy_workspace_materialized": workspace.is_materialized,
+                "private_state_created": (workspace.root / ".agently").exists(),
+                "materialized_components": workspace.capabilities().get("materialized_components", []),
                 "provider_checkpoint_collection": checkpoint_ref["collection"],
                 "runtime_event_count": len(runtime_events),
                 "runtime_event_tail": [event["event_type"] for event in runtime_events[-2:]],
@@ -125,13 +128,12 @@ async def main():
                 "latest_status": "fixed",
                 "checkpoint_count": 2,
                 "link_count": 2,
-                "lazy_workspace_materialized": True,
+                "private_state_created": True,
+                "materialized_components": ["links", "records", "recovery", "runtime_events"],
                 "provider_checkpoint_collection": "checkpoints",
                 "runtime_event_count": 21,
                 "runtime_event_tail": ["triggerflow.stream_closed", "triggerflow.execution_closed"],
             }
-            assert workspace.capabilities()["features"]["checkpoint_lookup"] is True
-            assert workspace.capabilities()["features"]["runtime_event_store"] is True
         finally:
             os.chdir(previous_cwd)
 
@@ -139,11 +141,12 @@ async def main():
 asyncio.run(main())
 
 # Expected key output:
-# {'latest_status': 'fixed', 'checkpoint_count': 2, 'link_count': 2, 'lazy_workspace_materialized': True, 'provider_checkpoint_collection': 'checkpoints', 'runtime_event_count': 21, 'runtime_event_tail': ['triggerflow.stream_closed', 'triggerflow.execution_closed']}
+# {'latest_status': 'fixed', 'checkpoint_count': 2, 'link_count': 2, 'private_state_created': True, 'materialized_components': ['links', 'records', 'recovery', 'runtime_events'], 'provider_checkpoint_collection': 'checkpoints', 'runtime_event_count': 21, 'runtime_event_tail': ['triggerflow.stream_closed', 'triggerflow.execution_closed']}
 #
 # This is an infrastructure composition smoke, not a model-owned WorkLoop.
-# TriggerFlow owns the explicit loop, while the Agent's default lazy Workspace
-# materializes only when durable provider ports are used. Workspace owns durable
+# TriggerFlow owns the explicit loop. The bound Workspace creates private state
+# only when durable records, recovery, and the explicitly configured RuntimeEvent
+# store are used. Workspace owns durable
 # structured observations, decisions, links, checkpoints, RuntimeEvent records,
 # and ContextPackage construction.
 #

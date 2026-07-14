@@ -65,7 +65,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--workspace",
         default=os.getenv("AGENT_TASK_WORKSPACE", ""),
-        help="Workspace directory. Defaults to .agently/tasks/legacy-script-upgrade-<run-id>.",
+        help="Workspace directory. Defaults to agent-task-workspaces/legacy-script-upgrade-<run-id>.",
     )
     parser.add_argument(
         "--max-iterations",
@@ -203,7 +203,9 @@ def _print_stream_item(item: Any) -> None:
 async def main(argv: list[str] | None = None):
     args = parse_args(argv)
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    workspace_dir = Path(args.workspace or f".agently/tasks/legacy-script-upgrade-{run_id}").resolve()
+    workspace_dir = Path(
+        args.workspace or f"agent-task-workspaces/legacy-script-upgrade-{run_id}"
+    ).resolve()
     workspace_dir.mkdir(parents=True, exist_ok=True)
     task_files_dir = workspace_dir / "files"
     task_files_dir.mkdir(parents=True, exist_ok=True)
@@ -329,7 +331,6 @@ async def main(argv: list[str] | None = None):
         and item.value["verification"].get("is_complete") is False
         for item in stream_items
     )
-    workspace_checkpoint_count = len(await workspace.checkpoint_history("legacy_agently_script_upgrade"))
     summary = {
         "provider": provider,
         "forced_gap": bool(args.forced_gap),
@@ -343,8 +344,8 @@ async def main(argv: list[str] | None = None):
         "replan_count": replan_count,
         "final_script_runs": validation["returncode"] == 0,
         "verification_passed": result["status"] == "completed",
-        "workspace_checkpoint_count": workspace_checkpoint_count,
-        "workspace_decision_count": len(meta["workspace_refs"]["decisions"]),
+        "workspace_recovery_ref_count": len(meta.get("workspace_refs", {}).get("checkpoints", [])),
+        "workspace_process_record_count": len(meta.get("workspace_refs", {}).get("decisions", [])),
         "stream_trace_file": str(stream_trace_path),
         "script_path": str(script_path),
         "validation": validation,
@@ -358,7 +359,7 @@ if __name__ == "__main__":
 
 # Expected key output from a real DeepSeek run on 2026-06-03:
 # command:
-#   AGENT_TASK_WORKSPACE=.agently/tasks/legacy-script-upgrade-cleanup-final python examples/agent_task/legacy_agently_script_upgrade.py
+#   AGENT_TASK_WORKSPACE=agent-task-workspaces/legacy-script-upgrade-cleanup-final python examples/agent_task/legacy_agently_script_upgrade.py
 # task_status="completed"
 # accepted=True
 # artifact_status="accepted"
@@ -367,13 +368,13 @@ if __name__ == "__main__":
 # replan_count=0
 # final_script_runs=True
 # verification_passed=True
-# workspace_checkpoint_count=1
+# workspace_recovery_ref_count=0 (recovery is opt-in)
 # validation.stdout_json.api="4.1.x"
 # validation.stdout_json.status="ok"
 # stream_trace_file points to a JSONL stream trace under the Workspace
 #
 # Forced-gap validation command (requires a real DeepSeek or local Ollama run):
-#   AGENT_TASK_WORKSPACE=.agently/tasks/legacy-forced-gap \
+#   AGENT_TASK_WORKSPACE=agent-task-workspaces/legacy-forced-gap \
 #   AGENT_TASK_LEGACY_FORCED_GAP=1 \
 #   python examples/agent_task/legacy_agently_script_upgrade.py
 # The forced-gap run reports forced_gap=True, first_verification_failed, and

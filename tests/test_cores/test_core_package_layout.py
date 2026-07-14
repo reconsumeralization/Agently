@@ -95,7 +95,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.model import AttemptRunner
     from agently.core.runtime import EventCenter, RuntimeEvent, bind_runtime_context
     from agently.core.session import Session
-    from agently.core.workspace import ContextProfile, Workspace
+    from agently.core.Workspace import ContextProfile, Workspace
 
     assert importlib.import_module("agently.core.Agent").BaseAgent is BaseAgent
     assert importlib.import_module("agently.core.application.AgentExecution.Stream").AgentExecutionStream is AgentExecutionStream
@@ -120,8 +120,33 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.operation.Action").Tool is Tool
     assert importlib.import_module("agently.core.application.SkillsManager.SkillsManager").SkillsManager is SkillsManager
     assert importlib.import_module("agently.core.application.SkillsExecutor.SkillsExecutor").SkillsExecutor is SkillsExecutor
-    assert importlib.import_module("agently.core.workspace.Workspace").Workspace is Workspace
-    assert importlib.import_module("agently.core.workspace.ContextBuilder").ContextProfile is ContextProfile
+    assert importlib.import_module("agently.core.Workspace.Workspace").Workspace is Workspace
+    assert importlib.import_module("agently.core.Workspace.ContextBuilder").ContextProfile is ContextProfile
+
+
+def test_workspace_package_uses_class_owned_canonical_name_only():
+    from agently.core import Workspace as RootWorkspace
+    from agently.core.Workspace import Workspace as CanonicalWorkspace
+
+    canonical_package = importlib.import_module("agently.core.Workspace")
+    assert canonical_package.__file__ is not None
+    canonical_root = Path(canonical_package.__file__).resolve().parent
+    core_root = canonical_root.parent
+    workspace_entries = sorted(path.name for path in core_root.iterdir() if path.name.casefold().startswith("workspace"))
+    workspace_directories = sorted(
+        path.name for path in core_root.iterdir() if path.is_dir() and path.name.casefold() == "workspace"
+    )
+
+    assert canonical_root.name == "Workspace"
+    assert workspace_entries == ["Workspace"]
+    assert (core_root / "Workspace").is_dir()
+    assert not (core_root / "workspace.py").exists()
+    assert not (core_root / "workspace.pyi").exists()
+    assert workspace_directories == ["Workspace"]
+    assert CanonicalWorkspace.__module__ == "agently.core.Workspace.Workspace"
+    assert canonical_package.Workspace is CanonicalWorkspace
+    assert RootWorkspace is CanonicalWorkspace
+
 
 
 def test_core_layout_keeps_only_classified_root_packages():
@@ -132,6 +157,7 @@ def test_core_layout_keeps_only_classified_root_packages():
 
     assert root_files == ["Agent.py", "__init__.py"]
     assert root_dirs == [
+        "Workspace",
         "application",
         "extension",
         "model",
@@ -139,16 +165,15 @@ def test_core_layout_keeps_only_classified_root_packages():
         "orchestration",
         "runtime",
         "session",
-        "workspace",
     ]
     assert (core_root / "application" / "AgentExecution").is_dir()
     assert (core_root / "application" / "SkillsManager").is_dir()
     assert (core_root / "application" / "SkillsExecutor").is_dir()
     assert (core_root / "operation" / "Action").is_dir()
     assert (core_root / "operation" / "ExecutionResource").is_dir()
-    assert (core_root / "workspace").is_dir()
-    assert (core_root / "workspace" / "ContextBuilder").is_dir()
-    assert not (core_root / "workspace" / "Recall").exists()
+    assert (core_root / "Workspace").is_dir()
+    assert (core_root / "Workspace" / "ContextBuilder").is_dir()
+    assert not (core_root / "Workspace" / "Recall").exists()
     assert not (core_root / "session" / "Workspace").exists()
     assert not (core_root / "session" / "Recall").exists()
     assert (core_root / "orchestration" / "TriggerFlow").is_dir()
@@ -164,6 +189,26 @@ def test_core_layout_keeps_only_classified_root_packages():
     assert not (core_root / "execution").exists()
     assert not (core_root / "operation" / "Tool.py").exists()
     assert not (core_root / "operation" / "Tool").exists()
+
+
+def test_workspace_active_code_has_no_superseded_layout_symbols():
+    workspace_root = Path(__file__).resolve().parents[2] / "agently" / "core" / "Workspace"
+    active_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in workspace_root.rglob("*.py")
+    )
+    for symbol in (
+        "content_root",
+        "files_root",
+        "WorkspaceScratchLease",
+        "open_scratch",
+        "close_scratch",
+        "AGENTLY_WORKSPACE.md",
+        "WORKSPACE_FILE_AREAS",
+        "with_files_root",
+        "lineage_files_root",
+    ):
+        assert symbol not in active_source
 
 
 def test_removed_flat_core_submodules_do_not_resolve():

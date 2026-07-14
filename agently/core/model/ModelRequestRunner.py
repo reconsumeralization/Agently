@@ -853,21 +853,6 @@ class ModelRequestRunner:
                         "run": self.request_run_context,
                     }
                 )
-                if self.agent_execution_run_context is not None:
-                    await async_emit_runtime(
-                        {
-                            "event_type": "agent_execution.completed",
-                            "source": "ModelRequest",
-                            "message": f"AgentExecution completed for '{ self.agent_name }'.",
-                            "payload": {
-                                "agent_name": self.agent_name,
-                                "response_id": self.id,
-                                "request_run_id": self.request_run_context.run_id,
-                                "attempt_count": self.attempt_index,
-                            },
-                            "run": self.agent_execution_run_context,
-                        }
-                    )
             except BaseException as error:
                 if isinstance(error, (GeneratorExit, SystemExit)):
                     raise
@@ -943,23 +928,6 @@ class ModelRequestRunner:
                         "run": self.request_run_context,
                     }
                 )
-                if self.agent_execution_run_context is not None:
-                    await async_emit_runtime(
-                        {
-                            "event_type": "agent_execution.failed",
-                            "source": "ModelRequest",
-                            "level": "ERROR",
-                            "message": f"AgentExecution failed for '{ self.agent_name }'.",
-                            "payload": {
-                                "agent_name": self.agent_name,
-                                "response_id": self.id,
-                                "request_run_id": self.request_run_context.run_id,
-                                "attempt_count": self.attempt_index,
-                            },
-                            "error": error,
-                            "run": self.agent_execution_run_context,
-                        }
-                    )
                 raise
             finally:
                 if scheduler_slot_entered:

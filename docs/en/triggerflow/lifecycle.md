@@ -140,6 +140,12 @@ What close does, in order:
 
 `close()` / `async_close()` reject pending interrupts by default. Resume them first, or explicitly cancel them with `pending_interrupts="cancel"` when shutdown should abandon the wait.
 
+For a durable standalone ActionFlow exchange, `execution_exchange.async_respond(...)`
+resumes the live execution and closes it after the final interrupt. Use
+`execution_exchange.async_abandon(...)` when the host intentionally abandons
+the wait. A direct execution close, abandonment, and successful final resume all
+trigger the ActionFlow-owned temporary artifact-scope cleanup exactly once.
+
 Close also releases execution-local transient aggregation state such as partial
 `when(mode="and")`, `batch`, `collect`, `for_each`, and `match` bookkeeping.
 These scratch keys are not part of the durable close snapshot.
@@ -252,17 +258,22 @@ For shared task information, prefer a Workspace instance that the application
 creates and owns explicitly:
 
 ```python
-shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
+shared_workspace = Agently.create_workspace("./project")
 execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-`flow.create_execution()` binds the current session/script default Workspace by
-default and assigns the execution its own scoped file root under
-`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`.
+`flow.create_execution()` binds a lightweight Workspace over the entry-script
+directory by default. Every execution sees the same direct ordinary file root;
+new files created without external write permission are isolated under
+`.agently/files/<execution-id>/`.
 Pass `workspace=False` to opt out, or pass a Workspace instance, path, or
 backend when the execution should use an explicitly selected Workspace. The
 resolved execution-local Workspace facade is available to TriggerFlow chunks as
 `runtime_resources["workspace"]` / `data.require_resource("workspace")`.
+
+This binding does not enable RuntimeEvent persistence and does not create
+`.agently`. Only real file products, records, recovery, or explicitly configured
+event storage materialize private state.
 
 It is a live resource, not serialized state. If a chunk needs an Agent to use
 the same explicit information scope, bind that Agent or the single

@@ -113,7 +113,7 @@ async def test_action_loop_hot_wait_approval_executes_action_in_place():
 
 
 @pytest.mark.asyncio
-async def test_action_loop_durable_mode_returns_paused_records_instead_of_raising():
+async def test_action_loop_durable_mode_returns_paused_records_instead_of_raising(monkeypatch):
     calls: list[dict[str, Any]] = []
     agent = _build_agent_with_guarded_action(calls)
     provider = RecordingOnlyProvider()
@@ -121,6 +121,30 @@ async def test_action_loop_durable_mode_returns_paused_records_instead_of_raisin
     old = _interaction_settings(mode="durable", exchange_provider="loop-cold")
     old_handler = global_settings.get("policy_approval.handler", None)
     global_settings.set("policy_approval.handler", "fail_closed")
+    original_normalize = agent.action._normalize_execution_records
+    original_release = agent.action._release_artifact_scope
+    registered_scope: dict[str, str] | None = None
+    release_calls: list[dict[str, str]] = []
+
+    def normalize_with_temporary_artifact(records, commands, *, artifact_scope=None):
+        nonlocal registered_scope
+        if registered_scope is None and artifact_scope is not None:
+            registered_scope = dict(artifact_scope)
+            agent.action._artifact_manager.register_execution_artifact(
+                action_call_id="pre-pause-output",
+                artifact_type="action_output",
+                label="Temporary pre-pause output",
+                value={"body": "p" * (1024 * 1024)},
+                artifact_scope=artifact_scope,
+            )
+        return original_normalize(records, commands, artifact_scope=artifact_scope)
+
+    def record_release(artifact_scope):
+        release_calls.append(dict(artifact_scope))
+        return original_release(artifact_scope)
+
+    monkeypatch.setattr(agent.action, "_normalize_execution_records", normalize_with_temporary_artifact)
+    monkeypatch.setattr(agent.action, "_release_artifact_scope", record_release)
     try:
         prompt = Agently.create_prompt()
         prompt.set("input", "clean up the stale report")
@@ -143,6 +167,8 @@ async def test_action_loop_durable_mode_returns_paused_records_instead_of_raisin
         assert exchange_meta["pending"][0]["status"] == "pending"
         assert exchange_meta["respond_keys"]
         assert exchange_meta["execution_id"]
+        assert agent.action._artifact_manager._artifacts
+        assert release_calls == []
 
         # The paused execution stays live: respond in process and let the
         # loop continue to execute the approved action.
@@ -153,12 +179,89 @@ async def test_action_loop_durable_mode_returns_paused_records_instead_of_raisin
             actor="unit-test",
         )
         assert view.get("status") == "responded"
-        await asyncio.sleep(0.1)
+        for _ in range(50):
+            if not agent.action._artifact_manager._artifacts:
+                break
+            await asyncio.sleep(0.01)
         assert calls == [{"path": "./tmp/report.md"}]
+        assert agent.action._artifact_manager._artifacts == {}
+        assert release_calls == [registered_scope]
     finally:
         global_settings.set("policy_approval.handler", old_handler)
         _restore_interaction_settings(old)
         execution_exchange.unregister_provider("loop-cold")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_path", ["abandon", "direct_close"])
+async def test_action_loop_durable_abandon_releases_paused_artifact_scope(monkeypatch, terminal_path):
+    calls: list[dict[str, Any]] = []
+    agent = _build_agent_with_guarded_action(calls)
+    provider = RecordingOnlyProvider()
+    execution_exchange.register_provider("loop-abandon", provider, replace=True)
+    old = _interaction_settings(mode="durable", exchange_provider="loop-abandon")
+    old_handler = global_settings.get("policy_approval.handler", None)
+    global_settings.set("policy_approval.handler", "fail_closed")
+    original_normalize = agent.action._normalize_execution_records
+    original_release = agent.action._release_artifact_scope
+    release_calls: list[dict[str, str]] = []
+    registered = False
+
+    def normalize_with_temporary_artifact(records, commands, *, artifact_scope=None):
+        nonlocal registered
+        if not registered and artifact_scope is not None:
+            registered = True
+            agent.action._artifact_manager.register_execution_artifact(
+                action_call_id="pre-abandon-output",
+                artifact_type="action_output",
+                label="Temporary pre-abandon output",
+                value={"body": "a" * (1024 * 1024)},
+                artifact_scope=artifact_scope,
+            )
+        return original_normalize(records, commands, artifact_scope=artifact_scope)
+
+    def record_release(artifact_scope):
+        release_calls.append(dict(artifact_scope))
+        return original_release(artifact_scope)
+
+    monkeypatch.setattr(agent.action, "_normalize_execution_records", normalize_with_temporary_artifact)
+    monkeypatch.setattr(agent.action, "_release_artifact_scope", record_release)
+    try:
+        records = await agent.action.async_plan_and_execute(
+            prompt=Agently.create_prompt().set("input", "clean up the stale report"),
+            settings=agent.settings,
+            action_list=agent.action.get_action_list(tags=["exchange-test"]),
+            agent_name=agent.name,
+            planning_handler=_planning_handler,
+            max_rounds=3,
+        )
+        paused = next(record for record in records if record.get("status") == "approval_required")
+        exchange_meta = paused.get("meta", {})["exchange"]
+        respond_key = exchange_meta["respond_keys"][0]
+        assert agent.action._artifact_manager._artifacts
+
+        if terminal_path == "abandon":
+            await execution_exchange.async_abandon(respond_key, reason="unit-test abandonment")
+        else:
+            live_wait = execution_exchange.get_live_wait(respond_key)
+            assert live_wait is not None
+            await live_wait["execution"].async_close(
+                reason="unit-test direct close",
+                pending_interrupts="cancel",
+            )
+        for _ in range(50):
+            if not agent.action._artifact_manager._artifacts:
+                break
+            await asyncio.sleep(0.01)
+
+        assert agent.action._artifact_manager._artifacts == {}
+        assert len(release_calls) == 1
+        assert execution_exchange.get_live_wait(respond_key) is None
+        assert calls == []
+    finally:
+        global_settings.set("policy_approval.handler", old_handler)
+        _restore_interaction_settings(old)
+        execution_exchange.unregister_provider("loop-abandon")
 
 
 @pytest.mark.asyncio

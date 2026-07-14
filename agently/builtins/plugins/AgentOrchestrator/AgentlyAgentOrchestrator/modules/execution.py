@@ -99,6 +99,8 @@ if TYPE_CHECKING:
     from agently.types.data import (
         AgentExecutionLineage,
         AgentExecutionLimits,
+        AgentExecutionWorkspacePurpose,
+        AgentExecutionWorkspaceRecord,
         OutputValidateHandler,
         RunContext,
         SkillExecutionPlan,
@@ -151,22 +153,18 @@ class AgentExecution:
         self.effective_options: dict[str, Any] = {}
         self.consumed_options: dict[str, Any] = {}
         self.workspace: Any = getattr(self.agent, "workspace", None)
-        # Bind the execution file root from the full resolved scope chain instead
-        # of a lineage-scoped execution file root. The effective parent scope is
-        # known at construction via ``self.lineage`` (parent task and/or parent
-        # execution), so the execution nests under its real ancestors and shares
-        # a single prunable lineage subtree with them (spec sections 8.2 / 9).
-        with_scope_lineage = getattr(self.workspace, "with_scope_lineage", None)
-        if callable(with_scope_lineage):
-            lineage_nodes: list[dict[str, Any]] = []
-            parent_task_id = self.lineage.get("task_id")
-            if parent_task_id:
-                lineage_nodes.append({"kind": "tasks", "id": str(parent_task_id)})
-            parent_execution_id = self.lineage.get("parent_execution_id")
-            if parent_execution_id:
-                lineage_nodes.append({"kind": "executions", "id": str(parent_execution_id)})
-            lineage_nodes.append({"kind": "executions", "id": self.id})
-            self.workspace = with_scope_lineage(lineage_nodes)
+        bind_execution = getattr(self.workspace, "_bind_execution", None)
+        if callable(bind_execution):
+            execution_scope = {"execution_id": self.id}
+            for key in ("task_id", "iteration_id", "step_id"):
+                value = self.lineage.get(key)
+                if value is not None:
+                    execution_scope[key] = value
+            self.workspace = bind_execution(
+                self.id,
+                scope=execution_scope,
+                search_scope=execution_scope,
+            )
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
         self._load_inherited_strategy_context()
         self.execution_context = AgentExecutionContext(
@@ -194,6 +192,15 @@ class AgentExecution:
         self.diagnostics: dict[str, Any] = initial_diagnostics()
         self.workspace_refs: dict[str, Any] = initial_workspace_refs()
         self.result: Any = None
+        self._terminal_inline_result: Any = None
+        self._terminal_retained_refs: list[Any] = []
+        self._terminal_retention_deferred = False
+        self._terminal_retention_diagnostics: list[dict[str, Any]] = []
+        self._terminal_task_handoff_refs: list[Any] = []
+        self._terminal_selected_action_artifact_ids: set[str] = set()
+        self._terminal_preserved_action_artifact_ids: set[str] = set()
+        self._terminal_error_projection: dict[str, Any] | None = None
+        self._terminal_status: Literal["completed", "failed", "cancelled"] | None = None
         self._model_request_result: Any = None
         self.status = "created"
         self._started = False
@@ -208,6 +215,7 @@ class AgentExecution:
         self.execution_prompt_snapshot: dict[str, Any] = self._snapshot_execution_prompt()
 
         self._start_lock = asyncio.Lock()
+        self._workspace_record_lock = asyncio.Lock()
         self.route_planner = HybridRoutePlanner(self.agent, prompt_snapshot=self.prompt_snapshot, execution=self)
         self.stream = AgentExecutionStream(
             execution_id=self.id,
@@ -440,7 +448,12 @@ class AgentExecution:
             self._agent_execution_started_emitted = True
         return run_context
 
-    async def _async_emit_agent_execution_terminal_event(self, *, failed: bool = False) -> None:
+    async def _async_emit_agent_execution_terminal_event(
+        self,
+        *,
+        terminal_status: Literal["completed", "failed", "cancelled"],
+        close_snapshot: dict[str, Any] | None = None,
+    ) -> None:
         if self.agent_execution_run_context is None:
             return
         await self.agent._async_emit_agent_execution_terminal_event(
@@ -450,8 +463,8 @@ class AgentExecution:
             route=cast(str | None, self.route_info.get("selected_route")),
             strategy=self.strategy_name,
             task_refs=self.task_refs,
-            close_snapshot=self.close_snapshot,
-            failed=failed,
+            close_snapshot=self.close_snapshot if close_snapshot is None else close_snapshot,
+            terminal_status=terminal_status,
         )
 
     async def _async_emit_stream_runtime_event(self, item: AgentExecutionStreamData) -> None:
@@ -1367,6 +1380,7 @@ class AgentExecution:
     async def async_record_workspace(
         self,
         *,
+        purpose: "AgentExecutionWorkspacePurpose" = "process",
         collection: str = "observations",
         kind: str | None = "agent_execution_observation",
         content: Any = None,
@@ -1378,9 +1392,10 @@ class AgentExecution:
         checkpoint_state: dict[str, Any] | None = None,
         checkpoint_step_id: str | None = None,
         profile: str = "fast",
-    ) -> dict[str, Any]:
+    ) -> "AgentExecutionWorkspaceRecord":
         return await record_workspace_entry(
             self,
+            purpose=purpose,
             collection=collection,
             kind=kind,
             content=content,
@@ -1409,8 +1424,8 @@ class AgentExecution:
     def _refresh_diagnostics(self) -> None:
         refresh_diagnostics(self)
 
-    def _record_error_diagnostic(self, error: BaseException) -> None:
-        record_error_diagnostic(self, error)
+    def _record_error_diagnostic(self, error: BaseException) -> dict[str, Any]:
+        return record_error_diagnostic(self, error)
 
     def raise_if_limit_exceeded(self) -> None:
         self.execution_context.raise_if_limit_exceeded()

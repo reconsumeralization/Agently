@@ -58,7 +58,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--workspace",
         default=os.getenv("AGENT_TASK_WORKSPACE", ""),
-        help="Workspace directory. Defaults to .agently/tasks/interview-question-preparation-<hash>.",
+        help="Workspace directory. Defaults to agent-task-workspaces/interview-question-preparation-<hash>.",
     )
     parser.add_argument(
         "--output-file",
@@ -99,7 +99,9 @@ def build_raw_interview_setup(args: argparse.Namespace) -> tuple[list[str], str,
     target_slug = _target_slug(slug_source)
     task_id = f"interview_question_preparation_{target_slug.replace('-', '_')}"
     output_file = args.output_file.strip() or f"outputs/blog_interview_questions_{target_slug}.md"
-    workspace_dir = Path(args.workspace or f".agently/tasks/interview-question-preparation-{target_slug}").resolve()
+    workspace_dir = Path(
+        args.workspace or f"agent-task-workspaces/interview-question-preparation-{target_slug}"
+    ).resolve()
     return raw_targets, task_id, output_file, workspace_dir
 
 
@@ -248,7 +250,7 @@ def print_result_summary(summary: dict[str, Any], file_text: str) -> None:
     print(f"[RESULT] Interview angle visible: {summary['has_interview_angle']}")
     print(f"[RESULT] Targets mentioned: {summary['mentions_all_targets']}")
     print(f"[RESULT] Semantic judge passed: {summary['semantic_judge_passed']}")
-    print(f"[RESULT] Workspace checkpoints: {summary['workspace_checkpoint_count']}")
+    print(f"[RESULT] Workspace recovery refs: {summary['workspace_recovery_ref_count']}")
     print(f"[RESULT] Observed action history entries: {summary['action_log_count']}")
     print(f"[RESULT] Stream trace: {summary['stream_trace_file']}")
     preview_lines = [line for line in file_text.splitlines() if line.strip()][:18]
@@ -682,7 +684,7 @@ async def main(argv: list[str] | None = None):
         "workspace_context_items": max((item.get("context_item_count", 0) for item in meta["iterations"]), default=0),
         "progress_model_key": progress_model_key,
         "progress_model": os.getenv("AGENT_TASK_PROGRESS_MODEL", "qwen2.5:7b"),
-        "workspace_checkpoint_count": len(await workspace.checkpoint_history(task_id)),
+        "workspace_recovery_ref_count": len(meta.get("workspace_refs", {}).get("checkpoints", [])),
         "action_log_count": action_log_count,
         "output_file": str(output_path),
     }
@@ -694,7 +696,7 @@ if __name__ == "__main__":
 
 # Expected key output from a real DeepSeek run on 2026-06-04:
 # command:
-# AGENT_TASK_WORKSPACE=.agently/tasks/blog-interview-semantics-check-acceptance \
+# AGENT_TASK_WORKSPACE=agent-task-workspaces/blog-interview-semantics-check-acceptance \
 #   python examples/agent_task/interview_question_preparation.py
 # task_status="completed"
 # accepted=True

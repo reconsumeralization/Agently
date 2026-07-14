@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Iterator, cast
+from typing import TYPE_CHECKING, Any, Iterator, cast
 
 if TYPE_CHECKING:
 	from agently.types.data import RunContext
@@ -57,6 +57,10 @@ _current_settings: ContextVar["Settings | None"] = ContextVar(
 	"agently_current_settings",
 	default=None,
 )
+_current_action_policy: ContextVar[dict[str, Any] | None] = ContextVar(
+	"agently_current_action_policy",
+	default=None,
+)
 
 
 @contextmanager
@@ -70,6 +74,7 @@ def bind_runtime_context(
 	tool_phase_run_context: "RunContext | None | object" = _MISSING,
 	agent_execution_context: object | None = _MISSING,
 	settings: "Settings | None | object" = _MISSING,
+	action_policy: dict[str, Any] | None | object = _MISSING,
 ) -> Iterator[None]:
 	tokens = []
 	try:
@@ -129,6 +134,13 @@ def bind_runtime_context(
 					_current_settings.set(cast("Settings | None", settings)),
 				)
 			)
+		if action_policy is not _MISSING:
+			tokens.append(
+				(
+					_current_action_policy,
+					_current_action_policy.set(cast("dict[str, Any] | None", action_policy)),
+				)
+			)
 		yield
 	finally:
 		for context_var, token in reversed(tokens):
@@ -165,6 +177,10 @@ def get_current_agent_execution_context():
 
 def get_current_settings():
 	return _current_settings.get()
+
+
+def get_current_action_policy():
+	return _current_action_policy.get()
 
 
 def resolve_parent_run_context(parent_run_context: "RunContext | None" = None):

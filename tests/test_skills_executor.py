@@ -1207,7 +1207,7 @@ Write the final Markdown deliverable to a workspace file.
     assert agent.action.action_registry.has("write_file")
     spec = agent.action.action_registry.get_spec("write_file")
     assert spec is not None
-    assert spec.get("meta", {}).get("root") == str(workspace.files_root)
+    assert spec.get("meta", {}).get("root") == str(workspace.root)
 
 
 @pytest.mark.asyncio

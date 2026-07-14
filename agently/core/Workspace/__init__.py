@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from .Errors import WorkspaceConfigurationError, WorkspaceError, WorkspacePolicyError
-from .LazyWorkspace import LazyWorkspace
 from .Workspace import Workspace
 from .LocalBackend import LocalWorkspaceBackend
 from .Manager import WorkspaceManager
@@ -23,9 +22,7 @@ from .Stores import (
     AgentEmbeddingProvider,
     CallableEmbeddingProvider,
     ChromaVectorStoreProvider,
-    LocalContentStore,
     LocalVectorIndex,
-    LocalWorkspacePolicyEngine,
     NoopVectorIndex,
     SQLiteVectorStoreProvider,
     VectorIndexPipeline,
@@ -38,11 +35,8 @@ __all__ = [
     "ChromaVectorStoreProvider",
     "DefaultContextBuilder",
     "FastIngestionProfile",
-    "LocalContentStore",
     "LocalVectorIndex",
     "LocalWorkspaceBackend",
-    "LazyWorkspace",
-    "LocalWorkspacePolicyEngine",
     "NoopVectorIndex",
     "SQLiteVectorStoreProvider",
     "VectorIndexPipeline",

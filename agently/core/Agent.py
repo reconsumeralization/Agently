@@ -548,16 +548,16 @@ class BaseAgent:
         strategy: str | None,
         task_refs: dict[str, Any],
         close_snapshot: dict[str, Any],
-        failed: bool = False,
+        terminal_status: Literal["completed", "failed", "cancelled"],
     ) -> None:
         from agently.base import async_emit_runtime
 
-        event_type = "agent_execution.failed" if failed else "agent_execution.completed"
+        event_type = f"agent_execution.{terminal_status}"
         await async_emit_runtime(
             {
                 "event_type": event_type,
                 "source": "BaseAgent",
-                "message": f"AgentExecution { 'failed' if failed else 'completed' } for '{ self.name }'.",
+                "message": f"AgentExecution {terminal_status} for '{ self.name }'.",
                 "payload": {
                     "execution_id": execution_id,
                     "status": status,
@@ -1077,31 +1077,28 @@ class BaseAgent:
         if scoped_workspace_action_ids:
             agent_execution.use_actions(scoped_workspace_action_ids)
         agent_execution.goal(goal, success_criteria)
-        agent_execution.workspace = getattr(self, "workspace", None)
         return agent_execution
 
     def _enable_task_workspace_read_actions(self, task_id: str, *, coding_agent: bool = False) -> list[str]:
         workspace = getattr(self, "workspace", None)
-        with_scope_node = getattr(workspace, "with_scope_node", None)
+        bind_execution = getattr(workspace, "_bind_execution", None)
         enable = getattr(
             self,
             "enable_coding_agent_actions" if coding_agent else "enable_workspace_file_actions",
             None,
         )
-        if not callable(with_scope_node) or not callable(enable):
+        if not callable(bind_execution) or not callable(enable):
             return []
         try:
-            task_workspace = with_scope_node(
-                "tasks",
+            task_workspace = bind_execution(
                 task_id,
                 scope={"task_id": task_id},
                 search_scope={"task_id": task_id},
             )
-            files_root = getattr(task_workspace, "files_root", None)
-            if files_root is None:
-                return []
+            task_workspace = cast(Any, task_workspace)
             enable(
-                root=files_root,
+                root=task_workspace.root,
+                workspace=task_workspace,
                 read=True,
                 write=bool(coding_agent),
                 search=True,
@@ -1348,7 +1345,7 @@ class BaseAgent:
         always: bool = False,
     ) -> "Self | AgentExecution":
         if always:
-            self.agent_prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
+            self.agent_prompt.append("instruct", "{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!")
             self.agent_prompt.set("system.rule", prompt, mappings=mappings)
             return self
         return self.create_execution().rule(prompt, mappings=mappings)
@@ -1386,7 +1383,7 @@ class BaseAgent:
     ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
-            self.agent_prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
+            self.agent_prompt.append("instruct", "YOU MUST REACT AND RESPOND AS {system.role}!")
             self.agent_prompt.set("system.your_role", prompt, mappings=mappings)
             return self
         return self.create_execution().role(prompt, mappings=mappings)
@@ -1424,7 +1421,7 @@ class BaseAgent:
     ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
-            self.agent_prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
+            self.agent_prompt.append("instruct", "{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!")
             self.agent_prompt.set("system.user_info", prompt, mappings=mappings)
             return self
         return self.create_execution().user_info(prompt, mappings=mappings)

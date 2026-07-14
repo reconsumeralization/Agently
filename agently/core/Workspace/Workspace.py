@@ -15,16 +15,18 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import re
 import shutil
 import subprocess
 import uuid
-from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Concatenate, Literal, ParamSpec, TypeVar, cast
 
 from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.workspace import (
@@ -37,42 +39,47 @@ from agently.types.data.workspace import (
     WorkspaceFileSearchResult,
     WorkspaceFileWriteResult,
     WorkspaceFileInfo,
-    WorkspaceFilePolicyMetadata,
     WorkspaceLeaseRef,
     WorkspaceLinkRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
-    WorkspaceRetentionAnchor,
     WorkspaceRetrievalMethod,
     WorkspaceRetrievalPackage,
     WorkspaceRetrievalSelection,
     WorkspaceRuntimeEventRecord,
-    WorkspaceScratchLease,
 )
 from agently.types.plugins import WorkspaceBackend
+from .Errors import WorkspacePolicyError
 from .Retrieval import RerankHandler, retrieve_workspace
-from ._defaults import (
-    ScopeNode,
-    WORKSPACE_FILE_AREAS,
-    WORKSPACE_GUIDE_FILENAME,
-    extend_lineage,
-    extend_lineage_nodes,
-    lineage_files_root,
-    lineage_scratch_root,
-    merge_scope,
-    normalize_file_area,
-    normalize_lineage,
-    scope_from_lineage,
-)
-from ._utils import utc_now
+from ._defaults import default_workspace_root, merge_scope
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
     from .Manager import WorkspaceManager
 
 
 _MISSING = object()
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _guard_workspace_mutation(
+    method: Callable[Concatenate["Workspace", _P], Coroutine[Any, Any, _R]],
+) -> Callable[Concatenate["Workspace", _P], Coroutine[Any, Any, _R]]:
+    @wraps(method)
+    async def guarded(
+        self: "Workspace",
+        *args: _P.args,
+        **kwargs: _P.kwargs,
+    ) -> _R:
+        async with self._backend_mutation_guard():
+            return await method(self, *args, **kwargs)
+
+    return cast(
+        Callable[Concatenate["Workspace", _P], Coroutine[Any, Any, _R]],
+        guarded,
+    )
 
 
 class Workspace:
@@ -84,7 +91,7 @@ class Workspace:
         manager: "WorkspaceManager | None" = None,
         *,
         create: bool = True,
-        mode: str = "read_write",
+        mode: str = "read_only",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
         db_store_provider: Any | None = None,
@@ -93,219 +100,113 @@ class Workspace:
         embedding_options: dict[str, Any] | None = None,
         vector_store_provider: Any | None = None,
         vector_store_options: dict[str, Any] | None = None,
-        files_root: str | Path | None = None,
         default_scope: dict[str, Any] | None = None,
         default_search_scope: dict[str, Any] | None = None,
-        scope_lineage: "Sequence[Mapping[str, Any]] | None" = None,
     ):
+        if mode not in {"read_only", "read_write"}:
+            raise ValueError("Workspace mode must be 'read_only' or 'read_write'.")
         if manager is None:
             from .Manager import WorkspaceManager
 
-            workspace = WorkspaceManager().create(
-                backend,
-                create=create,
-                mode=mode,
-                provider=provider,
-                provider_options=provider_options,
-                db_store_provider=db_store_provider,
-                db_store_options=db_store_options,
-                embedding_provider=embedding_provider,
-                embedding_options=embedding_options,
-                vector_store_provider=vector_store_provider,
-                vector_store_options=vector_store_options,
-                files_root=files_root,
-                default_scope=default_scope,
-                default_search_scope=default_search_scope,
-                scope_lineage=scope_lineage,
-            )
-            self.__dict__.update(workspace.__dict__)
-            return
-        if backend is None:
-            raise ValueError("Workspace backend is required when manager is provided.")
-        self.backend = cast(WorkspaceBackend, backend)
+            manager = WorkspaceManager()
         self.manager = manager
-        self.root = Path(str(getattr(self.backend, "root")))
-        self.content_root = Path(str(getattr(self.backend, "content_root")))
-        if files_root is None:
-            self.files_root = Path(str(getattr(self.backend, "files_root", self.content_root)))
+        self._create = bool(create)
+        self._provider = provider
+        self._provider_options = dict(provider_options or {})
+        self._db_store_provider = db_store_provider
+        self._db_store_options = dict(db_store_options or {})
+        self._embedding_provider = embedding_provider
+        self._embedding_options = dict(embedding_options or {})
+        self._vector_store_provider = vector_store_provider
+        self._vector_store_options = dict(vector_store_options or {})
+        self._file_mutation_lock = asyncio.Lock()
+        self._execution_id = uuid.uuid4().hex
+        if backend is None or isinstance(backend, (str, Path)):
+            self._backend: WorkspaceBackend | None = None
+            selected_root = default_workspace_root() if backend is None else Path(backend)
+            self.root = selected_root.expanduser().resolve()
+            self.mode = mode
         else:
-            self.files_root = Path(str(files_root)).expanduser().resolve()
-            if mode not in {"read", "read_only", "readonly"}:
-                self.files_root.mkdir(parents=True, exist_ok=True)
-        self.scope_lineage: list[ScopeNode] = normalize_lineage(scope_lineage)
+            self._backend = cast(WorkspaceBackend, backend)
+            self.root = Path(str(getattr(self._backend, "root"))).expanduser().resolve()
+            self.mode = "read_only" if bool(getattr(self._backend, "read_only", False)) else mode
+        self._workspace_id = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()
         self.default_scope = dict(default_scope or {})
         self.default_search_scope = dict(default_search_scope or self.default_scope)
-        if not getattr(self.backend, "read_only", False):
-            self.ensure_files_guide()
 
-    def _bind_child(
-        self,
-        child_lineage: list[ScopeNode],
-        *,
-        scope: dict[str, Any] | None,
-        search_scope: dict[str, Any] | None,
-    ) -> "Workspace":
-        lineage_scope = scope_from_lineage(child_lineage)
-        files_root = lineage_files_root(self.root, child_lineage)
-        return Workspace(
-            self.backend,
-            self.manager,
-            files_root=files_root,
-            mode="read_only" if self.capabilities().get("read_only") else "read_write",
-            default_scope=merge_scope(merge_scope(self.default_scope, lineage_scope), scope),
-            default_search_scope=merge_scope(
-                merge_scope(self.default_search_scope, lineage_scope), search_scope
-            ),
-            scope_lineage=child_lineage,
-        )
+    @property
+    def workspace_id(self) -> str:
+        return self._workspace_id
 
-    def with_scope_node(
+    @property
+    def execution_id(self) -> str:
+        return self._execution_id
+
+    def _bind_execution(
         self,
-        kind: str,
-        node_id: str | None,
+        execution_id: str,
         *,
         scope: dict[str, Any] | None = None,
         search_scope: dict[str, Any] | None = None,
     ) -> "Workspace":
-        """Bind a child Workspace whose file root is contained under this scope.
+        if not str(execution_id).strip():
+            raise ValueError("Workspace execution_id cannot be empty.")
+        # Execution binding is a view, not a new storage/provider binding. A
+        # shallow copy preserves the caller's backend and instance-level
+        # adapters while keeping execution identity and scopes view-local.
+        bound = copy.copy(self)
+        bound.default_scope = merge_scope(self.default_scope, scope)
+        bound.default_search_scope = merge_scope(self.default_search_scope, search_scope)
+        bound._execution_id = str(execution_id)
+        return bound
 
-        This is the lineage-aware replacement for the removed flat
-        ``scoped_files_root(kind, id)`` helper: the child file root is derived
-        from the full resolved scope chain, and the child ``default_scope``
-        carries the same lineage so physical cleanup and record-index cleanup
-        agree (spec section 8.2).
-        """
+    @property
+    def backend(self) -> Any:
+        if self._backend is None:
+            materialization_root = self.root if self._provider is not None else self.root / ".agently"
+            materialized = self.manager._materialize_workspace(
+                materialization_root,
+                create=self._create,
+                mode="read_write",
+                provider=self._provider,
+                provider_options=self._provider_options,
+                db_store_provider=self._db_store_provider,
+                db_store_options=self._db_store_options,
+                embedding_provider=self._embedding_provider,
+                embedding_options=self._embedding_options,
+                vector_store_provider=self._vector_store_provider,
+                vector_store_options=self._vector_store_options,
+                default_scope=self.default_scope,
+                default_search_scope=self.default_search_scope,
+            )
+            self._backend = materialized._backend
+        if self._backend is None:
+            raise RuntimeError("Workspace backend materialization did not produce a backend.")
+        return self._backend
 
-        return self._bind_child(
-            extend_lineage(self.scope_lineage, kind, node_id),
-            scope=scope,
-            search_scope=search_scope,
+    @asynccontextmanager
+    async def _backend_mutation_guard(self) -> AsyncIterator[None]:
+        guard = getattr(self._backend, "_mutation_guard", None) if self._backend is not None else None
+        if callable(guard):
+            typed_guard = cast(
+                Callable[[], AbstractAsyncContextManager[None]],
+                guard,
+            )
+            async with typed_guard():
+                yield
+            return
+        async with self._file_mutation_lock:
+            yield
+
+    def _try_backend_sync_mutation_guard(self) -> AbstractContextManager[bool] | None:
+        guard = getattr(self._backend, "_try_sync_mutation_guard", None) if self._backend is not None else None
+        if not callable(guard):
+            return None
+        typed_guard = cast(
+            Callable[[], AbstractContextManager[bool]],
+            guard,
         )
-
-    def with_scope_lineage(
-        self,
-        nodes: "Sequence[Mapping[str, Any]]",
-        *,
-        scope: dict[str, Any] | None = None,
-        search_scope: dict[str, Any] | None = None,
-    ) -> "Workspace":
-        """Bind a child Workspace extended by several resolved lineage nodes."""
-
-        return self._bind_child(
-            extend_lineage_nodes(self.scope_lineage, nodes),
-            scope=scope,
-            search_scope=search_scope,
-        )
-
-    def with_files_root(
-        self,
-        files_root: str | Path,
-        *,
-        default_scope: dict[str, Any] | None = None,
-        default_search_scope: dict[str, Any] | None = None,
-    ) -> "Workspace":
-        # Internal materialization helper that preserves the resolved scope
-        # lineage. It must not be used to invent flat, lineage-unaware roots;
-        # use ``with_scope_node`` / ``with_scope_lineage`` for child binding.
-        return Workspace(
-            self.backend,
-            self.manager,
-            files_root=files_root,
-            mode="read_only" if self.capabilities().get("read_only") else "read_write",
-            default_scope=merge_scope(self.default_scope, default_scope),
-            default_search_scope=merge_scope(self.default_search_scope, default_search_scope),
-            scope_lineage=self.scope_lineage,
-        )
-
-    def ensure_files_guide(self) -> Path:
-        """Write a small human-readable guide into the scoped editable file root.
-
-        The guide is intentionally not named ``README.md`` so task deliverables
-        and cloned repositories can keep their own README semantics.
-        """
-
-        self.files_root.mkdir(parents=True, exist_ok=True)
-        guide_path = self.files_root / WORKSPACE_GUIDE_FILENAME
-        if guide_path.exists():
-            return guide_path
-        lineage = " -> ".join(
-            f"{ node.get('kind', '') }/{ node.get('id', '') }"
-            for node in self.scope_lineage
-            if node.get("kind")
-        ) or "workspace root"
-        scope_lines = [
-            f"- { key }: { value }"
-            for key, value in sorted(self.default_scope.items())
-            if value is not None and key != "scope_lineage"
-        ]
-        if not scope_lines:
-            scope_lines = ["- none"]
-        area_lines = [
-            f"- { name }/: { description }"
-            for name, description in sorted(WORKSPACE_FILE_AREAS.items())
-        ]
-        guide_path.write_text(
-            "\n".join(
-                [
-                    "# Agently Workspace Files",
-                    "",
-                    "This directory is the editable file working tree for the current Agently scope.",
-                    "",
-                    f"- Workspace root: { self.root }",
-                    f"- Files root: { self.files_root }",
-                    f"- Scope lineage: { lineage }",
-                    "",
-                    "Scope fields:",
-                    *scope_lines,
-                    "",
-                    "Standard file areas:",
-                    *area_lines,
-                    "",
-                    "Use this directory for task deliverables, downloaded source files, and files shared with Actions or external coding agents.",
-                    "Use Workspace.open_scratch(...) or Workspace.scratch_root() for temporary scratch work; do not invent a scratch/ folder under this files root.",
-                    "Do not assume sibling lineage directories are in scope. Do not edit workspace.db or content/ directly.",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-        return guide_path
-
-    @staticmethod
-    def standard_file_areas() -> dict[str, str]:
-        """Return the standard editable file-area names for scoped files roots."""
-
-        return dict(WORKSPACE_FILE_AREAS)
-
-    def file_area_path(
-        self,
-        area: str,
-        *parts: str | Path,
-        create: bool = False,
-    ) -> Path:
-        """Resolve a standard file-area path within this scoped ``files_root``.
-
-        The returned path is always contained by ``files_root``. When ``create``
-        is true, the area directory or the returned path's parent directory is
-        created unless the Workspace is read-only.
-        """
-
-        normalized_area = normalize_file_area(area)
-        relative = Path(normalized_area)
-        for part in parts:
-            candidate = Path(part)
-            if candidate.is_absolute():
-                raise ValueError(f"Workspace file area path parts must be relative: { part }")
-            if any(segment == ".." for segment in candidate.parts):
-                raise ValueError(f"Workspace file area path parts must not contain '..': { part }")
-            relative = relative / candidate
-        target = self.resolve_file_path(relative)
-        if create:
-            if self.capabilities().get("read_only"):
-                raise PermissionError("Workspace is read-only; file_area_path(..., create=True) is blocked.")
-            directory = target if not parts else target.parent
-            directory.mkdir(parents=True, exist_ok=True)
-        return target
+        return typed_guard()
 
     def _scoped_record_scope(self, scope: dict[str, Any] | None) -> dict[str, Any]:
         return merge_scope(self.default_scope, scope)
@@ -351,6 +252,8 @@ class Workspace:
         kind: str | None = None,
         meta: dict[str, Any] | None = None,
         profile: str | None = None,
+        indexed: bool = False,
+        vector: bool = False,
         **kwargs,
     ):
         if record_or_content is _MISSING:
@@ -377,7 +280,15 @@ class Workspace:
             )
         if self.default_scope:
             kwargs["scope"] = self._scoped_record_scope(kwargs.get("scope"))
-        return await self.backend.put(record_or_content, collection=collection, kind=kind, meta=meta, **kwargs)
+        return await self.backend.put(
+            record_or_content,
+            collection=collection,
+            kind=kind,
+            meta=meta,
+            indexed=indexed,
+            vector=vector,
+            **kwargs,
+        )
 
     async def get(self, ref_or_path: WorkspaceRecordRef | str):
         return await self.backend.get(ref_or_path)
@@ -529,10 +440,12 @@ class Workspace:
             meta=meta,
         )
 
+    @_guard_workspace_mutation
     async def checkpoint(self, run_id: str, state: dict[str, Any], *, step_id: str | None = None):
         ref = await self.backend.checkpoint(run_id, state, step_id=step_id)
         return await self._scope_record_ref(ref)
 
+    @_guard_workspace_mutation
     async def put_checkpoint(
         self,
         run_id: str,
@@ -552,6 +465,7 @@ class Workspace:
     async def get_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
         return await self.latest_checkpoint(run_id)
 
+    @_guard_workspace_mutation
     async def put_snapshot(
         self,
         run_id: str,
@@ -577,6 +491,17 @@ class Workspace:
 
     async def latest_snapshot(self, run_id: str) -> WorkspaceRecordRef | None:
         return await self.latest_checkpoint(run_id)
+
+    @_guard_workspace_mutation
+    async def delete_snapshot(self, run_id: str) -> dict[str, Any]:
+        delete_snapshot = getattr(self.backend, "delete_snapshot", None)
+        if not callable(delete_snapshot):
+            raise TypeError("Workspace snapshot provider must expose async delete_snapshot(run_id).")
+        delete_snapshot_async = cast(
+            Callable[[str], Awaitable[dict[str, Any]]],
+            delete_snapshot,
+        )
+        return await delete_snapshot_async(run_id)
 
     async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
         if not self.default_search_scope:
@@ -632,6 +557,7 @@ class Workspace:
     ) -> WorkspaceLeaseRef:
         return await self.backend.release_lease(run_id, owner_id, lease_token)
 
+    @_guard_workspace_mutation
     async def put_artifact_ref(
         self,
         run_id: str,
@@ -708,53 +634,96 @@ class Workspace:
             limit=limit,
         )
 
-    async def record_file_policy(
-        self,
-        *,
-        action_file_root: str | None = None,
-        allowed_roots: list[str] | None = None,
-        root_source: str = "workspace",
-        path_normalization: str = "resolve",
-        symlink_policy: str = "resolved_within_root",
-        case_policy: str = "platform_default",
-        policy_labels: list[str] | None = None,
-        links: dict[str, str] | None = None,
-    ) -> WorkspaceFilePolicyMetadata:
-        return await self.backend.record_file_policy(
-            action_file_root=action_file_root or str(self.files_root),
-            allowed_roots=allowed_roots or [str(self.files_root)],
-            root_source=root_source,
-            path_normalization=path_normalization,
-            symlink_policy=symlink_policy,
-            case_policy=case_policy,
-            policy_labels=policy_labels,
-            links=links,
-        )
-
-    async def get_file_policy(self) -> WorkspaceFilePolicyMetadata:
-        metadata = dict(await self.backend.get_file_policy())
-        metadata["action_file_root"] = metadata.get("action_file_root") or str(self.files_root)
-        metadata["allowed_roots"] = metadata.get("allowed_roots") or [str(self.files_root)]
-        return cast(WorkspaceFilePolicyMetadata, metadata)
-
     def resolve_file_path(self, path: str | Path = ".") -> Path:
         """Resolve a Workspace-relative file path within this Workspace root."""
 
         candidate = Path(path)
+        was_relative = not candidate.is_absolute()
         if not candidate.is_absolute():
-            candidate = self.files_root / candidate
+            candidate = self.root / candidate
         resolved = candidate.expanduser().resolve()
         try:
-            resolved.relative_to(self.files_root)
+            relative = resolved.relative_to(self.root)
         except ValueError as error:
-            raise ValueError(f"Path is outside workspace file root: { path }") from error
+            raise ValueError(f"Path is outside Workspace root: { path }") from error
+        if relative.parts and relative.parts[0] == ".agently" and not self._is_current_execution_file(relative):
+            raise WorkspacePolicyError("Agently-private Workspace state is not available through ordinary file access.")
+        if was_relative and not relative.parts[:1] == (".agently",) and not resolved.exists():
+            fallback = self._resolve_fallback_file_path(resolved)
+            if fallback.exists():
+                return fallback
         return resolved
+
+    def _is_current_execution_file(self, path: str | Path) -> bool:
+        parts = Path(path).parts
+        return len(parts) >= 4 and parts[:3] == (".agently", "files", self._execution_id)
+
+    def _resolve_external_file_path(self, path: str | Path) -> Path:
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self.root / candidate
+        resolved = candidate.expanduser().resolve()
+        try:
+            relative = resolved.relative_to(self.root)
+        except ValueError as error:
+            raise WorkspacePolicyError(f"Path is outside Workspace root: {path}") from error
+        if relative.parts and relative.parts[0] == ".agently":
+            raise WorkspacePolicyError("External Workspace writes cannot target Agently-private state.")
+        return resolved
+
+    def _resolve_fallback_file_path(self, requested_external_path: Path) -> Path:
+        relative = requested_external_path.relative_to(self.root)
+        fallback_root = (self.root / ".agently" / "files" / self._execution_id).resolve()
+        target = (fallback_root / relative).resolve()
+        try:
+            target.relative_to(fallback_root)
+        except ValueError as error:
+            raise WorkspacePolicyError("Fallback file path escaped the current execution area.") from error
+        return target
+
+    def _ordinary_file_relative_path(self, target: Path) -> str:
+        """Project the current fallback carrier into the ordinary file view."""
+
+        relative = target.resolve().relative_to(self.root)
+        parts = relative.parts
+        if len(parts) >= 3 and parts[:3] == (".agently", "files", self._execution_id):
+            logical = Path(*parts[3:])
+            return logical.as_posix() if logical.parts else "."
+        return relative.as_posix()
+
+    def _with_trusted_file_ref(
+        self,
+        result: WorkspaceFileWriteResult,
+        *,
+        target: Path,
+    ) -> WorkspaceFileWriteResult:
+        relative = str(target.relative_to(self.root))
+        result["path"] = relative
+        refs = result.get("file_refs", [])
+        for ref in refs:
+            ref.update(
+                {
+                    "type": "file",
+                    "path": relative,
+                    "workspace_id": self._workspace_id,
+                    "execution_id": self._execution_id,
+                    "size": int(result.get("bytes", 0)),
+                    "sha256": str(result.get("sha256", "")),
+                    "available": target.is_file(),
+                }
+            )
+        return result
+
+    @staticmethod
+    def _is_private_relative_path(path: str | Path) -> bool:
+        parts = Path(path).parts
+        return bool(parts) and parts[0] == ".agently"
 
     def inspect_file(self, path: str | Path) -> WorkspaceFileInfo:
         target = self.resolve_file_path(path)
         return self.manager.inspect_file_path(
             target,
-            relative_path=str(target.relative_to(self.files_root)),
+            relative_path=str(target.relative_to(self.root)),
         )
 
     async def read_file(
@@ -771,7 +740,7 @@ class Workspace:
             raise FileNotFoundError(f"Workspace file not found: { path }")
         return await self.manager.read_file_path(
             target,
-            relative_path=str(target.relative_to(self.files_root)),
+            relative_path=str(target.relative_to(self.root)),
             max_bytes=max_bytes,
             offset=offset,
             handler=handler,
@@ -802,8 +771,10 @@ class Workspace:
             if not candidate.is_file():
                 continue
             try:
-                relative = str(candidate.relative_to(self.files_root))
+                relative = self._ordinary_file_relative_path(candidate)
             except ValueError:
+                continue
+            if self._is_private_relative_path(relative):
                 continue
             if not include_hidden and any(part.startswith(".") for part in Path(relative).parts):
                 continue
@@ -1135,8 +1106,10 @@ class Workspace:
             if not candidate.is_file():
                 continue
             try:
-                relative = str(candidate.relative_to(self.files_root))
+                relative = self._ordinary_file_relative_path(candidate)
             except ValueError:
+                continue
+            if self._is_private_relative_path(relative):
                 continue
             if not include_hidden and any(part.startswith(".") for part in Path(relative).parts):
                 continue
@@ -1240,8 +1213,10 @@ class Workspace:
                 continue
             candidate = (search_root / raw_candidate_path).resolve()
             try:
-                relative = str(candidate.relative_to(self.files_root))
+                relative = self._ordinary_file_relative_path(candidate)
             except ValueError:
+                continue
+            if self._is_private_relative_path(relative):
                 continue
             if relative in seen_paths:
                 continue
@@ -1306,17 +1281,23 @@ class Workspace:
             "search_engine": search_engine,
             "grep_tool": grep_tool,
         }
-        file_ref = cast(
-            WorkspaceFileRef,
-            {
-                "path": relative,
-                "bytes": int(read_result.get("bytes", file_size)),
-                "sha256": str(read_result.get("sha256", "")),
-                "media_type": read_result.get("media_type"),
-                "content_kind": str(read_result.get("content_kind", "unknown")),
-                "role": "source",
-            },
-        )
+        file_bytes = int(read_result.get("bytes", file_size))
+        file_sha256 = str(read_result.get("sha256", ""))
+        file_media_type = read_result.get("media_type")
+        file_content_kind = str(read_result.get("content_kind", "unknown"))
+        file_ref: WorkspaceFileRef = {
+            "type": "file",
+            "path": relative,
+            "workspace_id": self._workspace_id,
+            "execution_id": self._execution_id,
+            "size": file_bytes,
+            "available": True,
+            "bytes": file_bytes,
+            "sha256": file_sha256,
+            "media_type": file_media_type,
+            "content_kind": file_content_kind,
+            "role": "source",
+        }
         locator_ref = {
             "role": "locator_ref",
             "content_state": "ref_only",
@@ -1324,10 +1305,10 @@ class Workspace:
             "query": query_text,
             "scope": search_scope,
             "path": relative,
-            "bytes": file_ref["bytes"],
-            "sha256": file_ref["sha256"],
-            "media_type": file_ref["media_type"],
-            "content_kind": file_ref["content_kind"],
+            "bytes": file_bytes,
+            "sha256": file_sha256,
+            "media_type": file_media_type,
+            "content_kind": file_content_kind,
             "search_engine": search_engine,
             "grep_tool": grep_tool,
         }
@@ -1349,10 +1330,10 @@ class Workspace:
                 "truncated": snippet_truncated,
                 "line_start": snippet_start + 1,
                 "line_end": snippet_end,
-                "bytes": file_ref["bytes"],
-                "sha256": file_ref["sha256"],
-                "media_type": file_ref["media_type"],
-                "content_kind": file_ref["content_kind"],
+                "bytes": file_bytes,
+                "sha256": file_sha256,
+                "media_type": file_media_type,
+                "content_kind": file_content_kind,
                 "search_engine": search_engine,
                 "grep_tool": grep_tool,
                 "file_ref": file_ref,
@@ -1375,17 +1356,47 @@ class Workspace:
         handler: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> WorkspaceFileWriteResult:
-        if self.capabilities().get("read_only"):
-            raise PermissionError("Workspace is read-only; write_file(...) is blocked.")
-        target = self.resolve_file_path(path)
-        return await self.manager.write_file_path(
+        async with self._backend_mutation_guard():
+            return await self._write_file_unlocked(
+                path,
+                content,
+                append=append,
+                handler=handler,
+                options=options,
+            )
+
+    async def _write_file_unlocked(
+        self,
+        path: str | Path,
+        content: str,
+        *,
+        append: bool = False,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileWriteResult:
+        candidate_target = self.resolve_file_path(path)
+        candidate_relative = candidate_target.relative_to(self.root)
+        current_execution_private = self._is_current_execution_file(candidate_relative)
+        external_target = candidate_target if current_execution_private else self._resolve_external_file_path(path)
+        if current_execution_private:
+            target = candidate_target
+        elif self.mode == "read_only":
+            if external_target.exists() or append:
+                raise WorkspacePolicyError(
+                    "External Workspace mutation requires an explicit write grant or approval."
+                )
+            target = self._resolve_fallback_file_path(external_target)
+        else:
+            target = external_target
+        result = await self.manager.write_file_path(
             target,
-            relative_path=str(target.relative_to(self.files_root)),
+            relative_path=str(target.relative_to(self.root)),
             content=content,
             append=append,
             handler=handler,
             options=options,
         )
+        return self._with_trusted_file_ref(result, target=target)
 
     async def edit_file(
         self,
@@ -1398,6 +1409,34 @@ class Workspace:
         handler: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> WorkspaceFileWriteResult:
+        async with self._backend_mutation_guard():
+            return await self._edit_file_unlocked(
+                path,
+                old_string,
+                new_string,
+                replace_all=replace_all,
+                expected_sha256=expected_sha256,
+                handler=handler,
+                options=options,
+            )
+
+    async def _edit_file_unlocked(
+        self,
+        path: str | Path,
+        old_string: str,
+        new_string: str,
+        *,
+        replace_all: bool = False,
+        expected_sha256: str | None = None,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileWriteResult:
+        target = self.resolve_file_path(path)
+        target_relative = target.relative_to(self.root)
+        if self.mode == "read_only" and not self._is_current_execution_file(target_relative):
+            raise WorkspacePolicyError(
+                "Editing an external Workspace file requires an explicit write grant or approval."
+            )
         if old_string == new_string:
             raise ValueError("old_string and new_string are identical; no edit was applied.")
         info = self.inspect_file(path)
@@ -1406,7 +1445,13 @@ class Workspace:
         if not info.get("exists"):
             if old_string != "":
                 raise FileNotFoundError(f"Workspace file not found: { path }")
-            return await self.write_file(path, new_string, append=False, handler=handler, options=options)
+            return await self._write_file_unlocked(
+                path,
+                new_string,
+                append=False,
+                handler=handler,
+                options=options,
+            )
         read_result = await self.read_file(path, max_bytes=int(info.get("bytes") or 0) + 1)
         if not read_result.get("readable") or read_result.get("content_kind") != "text":
             raise ValueError(f"Workspace file is not editable text: { path }")
@@ -1425,7 +1470,15 @@ class Workspace:
             if replacement_count > 1 and not replace_all:
                 raise ValueError("old_string matched multiple locations; set replace_all=True or provide more context.")
             new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
-        result = dict(await self.write_file(path, new_content, append=False, handler=handler, options=options))
+        result = dict(
+            await self._write_file_unlocked(
+                path,
+                new_content,
+                append=False,
+                handler=handler,
+                options=options,
+            )
+        )
         result["replacements"] = replacement_count
         return cast(WorkspaceFileWriteResult, result)
 
@@ -1435,8 +1488,22 @@ class Workspace:
         *,
         expected_files: list[str] | None = None,
     ) -> dict[str, Any]:
-        if self.capabilities().get("read_only"):
-            raise PermissionError("Workspace is read-only; apply_patch(...) is blocked.")
+        async with self._backend_mutation_guard():
+            return await self._apply_patch_unlocked(
+                patch,
+                expected_files=expected_files,
+            )
+
+    async def _apply_patch_unlocked(
+        self,
+        patch: str,
+        *,
+        expected_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if self.mode == "read_only":
+            raise WorkspacePolicyError(
+                "Applying a patch to external Workspace files requires an explicit write grant or approval."
+            )
         patch_text = str(patch or "")
         paths = self._paths_from_unified_patch(patch_text)
         if not paths:
@@ -1445,7 +1512,7 @@ class Workspace:
         if expected_files is not None:
             for item in expected_files:
                 target = self.resolve_file_path(item)
-                normalized_expected.append(str(target.relative_to(self.files_root)))
+                normalized_expected.append(str(target.relative_to(self.root)))
             if sorted(paths) != sorted(dict.fromkeys(normalized_expected)):
                 raise ValueError("Patch file set does not match expected_files.")
         git_path = shutil.which("git")
@@ -1454,7 +1521,7 @@ class Workspace:
         completed = await asyncio.to_thread(
             subprocess.run,
             [git_path, "apply", "--whitespace=nowarn"],
-            cwd=str(self.files_root),
+            cwd=str(self.root),
             input=patch_text,
             text=True,
             capture_output=True,
@@ -1483,7 +1550,7 @@ class Workspace:
             if "\t" in text:
                 text = text.split("\t", 1)[0]
             target = self.resolve_file_path(text)
-            relative = str(target.relative_to(self.files_root))
+            relative = str(target.relative_to(self.root))
             if relative not in paths:
                 paths.append(relative)
 
@@ -1499,7 +1566,176 @@ class Workspace:
                 continue
         return paths
 
+    async def _close_execution_files(
+        self,
+        *,
+        retained_refs: list[WorkspaceFileRef | dict[str, Any]],
+        status: str,
+    ) -> dict[str, Any]:
+        """Close the current fallback carrier without touching external files."""
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("Workspace execution status must be completed, failed, or cancelled.")
+        execution_root = (
+            self.root / ".agently" / "files" / self._execution_id
+        ).resolve()
+        if not execution_root.exists():
+            return {
+                "status": "noop",
+                "execution_id": self._execution_id,
+                "retained_refs": [],
+                "retained_bytes": 0,
+                "deleted_bytes": 0,
+                "diagnostics": [],
+            }
+
+        verified_paths: set[Path] = set()
+        verified_refs: list[dict[str, Any]] = []
+        diagnostics: list[dict[str, Any]] = []
+
+        for raw_ref in retained_refs:
+            ref = dict(raw_ref) if isinstance(raw_ref, dict) else {}
+            diagnostic_code: str | None = None
+            diagnostic_message = ""
+            path_text = str(ref.get("path") or "")
+            target: Path | None = None
+            if ref.get("type") != "file":
+                diagnostic_code = "workspace.file_ref.invalid_type"
+                diagnostic_message = "Retained Workspace reference is not a file ref."
+            elif str(ref.get("workspace_id") or "") != self._workspace_id:
+                diagnostic_code = "workspace.file_ref.workspace_mismatch"
+                diagnostic_message = "Retained file ref belongs to another Workspace."
+            elif str(ref.get("execution_id") or "") != self._execution_id:
+                diagnostic_code = "workspace.file_ref.execution_mismatch"
+                diagnostic_message = "Retained file ref belongs to another execution."
+            else:
+                try:
+                    target = (self.root / path_text).resolve()
+                    relative = target.relative_to(self.root)
+                    if relative.parts and relative.parts[0] == ".agently":
+                        target.relative_to(execution_root)
+                except (OSError, ValueError):
+                    target = None
+                    diagnostic_code = "workspace.file_ref.path_outside_workspace"
+                    diagnostic_message = "Retained file ref is outside the current Workspace."
+            if diagnostic_code is None and target is not None:
+                if not target.is_file():
+                    diagnostic_code = "workspace.file_ref.unavailable"
+                    diagnostic_message = "Retained file ref has no readable physical file."
+                else:
+                    raw = target.read_bytes()
+                    actual_size = len(raw)
+                    actual_digest = hashlib.sha256(raw).hexdigest()
+                    claimed_size = ref.get("size")
+                    if not isinstance(claimed_size, int) or claimed_size != actual_size:
+                        diagnostic_code = "workspace.file_ref.size_mismatch"
+                        diagnostic_message = "Retained file ref size does not match physical readback."
+                    elif str(ref.get("sha256") or "") != actual_digest:
+                        diagnostic_code = "workspace.file_ref.digest_mismatch"
+                        diagnostic_message = "Retained file ref digest does not match physical readback."
+                    else:
+                        try:
+                            target.relative_to(execution_root)
+                        except ValueError:
+                            # External files are caller-owned. Verify their refs, but
+                            # never include them in execution-owned cleanup accounting.
+                            verified_refs.append(ref)
+                        else:
+                            verified_paths.add(target)
+                            verified_refs.append(ref)
+            if diagnostic_code is not None:
+                diagnostics.append(
+                    {
+                        "code": diagnostic_code,
+                        "message": diagnostic_message,
+                        "retryable": True,
+                        "path": path_text,
+                    }
+                )
+
+        # Retained refs are one closure: cleanup may start only after every
+        # declared product has passed physical identity and integrity checks.
+        # Returning before mutation keeps every possible product and
+        # intermediate available for a retry or an explicit recovery decision.
+        if diagnostics:
+            return {
+                "status": "deferred",
+                "execution_id": self._execution_id,
+                "retained_refs": [],
+                "retained_bytes": 0,
+                "deleted_bytes": 0,
+                "diagnostics": diagnostics,
+            }
+
+        deleted_bytes = 0
+        retained_bytes = sum(path.stat().st_size for path in verified_paths)
+        for candidate in sorted(execution_root.rglob("*"), reverse=True):
+            if not candidate.is_file() and not candidate.is_symlink():
+                continue
+            resolved = candidate.resolve()
+            if resolved in verified_paths:
+                continue
+            try:
+                size = candidate.lstat().st_size
+                candidate.unlink()
+                deleted_bytes += int(size)
+            except OSError as error:
+                diagnostics.append(
+                    {
+                        "code": "workspace.execution_file.delete_failed",
+                        "message": str(error),
+                        "retryable": True,
+                        "path": str(candidate.relative_to(self.root)),
+                    }
+                )
+
+        for directory in sorted(
+            (path for path in execution_root.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        for directory in (
+            execution_root,
+            execution_root.parent,
+            execution_root.parent.parent,
+            self.root / ".agently",
+        ):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+
+        return {
+            "status": "deferred" if diagnostics else "applied",
+            "execution_id": self._execution_id,
+            "retained_refs": verified_refs,
+            "retained_bytes": retained_bytes,
+            "deleted_bytes": deleted_bytes,
+            "diagnostics": diagnostics,
+        }
+
     async def materialize_file(
+        self,
+        path: str | Path,
+        content: bytes,
+        *,
+        source: dict[str, Any] | None = None,
+        media_type: str | None = None,
+        overwrite: bool = False,
+    ) -> WorkspaceFileWriteResult:
+        async with self._backend_mutation_guard():
+            return await self._materialize_file_unlocked(
+                path,
+                content,
+                source=source,
+                media_type=media_type,
+                overwrite=overwrite,
+            )
+
+    async def _materialize_file_unlocked(
         self,
         path: str | Path,
         content: bytes,
@@ -1514,17 +1750,32 @@ class Workspace:
         contract stays plain-text handler-backed writes. Materialization is for
         framework-owned remote file downloads and binary evidence refs.
         """
-        if self.capabilities().get("read_only"):
-            raise PermissionError("Workspace is read-only; materialize_file(...) is blocked.")
         if not isinstance(content, (bytes, bytearray)):
             raise TypeError("Workspace.materialize_file(...) requires bytes content.")
-        target = self.resolve_file_path(path)
+        candidate_target = self.resolve_file_path(path)
+        candidate_relative = candidate_target.relative_to(self.root)
+        current_execution_private = self._is_current_execution_file(candidate_relative)
+        external_target = (
+            candidate_target
+            if current_execution_private
+            else self._resolve_external_file_path(path)
+        )
+        if current_execution_private:
+            target = candidate_target
+        elif self.mode == "read_only":
+            if external_target.exists() or overwrite:
+                raise WorkspacePolicyError(
+                    "External Workspace mutation requires an explicit write grant or approval."
+                )
+            target = self._resolve_fallback_file_path(external_target)
+        else:
+            target = external_target
         if target.exists() and not overwrite:
             raise FileExistsError(f"Workspace file already exists: { path }")
         target.parent.mkdir(parents=True, exist_ok=True)
         raw = bytes(content)
         target.write_bytes(raw)
-        relative_path = str(target.relative_to(self.files_root))
+        relative_path = str(target.relative_to(self.root))
         file_info: WorkspaceFileInfo = self.manager.inspect_file_path(target, relative_path=relative_path)
         if media_type and not file_info.get("media_type"):
             file_info = cast(WorkspaceFileInfo, dict(file_info))
@@ -1539,7 +1790,7 @@ class Workspace:
                     "detail": {"source": dict(source)},
                 }
             )
-        return {
+        result: WorkspaceFileWriteResult = {
             "ok": True,
             "writable": True,
             "path": relative_path,
@@ -1552,16 +1803,20 @@ class Workspace:
             "handler_id": "workspace.materialize_file",
             "diagnostics": diagnostics,
             "file_refs": [
-                {
+                cast(
+                    WorkspaceFileRef,
+                    {
                     "path": relative_path,
                     "bytes": int(file_info.get("bytes", len(raw))),
                     "sha256": str(file_info.get("sha256") or hashlib.sha256(raw).hexdigest()),
                     "media_type": file_info.get("media_type"),
                     "content_kind": str(file_info.get("content_kind", "unknown")),
                     "role": "download",
-                }
+                    },
+                )
             ],
         }
+        return self._with_trusted_file_ref(result, target=target)
 
     async def export_file(
         self,
@@ -1572,56 +1827,87 @@ class Workspace:
         handler: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> WorkspaceFileExportResult:
-        if self.capabilities().get("read_only"):
-            raise PermissionError("Workspace is read-only; export_file(...) is blocked.")
+        async with self._backend_mutation_guard():
+            return await self._export_file_unlocked(
+                source_path,
+                output_path,
+                export_kind=export_kind,
+                handler=handler,
+                options=options,
+            )
+
+    async def _export_file_unlocked(
+        self,
+        source_path: str | Path,
+        output_path: str | Path,
+        *,
+        export_kind: str,
+        handler: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> WorkspaceFileExportResult:
         source = self.resolve_file_path(source_path)
         if not source.is_file():
             raise FileNotFoundError(f"Workspace source file not found: { source_path }")
-        output = self.resolve_file_path(output_path)
-        return await self.manager.export_file_path(
+        candidate_output = self.resolve_file_path(output_path)
+        candidate_relative = candidate_output.relative_to(self.root)
+        current_execution_private = self._is_current_execution_file(candidate_relative)
+        external_output = (
+            candidate_output
+            if current_execution_private
+            else self._resolve_external_file_path(output_path)
+        )
+        if current_execution_private:
+            output = candidate_output
+        elif self.mode == "read_only":
+            if external_output.exists():
+                raise WorkspacePolicyError(
+                    "External Workspace mutation requires an explicit write grant or approval."
+                )
+            output = self._resolve_fallback_file_path(external_output)
+        else:
+            output = external_output
+        result = await self.manager.export_file_path(
             source,
             output,
-            source_relative_path=str(source.relative_to(self.files_root)),
-            output_relative_path=str(output.relative_to(self.files_root)),
+            source_relative_path=str(source.relative_to(self.root)),
+            output_relative_path=str(output.relative_to(self.root)),
             export_kind=export_kind,
             handler=handler,
             options=options,
         )
-
-    async def add_retention_anchor(
-        self,
-        execution_id: str,
-        *,
-        anchor_type: str,
-        sequence: int | None = None,
-        record_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
-        summary_ref: WorkspaceRecordRef | WorkspaceReferenceEnvelope | str | None = None,
-        preserved_event_ids: list[str] | None = None,
-        meta: dict[str, Any] | None = None,
-    ) -> WorkspaceRetentionAnchor:
-        return await self.backend.add_retention_anchor(
-            execution_id,
-            anchor_type=anchor_type,
-            sequence=sequence,
-            record_ref=record_ref,
-            summary_ref=summary_ref,
-            preserved_event_ids=preserved_event_ids,
-            meta=meta,
-        )
-
-    async def retention_anchors(
-        self,
-        execution_id: str,
-        *,
-        anchor_type: str | None = None,
-        limit: int | None = None,
-    ) -> list[WorkspaceRetentionAnchor]:
-        return await self.backend.retention_anchors(execution_id, anchor_type=anchor_type, limit=limit)
+        result["output_path"] = str(output.relative_to(self.root))
+        for ref in result.get("file_refs", []):
+            ref.update(
+                {
+                    "type": "file",
+                    "path": result["output_path"],
+                    "workspace_id": self._workspace_id,
+                    "execution_id": self._execution_id,
+                    "size": int(result.get("bytes", 0)),
+                    "sha256": str(result.get("sha256", "")),
+                    "available": output.is_file(),
+                }
+            )
+        return result
 
     def capabilities(self) -> WorkspaceBackendCapabilities:
-        capabilities = dict(self.backend.capabilities())
-        capabilities["files_root"] = str(self.files_root)
-        return cast(WorkspaceBackendCapabilities, capabilities)
+        materialized_components: list[str] = []
+        if self._backend is not None:
+            backend_capabilities = dict(self._backend.capabilities())
+            components = backend_capabilities.get("materialized_components", [])
+            if isinstance(components, list):
+                materialized_components = sorted(str(name) for name in components)
+        return cast(
+            WorkspaceBackendCapabilities,
+            {
+                "root": str(self.root),
+                "mode": self.mode,
+                "external_read": True,
+                "external_write": self.mode == "read_write",
+                "private_write": True,
+                "materialized_components": materialized_components,
+            },
+        )
 
     def enable_file_actions(
         self,
@@ -1645,7 +1931,7 @@ class Workspace:
         if not callable(enable):
             raise TypeError("Workspace file actions require an Agent with enable_workspace_file_actions(...).")
         return enable(
-            root=self.files_root,
+            root=self.root,
             read=read,
             write=write,
             search=search,
@@ -1694,132 +1980,3 @@ class Workspace:
             budget=budget,
             profile=profile,
         )
-
-    async def prune_scope(
-        self,
-        scope: dict[str, Any],
-        *,
-        remove_files: bool = True,
-    ) -> dict[str, Any]:
-        prune = getattr(self.backend, "prune_scope", None)
-        if not callable(prune):
-            raise TypeError("Workspace backend does not support prune_scope(...).")
-        prune_scope = cast(Callable[..., Awaitable[dict[str, Any]]], prune)
-        # Physical cleanup is delegated to the backend so it removes only the
-        # lineage subtree(s) matching the scope, not the entire files_root
-        # (spec sections 8.2 / 9). The backend owns the lineage path layout.
-        return await prune_scope(scope, remove_files=remove_files)
-
-    def scratch_root(self) -> Path:
-        """Local lineage scratch root for this scope (no lease).
-
-        Local-only convenience for ephemeral, self-managed scratch. Durable
-        scratch that must survive a crash should use ``open_scratch(...)`` so its
-        lifecycle is tracked by a lease record and does not bypass the lease
-        lifecycle (spec sections 8.5 / A.1).
-        """
-
-        return lineage_scratch_root(self.root, self.scope_lineage)
-
-    async def open_scratch(
-        self,
-        *,
-        scope: dict[str, Any] | None = None,
-        purpose: str | None = None,
-        ttl_seconds: float | None = None,
-        cleanup_policy: Literal["on_close", "on_scope_prune", "ttl"] = "on_close",
-        read_only: bool = False,
-        policy_labels: list[str] | None = None,
-    ) -> WorkspaceScratchLease:
-        """Open a scratch working directory backed by a durable lease record.
-
-        The lease is registered as a durable Workspace fact so crashed runs can
-        be recovered by TTL/startup cleanup and scope prune, not only by on_close
-        cleanup (spec sections 8.5 / 11.1).
-        """
-
-        register_attr = getattr(self.backend, "register_scratch_lease", None)
-        if not callable(register_attr):
-            raise TypeError("Workspace backend does not support scratch leases.")
-        register = cast(
-            Callable[[WorkspaceScratchLease], Awaitable[WorkspaceScratchLease]], register_attr
-        )
-        lease_id = uuid.uuid4().hex
-        local_path = self.scratch_root() / lease_id
-        if not read_only:
-            local_path.mkdir(parents=True, exist_ok=True)
-        expires_at: str | None = None
-        if ttl_seconds is not None:
-            expires = datetime.now(timezone.utc) + timedelta(seconds=float(ttl_seconds))
-            expires_at = expires.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        lease: WorkspaceScratchLease = {
-            "lease_id": lease_id,
-            "scope": merge_scope(self.default_scope, scope),
-            "local_path": str(local_path),
-            "mount": None,
-            "purpose": purpose,
-            "cleanup_policy": cleanup_policy,
-            "expires_at": expires_at,
-            "read_only": read_only,
-            "policy_labels": list(policy_labels or []),
-            "created_at": utc_now(),
-            "closed_at": None,
-        }
-        return await register(lease)
-
-    async def close_scratch(
-        self,
-        lease_id: str,
-        *,
-        remove: bool | None = None,
-    ) -> WorkspaceScratchLease | None:
-        get_attr = getattr(self.backend, "get_scratch_lease", None)
-        close_attr = getattr(self.backend, "close_scratch_lease", None)
-        if not callable(get_attr) or not callable(close_attr):
-            raise TypeError("Workspace backend does not support scratch leases.")
-        get = cast(Callable[[str], Awaitable["WorkspaceScratchLease | None"]], get_attr)
-        close = cast(Callable[..., Awaitable["WorkspaceScratchLease | None"]], close_attr)
-        lease = await get(lease_id)
-        if lease is None:
-            return None
-        should_remove = remove if remove is not None else lease.get("cleanup_policy") in {"on_close", "ttl"}
-        local_path = lease.get("local_path")
-        if should_remove and local_path:
-            import shutil
-
-            path = Path(str(local_path))
-            if path.exists():
-                shutil.rmtree(path)
-        return await close(lease_id)
-
-    async def cleanup_scratch_leases(self, *, now: str | None = None) -> dict[str, Any]:
-        """Recover crashed scratch leases using durable lease facts.
-
-        Removes the working directory of every expired lease and marks it closed,
-        so TTL/startup recovery does not rely on filesystem mtime heuristics
-        (spec section 8.5).
-        """
-
-        list_attr = getattr(self.backend, "list_scratch_leases", None)
-        close_attr = getattr(self.backend, "close_scratch_lease", None)
-        if not callable(list_attr) or not callable(close_attr):
-            raise TypeError("Workspace backend does not support scratch leases.")
-        list_leases = cast(Callable[..., Awaitable[list[WorkspaceScratchLease]]], list_attr)
-        close = cast(Callable[..., Awaitable["WorkspaceScratchLease | None"]], close_attr)
-        stamp = now or utc_now()
-        import shutil
-
-        removed_paths: list[str] = []
-        recovered: list[str] = []
-        expired = await list_leases(expired_before=stamp)
-        for lease in expired:
-            lease_id = cast(str, lease.get("lease_id"))
-            local_path = lease.get("local_path")
-            if local_path:
-                path = Path(str(local_path))
-                if path.exists():
-                    shutil.rmtree(path)
-                    removed_paths.append(str(path))
-            await close(lease_id, closed_at=stamp)
-            recovered.append(lease_id)
-        return {"recovered_leases": recovered, "removed_paths": removed_paths}

@@ -1681,7 +1681,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 if basename and basename not in aliases:
                     aliases.append(basename)
 
-        for key in ("id", "cite_as", "path", "artifact_id", "action_call_id"):
+        for key in ("id", "cite_as", "path", "selection_key", "artifact_id", "action_call_id"):
             add(ref.get(key))
         raw_aliases = ref.get("aliases")
         if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, str | bytes | bytearray):
@@ -2414,8 +2414,22 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return compact
 
     @classmethod
+    def _workspace_artifact_display_path(cls, path: Any) -> str:
+        """Project a private fallback carrier back to its requested logical path."""
+
+        normalized = str(path or "").strip()
+        parts = PurePosixPath(normalized).parts
+        if len(parts) >= 4 and parts[:2] == (".agently", "files"):
+            return PurePosixPath(*parts[3:]).as_posix()
+        return normalized
+
+    @classmethod
     def _workspace_artifact_final_result_from_refs(cls, refs: Sequence[Mapping[str, Any]]) -> str:
-        paths = [str(ref.get("path") or "").strip() for ref in refs if str(ref.get("path") or "").strip()]
+        paths = [
+            cls._workspace_artifact_display_path(ref.get("path"))
+            for ref in refs
+            if str(ref.get("path") or "").strip()
+        ]
         if not paths:
             return ""
         if len(paths) == 1:
@@ -3027,8 +3041,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if not isinstance(ref, Mapping):
             return cls._compact_verifier_prompt_value(ref, max_chars=600)
         keep_keys = (
-            "artifact_id",
-            "action_call_id",
+            "selection_key",
             "path",
             "role",
             "label",
@@ -3049,6 +3062,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "available",
         )
         compact = {key: ref.get(key) for key in keep_keys if key in ref}
+        if not ref.get("selection_key"):
+            for key in ("artifact_id", "action_call_id"):
+                if key in ref:
+                    compact[key] = ref.get(key)
         if "preview" in ref:
             compact["preview"] = cls._compact_verifier_prompt_value(ref.get("preview"), max_chars=600)
         if "content_preview" in ref:

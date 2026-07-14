@@ -255,6 +255,7 @@ class TriggerFlowExecutionRuntimeIO:
 
     def set_result(self, result: Any, *, _origin_chunk: dict[str, Any] | None = None):
         execution = self._execution
+        execution._ensure_terminal_state_mutable()
         result = execution._trigger_flow._contract.validate_result(result)
         previous_result = self.get_compat_result()
         if previous_result is not None:

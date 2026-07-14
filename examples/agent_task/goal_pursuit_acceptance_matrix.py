@@ -11,7 +11,7 @@ from agently import Agently
 from legacy_agently_script_upgrade import configure_agent_model_pool
 
 
-TASK_ROOT = Path(".agently/tasks/goal-pursuit-acceptance-matrix").resolve()
+TASK_ROOT = Path("agent-task-workspaces/goal-pursuit-acceptance-matrix").resolve()
 
 
 async def _run_goal_pursuit_case(

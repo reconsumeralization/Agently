@@ -18,34 +18,20 @@ from pathlib import Path
 from typing import Any
 from typing_extensions import Self
 
-from agently.core import BaseAgent, LazyWorkspace, Workspace
-from agently.core.workspace._defaults import (
-    ScopeNode,
-    default_physical_root,
-    lineage_files_root,
-    scope_node,
-    script_scope,
-    slug,
-)
+from agently.core import BaseAgent, Workspace
+from agently.core.Workspace._defaults import default_workspace_root, script_scope
 
 
 class WorkspaceExtension(BaseAgent):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._workspace_explicit = False
-        self.workspace: Workspace | LazyWorkspace = self._create_lazy_workspace()
-        self._sync_workspace_settings(self.workspace, mode="read_write", lazy=True)
+        self.workspace: Workspace = self._create_workspace_binding()
+        self._sync_workspace_settings(self.workspace, mode="read_only", lazy=True)
 
     def _default_workspace_root(self) -> str | Path:
-        return default_physical_root(self.settings)
-
-    def _default_agent_lineage(self) -> list[ScopeNode]:
-        # The Agent is a lineage root: no narrower framework scope exists at
-        # default-Workspace binding time. Tasks/executions nest under this node.
-        return [scope_node("agents", slug(str(self.name), "agent"))]
-
-    def _default_workspace_files_root(self, root: str | Path) -> Path:
-        return lineage_files_root(root, self._default_agent_lineage())
+        configured = self.settings.get("workspace.default_root", None)
+        return Path(str(configured)).expanduser().resolve() if configured is not None else default_workspace_root()
 
     def _default_workspace_scope(self) -> dict[str, Any]:
         scope: dict[str, Any] = {
@@ -74,31 +60,26 @@ class WorkspaceExtension(BaseAgent):
             scope["project_id"] = str(project_id)
         return scope
 
-    def _create_lazy_workspace(self) -> LazyWorkspace:
+    def _create_workspace_binding(self) -> Workspace:
         from agently.base import workspace as global_workspace
 
         root = self._default_workspace_root()
-        return LazyWorkspace(
-            global_workspace,
+        return global_workspace.create(
             root,
-            files_root=self._default_workspace_files_root(root),
+            mode="read_only",
             default_scope=self._default_workspace_scope(),
             default_search_scope=self._default_workspace_search_scope(),
-            scope_lineage=self._default_agent_lineage(),
-            on_materialize=lambda workspace: self._sync_workspace_settings(workspace, lazy=False),
         )
 
     def _sync_workspace_settings(
         self,
-        workspace: Workspace | LazyWorkspace,
+        workspace: Workspace,
         *,
         mode: str | None = None,
         provider: str | None = None,
         lazy: bool | None = None,
     ) -> None:
         self.settings.set("workspace.root", str(workspace.root))
-        self.settings.set("workspace.content_root", str(workspace.content_root))
-        self.settings.set("workspace.files_root", str(workspace.files_root))
         if mode is not None:
             self.settings.set("workspace.mode", mode)
         if provider is not None:
@@ -110,16 +91,16 @@ class WorkspaceExtension(BaseAgent):
         if self._workspace_explicit:
             return
         workspace = getattr(self, "workspace", None)
-        if isinstance(workspace, LazyWorkspace) and not workspace.is_materialized:
-            self.workspace = self._create_lazy_workspace()
-            self._sync_workspace_settings(self.workspace, mode="read_write", lazy=True)
+        if isinstance(workspace, Workspace) and workspace._backend is None:
+            self.workspace = self._create_workspace_binding()
+            self._sync_workspace_settings(self.workspace, mode="read_only", lazy=True)
 
     def use_workspace(
         self,
         path_or_backend: str | Path | Any = None,
         *,
         create: bool = True,
-        mode: str = "read_write",
+        mode: str = "read_only",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
         db_store_provider: Any | None = None,
@@ -149,7 +130,7 @@ class WorkspaceExtension(BaseAgent):
             self.workspace,
             mode=mode,
             provider=provider,
-            lazy=False,
+            lazy=self.workspace._backend is None,
         )
         bind_session_memory = getattr(self, "_bind_activated_session_memory_workspace", None)
         if callable(bind_session_memory):

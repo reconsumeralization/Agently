@@ -803,11 +803,24 @@ async def test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_p
     assert snapshot_state["execution_id"] == execution.id
 
     records = await workspace.query_runtime_events(execution.id)
-    captured_event_ids = [event.event_id for event in captured]
+    retention_diagnostics = [
+        event
+        for event in captured
+        if event.event_type.startswith("triggerflow.workspace_retention_")
+    ]
+    captured_event_ids = [
+        event.event_id
+        for event in captured
+        if event not in retention_diagnostics
+    ]
     persisted_event_ids = [record["event_id"] for record in records]
 
     assert captured_event_ids
     assert captured_event_ids == persisted_event_ids
+    assert [event.event_type for event in retention_diagnostics] == [
+        "triggerflow.workspace_retention_applied"
+    ]
+    assert retention_diagnostics[0].event_id not in persisted_event_ids
     assert any(record["event_type"] == "triggerflow.execution_started" for record in records)
     assert any(record["event_type"] == "triggerflow.execution_closed" for record in records)
 

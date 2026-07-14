@@ -42,8 +42,12 @@ def create_pptx(path: Path) -> None:
 
 async def main() -> None:
     with TemporaryDirectory() as temp_dir:
-        workspace = Agently.create_workspace(Path(temp_dir) / "workspace")
-        root = workspace.files_root
+        workspace = Agently.create_workspace(
+            Path(temp_dir) / "workspace",
+            mode="read_write",
+        )
+        root = workspace.root
+        root.mkdir(parents=True)
 
         create_pdf(root / "sample.pdf")
         create_docx(root / "sample.docx")

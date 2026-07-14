@@ -214,32 +214,10 @@ class AgentTaskAcpRecoveryMixin(AgentTaskMixinBase):
         failed_execution_meta: dict[str, Any],
         acp_result: Any,
     ) -> "WorkspaceRecordRef | None":
-        try:
-            record_ref = await self.workspace.put(
-                content={
-                    "task_id": self.id,
-                    "iteration": iteration_index,
-                    "plan": DataFormatter.sanitize(plan),
-                    "failed_execution_meta": DataFormatter.sanitize(failed_execution_meta),
-                    "acp_result": DataFormatter.sanitize(acp_result),
-                },
-                collection="acp_recovery",
-                kind="agent_task_acp_recovery",
-                summary=f"{self.id} iteration {iteration_index} ACP recovery",
-                scope={"task_id": self.id, "iteration": iteration_index},
-                source={"type": "agent_task", "phase": "acp_recovery"},
-                meta={"task_id": self.id, "iteration": iteration_index},
-            )
-            self._append_workspace_ref("acp_recovery", record_ref)
-            return record_ref
-        except Exception as error:
-            self.diagnostics.setdefault("acp_recovery_record_errors", []).append(
-                {
-                    "type": error.__class__.__name__,
-                    "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                }
-            )
-            return None
+        _ = plan, failed_execution_meta, acp_result
+        return self._memory_process_ref(
+            "agent_task_acp_recovery", iteration=iteration_index, phase="acp_recovery"
+        )
 
 
 __all__ = ["AgentTaskAcpRecoveryMixin"]

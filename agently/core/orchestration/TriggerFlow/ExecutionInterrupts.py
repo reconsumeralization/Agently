@@ -13,11 +13,14 @@
 # limitations under the License.
 
 
+import asyncio
+import copy
 import inspect
 import time
 import uuid
 import warnings
-from typing import Any, TYPE_CHECKING, cast
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, TYPE_CHECKING, cast
 
 from agently.types.data import ExecutionExchangeRequest
 from agently.types.trigger_flow.runtime_keys import SELF_RESUME_COUNT_META_KEY, SELF_RESUME_MAX_META_KEY
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
 class TriggerFlowExecutionInterrupts:
     def __init__(self, execution: "TriggerFlowExecution[Any, Any, Any]"):
         self._execution = execution
+        self._pause_boundary_locks: dict[str, tuple[asyncio.Lock, int]] = {}
 
     def is_waiting(self):
         return self._execution._status == TRIGGER_FLOW_STATUS_WAITING
@@ -55,6 +59,50 @@ class TriggerFlowExecutionInterrupts:
             for interrupt_id, interrupt in self.get_interrupts().items()
             if isinstance(interrupt, dict) and interrupt.get("status") == "waiting"
         }
+
+    @asynccontextmanager
+    async def _serialize_interrupt_boundary(
+        self,
+        interrupt_id: str,
+    ) -> AsyncIterator[None]:
+        pause_lock, user_count = self._pause_boundary_locks.get(
+            interrupt_id,
+            (asyncio.Lock(), 0),
+        )
+        self._pause_boundary_locks[interrupt_id] = (pause_lock, user_count + 1)
+        try:
+            async with pause_lock:
+                yield
+        finally:
+            current = self._pause_boundary_locks.get(interrupt_id)
+            if current is not None and current[0] is pause_lock:
+                remaining_users = current[1] - 1
+                if remaining_users <= 0:
+                    self._pause_boundary_locks.pop(interrupt_id, None)
+                else:
+                    self._pause_boundary_locks[interrupt_id] = (
+                        pause_lock,
+                        remaining_users,
+                    )
+
+    @staticmethod
+    def _owns_waiting_pause_boundary(
+        current_interrupt: Any,
+        expected_interrupt: dict[str, Any],
+    ) -> bool:
+        current_request = (
+            current_interrupt.get("external_wait_request")
+            if isinstance(current_interrupt, dict)
+            else None
+        )
+        return bool(
+            isinstance(current_interrupt, dict)
+            and current_interrupt.get("created_at")
+            == expected_interrupt.get("created_at")
+            and current_interrupt.get("status") == "waiting"
+            and isinstance(current_request, dict)
+            and current_request.get("dispatch_state") == "persisted"
+        )
 
     def has_pending_interrupts(self):
         return bool(self.get_pending_interrupts())
@@ -349,6 +397,48 @@ class TriggerFlowExecutionInterrupts:
         response_payload_schema: dict[str, Any] | None = None,
         audit_metadata: dict[str, Any] | None = None,
     ):
+        pause_kwargs = {
+            "type": type,
+            "exchange_kind": exchange_kind,
+            "payload": payload,
+            "resume_event": resume_event,
+            "interrupt_id": interrupt_id,
+            "resume_to": resume_to,
+            "max_resumes": max_resumes,
+            "channel_id": channel_id,
+            "provider_id": provider_id,
+            "wait_mode": wait_mode,
+            "hot_wait_timeout": hot_wait_timeout,
+            "cold_persistence_policy": cold_persistence_policy,
+            "request_payload_schema": request_payload_schema,
+            "response_payload_schema": response_payload_schema,
+            "audit_metadata": audit_metadata,
+        }
+        if interrupt_id is None:
+            return await self._async_pause_for_unlocked(**pause_kwargs)
+
+        async with self._serialize_interrupt_boundary(interrupt_id):
+            return await self._async_pause_for_unlocked(**pause_kwargs)
+
+    async def _async_pause_for_unlocked(
+        self,
+        *,
+        type: str = "pause",
+        exchange_kind: str | None = None,
+        payload: Any = None,
+        resume_event: str | None = None,
+        interrupt_id: str | None = None,
+        resume_to: Any = None,
+        max_resumes: int | None = 1,
+        channel_id: str | None = None,
+        provider_id: str | None = None,
+        wait_mode: str = "disconnected",
+        hot_wait_timeout: float | None = None,
+        cold_persistence_policy: str = "persist",
+        request_payload_schema: dict[str, Any] | None = None,
+        response_payload_schema: dict[str, Any] | None = None,
+        audit_metadata: dict[str, Any] | None = None,
+    ):
         execution = self._execution
         if max_resumes is not None and (not isinstance(max_resumes, int) or max_resumes < 0):
             raise ValueError("max_resumes must be a non-negative integer or None.")
@@ -463,20 +553,72 @@ class TriggerFlowExecutionInterrupts:
                 audit_metadata=audit_metadata,
             ),
         }
+        await execution._async_activate_recovery_durability(reason="pause_for")
         await execution._emit_runtime_event(
             "triggerflow.interrupt_planned",
             level="DEBUG",
             message=f"TriggerFlow execution '{ execution.id }' planned interrupt '{ interrupt_id }'.",
             payload={"interrupt_id": interrupt_id, "interrupt": execution._to_serializable_value(interrupt)},
         )
+        previous_interrupts = self.get_interrupts()
+        previous_status = execution.get_status()
+        previous_interrupt = copy.deepcopy(previous_interrupts.get(interrupt_id))
+        had_previous_interrupt = interrupt_id in previous_interrupts
         self._set_external_wait_state(interrupt, "persisted")
         self._atomic_store_interrupt(interrupt_id, interrupt, status=TRIGGER_FLOW_STATUS_WAITING)
+        try:
+            await execution._async_activate_recovery_durability(
+                reason="pause_for",
+                persist_snapshot=True,
+                step_id=f"interrupt:{ interrupt_id }:waiting",
+            )
+        except BaseException:
+            restored_interrupts = self.get_interrupts().copy()
+            current_interrupt = restored_interrupts.get(interrupt_id)
+            owns_waiting_boundary = self._owns_waiting_pause_boundary(
+                current_interrupt,
+                interrupt,
+            )
+            if owns_waiting_boundary:
+                if had_previous_interrupt:
+                    restored_interrupts[interrupt_id] = previous_interrupt
+                else:
+                    restored_interrupts.pop(interrupt_id, None)
+                rollback_status = (
+                    TRIGGER_FLOW_STATUS_WAITING
+                    if any(
+                        isinstance(item, dict) and item.get("status") == "waiting"
+                        for item in restored_interrupts.values()
+                    )
+                    else previous_status
+                )
+                execution._system_runtime_data.pop("interrupts", None)
+                self._write_interrupt_state(
+                    restored_interrupts,
+                    status=rollback_status,
+                    bump=False,
+                )
+            raise
+        current_interrupt = self.get_interrupt(interrupt_id)
+        if not self._owns_waiting_pause_boundary(current_interrupt, interrupt):
+            return TriggerFlowPauseSignal(
+                current_interrupt
+                if isinstance(current_interrupt, dict)
+                else interrupt
+            )
         await execution._emit_runtime_event(
             "triggerflow.interrupt_persisted",
             level="DEBUG",
             message=f"TriggerFlow execution '{ execution.id }' persisted interrupt '{ interrupt_id }'.",
             payload={"interrupt_id": interrupt_id, "interrupt": execution._to_serializable_value(interrupt)},
         )
+        current_interrupt = self.get_interrupt(interrupt_id)
+        if not self._owns_waiting_pause_boundary(current_interrupt, interrupt):
+            return TriggerFlowPauseSignal(
+                current_interrupt
+                if isinstance(current_interrupt, dict)
+                else interrupt
+            )
 
         def _apply_local_envelope(stored: dict[str, Any]):
             stored["external_wait_request"] = interrupt.get("external_wait_request")
@@ -710,6 +852,23 @@ class TriggerFlowExecutionInterrupts:
         )
 
     async def async_continue_with(
+        self,
+        interrupt_id: str,
+        value: Any = None,
+        *,
+        resume_request_id: str | None = None,
+        actor: str | None = None,
+    ):
+        async with self._serialize_interrupt_boundary(interrupt_id):
+            pass
+        return await self._async_continue_with_unlocked(
+            interrupt_id,
+            value,
+            resume_request_id=resume_request_id,
+            actor=actor,
+        )
+
+    async def _async_continue_with_unlocked(
         self,
         interrupt_id: str,
         value: Any = None,
@@ -1022,7 +1181,51 @@ class TriggerFlowExecutionInterrupts:
                     actor=actor,
                     error=str(exc),
                 )
-                self._atomic_store_interrupt(interrupt_id, interrupt, status=TRIGGER_FLOW_STATUS_WAITING)
+                current_interrupt = self.get_interrupt(interrupt_id)
+                same_generation = (
+                    isinstance(current_interrupt, dict)
+                    and current_interrupt.get("created_at")
+                    == interrupt.get("created_at")
+                )
+                current_generation_is_waiting = (
+                    isinstance(current_interrupt, dict)
+                    and current_interrupt.get("status") == "waiting"
+                )
+
+                def _fail_resume_request(stored: dict[str, Any]):
+                    stored_requests = stored.get("resume_requests", {})
+                    failed_requests = (
+                        dict(stored_requests)
+                        if isinstance(stored_requests, dict)
+                        else {}
+                    )
+                    failed_requests[resume_request_id] = copy.deepcopy(
+                        request_record
+                    )
+                    stored["resume_requests"] = failed_requests
+                    if stored.get("created_at") == interrupt.get("created_at"):
+                        stored["status"] = "waiting"
+                        stored["response"] = None
+                        stored["resume_value"] = None
+                        stored["resumed_at"] = None
+                        stored["resume_claim"] = None
+                        self._set_external_wait_state(
+                            stored,
+                            "dispatch_failed",
+                            resume_request_id=resume_request_id,
+                            actor=actor,
+                            error=str(exc),
+                        )
+
+                self._atomic_mutate_interrupt(
+                    interrupt_id,
+                    _fail_resume_request,
+                    status=(
+                        TRIGGER_FLOW_STATUS_WAITING
+                        if same_generation or current_generation_is_waiting
+                        else None
+                    ),
+                )
                 await self._emit_resume_request_event(
                     "triggerflow.resume_dispatch_failed",
                     interrupt_id=interrupt_id,
@@ -1045,7 +1248,30 @@ class TriggerFlowExecutionInterrupts:
                 resume_request_id=resume_request_id,
                 actor=actor,
             )
-            self._atomic_store_interrupt(interrupt_id, interrupt)
+
+            def _complete_resume_request(stored: dict[str, Any]):
+                stored_requests = stored.get("resume_requests", {})
+                completed_requests = (
+                    dict(stored_requests)
+                    if isinstance(stored_requests, dict)
+                    else {}
+                )
+                completed_requests[resume_request_id] = copy.deepcopy(
+                    request_record
+                )
+                stored["resume_requests"] = completed_requests
+                if stored.get("created_at") == interrupt.get("created_at"):
+                    self._set_external_wait_state(
+                        stored,
+                        "completed",
+                        resume_request_id=resume_request_id,
+                        actor=actor,
+                    )
+
+            self._atomic_mutate_interrupt(
+                interrupt_id,
+                _complete_resume_request,
+            )
             await self._emit_resume_request_event(
                 "triggerflow.resume_completed",
                 interrupt_id=interrupt_id,

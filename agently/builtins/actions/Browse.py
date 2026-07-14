@@ -852,14 +852,6 @@ class Browse:
             }
         headers = trace.get("headers") if isinstance(trace.get("headers"), dict) else {}
         path = self._download_workspace_path(selected_url, bytes(content), headers)
-        file_area_path = getattr(workspace, "file_area_path", None)
-        files_root = getattr(workspace, "files_root", None)
-        if callable(file_area_path) and files_root is not None:
-            try:
-                area_path = Path(str(file_area_path("downloads", Path(path).name)))
-                path = str(area_path.relative_to(Path(str(files_root)).expanduser().resolve()))
-            except Exception:
-                path = self._download_workspace_path(selected_url, bytes(content), headers)
         materialized = await workspace.materialize_file(
             path,
             bytes(content),

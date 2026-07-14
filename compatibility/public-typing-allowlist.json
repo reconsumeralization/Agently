@@ -22,6 +22,7 @@
       "scan": "declared_public_callables"
     }
   ],
+  "required_typed_callables": [],
   "any_allowlist": [
     {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.input",

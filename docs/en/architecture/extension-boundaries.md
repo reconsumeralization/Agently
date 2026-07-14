@@ -155,7 +155,7 @@ appropriate only when the capability is genuinely small and splitting it would
 be over-design.
 
 Landed examples include `core/Action`, `core/TriggerFlow`,
-`core/orchestration/TaskDAG`, `core/workspace`,
+`core/orchestration/TaskDAG`, `core/Workspace`,
 `builtins/plugins/ExecutionResourceProvider`, and
 `builtins/plugins/SkillsManager`; `builtins/plugins/SkillsExecutor` is retained
 as a compatibility facade. Keep public imports stable through package

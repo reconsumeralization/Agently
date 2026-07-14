@@ -19,7 +19,7 @@ from agently import Agently
 from legacy_agently_script_upgrade import TASK_MODEL_KEY, configure_agent_model_pool
 
 
-TASK_ROOT = Path(".agently/tasks/goal-effort-public-stream").resolve()
+TASK_ROOT = Path("agent-task-workspaces/goal-effort-public-stream").resolve()
 
 
 def print_stream_item(item: Any) -> None:
@@ -177,7 +177,7 @@ if __name__ == "__main__":
 
 # Expected key output from a real DeepSeek run on 2026-06-26:
 # command:
-#   AGENT_TASK_PUBLIC_STREAM_WORKSPACE=.agently/tasks/goal-effort-public-stream-4138 \
+#   AGENT_TASK_PUBLIC_STREAM_WORKSPACE=agent-task-workspaces/goal-effort-public-stream-4138 \
 #   python examples/agent_task/goal_effort_public_stream.py
 # provider="deepseek"
 # task_status="completed"

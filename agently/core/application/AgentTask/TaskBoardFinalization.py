@@ -129,8 +129,12 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
 
         def priority(item: tuple[int, Mapping[str, Any]]) -> tuple[int, int]:
             index, ref = item
-            path = str(ref.get("path") or "").strip()
-            if path and path in required_paths:
+            path = self._taskboard_workspace_path_key(ref.get("path"))
+            required_path_keys = {
+                self._taskboard_workspace_path_key(required_path)
+                for required_path in required_paths
+            }
+            if path and path in required_path_keys:
                 return (0, index)
             if self._is_trusted_workspace_artifact_ref(ref):
                 return (1, index)
@@ -146,9 +150,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             return ledger_refs
         return cls._collect_taskboard_source_refs(evidence_view, max_refs=32)
 
-    @staticmethod
-    def _taskboard_workspace_path_key(path: Any) -> str:
-        text = str(path or "").strip()
+    @classmethod
+    def _taskboard_workspace_path_key(cls, path: Any) -> str:
+        text = cls._workspace_artifact_display_path(path)
         if not text:
             return ""
         return PurePosixPath(text).as_posix()
@@ -409,7 +413,13 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             )
             return self._prioritize_taskboard_final_refs(current_refs)
 
+        trusted_refs = [
+            dict(item)
+            for item in write_result.get("file_refs", [])
+            if isinstance(item, Mapping)
+        ]
         promoted_ref = {
+            **(trusted_refs[0] if trusted_refs else {}),
             "path": str(target_read.get("path") or write_result.get("path") or target_path),
             "bytes": int(target_read.get("bytes") or write_result.get("bytes") or 0),
             "sha256": str(target_read.get("sha256") or write_result.get("sha256") or ""),
@@ -556,13 +566,11 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         candidate_final_result = self._taskboard_candidate_final_result(revision)
         final_refs = self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view))
         final_refs = await self._taskboard_materialize_required_final_deliverable_refs(final_refs)
-        trusted_final_refs = [
-            ref
-            for ref in final_refs
-            if isinstance(ref, Mapping) and self._is_trusted_workspace_artifact_ref(ref)
-        ]
+        trusted_terminal_refs = self._trusted_terminal_refs(final_refs)
+        trusted_final_refs = self._trusted_terminal_file_refs(trusted_terminal_refs)
         can_attempt_degraded_final = self._taskboard_can_attempt_degraded_final(revision, schedule)
         if result_status != "completed" and not can_attempt_degraded_final:
+            promoted_partial_refs = await self._register_terminal_deliverables(trusted_terminal_refs)
             self.status = "blocked" if result_status == "blocked" else "error"
             reason = "TaskBoard did not reach a completed board state."
             final_response = self._taskboard_user_final_response(
@@ -571,7 +579,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 artifact_status="partial",
                 reason=reason,
                 missing_criteria=["TaskBoard did not reach a completed board state."],
-                final_refs=[],
+                final_refs=trusted_final_refs,
                 board_status=result_status,
                 degraded_finalization_attempted=False,
             )
@@ -579,17 +587,23 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "status": self.status,
                 "accepted": False,
                 "artifact_status": "partial",
-                "degraded": False,
                 "task_id": self.id,
                 "execution_strategy": self.execution_strategy,
                 "effective_execution_strategy": self.effective_execution_strategy,
                 "reason": reason,
                 "final_response": final_response,
-                "taskboard": {
-                    "revision": revision.to_dict(),
-                    "schedule": schedule.to_dict(),
-                    "evidence_view": evidence_view,
-                },
+                "final_result": self._compact_terminal_final_result(
+                    candidate_final_result,
+                    trusted_file_refs=trusted_final_refs,
+                ),
+                "artifact_refs": promoted_partial_refs,
+                "missing_criteria": ["TaskBoard did not reach a completed board state."],
+            }
+            self._terminal_taskboard_state = {
+                "revision": revision.to_dict(),
+                "schedule": schedule.to_dict(),
+                "evidence_view": evidence_view,
+                "terminal_status": result_status,
             }
             await self._emit("agent_task.blocked", self.result)
             return {"terminal": True, "status": self.status}
@@ -952,33 +966,38 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             completion_notes=completion_notes,
         )
         self.status = "completed" if accepted else "blocked"
+        promoted_refs = await self._register_terminal_deliverables(trusted_terminal_refs)
+        compact_final_result = self._compact_terminal_final_result(
+            final.get("final_result", ""),
+            trusted_file_refs=trusted_final_refs,
+        )
+        self._terminal_taskboard_state = {
+            "revision": revision.to_dict(),
+            "schedule": schedule.to_dict(),
+            "evidence_view": evidence_view,
+            "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+            "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
+            "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
+            "completion_notes": completion_notes,
+            "explicit_state_facts": explicit_state_facts,
+            "blocking_state_facts": blocking_state_facts,
+            "terminal_status": result_status,
+            "degraded_finalization_attempted": degraded_finalization_attempted,
+            "finalization_source": finalization_source,
+            "final_verification": final_verification,
+        }
         self.result = {
             "status": self.status,
             "accepted": accepted,
             "artifact_status": artifact_status,
-            "degraded": degraded,
             "task_id": self.id,
             "execution_strategy": self.execution_strategy,
             "effective_execution_strategy": self.effective_execution_strategy,
-            "final_result": final.get("final_result", ""),
+            "final_result": compact_final_result,
             "reason": final.get("reason", ""),
             "final_response": final_response,
             "missing_criteria": final.get("missing_criteria", []),
-            "taskboard": {
-                "revision": revision.to_dict(),
-                "schedule": schedule.to_dict(),
-                "evidence_view": evidence_view,
-                "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
-                "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
-                "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
-                "completion_notes": completion_notes,
-                "explicit_state_facts": explicit_state_facts,
-                "blocking_state_facts": blocking_state_facts,
-                "terminal_status": result_status,
-                "degraded_finalization_attempted": degraded_finalization_attempted,
-                "finalization_source": finalization_source,
-                "final_verification": final_verification,
-            },
+            "artifact_refs": promoted_refs,
         }
         await self._record_phase(
             "terminal",
@@ -1170,8 +1189,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         )
         return materialized, "" if materialized.get("truncated") else content, None
 
-    @staticmethod
+    @classmethod
     def _taskboard_final_artifact_manifest(
+        cls,
         ref: Mapping[str, Any],
         *,
         final: Mapping[str, Any],
@@ -1182,7 +1202,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         raw_manifest = final.get("artifact_manifest") if isinstance(final, Mapping) else None
         if isinstance(raw_manifest, Mapping):
             manifest_path = str(raw_manifest.get("path") or "").strip()
-            if not manifest_path or manifest_path == path:
+            if not manifest_path or cls._workspace_artifact_display_path(
+                manifest_path
+            ) == cls._workspace_artifact_display_path(path):
                 manifest.update(dict(DataFormatter.sanitize(raw_manifest)))
         if path:
             manifest["path"] = path

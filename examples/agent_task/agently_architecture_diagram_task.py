@@ -45,6 +45,7 @@ from _business_example_common import (
     default_workspace,
     judge_business_artifact,
     print_stream_item,
+    resolve_result_artifact_path,
     write_summary,
 )
 
@@ -82,7 +83,7 @@ SOURCE_PATHS = [
     "agently/core/application/AgentExecution/Result.py",
     "agently/core/orchestration/TaskDAG/TaskDAGExecutor.py",
     "agently/core/orchestration/TriggerFlow/TriggerFlow.py",
-    "agently/core/workspace/Workspace.py",
+    "agently/core/Workspace/Workspace.py",
     "agently/core/application/SkillsExecutor/SkillsExecutor.py",
     "agently/builtins/plugins/ActionRuntime/AgentlyActionRuntime.py",
 ]
@@ -262,7 +263,7 @@ async def main() -> None:
 
     result = await execution.async_start()
     meta = await execution.async_get_meta()
-    output_path = workspace.files_root / OUTPUT_FILE
+    output_path = resolve_result_artifact_path(workspace, result, OUTPUT_FILE)
     artifact_text = output_path.read_text(encoding="utf-8") if output_path.is_file() else ""
     model_judge = await judge_business_artifact(
         agent,
@@ -297,13 +298,13 @@ async def main() -> None:
         "model_judge": model_judge,
         "structural_smoke": structural_smoke,
         "replan_count": sum(1 for item in stream_items if item.path.endswith(".replan")),
-        "workspace_checkpoint_count": len(await workspace.checkpoint_history(TASK_ID)),
-        "workspace_decision_count": len(meta.get("workspace_refs", {}).get("decisions", [])),
+        "workspace_recovery_ref_count": len(meta.get("workspace_refs", {}).get("checkpoints", [])),
+        "workspace_process_record_count": len(meta.get("workspace_refs", {}).get("decisions", [])),
         "task_refs": result.get("task_refs") or meta.get("task_refs"),
         "stream_trace_file": str(stream_trace_path),
         "output_file": str(output_path),
     }
-    summary_path = workspace.files_root / SUMMARY_FILE
+    summary_path = workspace.root / SUMMARY_FILE
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_summary(summary)
@@ -322,7 +323,7 @@ if __name__ == "__main__":
 # example_accepted=true
 # structural_smoke.output_file_exists=true
 # structural_smoke.mermaid_block_count=2
-# workspace_checkpoint_count=1
+# workspace_recovery_ref_count=0 (default task process state stays in memory/logs)
 # task_refs.strategy="task"
 # output_file ends with files/outputs/agently_architecture_diagram.md
 #

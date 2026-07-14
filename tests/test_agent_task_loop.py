@@ -13,7 +13,12 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.core.orchestration import TaskBoard, build_task_board_acceptance_index, build_task_board_evidence_view
+from agently.core.orchestration import (
+    TaskBoard,
+    build_task_board_acceptance_index,
+    build_task_board_evidence_view,
+    resolve_task_board_planning_policy,
+)
 from agently.core.application.AgentTask.BlockCarrier import (
     WorkUnitIntent,
     WorkUnitResult,
@@ -33,6 +38,7 @@ from agently.types.data import (
     TaskBoardCardResult,
     TaskBoardGraph,
     TaskBoardRevision,
+    WorkspaceFileRef,
 )
 from agently.utils import DataFormatter, Settings
 from examples.agent_task.interview_question_preparation import judge_interview_semantics
@@ -3089,9 +3095,99 @@ def _create_agent(name: str = "agent-task-loop-test"):
     plugin_manager.register("ModelRequester", MockAgentTaskRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
+def test_agent_task_terminal_final_result_is_bounded_and_file_body_free(tmp_path):
+    agent = _create_agent("agent-task-terminal-result-bounds").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-result-bounds",
+        goal="Return a bounded terminal result.",
+        success_criteria=["The result remains useful without duplicating file bodies."],
+        execution="flat",
+    )
+    body = "FILE_BODY_MUST_NOT_REACH_TERMINAL_RESULT\n" + ("section body\n" * 800)
+    file_ref: WorkspaceFileRef = {
+        "path": "reports/final.md",
+        "bytes": len(body.encode("utf-8")),
+        "sha256": "a" * 64,
+        "media_type": "text/markdown",
+        "content_kind": "text",
+        "role": "workspace_artifact",
+    }
+    compact = getattr(task, "_compact_terminal_final_result", None)
+    assert callable(compact), "AgentTask must own one bounded terminal final_result compactor."
+
+    file_result = cast(Any, compact)(body, trusted_file_refs=[file_ref])
+    natural_result = cast(Any, compact)("BUSINESS_RESULT_START\n" + ("useful detail\n" * 800))
+
+    assert isinstance(file_result, str)
+    assert file_result.startswith("Workspace artifact delivered at reports/final.md")
+    assert "FILE_BODY_MUST_NOT_REACH_TERMINAL_RESULT" not in file_result
+    assert isinstance(natural_result, Mapping)
+    assert natural_result["truncated"] is True
+    assert str(natural_result["preview"]).startswith("BUSINESS_RESULT_START")
+    assert len(json.dumps(natural_result, ensure_ascii=False)) < 2200
+
+
+def test_agent_task_file_backed_final_response_ignores_model_body_and_is_byte_bounded(tmp_path):
+    agent = _create_agent("agent-task-terminal-response-bounds").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-terminal-response-bounds",
+        goal="Return a file-backed terminal response.",
+        success_criteria=["The response points to the canonical file."],
+        execution="flat",
+    )
+    model_body = "MODEL_FILE_BODY_MUST_NOT_REACH_FINAL_RESPONSE\n" + ("section\n" * 200000)
+    file_ref = {
+        "path": "reports/final.md",
+        "bytes": len(model_body.encode()),
+        "sha256": "a" * 64,
+        "media_type": "text/markdown",
+        "content_kind": "text",
+        "role": "workspace_artifact",
+    }
+
+    response = task._agent_task_user_final_response(
+        final={"final_response": model_body, "final_result": model_body},
+        accepted=True,
+        artifact_status="accepted",
+        final_refs=[file_ref],
+        final_result=model_body,
+    )
+
+    assert response == "Completed. Deliverable artifact: reports/final.md."
+    assert len(response.encode("utf-8")) <= 4096
+    assert "MODEL_FILE_BODY_MUST_NOT_REACH_FINAL_RESPONSE" not in response
+
 
 @pytest.mark.asyncio
-async def test_agent_task_guidance_records_workspace_refs_without_evidence_items(tmp_path):
+async def test_agent_task_terminal_retention_accepts_verified_zero_byte_file(tmp_path):
+    agent = _create_agent("agent-task-zero-byte-terminal-file").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="agent-task-zero-byte-terminal-file",
+        goal="Retain the intentionally empty marker file.",
+        success_criteria=["The empty marker is retained by exact digest."],
+        execution="flat",
+    )
+    write_result = await task.workspace.write_file("reports/empty.txt", "")
+    file_ref = cast(
+        WorkspaceFileRef,
+        {**write_result["file_refs"][0], "role": "workspace_artifact"},
+    )
+
+    assert task._trusted_terminal_refs({"artifact_refs": [{**file_ref, "bytes": True}]}) == []
+    selected = task._trusted_terminal_refs({"artifact_refs": [file_ref]})
+    assert selected == [file_ref]
+    promoted = await task._register_terminal_deliverables(selected)
+
+    assert len(promoted) == 1
+    assert promoted[0] == file_ref
+    assert not (task.workspace.root / ".agently" / "workspace.db").exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_task_guidance_stays_in_memory_without_workspace_records(tmp_path):
     agent = _create_agent("agent-task-guidance-record").use_workspace(tmp_path / "workspace")
     task = AgentTask(
         agent,
@@ -3111,15 +3207,14 @@ async def test_agent_task_guidance_records_workspace_refs_without_evidence_items
 
     assert guidance["kind"] == "guidance"
     assert guidance["status"] == "received"
-    assert guidance["workspace_ref"]["collection"] == "guidance"
-    assert task.workspace_refs["guidance"] == [guidance["workspace_ref"]["id"]]
+    assert guidance["storage"] == "memory"
+    assert "workspace_ref" not in guidance
+    assert task.workspace_refs["guidance"] == []
     assert task.guidance_items[0]["id"] == guidance["id"]
-
-    record_body = await task.workspace.get_data(guidance["workspace_ref"])
-    assert record_body["schema_version"] == "agent_task_guidance/v1"
-    assert record_body["guidance_id"] == guidance["id"]
-    assert record_body["content"] == "Use the operator's newly uploaded incident note as the primary context."
-    assert "evidence_items" not in record_body
+    assert task.guidance_items[0]["content"] == (
+        "Use the operator's newly uploaded incident note as the primary context."
+    )
+    assert not (task.workspace.root / ".agently" / "workspace.db").exists()
 
     guidance_events = [item for item in task._stream_items if item.path == "agent_task.guidance.received"]
     assert guidance_events
@@ -3128,7 +3223,7 @@ async def test_agent_task_guidance_records_workspace_refs_without_evidence_items
 
 
 @pytest.mark.asyncio
-async def test_taskboard_guidance_safe_boundary_records_checkpoint_projection(tmp_path):
+async def test_taskboard_guidance_safe_boundary_keeps_checkpoint_projection_in_memory(tmp_path):
     agent = _create_agent("agent-taskboard-guidance-boundary").use_workspace(tmp_path / "workspace")
     task = AgentTask(
         agent,
@@ -3170,11 +3265,12 @@ async def test_taskboard_guidance_safe_boundary_records_checkpoint_projection(tm
     assert applied[0]["id"] == guidance["id"]
     assert task.guidance_items[0]["status"] == "applied"
     assert len(revision.graph.cards) == 1
-    assert record_ref is not None
-    checkpoint_body = await task.workspace.get_data(record_ref)
-    assert checkpoint_body["guidance"][0]["id"] == guidance["id"]
-    assert checkpoint_body["guidance"][0]["status"] == "applied"
-    assert checkpoint_body["guidance"][0]["target"] == {"card_id": "draft"}
+    assert record_ref is None
+    assert _checkpoint_ref is None
+    assert task._latest_taskboard_acceptance_index is not None
+    assert task._latest_taskboard_acceptance_index["schema_version"]
+    assert any(item.path == "agent_task.taskboard.tick_recorded" for item in task._stream_items)
+    assert not (task.workspace.root / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -3200,20 +3296,24 @@ async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_p
         source="test.workspace_artifact",
     )
 
-    assert (workspace.files_root / "reports/final.md").read_text(encoding="utf-8").startswith("# Actual Report")
-    assert delivered["file_refs"][0]["path"] == "reports/final.md"
+    assert workspace.resolve_file_path("reports/final.md").read_text(encoding="utf-8").startswith("# Actual Report")
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "reports/final.md"
     assert delivered["file_refs"][0]["source"] == "test.workspace_artifact"
     assert delivered["artifact_manifest"]["sha256"] == delivered["file_refs"][0]["sha256"]
     assert delivered["diagnostics"][0]["code"] == "agent_task.workspace_artifact.untrusted_model_file_refs"
     assert delivered["artifact_markdown"].startswith("Workspace artifact delivered at reports/final.md")
     assert delivered["artifact_preview"].startswith("# Actual Report")
     assert delivered["workspace_artifact_content_omitted"][0]["field"] == "artifact_markdown"
-    assert execution_meta["logs"]["artifact_refs"][0]["path"] == "reports/final.md"
-    assert execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"] == "reports/final.md"
+    assert task._workspace_artifact_display_path(
+        execution_meta["logs"]["artifact_refs"][0]["path"]
+    ) == "reports/final.md"
+    assert task._workspace_artifact_display_path(
+        execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"]
+    ) == "reports/final.md"
     ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
     artifact_item = next(item for item in ledger_items if item["kind"] == "workspace_artifact.readback")
     assert artifact_item["status"] == "ok"
-    assert artifact_item["path"] == "reports/final.md"
+    assert task._workspace_artifact_display_path(artifact_item["path"]) == "reports/final.md"
     assert artifact_item["body"].startswith("# Actual Report")
 
 
@@ -3509,7 +3609,7 @@ async def test_taskboard_required_final_deliverable_promotion_replaces_stale_tar
 
     final_read = await task.workspace.read_file("final.md", max_bytes=len(full_body.encode("utf-8")) + 1)
     assert final_read["content"] == full_body
-    assert promoted_refs[0]["path"] == "final.md"
+    assert task._workspace_artifact_display_path(promoted_refs[0]["path"]) == "final.md"
     assert promoted_refs[0]["source_path"] == "working/taskboard/coverage-and-finalize/final.md"
     assert promoted_refs[0]["sha256"] == final_read["sha256"]
     assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "delivered"
@@ -3550,7 +3650,7 @@ async def test_taskboard_required_final_deliverable_promotion_uses_unique_truste
 
     target_read = await task.workspace.read_file("support_reply.md", max_bytes=4000)
     assert target_read["content"] == body
-    assert promoted_refs[0]["path"] == "support_reply.md"
+    assert task._workspace_artifact_display_path(promoted_refs[0]["path"]) == "support_reply.md"
     assert promoted_refs[0]["source_path"] == "final.md"
     assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "selected"
     assert task.diagnostics["taskboard_final_deliverable_promotion"][1]["status"] == "delivered"
@@ -3608,7 +3708,7 @@ async def test_taskboard_required_final_deliverable_promotion_uses_repair_source
 
     target_read = await task.workspace.read_file("incident_learning.md", max_bytes=4000)
     assert target_read["content"] == repaired_body
-    assert promoted_refs[0]["path"] == "incident_learning.md"
+    assert task._workspace_artifact_display_path(promoted_refs[0]["path"]) == "incident_learning.md"
     assert promoted_refs[0]["source_path"] == "final.md"
     assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["reason"] == (
         "unique_final_verification_repair_source_for_required_deliverable"
@@ -3642,9 +3742,13 @@ async def test_workspace_intermediate_artifact_stays_ref_backed_without_satisfyi
 
     bounded_read = await workspace.read_file("working/search-notes.md", max_bytes=80)
 
-    assert delivered["file_refs"][0]["path"] == "working/search-notes.md"
-    assert execution_meta["logs"]["artifact_refs"][0]["path"] == "working/search-notes.md"
-    assert execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"] == "working/search-notes.md"
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "working/search-notes.md"
+    assert task._workspace_artifact_display_path(
+        execution_meta["logs"]["artifact_refs"][0]["path"]
+    ) == "working/search-notes.md"
+    assert task._workspace_artifact_display_path(
+        execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"]
+    ) == "working/search-notes.md"
     assert bounded_read["ok"] is True
     assert bounded_read["truncated"] is True
     assert bounded_read["content"].startswith("# Search Notes")
@@ -3657,7 +3761,7 @@ async def test_agent_task_workspace_artifact_delivery_reports_readback_failure(t
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-readback-failure")
 
     class ReadbackFailingWorkspace:
-        files_root = workspace.files_root
+        root = workspace.root
 
         async def write_file(self, *args: Any, **kwargs: Any) -> Any:
             return await workspace.write_file(*args, **kwargs)
@@ -3667,7 +3771,7 @@ async def test_agent_task_workspace_artifact_delivery_reports_readback_failure(t
 
     task = AgentTask.__new__(AgentTask)
     task.id = "workspace-artifact-readback-failure"
-    task.workspace = ReadbackFailingWorkspace()
+    cast(Any, task).workspace = ReadbackFailingWorkspace()
     task.diagnostics = {}
     execution_meta = {"logs": {}}
 
@@ -3681,7 +3785,7 @@ async def test_agent_task_workspace_artifact_delivery_reports_readback_failure(t
         source="test.workspace_artifact",
     )
 
-    assert (workspace.files_root / "reports/final.md").is_file()
+    assert workspace.resolve_file_path("reports/final.md").is_file()
     assert delivered["file_refs"] == []
     assert "artifact_refs" not in execution_meta["logs"]
     assert delivered["workspace_artifact_delivery"]["status"] == "readback_failed"
@@ -3712,7 +3816,7 @@ async def test_agent_task_workspace_artifact_delivery_prefers_complete_body(tmp_
         source="test.workspace_artifact",
     )
 
-    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    written = workspace.resolve_file_path("reports/final.md").read_text(encoding="utf-8")
     assert written == full_body
     assert delivered["workspace_artifact_delivery"]["content_key"] == "answer"
     assert delivered["file_refs"][0]["bytes"] == len(full_body.encode("utf-8"))
@@ -3744,7 +3848,7 @@ async def test_agent_task_workspace_artifact_delivery_compacts_manifest_sections
         source="test.workspace_artifact",
     )
 
-    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    written = workspace.resolve_file_path("reports/final.md").read_text(encoding="utf-8")
     assert "Section body." in written
     first_section = delivered["artifact_manifest"]["sections"][0]
     second_section = delivered["artifact_manifest"]["sections"][1]
@@ -3771,7 +3875,7 @@ async def test_agent_task_workspace_artifact_delivery_does_not_write_plain_answe
 
     assert delivered["answer"] == "This is a control-card summary, not a deliverable body."
     assert delivered.get("file_refs") == []
-    assert not (workspace.files_root / "final.md").exists()
+    assert not workspace.resolve_file_path("final.md").exists()
 
 
 @pytest.mark.asyncio
@@ -3797,7 +3901,7 @@ async def test_agent_task_workspace_artifact_delivery_waits_for_remaining_work(t
     assert delivered["remaining_work"] == ["Read README.md before writing the final report."]
     assert delivered.get("file_refs") == []
     assert "workspace_artifact_delivery" not in delivered
-    assert not (workspace.files_root / "reports/final.md").exists()
+    assert not workspace.resolve_file_path("reports/final.md").exists()
 
 
 @pytest.mark.asyncio
@@ -3854,17 +3958,25 @@ async def test_agent_task_workspace_artifact_delivery_adopts_successful_action_w
 
     assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
     assert delivered["workspace_artifact_delivery"]["content_key"] == "action_file_ref"
-    assert delivered["workspace_artifact_delivery"]["readback"]["path"] == "final.md"
-    assert delivered["file_refs"][0]["path"] == "final.md"
+    assert task._workspace_artifact_display_path(
+        delivered["workspace_artifact_delivery"]["readback"]["path"]
+    ) == "final.md"
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
     assert delivered["file_refs"][0]["sha256"]
     assert delivered["artifact_preview"].startswith("# Existing Action Report")
     assert delivered["remaining_work"] == []
     assert delivered["ready_for_final_verification"] is True
     assert delivered["workspace_artifact_remaining_work_handoff"]["status"] == "handed_to_terminal_verification"
     assert delivered["diagnostics"][-1]["code"] == "agent_task.workspace_artifact.action_file_adopted"
-    assert execution_meta["logs"]["artifact_refs"][0]["path"] == "final.md"
+    assert task._workspace_artifact_display_path(
+        execution_meta["logs"]["artifact_refs"][0]["path"]
+    ) == "final.md"
     ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
-    assert any(item["kind"] == "workspace_artifact.readback" and item["path"] == "final.md" for item in ledger_items)
+    assert any(
+        item["kind"] == "workspace_artifact.readback"
+        and task._workspace_artifact_display_path(item["path"]) == "final.md"
+        for item in ledger_items
+    )
 
 
 @pytest.mark.asyncio
@@ -3938,7 +4050,7 @@ async def test_agent_task_workspace_artifact_delivery_uses_full_markdown_body_fr
         source="test.workspace_artifact.evidence_body",
     )
 
-    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    written = workspace.resolve_file_path("reports/final.md").read_text(encoding="utf-8")
     assert written == full_body.strip()
     assert delivered["workspace_artifact_delivery"]["status"] == "delivered"
     assert delivered["workspace_artifact_delivery"]["content_key"] == "evidence[1]"
@@ -3980,7 +4092,7 @@ async def test_agent_task_workspace_artifact_delivery_ignores_non_body_evidence_
     assert delivered["remaining_work"] == ["Read README.md before writing the final report."]
     assert delivered.get("file_refs") == []
     assert "workspace_artifact_delivery" not in delivered
-    assert not (workspace.files_root / "reports/final.md").exists()
+    assert not workspace.resolve_file_path("reports/final.md").exists()
 
 
 @pytest.mark.asyncio
@@ -4012,7 +4124,7 @@ async def test_agent_task_workspace_artifact_delivery_preserves_existing_full_bo
         source="test.workspace_artifact.followup",
     )
 
-    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    written = workspace.resolve_file_path("reports/final.md").read_text(encoding="utf-8")
     assert written == full_body
     assert first["file_refs"][0]["sha256"] == second["file_refs"][0]["sha256"]
     assert second["workspace_artifact_delivery"]["status"] == "preserved_existing"
@@ -4083,7 +4195,7 @@ async def test_agent_task_workspace_artifact_outline_sections_trigger_stream_dra
         source="test.workspace_artifact.outline",
     )
 
-    written = (workspace.files_root / "reports/final.md").read_text(encoding="utf-8")
+    written = workspace.resolve_file_path("reports/final.md").read_text(encoding="utf-8")
     assert written == replacement_body
     assert delivered["workspace_artifact_delivery"]["mode"] == "streamed_workspace_artifact"
     assert delivered["workspace_artifact_delivery"]["status"] == "delivered"
@@ -4150,7 +4262,7 @@ async def test_workspace_artifact_outline_with_remaining_verification_still_draf
         source="test.workspace_artifact.outline_remaining",
     )
 
-    written = (workspace.files_root / "final.md").read_text(encoding="utf-8")
+    written = workspace.resolve_file_path("final.md").read_text(encoding="utf-8")
     assert written == body
     assert delivered["workspace_artifact_delivery"]["mode"] == "streamed_workspace_artifact"
     assert delivered["workspace_artifact_delivery"]["remaining_work_handoff"]["status"] == (
@@ -4235,14 +4347,13 @@ async def test_agent_task_flat_workspace_artifact_delivery_before_verification(t
     meta = await task.meta()
 
     assert result["status"] == "completed"
-    task_scoped_workspace = Agently.create_workspace(tmp_path / "task-workspace").with_scope_node(
-        "tasks",
-        "workspace-artifact-flat",
+    task_scoped_workspace = Agently.create_workspace(tmp_path / "task-workspace")._bind_execution(
+        "workspace-artifact-flat"
     )
     assert (await task_scoped_workspace.read_file("reports/final.md"))["content"].startswith("# Delivered Report")
     delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
     assert delivery["status"] == "delivered"
-    assert delivery["file_refs"][0]["path"] == "reports/final.md"
+    assert AgentTask._workspace_artifact_display_path(delivery["file_refs"][0]["path"]) == "reports/final.md"
     assert delivery["file_refs"][0]["bytes"] > 0
     assert delivery["file_refs"][0]["sha256"]
     assert delivery["file_refs"][0]["preview"].startswith("# Delivered Report")
@@ -4348,6 +4459,15 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
 
     assert result["status"] == "completed"
     assert result["final_result"].startswith("Workspace artifact delivered at reports/final.md")
+    assert len(result["artifact_refs"]) == 1
+    assert result["artifact_refs"][0]["type"] == "file"
+    assert AgentTask._workspace_artifact_display_path(
+        result["artifact_refs"][0]["path"]
+    ) == "reports/final.md"
+    assert not (tmp_path / "task-workspace" / ".agently" / "workspace.db").exists()
+    assert "verification" not in result
+    assert "iterations" not in result
+    assert "# Delivered Report" not in json.dumps(result, ensure_ascii=False)
     assert "final_response" in result
     assert "Completed" in result["final_response"]
     assert "reports/final.md" in result["final_response"]
@@ -4440,14 +4560,15 @@ async def test_agent_task_workspace_artifact_refs_survive_incomplete_verificatio
     assert await task.async_get_text() == result["final_response"]
     delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
     assert delivery["status"] == "delivered"
-    assert delivery["file_refs"][0]["path"] == "reports/partial.md"
+    assert AgentTask._workspace_artifact_display_path(
+        delivery["file_refs"][0]["path"]
+    ) == "reports/partial.md"
     assert (
         meta["iterations"][0]["verification"]["reason"]
         == "real Workspace artifact exists but source coverage is incomplete"
     )
-    task_scoped_workspace = Agently.create_workspace(tmp_path / "task-workspace").with_scope_node(
-        "tasks",
-        "workspace-artifact-partial",
+    task_scoped_workspace = Agently.create_workspace(tmp_path / "task-workspace")._bind_execution(
+        "workspace-artifact-partial"
     )
     readback = await task_scoped_workspace.read_file("reports/partial.md")
     assert "这是一份仍需补证据的报告草稿" in readback["content"]
@@ -4543,9 +4664,8 @@ async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_b
     meta = await task.meta()
 
     assert result["status"] == "completed"
-    task_scoped_workspace = Agently.create_workspace(tmp_path / "task-workspace").with_scope_node(
-        "tasks",
-        "workspace-artifact-stream-draft",
+    task_scoped_workspace = Agently.create_workspace(tmp_path / "task-workspace")._bind_execution(
+        "workspace-artifact-stream-draft"
     )
     readback = await task_scoped_workspace.read_file("final.md")
     assert "Streamed Report" in readback["content"]
@@ -4557,7 +4677,7 @@ async def test_agent_task_workspace_artifact_stream_draft_when_step_returns_no_b
     assert delivery["mode"] == "streamed_workspace_artifact"
     assert delivery["retry_boundaries"][0]["source"] == "structured_status"
     assert delivery["retry_boundaries"][0]["reason"] == "transient provider disconnect"
-    assert delivery["file_refs"][0]["path"] == "final.md"
+    assert AgentTask._workspace_artifact_display_path(delivery["file_refs"][0]["path"]) == "final.md"
     assert meta["iterations"][0]["verification"]["reason"] == "trusted streamed Workspace artifact readback is present"
 
 
@@ -4893,8 +5013,7 @@ async def test_agent_create_task_exposes_scoped_workspace_readback_actions(tmp_p
 
     assert {"list_files", "read_file", "search_files"}.issubset(set(execution.local_action_ids))
 
-    scoped_workspace = agent.workspace.with_scope_node(
-        "tasks",
+    scoped_workspace = agent.workspace._bind_execution(
         task_id,
         scope={"task_id": task_id},
         search_scope={"task_id": task_id},
@@ -4941,8 +5060,7 @@ async def test_agent_create_task_exposes_scoped_workspace_coding_actions(tmp_pat
     }
     assert expected_actions.issubset(set(execution.local_action_ids))
 
-    scoped_workspace = agent.workspace.with_scope_node(
-        "tasks",
+    scoped_workspace = agent.workspace._bind_execution(
         task_id,
         scope={"task_id": task_id},
         search_scope={"task_id": task_id},
@@ -5150,7 +5268,8 @@ async def test_strategy_shape_analysis_is_hint_not_hard_route(tmp_path):
     assert task.execution_strategy == "auto"
     assert task.task_shape_analysis["execution_hint"]["recommended_shape"] == "taskboard"
     assert task.diagnostics["execution_strategy"]["effective"] == "flat"
-    assert task.workspace_refs["strategy"]
+    assert task.workspace_refs["strategy"] == []
+    assert not (task.workspace.root / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -5416,7 +5535,8 @@ async def test_acp_recovery_policy_uses_registered_action_after_exhaustion(tmp_p
     assert result["status"] == "completed"
     assert calls and calls[0][0] == "acp_run_task"
     assert calls[0][1]["agent_id"] == "codex"
-    assert task.workspace_refs["acp_recovery"]
+    assert task.workspace_refs["acp_recovery"] == []
+    assert not (task.workspace.root / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -5494,7 +5614,8 @@ async def test_taskboard_card_failure_uses_acp_recovery_after_card_attempts(tmp_
     assert payload["agent_id"] == "codex"
     assert payload["context"]["plan"]["taskboard_card_id"] == "collect"
     assert payload["context"]["failed_execution_result"]["taskboard_card_result"]["status"] == "failed"
-    assert task.workspace_refs["acp_recovery"]
+    assert task.workspace_refs["acp_recovery"] == []
+    assert not (task.workspace.root / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -5626,8 +5747,10 @@ async def test_taskboard_workspace_file_copy_patch_materializes_target_ref(tmp_p
     assert "patch_proposal" not in patched
     assert patched["workspace_patch_delivery"]["status"] == "completed"
     assert patched["workspace_patch_delivery"]["source_path"] == source_path
-    assert patched["workspace_patch_delivery"]["file_refs"][0]["path"] == "final.md"
-    assert patched["file_refs"][0]["path"] == "final.md"
+    assert task._workspace_artifact_display_path(
+        patched["workspace_patch_delivery"]["file_refs"][0]["path"]
+    ) == "final.md"
+    assert task._workspace_artifact_display_path(patched["file_refs"][0]["path"]) == "final.md"
     assert patched["diagnostics"][0]["code"] == "taskboard.control.workspace_patch_applied"
 
 
@@ -5890,6 +6013,59 @@ async def test_taskboard_finalization_repairs_structured_continuation_verdict(tm
     assert "Missing required section." in repair_cards[0].evidence_contract["missing_criteria"]
 
 
+@pytest.mark.asyncio
+async def test_taskboard_early_noncompleted_terminal_preserves_verified_partial_ref(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-partial-terminal-ref").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-partial-terminal-ref",
+        goal="Preserve the verified partial report on failure.",
+        success_criteria=["The final report is complete."],
+        execution="taskboard",
+    )
+    write_result = await task.workspace.write_file("reports/partial.md", "verified partial body")
+    partial_ref = {
+        **write_result["file_refs"][0],
+        "role": "workspace_artifact",
+    }
+    card = TaskBoardCard.from_value(
+        {"id": "draft", "objective": "Draft the report.", "required_outputs": ["Final report"]}
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-failed",
+            "graph": {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]},
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="failed",
+                    preview={"status": "failed", "remaining_work": ["Complete the report."]},
+                    file_refs=(partial_ref,),
+                ).to_dict()
+            },
+        }
+    )
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+    terminal = await task._finalize_taskboard(
+        revision,
+        context_pack=cast(Any, {}),
+    )
+    retention = await task._apply_terminal_workspace_retention(status="failed")
+
+    assert terminal == {"terminal": True, "status": "error"}
+    assert len(task.result["artifact_refs"]) == 1
+    assert task.result["artifact_refs"][0] == partial_ref
+    assert not (task.workspace.root / ".agently" / "workspace.db").exists()
+    assert retention is not None
+    assert retention["status"] in {"applied", "noop"}
+    assert (await task.workspace.read_file("reports/partial.md"))["content"] == "verified partial body"
+
+
 def test_taskboard_final_verification_does_not_parse_repairable_reason_text():
     assert (
         AgentTask._taskboard_final_verification_allows_repair(
@@ -6084,7 +6260,10 @@ async def test_taskboard_finalization_promotes_single_terminal_candidate_without
 
     assert result == {"terminal": True, "status": "completed"}
     assert calls == {"finalizer": 0, "verifier": 1}
-    assert task.result["taskboard"]["finalization_source"] == "candidate_promotion"
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert terminal_state["finalization_source"] == "candidate_promotion"
+    assert "taskboard" not in task.result
+    assert task.result["artifact_refs"] == []
 
 
 @pytest.mark.asyncio
@@ -6173,8 +6352,11 @@ async def test_taskboard_finalization_skips_verifier_when_acceptance_cache_is_cl
     assert result == {"terminal": True, "status": "completed"}
     assert calls == {"finalizer": 0, "verifier": 0}
     assert task.result["accepted"] is True
-    assert task.result["taskboard"]["acceptance_verification_plan"]["all_satisfied"] is True
-    assert task.result["taskboard"]["final_verification"]["verification_source"] == "taskboard_acceptance_cache"
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert terminal_state["acceptance_verification_plan"]["all_satisfied"] is True
+    assert terminal_state["final_verification"]["verification_source"] == (
+        "taskboard_acceptance_cache"
+    )
 
 
 @pytest.mark.asyncio
@@ -6270,7 +6452,8 @@ async def test_taskboard_final_gate_blocks_only_explicit_dirty_state_facts(tmp_p
     assert calls == {"finalizer": 0, "verifier": 1}
     assert task.result["accepted"] is False
     assert task.result["artifact_status"] == "partial"
-    assert task.result["taskboard"]["explicit_state_facts"][0]["code"] == "task_repo.dirty"
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert terminal_state["explicit_state_facts"][0]["code"] == "task_repo.dirty"
     assert "Task-scoped repository files are still dirty." in task.result["reason"]
 
 
@@ -6760,7 +6943,7 @@ def test_output_contract_falls_back_to_json_when_declared_format_fails(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
+async def test_agent_task_loop_replans_without_workspace_audit_records(tmp_path):
     MockAgentTaskRequester.reset()
     agent = _create_agent()
 
@@ -6784,23 +6967,15 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     execution_meta = await result_facade.async_get_meta()
     meta = await task.meta()
     delta_text = "".join([chunk async for chunk in task.get_async_generator(type="delta")])
-    resumed_execution = await result_facade.async_resume()
-    resumed_result = await resumed_execution.async_start()
-    resumed_meta = await resumed_execution.async_get_meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     assert "final_response" in result
     assert await result_facade.async_get_text() == result["final_response"]
     assert result_facade.task_refs["task_id"] == "legacy-script-upgrade"
     assert result_facade.task_refs["status"] == "completed"
     assert execution_meta["task_refs"]["task_id"] == "legacy-script-upgrade"
     assert execution_meta["task_refs"]["status"] == "completed"
-    assert resumed_execution.task_refs["task_id"] == "legacy-script-upgrade"
-    assert resumed_execution.task_refs["resume"] is True
-    assert resumed_result["status"] == "completed"
-    assert resumed_result["resumed"] is True
-    assert resumed_meta["task_refs"]["status"] == "completed"
     assert meta["status"] == "completed"
     assert len(meta["iterations"]) == 2
     for iteration in meta["iterations"]:
@@ -6853,24 +7028,11 @@ async def test_agent_task_loop_replans_and_records_workspace(tmp_path):
     assert "terminal" in phase_names
     assert any(item.path == "agent_task.phase.verified" for item in stream_items)
     assert any((item.meta or {}).get("stream_kind") == "phase" for item in stream_items)
-    assert len(meta["workspace_refs"]["observations"]) == 2
-    assert len(meta["workspace_refs"]["decisions"]) == 2
-    assert len(meta["workspace_refs"]["verification"]) == 2
-    assert len(meta["workspace_refs"]["checkpoints"]) == 2
-    assert len(meta["workspace_refs"]["evidence_links"]) >= 6
-    assert meta["workspace_refs"]["reflections"]
+    assert all(not refs for refs in meta["workspace_refs"].values())
     workspace = agent.workspace
     assert workspace is not None
-    assert len(await workspace.checkpoint_history("legacy-script-upgrade")) == 2
-    verifies_links = await workspace.links(relation="verifies_observation")
-    decision_links = await workspace.links(relation="implements_decision")
-    checkpoint_links = await workspace.links(relation="checkpointed_by")
-    reflection_links = await workspace.links(relation="reflects_on")
-    assert len(verifies_links) == 2
-    assert len(decision_links) == 2
-    assert len(checkpoint_links) == 2
-    assert reflection_links
-    assert all(link["meta"]["evidence"] for link in [*verifies_links, *decision_links, *checkpoint_links])
+    assert not (workspace.root / ".agently" / "workspace.db").exists()
+    assert meta["diagnostics"]["workspace_retention"]["status"] in {"applied", "noop"}
 
 
 @pytest.mark.asyncio
@@ -7329,7 +7491,8 @@ async def test_flat_intermediate_work_unit_skips_independent_verifier(tmp_path):
     assert iteration["verification"]["is_complete"] is False
     assert iteration["verification"]["consumer_driven_sufficiency"]["consumer"] == "next_flat_iteration"
     assert "Use the evidence" in " ".join(iteration["verification"]["next_step_requirements"])
-    assert len(meta["workspace_refs"]["verification"]) == 1
+    assert meta["workspace_refs"]["verification"] == []
+    assert not (tmp_path / "task-workspace" / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -7385,7 +7548,8 @@ async def test_flat_remaining_work_without_ready_flag_skips_independent_verifier
         "work_unit_reports_remaining_work"
     )
     assert "Use the evidence" in " ".join(iteration["verification"]["next_step_requirements"])
-    assert len(meta["workspace_refs"]["verification"]) == 1
+    assert meta["workspace_refs"]["verification"] == []
+    assert not (tmp_path / "task-workspace" / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -7435,8 +7599,8 @@ async def test_agent_task_loop_stops_at_max_iterations(tmp_path):
     assert result["artifact_status"] == "partial"
     assert meta["status"] == "max_iterations"
     assert len(meta["iterations"]) == 1
-    assert len(meta["workspace_refs"]["decisions"]) == 1
-    assert len(meta["workspace_refs"]["verification"]) == 1
+    assert all(not refs for refs in meta["workspace_refs"].values())
+    assert not (tmp_path / "task-workspace" / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -7984,7 +8148,7 @@ async def test_agent_task_loop_verification_guard_replans_when_missing_criteria_
     meta = await task.meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     assert any(item.path.endswith(".replan") for item in stream_items)
     assert meta["iterations"][0]["verification"]["is_complete"] is False
     assert "missing_criteria_present" in meta["iterations"][0]["verification"]["guard_reasons"]
@@ -8057,7 +8221,7 @@ async def test_agent_task_loop_verification_guard_replans_when_final_result_miss
     assert result["status"] == "completed"
     assert result["accepted"] is True
     assert result["artifact_status"] == "accepted"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     assert any(item.path.endswith(".replan") for item in stream_items)
     first_verification = meta["iterations"][0]["verification"]
     assert first_verification["is_complete"] is False
@@ -8134,7 +8298,7 @@ async def test_agent_task_loop_verification_guard_replans_on_failed_action_evide
     meta = await task.meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     assert any(phase["phase"] == "replanned" for phase in meta["diagnostics"]["phases"])
     first_verification = meta["iterations"][0]["verification"]
     assert first_verification["is_complete"] is False
@@ -8218,7 +8382,7 @@ async def test_agent_task_loop_replans_on_structured_blocks_replan_signal(tmp_pa
     meta = await task.async_meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     first_verification = meta["iterations"][0]["verification"]
     assert first_verification["is_complete"] is False
     assert first_verification["replan_signals"][0]["status"] == "replan_goal"
@@ -8297,7 +8461,7 @@ async def test_required_capabilities_satisfied_cumulatively_across_iterations(tm
 
     # Iteration 1 cannot complete (skill_y still missing); iteration 2 completes.
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     first = meta["iterations"][0]["verification"]
     assert first["is_complete"] is False
     assert "skill_y" in " ".join(first.get("missing_required_capabilities", []))
@@ -8318,8 +8482,8 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
         success_criteria=["The script runs successfully."],
         workspace=workspace_dir,
         max_iterations=3,
+        options={"agent_task": {"workspace_recovery": True}},
     )
-
     async def crash_on_second_iteration(iteration_index, plan, context_pack):
         if iteration_index >= 2:
             raise RuntimeError("simulated process crash")
@@ -8338,8 +8502,9 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
     assert snapshot is not None
     assert snapshot["iteration"] == 1
     assert snapshot["manifest"]["goal"].startswith("Repair a legacy")
-    # The bare task_id checkpoint history is unaffected by resume snapshots.
-    assert len(await agent.workspace.checkpoint_history("resumable-task")) == 1
+    # Failed-run cleanup discards ordinary process checkpoints while the
+    # explicitly anchored compact resume snapshot remains available.
+    assert await agent.workspace.checkpoint_history("resumable-task") == []
 
     # Second run: a fresh AgentExecution resumes from the snapshot and completes.
     MockAgentTaskRequester.reset()
@@ -9004,7 +9169,7 @@ async def test_capability_evidence_satisfied_cumulatively_across_iterations(tmp_
     meta = await task.async_meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     first = meta["iterations"][0]["verification"]
     assert first["is_complete"] is False
     assert "design-skill" in " ".join(first.get("missing_capability_evidence", []))
@@ -9761,7 +9926,7 @@ async def test_path_only_host_file_action_upgrades_only_after_workspace_readback
         source="test.host_file.workspace_readback",
     )
 
-    assert delivered["file_refs"][0]["path"] == "reports/final.txt"
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "reports/final.txt"
     assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
 
 
@@ -10172,7 +10337,7 @@ async def test_action_succeeded_evidence_satisfied_in_earlier_iteration(tmp_path
     meta = await task.async_meta()
 
     assert result["status"] == "completed"
-    assert result["iterations"] == 2
+    assert len(meta["iterations"]) == 2
     # Iteration 2 must not report build_action as missing — it succeeded in iter 1.
     second = meta["iterations"][1]["verification"]
     assert "build_action" not in " ".join(second.get("missing_capability_evidence", []))

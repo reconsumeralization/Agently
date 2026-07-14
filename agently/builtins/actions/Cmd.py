@@ -64,10 +64,8 @@ class Cmd:
             if isinstance(prefix, str) and prefix.strip()
         ]
         # No implicit process-cwd boundary: a Workspace-bound shell must inject
-        # the working directory through the Workspace file boundary (e.g.
-        # agent.enable_shell(...) derives allowed_workdir_roots from the bound
-        # Workspace files_root). Executors must not invent a fallback cwd
-        # (spec sections 8.6 / 9).
+        # the working directory through the direct Workspace root. Executors
+        # must not invent a fallback cwd.
         roots = allowed_workdir_roots if allowed_workdir_roots is not None else []
         self.allowed_workdir_roots = [Path(root).resolve() for root in roots]
         self.timeout = timeout

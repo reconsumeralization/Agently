@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from agently.types.data import WorkspaceRetentionTerminalStatus
+
 from .TaskShared import *
 
 # A bounded AgentTask step should hand inconclusive action evidence back to the
@@ -40,10 +42,15 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 await self._emit("agent_task.resumed", {"task_id": self.id, "terminal": True})
                 await self._ensure_final_reflection()
                 await self._emit("result", self.result)
+                await self._apply_terminal_workspace_retention(
+                    status="completed" if self.status == "completed" else "failed"
+                )
+                self._release_terminal_action_artifact_scope()
                 await self._close_streams()
                 return self.result
             self.status = "running"
-            execution = self._flow.create_execution(auto_close=False)
+            execution = self._flow.create_execution(auto_close=False, workspace=False)
+            terminal_retention_status: WorkspaceRetentionTerminalStatus | None = None
             try:
                 await self._record_phase(
                     "configured",
@@ -70,6 +77,9 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                         "status": self.status,
                         "accepted": False,
                         "artifact_status": "partial",
+                        "task_id": self.id,
+                        "execution_strategy": self.execution_strategy,
+                        "effective_execution_strategy": self.effective_execution_strategy,
                         "reason": reason,
                         "final_response": self._agent_task_user_final_response(
                             accepted=False,
@@ -77,12 +87,39 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                             status=self.status,
                             reason=reason,
                         ),
-                        "iterations": len(self.iterations),
+                        "final_result": "",
+                        "artifact_refs": [],
+                        "missing_criteria": [],
                     }
                     await self._emit("agent_task.blocked", self.result)
                 await self._ensure_final_reflection()
                 await self._emit("result", self.result)
+                terminal_retention_status = (
+                    "completed" if self.status == "completed" else "failed"
+                )
                 return self.result
+            except asyncio.CancelledError as error:
+                self.status = "cancelled"
+                self._error = error
+                self.result = {
+                    "status": "cancelled",
+                    "accepted": False,
+                    "artifact_status": "partial",
+                    "task_id": self.id,
+                    "execution_strategy": self.execution_strategy,
+                    "effective_execution_strategy": self.effective_execution_strategy,
+                    "reason": "AgentTask was cancelled by its host.",
+                    "final_response": "Task was cancelled by its host.",
+                    "final_result": "",
+                    "artifact_refs": [],
+                    "missing_criteria": [],
+                }
+                await self._emit(
+                    "agent_task.cancelled",
+                    {"status": "cancelled", "task_id": self.id, "message": "AgentTask was cancelled by its host."},
+                )
+                terminal_retention_status = "cancelled"
+                raise
             except BaseException as error:
                 self.status = "timed_out" if self._is_timeout_error(error) else "error"
                 self._error = error
@@ -91,6 +128,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     {"type": error.__class__.__name__, "message": message, "status": self.status}
                 )
                 await self._emit("agent_task.error", self.diagnostics["errors"][-1])
+                terminal_retention_status = "failed"
                 raise
             finally:
                 # Always close the auto_close=False execution so its runtime is
@@ -99,6 +137,11 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     await execution.async_close()
                 except Exception:
                     pass
+                if terminal_retention_status is not None:
+                    await self._apply_terminal_workspace_retention(
+                        status=terminal_retention_status
+                    )
+                    self._release_terminal_action_artifact_scope()
                 self.completed_at = time.time()
                 self._completed = True
                 await self._close_streams()
@@ -109,6 +152,46 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         except RuntimeError:
             return asyncio.run(self.async_run())
         return self.async_run()
+
+    def _release_terminal_action_artifact_scope(self) -> None:
+        """Release an untransferred task scope without changing task outcome."""
+
+        transferred_to = str(
+            getattr(self, "_action_artifact_scope_transferred_to_execution_id", "") or ""
+        ).strip()
+        artifact_scope = {"kind": "agent_task", "id": self.id}
+        if transferred_to:
+            self.diagnostics["action_artifact_release"] = {
+                "status": "transferred",
+                "scope": artifact_scope,
+                "owner": {"kind": "agent_execution", "id": transferred_to},
+            }
+            return
+        action = getattr(self.agent, "action", None)
+        release_scope = getattr(action, "_release_artifact_scope", None)
+        if not callable(release_scope):
+            return
+        try:
+            released = release_scope(artifact_scope)
+            self.diagnostics["action_artifact_release"] = {
+                "status": "released",
+                "scope": artifact_scope,
+                "released_count": released if isinstance(released, int) else 0,
+            }
+        except Exception as error:
+            self.diagnostics["action_artifact_release"] = {
+                "status": "failed",
+                "scope": artifact_scope,
+                "diagnostics": [
+                    {
+                        "code": "agent_task.action_artifact_release_failed",
+                        "message": _compact_agent_task_error_message(
+                            error,
+                            fallback=error.__class__.__name__,
+                        ),
+                    }
+                ],
+            }
 
     @staticmethod
     def _is_timeout_error(error: BaseException) -> bool:
@@ -136,6 +219,8 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             "accepted": False,
             "artifact_status": "partial",
             "task_id": self.id,
+            "execution_strategy": self.execution_strategy,
+            "effective_execution_strategy": self.effective_execution_strategy,
             "reason": reason,
             "final_response": self._agent_task_user_final_response(
                 accepted=False,
@@ -143,7 +228,9 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 status="timed_out",
                 reason=reason,
             ),
-            "iterations": len(self.iterations),
+            "final_result": "",
+            "artifact_refs": [],
+            "missing_criteria": [],
         }
         self.diagnostics.setdefault("terminal_reason", "timed_out")
         await self._emit_progress(iteration_index, "timed_out", f"Iteration {iteration_index}: { reason }")

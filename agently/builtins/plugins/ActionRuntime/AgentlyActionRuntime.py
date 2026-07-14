@@ -443,6 +443,9 @@ class AgentlyActionRuntime:
         trusted_policy_overrides = request.get("trusted_policy_overrides", {})
         if not isinstance(trusted_policy_overrides, dict):
             trusted_policy_overrides = {}
+        artifact_scope = context.get("artifact_scope")
+        if not isinstance(artifact_scope, dict):
+            artifact_scope = None
         if len(action_calls) == 0:
             return []
         if self.action.async_execute_action is None:
@@ -494,6 +497,7 @@ class AgentlyActionRuntime:
                     source_protocol=str(action_call.get("source_protocol", "structured_plan")),
                     todo_suggestion=next_step,
                     next_value=next_step,
+                    artifact_scope=artifact_scope,
                 )
 
             try:
@@ -522,7 +526,7 @@ class AgentlyActionRuntime:
 
         flow = TriggerFlow(name="action-runtime-execute-actions")
         flow.for_each(concurrency=concurrency).to(run_one).end_for_each().to(collect_results)
-        execution = flow.create_execution(auto_close=False)
+        execution = flow.create_execution(auto_close=False, workspace=False)
         await execution.async_start(list(action_calls))
         close_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
         snapshot = await execution.async_close(timeout=close_timeout)

@@ -70,7 +70,7 @@ class AgentExecutionPromptDraft:
         if always:
             self.agent.rule(prompt, mappings=mappings, always=True)
         else:
-            self.request.prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
+            self.request.prompt.append("instruct", "{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!")
             self.request.prompt.set("system.rule", prompt, mappings=mappings)
         return self
 
@@ -87,7 +87,7 @@ class AgentExecutionPromptDraft:
         if always:
             self.agent.role(prompt, mappings=mappings, always=True)
         else:
-            self.request.prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
+            self.request.prompt.append("instruct", "YOU MUST REACT AND RESPOND AS {system.role}!")
             self.request.prompt.set("system.your_role", prompt, mappings=mappings)
         return self
 
@@ -104,7 +104,7 @@ class AgentExecutionPromptDraft:
         if always:
             self.agent.user_info(prompt, mappings=mappings, always=True)
         else:
-            self.request.prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
+            self.request.prompt.append("instruct", "{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!")
             self.request.prompt.set("system.user_info", prompt, mappings=mappings)
         return self
 

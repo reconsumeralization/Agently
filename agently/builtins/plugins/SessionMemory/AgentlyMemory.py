@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from agently.core.workspace.Retrieval import _default_model_unavailable_reason
+from agently.core.Workspace.Retrieval import _default_model_unavailable_reason
 from agently.types.data.workspace import WorkspaceRetrievalPackage
 from agently.types.plugins import SessionMemory
 from agently.utils import Settings, SettingsNamespace
@@ -455,6 +455,7 @@ class AgentlyMemory(SessionMemory):
         scope = {"memory_scope": memory_scope}
         if memory_scope == SESSION_MEMORY:
             scope["session_id"] = str(session.id)
+        vector_enabled = bool(self.plugin_settings.get("vector_index.enabled", False))
         vector_meta = self._vector_index_meta(workspace)
         provenance = dict(memory["provenance"])
         record_body = {
@@ -473,6 +474,7 @@ class AgentlyMemory(SessionMemory):
             summary=str(memory["summary"]),
             scope=scope,
             source=provenance,
+            vector=vector_enabled,
             meta={
                 "tags": memory["tags"],
                 "memory_scope": memory_scope,
@@ -482,11 +484,15 @@ class AgentlyMemory(SessionMemory):
         )
 
     def _vector_index_meta(self, workspace: Any) -> dict[str, Any]:
-        vector_index = getattr(getattr(workspace, "backend", None), "vector_index", None)
+        capabilities = workspace.capabilities()
+        materialized = {
+            str(component)
+            for component in capabilities.get("materialized_components", [])
+        }
         return {
             "requested": bool(self.plugin_settings.get("vector_index.enabled", False)),
-            "backend": type(vector_index).__name__ if vector_index is not None else None,
-            "available": vector_index is not None and getattr(vector_index, "name", None) != "noop",
+            "backend": None,
+            "available": {"embedding", "vector"}.issubset(materialized),
         }
 
     def _prompt_memory_package(self, package: WorkspaceRetrievalPackage) -> list[dict[str, Any]]:

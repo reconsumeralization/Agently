@@ -239,50 +239,7 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
             )
             terminal = bool(getattr(self, "_completed", False))
             guidance_ref["status"] = "received_after_terminal" if terminal else "received"
-            record_ref = await self.workspace.put(
-                content={
-                    "schema_version": "agent_task_guidance/v1",
-                    "task_id": self.id,
-                    "guidance_id": guidance_ref["id"],
-                    "status": guidance_ref["status"],
-                    "content": guidance_ref["content"],
-                    "content_preview": guidance_ref["content_preview"],
-                    "target": guidance_ref["target"],
-                    "author": guidance_ref.get("author"),
-                    "received_at": guidance_ref["received_at"],
-                    "meta": guidance_ref.get("meta", {}),
-                },
-                collection="guidance",
-                kind="agent_task_guidance",
-                summary=f"{self.id} runtime guidance {guidance_ref['id']}",
-                scope={
-                    "task_id": self.id,
-                    "guidance_id": guidance_ref["id"],
-                    "target": DataFormatter.sanitize(guidance_ref["target"]),
-                },
-                source={"type": "agent_task", "phase": "guidance", "author": author},
-                meta={
-                    "task_id": self.id,
-                    "guidance_id": guidance_ref["id"],
-                    "schema_version": "agent_task_guidance/v1",
-                },
-            )
-            guidance_ref["workspace_ref"] = DataFormatter.sanitize(record_ref)
-            self._append_workspace_ref("guidance", record_ref)
-            checkpoint_ref = await self.workspace.put_checkpoint(
-                self.id,
-                {
-                    "schema_version": "agent_task_guidance_checkpoint/v1",
-                    "task_id": self.id,
-                    "guidance_id": guidance_ref["id"],
-                    "status": guidance_ref["status"],
-                    "guidance_ref": record_ref.get("id"),
-                    "guidance_items": self._guidance_context_projection(extra=[guidance_ref]),
-                },
-                step_id=f"guidance-{guidance_ref['id']}",
-            )
-            guidance_ref["checkpoint_ref"] = DataFormatter.sanitize(checkpoint_ref)
-            self._append_workspace_ref("checkpoints", checkpoint_ref)
+            guidance_ref["storage"] = "memory"
             self.guidance_items.append(DataFormatter.sanitize(guidance_ref))
             self._record_guidance_diagnostic(guidance_ref["status"])
             event_name = (

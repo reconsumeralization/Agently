@@ -55,6 +55,7 @@ class ActionApproval(TypedDict, total=False):
 
 
 class ActionArtifact(TypedDict, total=False):
+    selection_key: str
     artifact_id: str
     action_call_id: str
     label: str
@@ -175,6 +176,7 @@ class ActionRunContext(_ActionRunContextRequired, total=False):
     done_plans: list[ActionResult]
     last_round_records: list[ActionResult]
     parent_run_context: Any
+    artifact_scope: dict[str, str]
     action: Any
     runtime: Any
 

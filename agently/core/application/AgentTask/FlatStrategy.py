@@ -396,11 +396,20 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         if bool(verification.get("is_complete")):
             self.status = "completed"
             final_result = verification.get("final_result") or execution_result
+            terminal_refs = self._trusted_terminal_refs(execution_result, verification)
+            terminal_file_refs = self._trusted_terminal_file_refs(terminal_refs)
+            promoted_refs = await self._register_terminal_deliverables(terminal_refs)
+            final_result = self._compact_terminal_final_result(
+                final_result,
+                trusted_file_refs=terminal_file_refs,
+            )
             self.result = {
                 "status": "completed",
                 "accepted": True,
                 "artifact_status": "accepted",
                 "task_id": self.id,
+                "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
                 "final_result": final_result,
                 "final_response": self._agent_task_user_final_response(
                     final=verification,
@@ -409,10 +418,12 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     status="completed",
                     reason=str(verification.get("reason") or ""),
                     missing_criteria=verification.get("missing_criteria", []),
+                    final_refs=terminal_file_refs,
                     final_result=final_result,
                 ),
-                "iterations": iteration_index,
-                "verification": verification,
+                "artifact_refs": promoted_refs,
+                "reason": verification.get("reason", ""),
+                "missing_criteria": verification.get("missing_criteria", []),
             }
             await self._emit_progress(
                 iteration_index,
@@ -431,12 +442,20 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             self.status = "blocked"
             reason = verification.get("reason") or "Verifier blocked the task."
             blocked_final_result = verification.get("final_result") or ""
-            blocked_final_refs = execution_result.get("file_refs", []) if isinstance(execution_result, Mapping) else []
+            blocked_terminal_refs = self._trusted_terminal_refs(execution_result, verification)
+            blocked_final_refs = self._trusted_terminal_file_refs(blocked_terminal_refs)
+            promoted_refs = await self._register_terminal_deliverables(blocked_terminal_refs)
+            blocked_final_result = self._compact_terminal_final_result(
+                blocked_final_result,
+                trusted_file_refs=blocked_final_refs,
+            )
             self.result = {
                 "status": "blocked",
                 "accepted": False,
                 "artifact_status": "blocked",
                 "task_id": self.id,
+                "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
                 "reason": reason,
                 "final_response": self._agent_task_user_final_response(
                     final=verification,
@@ -448,8 +467,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     final_refs=blocked_final_refs,
                     final_result=blocked_final_result,
                 ),
-                "iterations": iteration_index,
-                "verification": verification,
+                "artifact_refs": promoted_refs,
+                "missing_criteria": verification.get("missing_criteria", []),
             }
             if blocked_final_result not in (None, ""):
                 self.result["final_result"] = blocked_final_result
@@ -478,12 +497,20 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 self.status = "max_iterations"
                 reason = verification.get("reason") or "Task did not pass verification before max_iterations."
             partial_final_result = verification.get("final_result") or ""
-            partial_final_refs = execution_result.get("file_refs", []) if isinstance(execution_result, Mapping) else []
+            partial_terminal_refs = self._trusted_terminal_refs(execution_result, verification)
+            partial_final_refs = self._trusted_terminal_file_refs(partial_terminal_refs)
+            promoted_refs = await self._register_terminal_deliverables(partial_terminal_refs)
+            partial_final_result = self._compact_terminal_final_result(
+                partial_final_result,
+                trusted_file_refs=partial_final_refs,
+            )
             self.result = {
                 "status": self.status,
                 "accepted": False,
                 "artifact_status": "partial",
                 "task_id": self.id,
+                "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
                 "reason": reason,
                 "final_response": self._agent_task_user_final_response(
                     final=verification,
@@ -495,13 +522,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     final_refs=partial_final_refs,
                     final_result=partial_final_result,
                 ),
-                "iterations": iteration_index,
-                "verification": verification,
+                "artifact_refs": promoted_refs,
+                "missing_criteria": verification.get("missing_criteria", []),
             }
             if partial_final_result not in (None, ""):
                 self.result["final_result"] = partial_final_result
-            if missing_capabilities:
-                self.result["missing_required_capabilities"] = missing_capabilities
             await self._emit_progress(
                 iteration_index,
                 self.status,
@@ -695,6 +720,19 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         return normalized
 
     async def _build_context(self) -> "WorkspaceContextPackage":
+        if str(self.context_profile or "auto").strip().lower() in {"", "auto", "none", "off"}:
+            return await self._context_pack_with_task_context(
+                cast(
+                    "WorkspaceContextPackage",
+                    {
+                        "goal": self.goal,
+                        "profile": "none",
+                        "items": [],
+                        "omitted": [],
+                        "diagnostics": {"workspace_recall": "disabled_by_default"},
+                    },
+                )
+            )
         try:
             context_pack = await self.workspace.build_context(
                 goal=self.goal,

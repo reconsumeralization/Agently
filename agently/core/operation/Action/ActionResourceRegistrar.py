@@ -337,6 +337,7 @@ class ActionResourceRegistrar:
         env: dict[str, str] | None = None,
         max_output_chars: int = 20000,
         output_artifact_dir: str | Path | None = None,
+        workspace_mounts: list[dict[str, str]] | None = None,
         sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
@@ -368,6 +369,7 @@ class ActionResourceRegistrar:
                         "env": env,
                         "max_output_chars": max_output_chars,
                         "output_artifact_dir": output_artifact_dir,
+                        "workspace_mounts": workspace_mounts,
                     },
                     "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }
@@ -392,6 +394,7 @@ class ActionResourceRegistrar:
                         "env": env,
                         "max_output_chars": max_output_chars,
                         "output_artifact_dir": str(output_artifact_dir) if output_artifact_dir is not None else None,
+                        "workspace_mounts": [dict(item) for item in (workspace_mounts or [])],
                     },
                 )
             ]

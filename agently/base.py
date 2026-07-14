@@ -408,7 +408,7 @@ class AgentlyMain(Generic[A]):
         path_or_backend: "str | Path | WorkspaceBackend | None" = None,
         *,
         create: bool = True,
-        mode: str = "read_write",
+        mode: str = "read_only",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
         db_store_provider: Any | None = None,
@@ -417,7 +417,6 @@ class AgentlyMain(Generic[A]):
         embedding_options: dict[str, Any] | None = None,
         vector_store_provider: Any | None = None,
         vector_store_options: dict[str, Any] | None = None,
-        files_root: "str | Path | None" = None,
         default_scope: dict[str, Any] | None = None,
         default_search_scope: dict[str, Any] | None = None,
     ) -> "Workspace":
@@ -433,7 +432,6 @@ class AgentlyMain(Generic[A]):
             embedding_options=embedding_options,
             vector_store_provider=vector_store_provider,
             vector_store_options=vector_store_options,
-            files_root=files_root,
             default_scope=default_scope,
             default_search_scope=default_search_scope,
         )

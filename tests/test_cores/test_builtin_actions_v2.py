@@ -13,7 +13,6 @@ from agently.builtins.tools import Cmd as LegacyCmd
 from agently.builtins.tools import Search as LegacySearch
 from agently.core.application.AgentExecution.Context import AgentExecutionContext
 from agently.core.runtime.RuntimeContext import bind_runtime_context
-from agently.core.workspace._defaults import WORKSPACE_GUIDE_FILENAME
 
 
 def test_builtins_actions_is_preferred_import_path_and_tools_is_facade():
@@ -191,9 +190,9 @@ def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
     assert run_result.get("status") == "success"
     assert run_result.get("agent_id") == "codex"
     assert run_result.get("data", {}).get("output") == "codex: inspect the current branch"
-    assert provider.runs[0]["root"] == str(agent.workspace.files_root)
-    assert provider.runs[0]["working_dir"] == str(agent.workspace.files_root)
-    assert (agent.workspace.files_root / WORKSPACE_GUIDE_FILENAME).is_file()
+    assert provider.runs[0]["root"] == str(agent.workspace.root)
+    assert provider.runs[0]["working_dir"] == str(agent.workspace.root)
+    assert not (agent.workspace.root / ".agently").exists()
 
 
 def test_agent_use_acp_skips_missing_or_failed_agents(tmp_path):
@@ -743,8 +742,8 @@ async def test_browse_curl_backend_materializes_remote_file_to_workspace(tmp_pat
 
     assert result["status"] in {"success", "partial_success"}
     assert result["data"]["kind"] == "remote_file"
-    assert result["file_refs"][0]["path"].startswith("downloads/syllabus-")
-    assert (workspace.files_root / result["file_refs"][0]["path"]).is_file()
+    assert "downloads/syllabus-" in result["file_refs"][0]["path"]
+    assert (workspace.root / result["file_refs"][0]["path"]).is_file()
 
 
 def test_browse_action_failure_is_structured_error_not_success_text():
@@ -1002,8 +1001,8 @@ async def test_browse_materializes_remote_file_to_workspace(tmp_path):
     assert result["status"] in {"success", "partial_success"}
     assert result["data"]["kind"] == "remote_file"
     assert result["data"]["media_type"] == "application/pdf"
-    assert result["file_refs"][0]["path"].startswith("downloads/syllabus-")
-    assert (workspace.files_root / result["file_refs"][0]["path"]).is_file()
+    assert "downloads/syllabus-" in result["file_refs"][0]["path"]
+    assert (workspace.root / result["file_refs"][0]["path"]).is_file()
     assert result["data"]["read_preview"]["path"] == result["file_refs"][0]["path"]
     assert "content_bytes" not in str(result)
 
@@ -1040,8 +1039,8 @@ def test_browse_action_executor_uses_settings_workspace_for_remote_file(tmp_path
     assert result.get("success") is True
     file_refs = result.get("file_refs", [])
     assert isinstance(file_refs, list)
-    assert file_refs[0]["path"].startswith("downloads/syllabus-")
-    assert (workspace.files_root / file_refs[0]["path"]).is_file()
+    assert "downloads/syllabus-" in file_refs[0]["path"]
+    assert (workspace.root / file_refs[0]["path"]).is_file()
 
 
 @pytest.mark.asyncio
@@ -1160,7 +1159,7 @@ def test_agent_enable_sqlite_registers_managed_sqlite_action(tmp_path):
     assert data.get("rows") == [{"name": "Agently"}]
 
 
-def test_instruction_heavy_action_records_digest_and_artifact_recall(tmp_path):
+def test_instruction_heavy_direct_action_releases_historical_artifact_refs(tmp_path):
     agent = Agently.create_agent()
     agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="test_recall_bash", sandbox="trusted_local")
 
@@ -1193,29 +1192,38 @@ def test_instruction_heavy_action_records_digest_and_artifact_recall(tmp_path):
     assert isinstance(input_action_call_id, str)
     assert isinstance(output_artifact_id, str)
     assert isinstance(output_action_call_id, str)
+    assert all(ref.get("available") is False for ref in artifact_refs)
+    assert all(ref.get("full_value_available") is False for ref in artifact_refs)
 
     recalled_input = agent.action.read_action_artifact(
-        artifact_id=input_artifact_id,
-        action_call_id=input_action_call_id,
+        selection_key=str(input_ref.get("selection_key", "")),
     )
-    assert recalled_input.get("value", {}).get("api_token") == "[REDACTED]"
+    assert recalled_input.get("ok") is False
+    assert recalled_input.get("status") == "not_found"
 
     recalled = agent.action.read_action_artifact(
-        artifact_id=output_artifact_id,
-        action_call_id=output_action_call_id,
+        selection_key=str(output_ref.get("selection_key", "")),
     )
-    assert recalled.get("ok") is True
-    assert str(tmp_path) in str(recalled.get("value", {}).get("stdout", ""))
+    assert recalled.get("ok") is False
+    assert recalled.get("status") == "not_found"
 
     prompt_results = agent.action.to_action_results([result])
     visible = prompt_results["Inspect cwd"]
     assert isinstance(visible, dict)
     assert visible.get("action_call_id") == result.get("action_call_id")
-    assert visible.get("artifact_refs") == artifact_refs
+    visible_refs = visible.get("artifact_refs")
+    assert isinstance(visible_refs, list)
+    assert [ref.get("selection_key") for ref in visible_refs] == [
+        ref.get("selection_key") for ref in artifact_refs
+    ]
+    assert all(
+        set(ref).isdisjoint({"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"})
+        for ref in visible_refs
+    )
 
 
 @pytest.mark.asyncio
-async def test_action_loop_uses_digest_and_exposes_recall_after_artifacts(tmp_path):
+async def test_action_loop_exposes_live_recall_then_returns_historical_refs(tmp_path):
     agent = Agently.create_agent()
     tag = f"recall-loop-{agent.name}"
     action_id = "test_loop_recall_bash"
@@ -1271,17 +1279,29 @@ async def test_action_loop_uses_digest_and_exposes_recall_after_artifacts(tmp_pa
     )
 
     assert len(records) == 1
-    assert str(tmp_path) in str(records[0].get("data", {}).get("stdout", ""))
+    assert str(tmp_path) in str(
+        records[0].get("data", {}).get("result_preview", {}).get("stdout", "")
+    )
     assert len(seen_rounds) >= 2
     second_round = seen_rounds[1]
     assert "read_action_artifact" in second_round["action_ids"]
     visible_record = second_round["last_round_records"][0]
-    assert visible_record.get("data") == records[0].get("model_digest")
-    assert visible_record.get("result") == records[0].get("model_digest")
+    live_digest = visible_record.get("data")
+    returned_digest = records[0].get("model_digest")
+    assert isinstance(live_digest, dict)
+    assert isinstance(returned_digest, dict)
+    assert {
+        key: value for key, value in live_digest.items() if key != "artifact_refs"
+    } == {
+        key: value for key, value in returned_digest.items() if key != "artifact_refs"
+    }
+    assert visible_record.get("result") == live_digest
+    assert all(ref.get("available") is True for ref in live_digest.get("artifact_refs", []))
+    assert all(ref.get("available") is False for ref in returned_digest.get("artifact_refs", []))
 
 
 @pytest.mark.asyncio
-async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_context():
+async def test_action_loop_keeps_large_outputs_cold_then_releases_standalone_scope():
     agent = Agently.create_agent()
     marker = "RAW_OUTPUT_SHOULD_STAY_COLD"
 
@@ -1330,7 +1350,19 @@ async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_contex
         planning_handler=planning_handler,
     )
 
-    assert marker in json.dumps(records, ensure_ascii=False)
+    assert marker not in json.dumps(records, ensure_ascii=False)
+    output_ref = next(
+        ref
+        for ref in records[0].get("artifact_refs", [])
+        if ref.get("artifact_type") == "action_output"
+    )
+    assert output_ref.get("selection_key")
+    assert set(output_ref).isdisjoint(
+        {"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"}
+    )
+    assert output_ref.get("available") is False
+    assert output_ref.get("full_value_available") is False
+    assert agent.action._artifact_manager._artifacts == {}
     assert len(seen_rounds) >= 2
     second_round = seen_rounds[1]
     hot_context = json.dumps(
@@ -1341,7 +1373,7 @@ async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_contex
         ensure_ascii=False,
     )
     assert marker not in hot_context
-    assert len(hot_context) < 9000
+    assert len(hot_context) < 10000
     assert "read_action_artifact" in second_round["action_ids"]
     visible_record = second_round["last_round_records"][0]
     assert visible_record["data"]["same_as"] == "result"

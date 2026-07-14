@@ -162,7 +162,8 @@ allowlist, Agently uses a small safe shell profile for commands such as `pwd`,
 `ls`, `rg`, `cat`, `git status`, `git diff`, `git log`, `python -m pytest`, and
 `python -m pyright`. Stdout and stderr are returned as bounded previews; if a
 stream exceeds `max_output_chars`, the full stream is written under the
-Workspace root at `artifacts/shell/` and referenced from the action result.
+current execution fallback at `.agently/files/<execution-id>/shell-output/`
+and referenced from the action result.
 `allow_unsafe` is a host-only direct execution grant; it is not exposed in
 model-visible shell action schemas and is stripped from model-planned action
 inputs. If a model-selected command is outside the safe profile, route it
@@ -210,7 +211,7 @@ The default `on_missing="skip"` records diagnostics and avoids fake runnable
 agents; `on_missing="error"` fails closed. ACP run actions declare
 `ExecutionResource(kind="acp")` so root scope and lifecycle facts stay in the
 resource layer. If `root` is omitted, `agent.use_acp()` uses the Agent's bound
-Workspace `files_root` as the coding-agent project root; pass `root=...` only
+Workspace `root` as the coding-agent project root; pass `root=...` only
 when the host intentionally authorizes a different project directory. ACP
 session reuse is an internal AgentExecution resource policy, not an ordinary
 task-start option. CLI adapters are marked
@@ -252,12 +253,14 @@ recording an execution digest plus artifact references.
 
 The digest is what the next action-planning round normally sees. It includes the
 action id, call id, purpose, status, a compact instruction preview, result
-preview, preview truncation metadata, redaction notes, artifact refs, and any
+preview, preview truncation metadata, redaction notes, artifact candidates, and any
 Workspace file refs returned by the Action. Full raw content such as complete
 code, shell output, SQL rows, page HTML, screenshots, or logs is retained as a
-redacted artifact instead of being inserted into every prompt. Artifact refs
-include role, media type, size/bytes, preview size, SHA-256, and truncation
-flags so consumers can tell that a preview is not complete evidence.
+redacted artifact instead of being inserted into every prompt. Each model-visible
+candidate carries one host-issued `selection_key` plus task-relevant facts such
+as role, media type, label, and a bounded preview. Canonical artifact ids, call
+ids, scope, digest, size, and provenance remain host-owned and are not copied
+through the model.
 Actions that explicitly return `artifacts` or `artifact_refs` use the same
 contract even when the output is small. This includes MCP resource/content
 blocks surfaced by `MCPActionExecutor`; Agently records the declared artifact
@@ -280,18 +283,33 @@ pointers, and artifact refs omit preview bodies while keeping readback ids.
 That compaction only applies to hot-path model context; full redacted content
 stays in the Action artifact store for explicit readback.
 
-When the model or application needs the omitted detail, read it explicitly:
+While the owning ActionFlow scope is still live, the model can request omitted
+detail through the built-in readback Action:
 
 ```python
-turn = agent.input("Use the action and summarize the result.")
-records = agent.get_action_result(prompt=turn.prompt)
-artifact_ref = records[0]["artifact_refs"][0]
-
-raw = agent.action.read_action_artifact(
-    artifact_id=artifact_ref["artifact_id"],
-    action_call_id=artifact_ref["action_call_id"],
-)
+readback_call = {
+    "action_id": "read_action_artifact",
+    "action_input": {"selection_key": artifact_candidate["selection_key"]},
+}
 ```
+
+This is an in-flow readback contract. After a standalone ActionFlow returns,
+its candidates truthfully report `available=false`; applications must use a
+durably promoted Workspace ref instead of trying to read the released scope.
+The public readback selector is only `selection_key`. Agently resolves it
+against the currently bound AgentExecution, AgentTask, or standalone ActionFlow
+artifact scope; TaskBoard host code binds the current task lineage so sibling
+cards in one task can consume the same retained artifact. Missing scope and
+cross-task or cross-execution access fail closed. Canonical artifact ids and
+Action call ids are not alternate readback selectors.
+
+Oversized direct Action and ActionFlow carriers are compacted as complete
+records before they enter a TriggerFlow state or return boundary. This covers
+large kwargs/instructions as well as large output fields and avoids retaining
+duplicate `data`, `result`, and `model_digest` payloads. Finite internal
+ActionRuntime execution flows, ActionFlows, and TaskDAG executions do not bind a
+Workspace. `TriggerFlowActionFlow` binds Workspace recovery only when an
+approval pause needs save/resume.
 
 `Action.to_action_results(records)` uses the digest for instruction-heavy
 actions, so follow-up replies can reason about what happened without receiving
@@ -409,7 +427,70 @@ plain observation dictionaries to that handler instead of emitting official
 `action.*` or `tool.*` RuntimeEvents directly; core maps those observations to
 the official event stream.
 
+The built-in `TriggerFlowActionFlow` and `DAGActionFlow` apply the same
+Action-owned bounded/redacted projection before invoking that handler and before
+core emits official or compatibility events. Plan observations expose one
+canonical `decision.action_calls` list rather than copying commands through the
+legacy decision aliases; command observations use canonical `action_id` and
+bounded/redacted `action_input` fields. Repeated-failure convergence observations
+also carry bounded records, never the private complete Action values. The same
+carrier budget covers `payload` and `error`: a raw exception becomes one
+bounded/redacted ErrorInfo-compatible mapping before the direct callback, and
+official `action.*` plus compatibility `tool.*` events reuse that mapping
+without rebuilding the original message or traceback. Opaque string or bytes
+exception arguments never preserve a raw prefix: they project to a fixed
+redacted summary plus the original UTF-8 byte length and SHA-256 digest.
+Explicitly structured arguments may retain bounded facts after sensitive-key
+redaction. Projected tracebacks contain structural frame facts only and exclude
+the formatted exception line, source line, notes, locals, cause, and context.
+
 There is no legacy positional handler signature — the public contract is `(context, request)` only.
+
+Custom execution-handler results pass through the same complete-record bound as
+built-in handlers before they enter AgentExecution context, ActionFlow
+RuntimeEvents, TriggerFlow state, logs, metadata, or the public return. Route
+logs keep one bounded semantic payload; they do not retain another complete
+record under `raw` or duplicate it across `data` and `model_digest`. The exact
+value remains only in the live private Action artifact scope.
+
+## Action Artifact Lifetime
+
+Large Action values stay exact in the private `ActionArtifactManager`. Sensitive
+field redaction and truncation apply to model-visible previews and RuntimeEvents,
+not to the private value selected for durable promotion. AgentExecution accepts
+only a `selection_key` offered exactly once by that execution and returned
+exactly once by the terminal result. The host resolves that key with the expected
+execution scope and reconstructs the canonical ref and exact value; unknown,
+duplicate, or copied canonical identities are rejected. A business field named
+`accepted` has no selection authority. Provider-supplied artifact ids are stored
+only as provenance while each scope receives a fresh local artifact id.
+
+Standalone direct Action calls, `TriggerFlowActionFlow`, and `DAGActionFlow`
+release their exact `action_call` or `action_run` scope in `finally` on success,
+failure, and cancellation. A standalone AgentTask releases its exact task scope
+in its own terminal seam. A routed AgentTask explicitly transfers that scope to
+its parent AgentExecution, which keeps it live through terminal selection and
+promotion and releases it afterward; on parent cancellation or timeout, the
+routed task's stream owner cancels and joins the child before that release, so
+the child cannot create a late artifact or Workspace process record. Child
+ActionFlows never release that inherited scope early. If selected promotion
+fails, the selected source is kept with bounded retry diagnostics while
+unselected artifacts from that exact scope are released.
+
+A durable standalone `TriggerFlowActionFlow` pause keeps its scope while the
+exchange is pending. Response/resume closes the flow after the final interrupt;
+explicit abandonment or host close cancels the wait. All three paths release
+the standalone scope once.
+
+Because a standalone scope is discarded at run end, any artifact refs returned
+from that run are historical projections with `available=false` and
+`full_value_available=false`. Their bounded digest/preview remains useful, but
+`read_action_artifact` cannot retrieve the released value. Only call readback
+while a ref explicitly reports `available=true`, such as an execution-owned
+scope that has not yet completed transfer or cleanup.
+At model and terminal boundaries, `artifact_refs` and the compatibility alias
+`artifacts` are normalized to the same selection-key-only list so one alias
+cannot expose a canonical identity omitted by the other.
 
 ## Extension guidance
 

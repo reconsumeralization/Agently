@@ -1,6 +1,7 @@
 import pytest
 
 import asyncio
+import json
 import shlex
 import sys
 import uuid
@@ -334,6 +335,7 @@ def test_action_dispatcher_timeout_has_structured_diagnostic():
 
 def test_large_action_output_uses_digest_and_artifact_ref():
     action = Agently.create_agent().action
+    artifact_scope = {"kind": "test", "id": "large-action-output"}
     action_id = f"large_output_{ uuid.uuid4().hex[:8] }"
     stdout = "x" * 12000
     stderr = "y" * 9000
@@ -346,10 +348,11 @@ def test_large_action_output_uses_digest_and_artifact_ref():
         expose_to_model=False,
     )
 
-    record = action.execute_action(action_id, {})
+    record = action.execute_action(action_id, {}, artifact_scope=artifact_scope)
 
     assert record.get("status") == "success"
-    assert record.get("data", {}).get("stdout") == stdout
+    assert record.get("data", {}).get("carrier_compacted") is True
+    assert len(json.dumps(record, ensure_ascii=False, default=str).encode("utf-8")) <= 16000
     artifact_refs = record.get("artifact_refs")
     assert isinstance(artifact_refs, list)
     output_ref = next(ref for ref in artifact_refs if ref.get("artifact_type") == "action_output")
@@ -358,7 +361,7 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     assert output_ref.get("bytes", 0) > output_ref.get("preview_size", 0)
     assert isinstance(output_ref.get("sha256"), str) and len(str(output_ref.get("sha256"))) == 64
 
-    digest = record.get("model_digest")
+    digest = record.get("result")
     assert isinstance(digest, dict)
     preview_meta = digest.get("result_preview_meta")
     assert isinstance(preview_meta, dict)
@@ -371,11 +374,15 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     visible_digest = next(iter(visible.values()))
     assert visible_digest["result_preview_meta"]["truncated"] is True
     assert "artifact_refs" in visible_digest
-
-    recalled = action.read_action_artifact(
-        artifact_id=str(output_ref.get("artifact_id", "")),
-        action_call_id=str(output_ref.get("action_call_id", "")),
+    assert visible_digest["artifact_refs"][0]["selection_key"]
+    assert set(visible_digest["artifact_refs"][0]).isdisjoint(
+        {"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"}
     )
+
+    with action._artifact_manager.bind_artifact_scope(artifact_scope):
+        recalled = action.read_action_artifact(
+            selection_key=str(output_ref.get("selection_key", "")),
+        )
     assert recalled["ok"] is True
     assert recalled["value"]["stdout"] == stdout
     assert recalled["value"]["stderr"] == stderr
@@ -383,18 +390,20 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     dispatched_recall = action.execute_action(
         "read_action_artifact",
         {
-            "artifact_id": str(output_ref.get("artifact_id", "")),
-            "action_call_id": str(output_ref.get("action_call_id", "")),
+            "selection_key": str(output_ref.get("selection_key", "")),
         },
         source_protocol="structured_plan",
+        artifact_scope=artifact_scope,
     )
     assert dispatched_recall.get("status") == "success"
-    assert dispatched_recall.get("data", {}).get("stdout") == stdout
-    assert dispatched_recall.get("result", {}).get("stderr") == stderr
+    assert dispatched_recall.get("data", {}).get("carrier_compacted") is True
+    assert len(json.dumps(dispatched_recall, ensure_ascii=False, default=str).encode("utf-8")) <= 16000
+    action._release_artifact_scope(artifact_scope)
 
 
 def test_max_output_bytes_preserves_full_output_in_artifact():
     action = Agently.create_agent().action
+    artifact_scope = {"kind": "test", "id": "max-output-preserve"}
     action_id = f"max_output_preserve_{ uuid.uuid4().hex[:8] }"
     output = "z" * 2000
 
@@ -407,7 +416,7 @@ def test_max_output_bytes_preserves_full_output_in_artifact():
         expose_to_model=False,
     )
 
-    record = action.execute_action(action_id, {})
+    record = action.execute_action(action_id, {}, artifact_scope=artifact_scope)
 
     assert record.get("data") == output
     assert record.get("meta", {}).get("max_output_bytes_exceeded") is True
@@ -417,11 +426,12 @@ def test_max_output_bytes_preserves_full_output_in_artifact():
     artifact_refs = record.get("artifact_refs")
     assert isinstance(artifact_refs, list)
     output_ref = next(ref for ref in artifact_refs if ref.get("artifact_type") == "action_output")
-    recalled = action.read_action_artifact(
-        artifact_id=str(output_ref.get("artifact_id", "")),
-        action_call_id=str(output_ref.get("action_call_id", "")),
-    )
+    with action._artifact_manager.bind_artifact_scope(artifact_scope):
+        recalled = action.read_action_artifact(
+            selection_key=str(output_ref.get("selection_key", "")),
+        )
     assert recalled["value"] == output
+    action._release_artifact_scope(artifact_scope)
 
 
 def test_explicit_action_artifacts_are_preserved_without_large_output():

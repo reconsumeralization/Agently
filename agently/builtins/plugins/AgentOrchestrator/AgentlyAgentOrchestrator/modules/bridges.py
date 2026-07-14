@@ -48,43 +48,16 @@ async def record_action_log(
 ) -> dict[str, Any] | None:
     if not isinstance(log, dict):
         return None
-    raw_model_digest = log.get("model_digest")
-    model_digest: dict[str, Any] = raw_model_digest if isinstance(raw_model_digest, dict) else {}
-    action_id = str(log.get("action_id") or log.get("tool_name") or model_digest.get("action_id") or "action")
-    action_call_id = log.get("action_call_id") or model_digest.get("action_call_id")
-    status = str(log.get("status") or model_digest.get("status") or "")
-    artifact_refs = log.get("artifact_refs") or model_digest.get("artifact_refs") or []
-    if not isinstance(artifact_refs, list):
-        artifact_refs = []
-    if action_call_id:
-        key = str(action_call_id)
-    else:
-        # No call id: dedup the same action reported through both the stream and
-        # the result's extra.action_logs by action id + status + result content,
-        # rather than the action-log count (which differs between channels and
-        # would double-count the same execution).
-        digest = str(DataFormatter.sanitize(log.get("data") if log.get("data") is not None else log.get("result")))
-        key = f"{ action_id }:{ status }:{ hash(digest) }"
+    normalized = normalize_action_log(log, route=route, source=source)
+    key = _action_log_key(normalized)
     if key in owner._seen_action_log_keys:
         return None
     owner._seen_action_log_keys.add(key)
-    data = log.get("data")
-    if data is None:
-        data = log.get("result")
-    normalized = DataFormatter.sanitize(
-        {
-            "action_call_id": action_call_id,
-            "action_id": action_id,
-            "status": status,
-            "success": log.get("success") if "success" in log else model_digest.get("success"),
-            "source": source,
-            "route": route,
-            "data": data if isinstance(data, dict) else {},
-            "model_digest": model_digest,
-            "artifact_refs": artifact_refs,
-            "raw": log,
-        }
-    )
+    action_id = str(normalized.get("action_id") or "action")
+    artifact_refs = normalized.get("artifact_refs", [])
+    if not isinstance(artifact_refs, list):
+        artifact_refs = []
+
     # Keep framework loop diagnostics out of the executed action_logs; retain them in
     # a sibling channel so the boundary signal stays inspectable without being counted
     # as an action execution.
@@ -106,6 +79,52 @@ async def record_action_log(
             action_id=action_id,
         )
     return normalized
+
+
+def normalize_action_log(
+    log: dict[str, Any],
+    *,
+    route: str,
+    source: str,
+) -> dict[str, Any]:
+    """Build one bounded semantic log carrier without a nested raw record."""
+
+    raw_model_digest = log.get("model_digest")
+    model_digest: dict[str, Any] = raw_model_digest if isinstance(raw_model_digest, dict) else {}
+    action_id = str(log.get("action_id") or log.get("tool_name") or model_digest.get("action_id") or "action")
+    action_call_id = log.get("action_call_id") or model_digest.get("action_call_id")
+    status = str(log.get("status") or model_digest.get("status") or "")
+    artifact_refs = log.get("artifact_refs") or model_digest.get("artifact_refs") or []
+    if not isinstance(artifact_refs, list):
+        artifact_refs = []
+    data = log.get("result")
+    if data is None or (isinstance(data, dict) and data.get("same_as")):
+        data = log.get("data")
+    if data is None or (isinstance(data, dict) and data.get("same_as")):
+        data = model_digest
+    normalized = DataFormatter.sanitize(
+        {
+            "action_call_id": action_call_id,
+            "action_id": action_id,
+            "status": status,
+            "success": log.get("success") if "success" in log else model_digest.get("success"),
+            "source": source,
+            "route": route,
+            "data": data if isinstance(data, dict) else {},
+            "artifact_refs": artifact_refs,
+        }
+    )
+    return normalized if isinstance(normalized, dict) else {}
+
+
+def _action_log_key(log: dict[str, Any]) -> str:
+    action_call_id = log.get("action_call_id")
+    if action_call_id:
+        return str(action_call_id)
+    action_id = str(log.get("action_id") or "action")
+    status = str(log.get("status") or "")
+    digest = str(DataFormatter.sanitize(log.get("data")))
+    return f"{ action_id }:{ status }:{ hash(digest) }"
 
 
 async def bridge_task_dag_stream_item(owner: "AgentExecution", item: Any, *, route: str) -> None:

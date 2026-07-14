@@ -23,12 +23,15 @@ from typing import Any, Callable, Literal, TYPE_CHECKING, ParamSpec, TypeAlias, 
 from typing_extensions import Self
 
 from agently.core import BaseAgent
-from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
+from agently.core.runtime.RuntimeContext import (
+    get_current_action_policy,
+    get_current_agent_execution_context,
+)
 from agently.utils import DeprecationWarnings, FunctionShifter
 from agently.builtins.actions.Cmd import DEFAULT_SAFE_CMD_PREFIXES
 
 if TYPE_CHECKING:
-    from agently.core import Prompt
+    from agently.core import Prompt, Workspace
     from agently.core.operation.Action import ToolCommand, ToolExecutionRecord
     from agently.types.data import ActionCall, ActionResult, AgentlyModelResult, KwargsType, MCPConfigs, ReturnType
     from agently.types.plugins import AgentExecution
@@ -237,14 +240,9 @@ class ActionExtension(BaseAgent):
         resolved_root = root
         if resolved_root is None:
             workspace = getattr(self, "workspace", None)
-            files_root = getattr(workspace, "files_root", None)
-            if files_root is not None:
-                resolved_root = files_root
-                ensure_files_guide = getattr(workspace, "ensure_files_guide", None)
-                if callable(ensure_files_guide):
-                    ensure_files_guide()
-                else:
-                    Path(str(files_root)).mkdir(parents=True, exist_ok=True)
+            workspace_root = getattr(workspace, "root", None)
+            if workspace_root is not None:
+                resolved_root = workspace_root
         acp = ACP(
             root=resolved_root,
             agent_ids=agent_ids,
@@ -437,11 +435,46 @@ class ActionExtension(BaseAgent):
     ) -> Self:
         workspace = getattr(self, "workspace", None)
         if root is None and workspace is not None:
-            root = getattr(workspace, "files_root", getattr(workspace, "content_root", None))
+            root = getattr(workspace, "root", None)
         root_path = Path(root).expanduser().resolve() if root is not None else None
+        if (
+            workspace is not None
+            and root_path is not None
+            and root_path == Path(str(getattr(workspace, "root", ""))).expanduser().resolve()
+            and getattr(workspace, "mode", "read_only") == "read_only"
+            and sandbox == "trusted_local"
+        ):
+            raise ValueError(
+                "A read-only Workspace cannot use sandbox='trusted_local' because cwd checks "
+                "cannot enforce filesystem write isolation. Use the Docker sandbox or grant "
+                "the Workspace read_write mode explicitly."
+            )
         roots: list[str | Path] | None = [str(root_path)] if root_path is not None else None
         resolved_commands = list(commands) if commands is not None else list(DEFAULT_SAFE_CMD_PREFIXES)
-        output_artifact_dir = str(root_path / "artifacts" / "shell") if root_path is not None else None
+        workspace_mounts: list[dict[str, str]] | None = None
+        output_artifact_dir: str | None = None
+        if (
+            workspace is not None
+            and root_path is not None
+            and root_path == Path(str(getattr(workspace, "root", ""))).expanduser().resolve()
+        ):
+            fallback_root = root_path / ".agently" / "files" / str(workspace.execution_id)
+            output_artifact_dir = str(fallback_root / "shell-output")
+            workspace_mounts = [
+                {
+                    "host_path": str(root_path),
+                    "container_path": "/workspace",
+                    "mode": "rw" if getattr(workspace, "mode", "read_only") == "read_write" else "ro",
+                }
+            ]
+            if getattr(workspace, "mode", "read_only") == "read_only":
+                workspace_mounts.append(
+                    {
+                        "host_path": str(fallback_root),
+                        "container_path": f"/workspace/.agently/files/{workspace.execution_id}",
+                        "mode": "rw",
+                    }
+                )
         boundary_text = (
             "Docker-backed workspace boundary"
             if sandbox != "trusted_local"
@@ -466,6 +499,7 @@ class ActionExtension(BaseAgent):
             env=env,
             max_output_chars=max_output_chars,
             output_artifact_dir=output_artifact_dir,
+            workspace_mounts=workspace_mounts,
             sandbox=sandbox,
             docker_image=docker_image,
             docker_binary=docker_binary,
@@ -497,7 +531,7 @@ class ActionExtension(BaseAgent):
     ) -> Self:
         workspace = getattr(self, "workspace", None)
         if cwd is None and workspace is not None:
-            cwd = str(getattr(workspace, "files_root", getattr(workspace, "content_root")))
+            cwd = str(getattr(workspace, "root"))
         if sandbox == "trusted_local":
             default_desc = "Run JavaScript with Node.js inside an explicitly trusted local execution resource."
         else:
@@ -627,9 +661,10 @@ class ActionExtension(BaseAgent):
         self,
         *,
         root: str | Path | object = _WORKSPACE_ROOT_UNSET,
+        workspace: "Workspace | None" = None,
         isolated: bool = False,
         read: bool = True,
-        write: bool = False,
+        write: bool = True,
         search: bool = True,
         list_files: bool = True,
         export: bool = False,
@@ -641,11 +676,11 @@ class ActionExtension(BaseAgent):
         desc_mode: CapabilityDescMode = "append",
         coding_agent: bool = False,
     ) -> Self:
-        workspace = getattr(self, "workspace", None)
+        workspace = workspace or getattr(self, "workspace", None)
         if isolated and root is _WORKSPACE_ROOT_UNSET:
             root = tempfile.mkdtemp(prefix="agently-workspace-action-")
         elif root is _WORKSPACE_ROOT_UNSET and workspace is not None:
-            root = getattr(workspace, "files_root", getattr(workspace, "content_root"))
+            root = getattr(workspace, "root")
         elif root is _WORKSPACE_ROOT_UNSET:
             DeprecationWarnings.warn_deprecated_once(
                 "ActionExtension.enable_workspace.default_root_without_foundation_workspace",
@@ -660,7 +695,7 @@ class ActionExtension(BaseAgent):
         prefix = action_prefix.strip()
         workspace_for_actions = None
         if workspace is not None:
-            workspace_root = Path(str(getattr(workspace, "files_root", ""))).expanduser().resolve()
+            workspace_root = Path(str(getattr(workspace, "root", ""))).expanduser().resolve()
             if workspace_root == root_path:
                 workspace_for_actions = workspace
 
@@ -693,6 +728,61 @@ class ActionExtension(BaseAgent):
                 return True
             return any(part.startswith(".") for part in relative_parts)
 
+        def mutation_workspace():
+            if workspace_for_actions is None:
+                return None
+            if getattr(workspace_for_actions, "mode", "read_only") == "read_write":
+                return workspace_for_actions
+            policy = get_current_action_policy() or {}
+            if policy.get("policy_approval_granted") is not True:
+                return workspace_for_actions
+            from agently.core.Workspace import Workspace
+
+            return Workspace(
+                root_path,
+                getattr(workspace_for_actions, "manager", None),
+                mode="read_write",
+            )
+
+        def workspace_mutation_approval(
+            operation: str,
+            action_call: dict[str, Any],
+        ) -> dict[str, Any]:
+            if workspace_for_actions is None or getattr(workspace_for_actions, "mode", "read_only") == "read_write":
+                return {"required": False}
+            action_input = action_call.get("action_input", {})
+            action_input = action_input if isinstance(action_input, dict) else {}
+            path = str(action_input.get("path") or "")
+            if operation == "apply_patch":
+                paths = patch_paths(str(action_input.get("patch") or ""))
+                external_required = any(
+                    workspace_for_actions._resolve_external_file_path(item).exists()
+                    for item in paths
+                )
+            else:
+                target = workspace_for_actions._resolve_external_file_path(path)
+                paths = [str(target.relative_to(root_path))]
+                external_required = target.exists()
+            if not external_required:
+                return {"required": False}
+            canonical_paths = [str((root_path / item).resolve()) for item in paths]
+            mutation_facts: dict[str, Any] = {
+                "operation": operation,
+                "path": paths[0] if len(paths) == 1 else None,
+                "paths": paths,
+                "canonical_path": canonical_paths[0] if len(canonical_paths) == 1 else None,
+                "canonical_paths": canonical_paths,
+                "workspace_id": workspace_for_actions.workspace_id,
+            }
+            return {
+                "required": True,
+                "context": {
+                    "risk": "filesystem_write",
+                    "subject": f"{operation}:{paths[0] if paths else root_path}",
+                    "payload": {"workspace_mutation": mutation_facts},
+                },
+            }
+
         def iter_workspace_files(
             path: str = ".",
             pattern: str = "*",
@@ -720,6 +810,12 @@ class ActionExtension(BaseAgent):
         def relative_path(path: Path):
             return str(path.relative_to(root_path))
 
+        def ordinary_action_path(path: str | Path):
+            if workspace_for_actions is not None:
+                target = workspace_for_actions.resolve_file_path(path)
+                return workspace_for_actions._ordinary_file_relative_path(target)
+            return relative_path(resolve_workspace_path(path))
+
         def file_result_action_output(result: Any):
             return {
                 "status": "success",
@@ -731,6 +827,10 @@ class ActionExtension(BaseAgent):
         read_state: dict[str, dict[str, Any]] = {}
 
         def inspect_workspace_file(path: str | Path):
+            if workspace_for_actions is not None:
+                info = dict(workspace_for_actions.inspect_file(path))
+                info["path"] = ordinary_action_path(path)
+                return info
             target = resolve_workspace_path(path)
             return manager.inspect_file_path(target, relative_path=relative_path(target))
 
@@ -776,7 +876,11 @@ class ActionExtension(BaseAgent):
 
         async def manager_read_file(path: str, max_bytes: int = max_file_bytes, offset: int = 0):
             if workspace_for_actions is not None:
-                return await workspace_for_actions.read_file(path, max_bytes=max_bytes, offset=offset)
+                result = dict(
+                    await workspace_for_actions.read_file(path, max_bytes=max_bytes, offset=offset)
+                )
+                result["path"] = ordinary_action_path(path)
+                return result
             target = resolve_workspace_path(path)
             if not target.is_file():
                 raise FileNotFoundError(f"Workspace file not found: { path }")
@@ -788,8 +892,9 @@ class ActionExtension(BaseAgent):
             )
 
         async def manager_write_file(path: str, content: str, append: bool = False):
-            if workspace_for_actions is not None:
-                return await workspace_for_actions.write_file(path, content, append=append)
+            selected_workspace = mutation_workspace()
+            if selected_workspace is not None:
+                return await selected_workspace.write_file(path, content, append=append)
             target = resolve_workspace_path(path)
             return await manager.write_file_path(
                 target,
@@ -807,8 +912,9 @@ class ActionExtension(BaseAgent):
             expected_sha256: str | None = None,
         ):
             require_fresh_for_write(path, expected_sha256)
-            if workspace_for_actions is not None:
-                result = await workspace_for_actions.edit_file(
+            selected_workspace = mutation_workspace()
+            if selected_workspace is not None:
+                result = await selected_workspace.edit_file(
                     path,
                     old_string,
                     new_string,
@@ -822,7 +928,11 @@ class ActionExtension(BaseAgent):
                         raise FileNotFoundError(f"Workspace file not found: { path }")
                     result = await manager_write_file(path, new_string, append=False)
                 else:
-                    read_result = await manager_read_file(path, max_bytes=int(info.get("bytes") or 0) + 1)
+                    file_bytes = info.get("bytes")
+                    read_result = await manager_read_file(
+                        path,
+                        max_bytes=(file_bytes if isinstance(file_bytes, int) else 0) + 1,
+                    )
                     content = str(read_result.get("content") or "")
                     if old_string == new_string:
                         raise ValueError("old_string and new_string are identical; no edit was applied.")
@@ -887,8 +997,9 @@ class ActionExtension(BaseAgent):
             for path in paths:
                 if inspect_workspace_file(path).get("exists"):
                     require_fresh_for_write(path)
-            if workspace_for_actions is not None:
-                result = await workspace_for_actions.apply_patch(patch, expected_files=expected_files)
+            selected_workspace = mutation_workspace()
+            if selected_workspace is not None:
+                result = await selected_workspace.apply_patch(patch, expected_files=expected_files)
             else:
                 git_path = shutil.which("git")
                 if git_path is None:
@@ -945,12 +1056,20 @@ class ActionExtension(BaseAgent):
 
         if read and list_files and not has_action("list_files"):
 
-            def list_workspace_files(
+            async def list_workspace_files(
                 path: str = ".",
                 pattern: str = "*",
                 max_results: int = 200,
                 include_hidden: bool = False,
             ):
+                if workspace_for_actions is not None:
+                    result = await workspace_for_actions.glob_files(
+                        pattern,
+                        path=path,
+                        max_results=max_results,
+                        include_hidden=include_hidden,
+                    )
+                    return list(result.get("matches", []))
                 files = iter_workspace_files(path, pattern, max_results, include_hidden)
                 return [str(file.relative_to(root_path)) for file in files]
 
@@ -1264,7 +1383,12 @@ class ActionExtension(BaseAgent):
                 tags=[agent_tag],
                 side_effect_level="write",
                 expose_to_model=expose_to_model,
-                meta={"component": "workspace", "root": str(root_path), "write": True},
+                meta={
+                    "component": "workspace",
+                    "root": str(root_path),
+                    "write": True,
+                    "_host_approval_required_when": lambda call: workspace_mutation_approval("write_file", call),
+                },
             )
 
         if write and coding_agent and not has_action("edit_file"):
@@ -1307,7 +1431,13 @@ class ActionExtension(BaseAgent):
                 tags=[agent_tag],
                 side_effect_level="write",
                 expose_to_model=expose_to_model,
-                meta={"component": "workspace", "root": str(root_path), "write": True, "coding_agent": True},
+                meta={
+                    "component": "workspace",
+                    "root": str(root_path),
+                    "write": True,
+                    "coding_agent": True,
+                    "_host_approval_required_when": lambda call: workspace_mutation_approval("edit_file", call),
+                },
             )
 
         if write and coding_agent and not has_action("apply_patch"):
@@ -1333,7 +1463,13 @@ class ActionExtension(BaseAgent):
                 tags=[agent_tag],
                 side_effect_level="write",
                 expose_to_model=expose_to_model,
-                meta={"component": "workspace", "root": str(root_path), "write": True, "coding_agent": True},
+                meta={
+                    "component": "workspace",
+                    "root": str(root_path),
+                    "write": True,
+                    "coding_agent": True,
+                    "_host_approval_required_when": lambda call: workspace_mutation_approval("apply_patch", call),
+                },
             )
 
         if write and export and not has_action("export_file"):
@@ -1382,6 +1518,7 @@ class ActionExtension(BaseAgent):
         self,
         *,
         root: str | Path | object = _WORKSPACE_ROOT_UNSET,
+        workspace: "Workspace | None" = None,
         isolated: bool = False,
         read: bool = True,
         write: bool = True,
@@ -1402,6 +1539,7 @@ class ActionExtension(BaseAgent):
         )
         return self.enable_workspace_file_actions(
             root=root,
+            workspace=workspace,
             isolated=isolated,
             read=read,
             write=write,

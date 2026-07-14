@@ -14,7 +14,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import inspect
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -80,21 +81,17 @@ class WorkspaceManager:
         "put_snapshot",
         "get_snapshot",
         "latest_snapshot",
+        "delete_snapshot",
         "latest_checkpoint",
         "checkpoint_history",
         "append_runtime_event",
         "query_runtime_events",
-        "record_file_policy",
-        "get_file_policy",
-        "add_retention_anchor",
-        "retention_anchors",
-        "prune_scope",
-        "register_scratch_lease",
-        "get_scratch_lease",
-        "list_scratch_leases",
-        "close_scratch_lease",
     )
-    _VECTOR_STORE_REQUIRED_METHODS = ("index_record", "search_by_embedding")
+    _VECTOR_STORE_REQUIRED_METHODS = ("index_record", "search_by_embedding", "delete_records")
+
+    @staticmethod
+    def _missing_required_callables(candidate: Any, required: Sequence[str]) -> list[str]:
+        return [name for name in required if not callable(getattr(candidate, name, None))]
 
     def __init__(self):
         self._profiles: dict[str, IngestionProfile] = {}
@@ -166,6 +163,40 @@ class WorkspaceManager:
         path_or_backend: str | Path | WorkspaceBackend | None = None,
         *,
         create: bool = True,
+        mode: str = "read_only",
+        provider: str | None = None,
+        provider_options: dict[str, Any] | None = None,
+        db_store_provider: Any | None = None,
+        db_store_options: dict[str, Any] | None = None,
+        embedding_provider: Any | None = None,
+        embedding_options: dict[str, Any] | None = None,
+        vector_store_provider: Any | None = None,
+        vector_store_options: dict[str, Any] | None = None,
+        default_scope: dict[str, Any] | None = None,
+        default_search_scope: dict[str, Any] | None = None,
+    ) -> Workspace:
+        return Workspace(
+            path_or_backend,
+            self,
+            create=create,
+            mode=mode,
+            provider=provider,
+            provider_options=provider_options,
+            db_store_provider=db_store_provider,
+            db_store_options=db_store_options,
+            embedding_provider=embedding_provider,
+            embedding_options=embedding_options,
+            vector_store_provider=vector_store_provider,
+            vector_store_options=vector_store_options,
+            default_scope=default_scope,
+            default_search_scope=default_search_scope,
+        )
+
+    def _materialize_workspace(
+        self,
+        path_or_backend: str | Path | WorkspaceBackend | None = None,
+        *,
+        create: bool = True,
         mode: str = "read_write",
         provider: str | None = None,
         provider_options: dict[str, Any] | None = None,
@@ -175,10 +206,8 @@ class WorkspaceManager:
         embedding_options: dict[str, Any] | None = None,
         vector_store_provider: Any | None = None,
         vector_store_options: dict[str, Any] | None = None,
-        files_root: str | Path | None = None,
         default_scope: dict[str, Any] | None = None,
         default_search_scope: dict[str, Any] | None = None,
-        scope_lineage: "Sequence[Mapping[str, Any]] | None" = None,
     ) -> Workspace:
         component_options_used = any(
             value is not None
@@ -212,7 +241,7 @@ class WorkspaceManager:
             backend = cast(WorkspaceBackend, path_or_backend)
         else:
             if path_or_backend is None:
-                path_or_backend = Path(".agently") / "workspaces" / "default"
+                path_or_backend = Path.cwd() / ".agently"
             backend_root = cast(str | Path, path_or_backend)
             backend = LocalWorkspaceBackend(
                 backend_root,
@@ -233,12 +262,11 @@ class WorkspaceManager:
                 vector_store_options=vector_store_options,
             )
         return Workspace(
-            backend,
+            cast(WorkspaceBackend, backend),
             self,
-            files_root=files_root,
+            mode=mode,
             default_scope=default_scope,
             default_search_scope=default_search_scope,
-            scope_lineage=scope_lineage,
         )
 
     def _configure_local_backend_components(
@@ -255,28 +283,53 @@ class WorkspaceManager:
         vector_store_provider: Any | None,
         vector_store_options: dict[str, Any] | None,
     ) -> None:
-        db_store, db_store_name = self._resolve_db_store_provider(
-            db_store_provider,
-            root=root,
-            create=create,
-            mode=mode,
-            options=db_store_options,
+        db_store_name = str(db_store_provider or "sqlite") if isinstance(db_store_provider, (str, type(None))) else str(
+            getattr(db_store_provider, "name", type(db_store_provider).__name__)
         )
-        embedder = self._resolve_embedding_provider(embedding_provider, embedding_options)
-        vector_store_provider_instance, vector_store_name, fallback_reason = self._resolve_vector_store_provider(
-            vector_store_provider,
-            root=root,
-            create=create,
-            mode=mode,
-            options=vector_store_options,
+        if isinstance(db_store_provider, str) and db_store_name not in self._db_store_providers:
+            raise WorkspaceConfigurationError(
+                f"Workspace DB store provider is not registered: { db_store_name }"
+            )
+        vector_store_name = (
+            str(vector_store_provider)
+            if isinstance(vector_store_provider, str)
+            else getattr(vector_store_provider, "name", None)
         )
-        backend.configure_components(
-            db_store_provider=db_store,
+        if (
+            isinstance(vector_store_provider, str)
+            and vector_store_name != "auto"
+            and vector_store_name not in self._vector_store_providers
+        ):
+            raise WorkspaceConfigurationError(
+                f"Workspace vector store provider is not registered: { vector_store_name }"
+            )
+        if isinstance(embedding_provider, str) and embedding_provider not in self._embedding_providers:
+            raise WorkspaceConfigurationError(
+                f"Workspace embedding provider is not registered: { embedding_provider }"
+            )
+        backend.configure_component_loaders(
+            db_store_provider_loader=lambda: self._resolve_db_store_provider(
+                db_store_provider,
+                root=root,
+                create=create,
+                mode=mode,
+                options=db_store_options,
+            ),
+            embedding_provider_loader=lambda: self._resolve_embedding_provider(
+                embedding_provider,
+                embedding_options,
+            ),
+            vector_store_provider_loader=lambda: self._resolve_vector_store_provider(
+                vector_store_provider,
+                root=root,
+                create=create,
+                mode=mode,
+                options=vector_store_options,
+            ),
             db_store_provider_name=db_store_name,
-            embedding_provider=embedder,
-            vector_store_provider=vector_store_provider_instance,
-            vector_store_provider_name=vector_store_name,
-            vector_store_fallback_reason=fallback_reason,
+            vector_store_provider_name=(
+                str(vector_store_name) if vector_store_name is not None else None
+            ),
         )
 
     def _resolve_db_store_provider(
@@ -301,7 +354,7 @@ class WorkspaceManager:
 
     def _validate_db_store_provider(self, candidate: Any, *, label: str | None = None) -> DBStoreProvider:
         provider_label = label or getattr(candidate, "name", None) or type(candidate).__name__
-        missing = [name for name in self._DB_STORE_REQUIRED_METHODS if not hasattr(candidate, name)]
+        missing = self._missing_required_callables(candidate, self._DB_STORE_REQUIRED_METHODS)
         if missing:
             raise TypeError(
                 f"Workspace DB store provider '{ provider_label }' must implement DBStoreProvider; "
@@ -316,7 +369,7 @@ class WorkspaceManager:
     ) -> EmbeddingProvider | None:
         if provider is None:
             return None
-        if hasattr(provider, "embed_texts"):
+        if callable(getattr(provider, "embed_texts", None)):
             return cast(EmbeddingProvider, provider)
         if callable(provider) and not isinstance(provider, str):
             return CallableEmbeddingProvider(cast(EmbeddingFunction, provider))
@@ -324,7 +377,7 @@ class WorkspaceManager:
         if normalized not in self._embedding_providers:
             raise WorkspaceConfigurationError(f"Workspace embedding provider is not registered: { normalized }")
         resolved = self._embedding_providers[normalized](**dict(options or {}))
-        if not hasattr(resolved, "embed_texts"):
+        if not callable(getattr(resolved, "embed_texts", None)):
             raise TypeError(f"Workspace embedding provider '{ normalized }' must implement embed_texts(...).")
         return cast(EmbeddingProvider, resolved)
 
@@ -396,17 +449,21 @@ class WorkspaceManager:
 
     def _validate_vector_store_provider(self, candidate: Any, *, label: str | None = None) -> VectorStoreProvider:
         provider_label = label or getattr(candidate, "name", None) or type(candidate).__name__
-        missing = [name for name in self._VECTOR_STORE_REQUIRED_METHODS if not hasattr(candidate, name)]
+        missing = self._missing_required_callables(candidate, self._VECTOR_STORE_REQUIRED_METHODS)
         if missing:
             raise TypeError(
                 f"Workspace vector store provider '{ provider_label }' must implement VectorStoreProvider; "
                 f"missing: {', '.join(missing)}."
             )
+        if not inspect.iscoroutinefunction(getattr(candidate, "delete_records")):
+            raise TypeError(
+                f"Workspace vector store provider '{ provider_label }' must implement async delete_records(...)."
+            )
         return cast(VectorStoreProvider, candidate)
 
     def _validate_backend(self, backend: Any, *, provider: str | None = None) -> WorkspaceBackend:
         required = ("put", "search", "get_data", "capabilities")
-        missing = [name for name in required if not hasattr(backend, name)]
+        missing = self._missing_required_callables(backend, required)
         if missing:
             detail = f" from provider '{provider}'" if provider else ""
             raise TypeError(

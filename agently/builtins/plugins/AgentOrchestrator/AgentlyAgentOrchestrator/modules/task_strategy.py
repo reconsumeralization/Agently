@@ -140,7 +140,10 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             goal=goal,
             success_criteria=success_criteria,
             execution=execution_strategy,
-            workspace=task_options.get("workspace"),
+            # AgentExecution owns the route and hands its exact scoped view to
+            # AgentTask. AgentTask derives a descendant instead of rebinding
+            # from the Agent-wide Workspace or inferring a filesystem path.
+            workspace=execution.workspace,
             max_iterations=AgentTask.normalize_max_iterations(max_iterations),
             verify=cast(Any, task_options.get("verify", "before_done")),
             context_profile=str(task_options.get("context_profile", "auto")),
@@ -149,6 +152,11 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             options=cast(Any, agent_task_options),
             task_id=cast(Any, task_options.get("task_id") or execution.lineage.get("task_id")),
         )
+    # This is the exact host-owned transfer seam: a routed task keeps its
+    # agent_task Action artifact scope live until the parent AgentExecution has
+    # completed terminal selection/promotion and releases it. Standalone tasks
+    # never receive this transfer marker and clean up in AgentTask finalization.
+    task._action_artifact_scope_transferred_to_execution_id = execution.id
     # Advanced/test step-stage override channel. Callers may set an explicit
     # `execution._agent_task_step_overrides = {"_request_plan": ..., ...}` before
     # running to drive the plan/execute/verify stages deterministically. This is
@@ -188,6 +196,11 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         await execution.stream.bridge_agent_task_item(item, route="agent_task")
 
     task_meta = await task.async_meta()
+    execution._terminal_task_handoff_refs = [
+        dict(ref)
+        for ref in list(getattr(task, "_terminal_deliverable_refs", []) or [])
+        if isinstance(ref, Mapping)
+    ]
     execution.task_refs.update(
         {
             "status": task.status,

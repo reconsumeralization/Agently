@@ -143,17 +143,17 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         return intervention_mode
 
     def _default_execution_workspace_root(self, run_context: "RunContext | None" = None) -> Path:
-        from agently.core.workspace._defaults import default_physical_root
+        from agently.core.Workspace._defaults import default_workspace_root
 
-        session_id = getattr(run_context, "session_id", None)
-        return default_physical_root(session_id=str(session_id) if session_id else None)
+        _ = run_context
+        return default_workspace_root()
 
     def _default_execution_workspace_scope(
         self,
         execution_id: str,
         run_context: "RunContext | None" = None,
     ) -> dict[str, Any]:
-        from agently.core.workspace._defaults import script_scope
+        from agently.core.Workspace._defaults import script_scope
 
         scope: dict[str, Any] = {
             "execution_id": execution_id,
@@ -179,29 +179,21 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         return {"execution_id": execution_id}
 
     def _create_execution_workspace_resource(self, execution_id: str, run_context: "RunContext | None" = None):
-        from agently.base import workspace as global_workspace
-        from agently.core.workspace import LazyWorkspace
-        from agently.core.workspace._defaults import lineage_files_root, scope_node
+        from agently.core.Workspace import Workspace
 
         root = self._default_execution_workspace_root(run_context)
-        # A directly started flow execution is a lineage root: tasks/actions/
-        # nested executions created within it nest under this execution node and
-        # share one prunable subtree (spec section 8.2).
-        execution_lineage = [scope_node("executions", execution_id)]
-        return LazyWorkspace(
-            global_workspace,
+        return Workspace(
             root,
-            files_root=lineage_files_root(root, execution_lineage),
+            mode="read_only",
             default_scope=self._default_execution_workspace_scope(execution_id, run_context),
             default_search_scope=self._default_execution_workspace_search_scope(execution_id, run_context),
-            scope_lineage=execution_lineage,
-        )
+        )._bind_execution(execution_id)
 
     def _coerce_execution_workspace_resource(self, workspace: Any):
         from agently.base import workspace as global_workspace
-        from agently.core.workspace import LazyWorkspace, Workspace
+        from agently.core.Workspace import Workspace
 
-        if isinstance(workspace, (Workspace, LazyWorkspace)):
+        if isinstance(workspace, Workspace):
             return workspace
         return global_workspace.create(workspace)
 
@@ -218,7 +210,13 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         elif workspace is None:
             resolved.setdefault("workspace", self._create_execution_workspace_resource(execution_id, run_context))
         else:
-            resolved["workspace"] = self._coerce_execution_workspace_resource(workspace)
+            resolved["workspace"] = self._coerce_execution_workspace_resource(workspace)._bind_execution(execution_id)
+        existing = cast(Any, resolved.get("workspace"))
+        if existing is not None and callable(getattr(existing, "_bind_execution", None)):
+            if str(getattr(existing, "execution_id", "")) != execution_id:
+                resolved["workspace"] = existing._bind_execution(
+                    execution_id,
+                )
         return resolved
 
     @overload
@@ -307,6 +305,11 @@ class TriggerFlow(Generic[InputT, StreamT, ResultT]):
         )
         if execution_runtime_resources:
             execution.update_runtime_resources(execution_runtime_resources)
+        execution._bind_configured_durability_resources()
+        if intervention_mode in {"planned", "auto"}:
+            execution._activate_recovery_durability(
+                reason=f"intervention_mode:{ intervention_mode }",
+            )
         self._executions[execution_id] = execution
         return cast("TriggerFlowExecution[InputT, StreamT, ResultT]", execution)
 

@@ -696,7 +696,10 @@ async def test_blocks_workspace_operation_search_empty_result_enters_ledger(tmp_
 
 @pytest.mark.asyncio
 async def test_blocks_workspace_operation_search_can_use_workspace_files_surface(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-file-search")
+    workspace = Agently.create_workspace(
+        tmp_path / "blocks-workspace-file-search",
+        mode="read_write",
+    )
     await workspace.write_file("notes/todo.md", "alpha\nrelease deadline is 2026-07-01\n")
     await workspace.put(
         content="Indexed record is unrelated to the file-only query.",
@@ -874,7 +877,7 @@ async def test_blocks_approval_wait_global_access_control_auto_allow():
 
 
 @pytest.mark.asyncio
-async def test_blocks_approval_wait_uses_triggerflow_pause_and_resume():
+async def test_blocks_approval_wait_uses_triggerflow_pause_and_resume(tmp_path):
     Agently.configure_policy_approval(handler="fail_closed")
     try:
         graph = Agently.blocks.compile(
@@ -899,7 +902,7 @@ async def test_blocks_approval_wait_uses_triggerflow_pause_and_resume():
         execution = await Agently.blocks.bind_runtime(graph).async_start_execution(
             {"draft": True},
             wait_for_result=False,
-            workspace=False,
+            workspace=tmp_path / "approval-resume",
         )
         pending = execution.get_pending_interrupts()
 
@@ -923,7 +926,7 @@ async def test_blocks_approval_wait_uses_triggerflow_pause_and_resume():
 
 
 @pytest.mark.asyncio
-async def test_blocks_external_wait_uses_triggerflow_pause_and_resume():
+async def test_blocks_external_wait_uses_triggerflow_pause_and_resume(tmp_path):
     graph = Agently.blocks.compile(
         {
             "plan_id": "plan-external-wait",
@@ -945,7 +948,7 @@ async def test_blocks_external_wait_uses_triggerflow_pause_and_resume():
     execution = await Agently.blocks.bind_runtime(graph).async_start_execution(
         None,
         wait_for_result=False,
-        workspace=False,
+        workspace=tmp_path / "external-wait",
     )
     pending = execution.get_pending_interrupts()
 
@@ -1085,7 +1088,7 @@ def test_task_dag_executor_blocks_path_still_rejects_invalid_dag():
 
 
 @pytest.mark.asyncio
-async def test_blocks_external_wait_forwards_exchange_metadata_to_envelope():
+async def test_blocks_external_wait_forwards_exchange_metadata_to_envelope(tmp_path):
     graph = Agently.blocks.compile(
         {
             "plan_id": "plan-external-wait-metadata",
@@ -1113,7 +1116,7 @@ async def test_blocks_external_wait_forwards_exchange_metadata_to_envelope():
     execution = await Agently.blocks.bind_runtime(graph).async_start_execution(
         None,
         wait_for_result=False,
-        workspace=False,
+        workspace=tmp_path / "external-wait-metadata",
     )
     pending = execution.get_pending_interrupts()
     envelope = pending["external-callback"]["external_wait_request"]

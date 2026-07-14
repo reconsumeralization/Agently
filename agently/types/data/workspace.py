@@ -41,14 +41,16 @@ class WorkspaceLinkRef(TypedDict):
     meta: dict[str, Any]
 
 
+WorkspaceMode = Literal["read_only", "read_write"]
+
+
 class WorkspaceBackendCapabilities(TypedDict):
-    backend: str
     root: str
-    content_root: str
-    files_root: str
-    read_only: bool
-    components: dict[str, str | None]
-    features: dict[str, bool]
+    mode: WorkspaceMode
+    external_read: bool
+    external_write: bool
+    private_write: bool
+    materialized_components: list[str]
 
 
 class WorkspaceReferenceEnvelope(TypedDict):
@@ -89,11 +91,16 @@ class WorkspaceFileDiagnostic(TypedDict):
 
 class WorkspaceFileRef(TypedDict):
     path: str
-    bytes: int
     sha256: str
-    media_type: str | None
-    content_kind: str
-    role: str
+    type: NotRequired[Literal["file"]]
+    workspace_id: NotRequired[str]
+    execution_id: NotRequired[str | None]
+    size: NotRequired[int]
+    available: NotRequired[bool]
+    bytes: NotRequired[int]
+    media_type: NotRequired[str | None]
+    content_kind: NotRequired[str]
+    role: NotRequired[str]
 
 
 class WorkspaceFileInfo(TypedDict):
@@ -210,7 +217,7 @@ class WorkspaceRuntimeEventRecord(TypedDict):
     persisted_at: str | None
 
 
-class WorkspaceLeaseRef(TypedDict, total=False):
+class WorkspaceLeaseRef(TypedDict):
     run_id: str
     owner_id: str
     lease_token: str
@@ -222,50 +229,24 @@ class WorkspaceLeaseRef(TypedDict, total=False):
     state_version: int | None
 
 
-class WorkspaceScratchLease(TypedDict, total=False):
-    """Durable record of a scratch lease.
-
-    Scratch leases are persisted as Workspace facts so crashed runs can be
-    recovered by TTL/startup cleanup and scope prune using lease records rather
-    than filesystem heuristics such as mtime (spec sections 8.5 / 11.1).
-    """
-
-    lease_id: str
-    scope: dict[str, Any]
-    local_path: str | None
-    mount: dict[str, Any] | None
-    purpose: str | None
-    cleanup_policy: Literal["on_close", "on_scope_prune", "ttl"]
-    expires_at: str | None
-    read_only: bool
-    policy_labels: list[str]
-    created_at: str
-    closed_at: str | None
+WorkspaceRetentionTerminalStatus = Literal["completed", "failed", "cancelled"]
 
 
-class WorkspaceFilePolicyMetadata(TypedDict):
-    content_root: str
-    files_root: str
-    action_file_root: str | None
-    allowed_roots: list[str]
-    root_source: str
-    path_normalization: str
-    symlink_policy: str
-    case_policy: str
-    policy_labels: list[str]
-    links: dict[str, str]
+class WorkspaceRetentionDiagnostic(TypedDict, total=False):
+    code: str
+    message: str
+    retryable: bool
+    entity: str
+    detail: dict[str, Any]
 
 
-class WorkspaceRetentionAnchor(TypedDict):
-    id: str
+class WorkspaceRetentionResult(TypedDict):
+    status: Literal["applied", "deferred", "noop"]
     execution_id: str
-    anchor_type: str
-    sequence: int | None
-    record_ref: WorkspaceReferenceEnvelope | None
-    summary_ref: WorkspaceReferenceEnvelope | None
-    preserved_event_ids: list[str]
-    created_at: str
-    meta: dict[str, Any]
+    retained_refs: list[WorkspaceFileRef]
+    retained_bytes: int
+    deleted_bytes: int
+    diagnostics: list[WorkspaceRetentionDiagnostic]
 
 
 class WorkspaceSearchResult(TypedDict, total=False):

@@ -15,12 +15,13 @@
 from __future__ import annotations
 
 from typing import Any, Literal, TypeAlias
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from .workspace import WorkspaceRecordRef
 
 
 AgentExecutionStatus: TypeAlias = Literal["created", "running", "success", "blocked", "error", "cancelled"] | str
+AgentExecutionWorkspacePurpose: TypeAlias = Literal["process", "deliverable", "recovery", "audit"]
 
 
 class AgentExecutionLineage(TypedDict):
@@ -56,6 +57,21 @@ class AgentExecutionDiagnostics(TypedDict):
     stages: dict[str, Any]
     last_progress: dict[str, Any]
     required_capabilities: list[dict[str, Any]]
+    workspace_retention: NotRequired[dict[str, Any]]
+    action_artifact_release: NotRequired["ActionArtifactReleaseDiagnostics"]
+
+
+class ActionArtifactReleaseDiagnostic(TypedDict):
+    code: str
+    message: str
+
+
+class ActionArtifactReleaseDiagnostics(TypedDict, total=False):
+    status: Literal["released", "deferred", "failed"]
+    scope: dict[str, str]
+    released_count: int
+    preserved_artifact_ids: list[str]
+    diagnostics: list[ActionArtifactReleaseDiagnostic]
 
 
 class AgentExecutionRouteInfo(TypedDict):

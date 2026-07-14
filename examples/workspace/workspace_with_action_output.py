@@ -7,7 +7,10 @@ from agently import Agently
 
 async def main():
     with TemporaryDirectory() as temp_dir:
-        agent = Agently.create_agent("workspace-action-output-example").use_workspace(temp_dir)
+        agent = Agently.create_agent("workspace-action-output-example").use_workspace(
+            temp_dir,
+            mode="read_write",
+        )
         workspace = agent.workspace
         assert workspace is not None
 
@@ -16,6 +19,7 @@ async def main():
             commands=["cat"],
             action_id="inspect_workspace_files",
             expose_to_model=False,
+            sandbox="trusted_local",
         )
 
         write_result = agent.action.execute_action(
@@ -31,7 +35,7 @@ async def main():
             "inspect_workspace_files",
             {
                 "cmd": "cat notes/runtime.txt",
-                "workdir": str(workspace.files_root),
+                "workdir": str(workspace.root),
             },
         )
         shell_data = cast(dict[str, Any], shell_result.get("data"))
@@ -83,11 +87,12 @@ asyncio.run(main())
 # {'stdout': 'route fallback fixed after provider returned no route candidate', 'workspace_file': 'notes/runtime.txt', 'context_item_count': 1, 'contains_action_output': True}
 #
 # This is an infrastructure composition smoke, not a model-owned WorkLoop.
-# `use_workspace(...)` creates one Workspace with:
-# - files_root: ordinary editable working files used by shell/file actions;
-# - content_root: managed content used by durable Workspace records.
+# `use_workspace(...)` binds one direct ordinary file root. This example grants
+# read-write access because the shell must read the new external file directly.
+# Durable records are created lazily under `.agently/workspace.db` only when
+# `workspace.put(...)` is called.
 #
-# `enable_workspace_file_actions(...)` only exposes file actions over files_root.
+# `enable_workspace_file_actions(...)` exposes file actions over that root.
 # The shell action output does not become memory automatically. Application code
 # explicitly ingests the action result as a Workspace observation, then
 # ContextBuilder packages it into a ContextPackage through `workspace.build_context(...)`.
@@ -102,7 +107,7 @@ asyncio.run(main())
 # enable_shell(..., action_id="inspect_workspace_files")
 #   |
 #   v
-# run_bash("cat notes/runtime.txt", workdir=workspace.files_root)
+# run_bash("cat notes/runtime.txt", workdir=workspace.root)
 #   |
 #   v
 # workspace.put(action output as observation)

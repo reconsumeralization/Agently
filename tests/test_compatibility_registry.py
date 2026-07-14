@@ -67,9 +67,13 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert index["in_development_file"] == "compatibility/in-development.json"
     assert in_development["framework"] == "agently"
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert in_development["target_version"] == "4.1.4.1"
-    assert in_development["release_train"] == "2026-07-4.1.4.1-dev"
-    assert "4.1.4.1 work after the 4.1.4 AgentExecution and TaskBoard release" in in_development["notes"]
+    assert in_development["target_version"] == "4.1.4.2"
+    assert in_development["release_train"] == "2026-07-4.1.4.2-dev"
+    assert "4.1.4.2 work after the 4.1.4.1 compatibility release" in in_development["notes"]
+    assert "direct ordinary file root" in in_development["notes"]
+    assert "lazy .agently private state" in in_development["notes"]
+    assert "AgentTask process state stays in memory/logs by default" in in_development["notes"]
+    assert "TriggerFlow Workspace binding no longer implies RuntimeEvent persistence" in in_development["notes"]
     assert "AgentExecutionResult reader compatibility" in in_development["notes"]
     assert "get_data() consistently returns business data" in in_development["notes"]
     assert "get_full_data() exposes full route/task envelopes" in in_development["notes"]
@@ -201,7 +205,7 @@ def test_in_development_manifest_is_registered_and_protocol_compatible():
     assert "without .output()" in task_loop_contract["artifact_stream_contract"]
     assert "targeted_readbacks" in task_loop_contract["artifact_stream_contract"]
     assert "runtime_guidance_contract" in task_loop_contract
-    assert "Workspace collection guidance" in task_loop_contract["runtime_guidance_contract"]
+    assert "kept in running task memory" in task_loop_contract["runtime_guidance_contract"]
     assert "not EvidenceEnvelope completion evidence" in task_loop_contract["runtime_guidance_contract"]
     assert "content/content_preview/text/excerpt/snippet" in task_loop_contract["contract"]
     assert "TaskBoard final verification carries board source_refs" in task_loop_contract["contract"]

@@ -83,7 +83,7 @@ async def main():
         await workspace.write_file("notes/todo.txt", "ship workspace file io")
         text_read = await workspace.read_file("notes/todo.txt", max_bytes=32)
 
-        (workspace.files_root / "payload.bin").write_bytes(b"\x00\xffbinary")
+        await workspace.materialize_file("payload.bin", b"\x00\xffbinary")
         binary_read = await workspace.read_file("payload.bin")
 
         await workspace.write_file("report.md", "# Report\n")

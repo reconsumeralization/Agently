@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from agently.core.Workspace import Workspace
+
 from .TaskShared import *
 from .StrategyRouter import AgentTaskStrategyRouterMixin
 from .TaskBoardStrategy import AgentTaskTaskBoardStrategyMixin
@@ -53,7 +55,7 @@ class AgentTask(
         goal: str,
         success_criteria: list[str],
         execution: AgentTaskExecutionStrategy | str | None = "auto",
-        workspace: str | os.PathLike[str] | None = None,
+        workspace: str | os.PathLike[str] | Workspace | None = None,
         max_iterations: int | None = _AGENT_TASK_DEFAULT_MAX_ITERATIONS,
         verify: Literal["before_done"] = "before_done",
         context_profile: str = "auto",
@@ -84,28 +86,27 @@ class AgentTask(
         self.limits = dict(limits or {})
         self.options = dict(options or {})
         agent_with_workspace = cast(Any, agent)
-        if workspace is not None:
-            agent_with_workspace.use_workspace(workspace)
-        if getattr(agent, "workspace", None) is None:
+        if isinstance(workspace, Workspace):
+            bound_workspace = workspace
+        else:
+            if workspace is not None:
+                agent_with_workspace.use_workspace(workspace)
+            bound_workspace = getattr(agent, "workspace", None)
+        if bound_workspace is None:
             raise RuntimeError(
-                "AgentTask requires a Workspace binding. Standard Agents include a lazy Workspace; "
+                "AgentTask requires a Workspace binding. Standard Agents include a Workspace; "
                 "pass workspace=... or call agent.use_workspace(...) only when you need an explicit "
                 "root, mode, or provider."
             )
-        bound_workspace = agent_with_workspace.workspace
-        # Bind the task file root as a lineage child of the Agent scope so the
-        # task subtree (and any nested executions) lives under the Agent node and
-        # can be pruned as one contained subtree (spec section 8.2).
-        with_scope_node = getattr(bound_workspace, "with_scope_node", None)
-        if callable(with_scope_node):
-            self.workspace: Any = with_scope_node(
-                "tasks",
-                self.id,
-                scope={"task_id": self.id},
-                search_scope={"task_id": self.id},
-            )
-        else:
-            self.workspace = bound_workspace
+        # AgentTask shares the caller's ordinary file root. Only execution
+        # identity changes so private fallback files stay task-owned; binding
+        # must not materialize storage or invent a scoped file tree.
+        self._workspace_execution_id = self.id
+        self.workspace: Workspace = bound_workspace._bind_execution(
+            self.id,
+            scope={"task_id": self.id, "execution_id": self.id},
+            search_scope={"task_id": self.id, "execution_id": self.id},
+        )
         self.status: AgentTaskStatus = "created"
         self.result: Any = None
         self.diagnostics: dict[str, Any] = {}
@@ -153,6 +154,14 @@ class AgentTask(
         self._resumed_taskboard_state: dict[str, Any] | None = None
         self._latest_taskboard_acceptance_index: dict[str, Any] | None = None
         self._resumed_prior_result: Any = None
+        self._terminal_deliverable_refs: list[WorkspaceRecordRef] = []
+        self._terminal_retained_refs: list[Any] = []
+        self._terminal_retention_deferred = False
+        # Routed AgentTask construction transfers this exact task-owned Action
+        # artifact scope to its parent AgentExecution. Standalone tasks keep the
+        # value unset and release the scope in their own terminal seam.
+        self._action_artifact_scope_transferred_to_execution_id: str | None = None
+        self._terminal_taskboard_state: dict[str, Any] | None = None
         self._stream_items: list[AgentExecutionStreamData] = []
         self._stream_queues: list[asyncio.Queue[Any]] = []
         self._background_stream_tasks: set[asyncio.Task[Any]] = set()

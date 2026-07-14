@@ -56,6 +56,7 @@ from _business_example_common import (
     configure_agent_model_pool,
     default_workspace,
     judge_business_artifact,
+    resolve_result_artifact_path,
     write_summary,
 )
 
@@ -436,11 +437,10 @@ async def main() -> None:
         rules=JUDGE_RULES,
     )
 
-    files_root = workspace.files_root
     output_files = {
-        "daily_report": files_root / OUTPUT_DAILY_REPORT,
-        "travelogue": files_root / OUTPUT_TRAVELOGUE,
-        "architecture": files_root / OUTPUT_ARCHITECTURE,
+        "daily_report": resolve_result_artifact_path(workspace, result, OUTPUT_DAILY_REPORT),
+        "travelogue": resolve_result_artifact_path(workspace, result, OUTPUT_TRAVELOGUE),
+        "architecture": resolve_result_artifact_path(workspace, result, OUTPUT_ARCHITECTURE),
     }
     registered_actions = action_ids(agent)
     required_skill_ids = execution.required_skill_ids()
@@ -498,7 +498,7 @@ async def main() -> None:
         "stream_trace_file": str(trace_path),
         "final_result": final_text,
     }
-    summary_path = files_root / OUTPUT_SUMMARY
+    summary_path = workspace.root / OUTPUT_SUMMARY
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_summary(summary)

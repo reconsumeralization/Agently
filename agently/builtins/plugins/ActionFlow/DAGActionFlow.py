@@ -26,7 +26,11 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING, Any
 
-from agently.core.runtime.RuntimeContext import bind_runtime_context, resolve_parent_run_context
+from agently.core.runtime.RuntimeContext import (
+    bind_runtime_context,
+    get_current_agent_execution_context,
+    resolve_parent_run_context,
+)
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -112,6 +116,11 @@ class DAGActionFlow:
                 "compat_event_family": "tool",
             },
         )
+        parent_artifact_scope = action._artifact_scope_from_agent_execution_context(
+            get_current_agent_execution_context(),
+        )
+        artifact_scope = parent_artifact_scope or action._artifact_scope_from_run_context(action_loop_run)
+        owns_artifact_scope = artifact_scope.get("kind") == "action_run"
 
         async def publish_runtime_observation(
             kind: str,
@@ -127,17 +136,19 @@ class DAGActionFlow:
             if runtime_observation_handler is None:
                 return
             result = runtime_observation_handler(
-                {
-                    "kind": kind,
-                    "source": "DAGActionFlow",
-                    "level": level,
-                    "message": message,
-                    "payload": payload,
-                    "error": error,
-                    "run": action_loop_run if run is None else run,
-                    "compat_event_family": compat_event_family,
-                    "compat_message": compat_message,
-                }
+                action._to_runtime_visible_observation(
+                    {
+                        "kind": kind,
+                        "source": "DAGActionFlow",
+                        "level": level,
+                        "message": message,
+                        "payload": payload,
+                        "error": error,
+                        "run": action_loop_run if run is None else run,
+                        "compat_event_family": compat_event_family,
+                        "compat_message": compat_message,
+                    }
+                )
             )
             if inspect.isawaitable(result):
                 await result
@@ -289,6 +300,7 @@ class DAGActionFlow:
                     round_index=round_index,
                     agent_name=agent_name,
                     action_loop_run=action_loop_run,
+                    artifact_scope=artifact_scope,
                 )
 
             graph = {
@@ -298,7 +310,14 @@ class DAGActionFlow:
             }
 
             dag_executor = TaskDAGExecutor(resolver=resolver, name=f"dag-action-exec-{agent_name}-round-{round_index}")
-            result = await dag_executor.async_run(graph, {"round_index": round_index}, timeout=timeout, concurrency=concurrency)
+            compiled_dag = dag_executor.compile(graph)
+            dag_execution = compiled_dag.create_execution(
+                auto_close=False,
+                concurrency=concurrency,
+                workspace=False,
+            )
+            await dag_execution.async_start({"round_index": round_index})
+            result = await dag_execution.async_close(timeout=timeout)
 
             # Extract per-task results and collect them
             task_results: list[dict[str, Any]] = []
@@ -317,9 +336,14 @@ class DAGActionFlow:
                     })
 
             # Normalize and finalize records
-            records = action._normalize_execution_records(task_results, action_calls)
+            records = action._normalize_execution_records(
+                task_results,
+                action_calls,
+                artifact_scope=artifact_scope,
+            )
 
-            for record_index, record in enumerate(records):
+            bounded_records = action._to_action_flow_return_records(records)
+            for record_index, record in enumerate(bounded_records):
                 action_id = record.get("action_id", record.get("tool_name", "unknown"))
                 success = bool(record.get("success"))
                 status = str(record.get("status", "") or "")
@@ -363,12 +387,13 @@ class DAGActionFlow:
                     run=action_run,
                 )
 
-            done_plans.extend(records)
+            state_records = bounded_records
+            done_plans.extend(state_records)
             data.set_state("done_plans", done_plans)
-            data.set_state("last_round_records", records)
+            data.set_state("last_round_records", state_records)
             data.set_state("round_index", round_index + 1)
             await data.async_emit("PLAN", None)
-            return records
+            return state_records
 
         async def finalize_loop(data):
             result = data.value if isinstance(data.value, list) else []
@@ -381,15 +406,21 @@ class DAGActionFlow:
         flow.when("EXECUTE").to(execute_step_via_dag)
         flow.when("DONE").to(finalize_loop)
 
-        execution = flow.create_execution(parent_run_context=action_loop_run)
+        execution = flow.create_execution(
+            parent_run_context=action_loop_run,
+            workspace=False,
+            auto_close=False,
+        )
+        action_loop_completed = False
         try:
             with bind_runtime_context(
                 parent_run_context=action_loop_run,
                 tool_phase_run_context=action_loop_run,
                 settings=settings,
             ):
-                await execution.async_start(wait_for_result=False)
+                await execution.async_start()
                 result = await execution.async_close(timeout=timeout)
+                action_loop_completed = True
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -407,14 +438,28 @@ class DAGActionFlow:
                     error=error,
                 )
             raise
+        finally:
+            if owns_artifact_scope and not action_loop_completed:
+                action._release_artifact_scope(artifact_scope)
         if isinstance(result, dict):
             result = result.get("action_loop_result", result.get("$final_result"))
         if not isinstance(result, list):
+            if owns_artifact_scope:
+                action._release_artifact_scope(artifact_scope)
             return []
-        normalized = [
-            action._finalize_action_result(action._normalize_execution_record(record, None, index))
-            for index, record in enumerate(result)
-        ]
+        normalized = action._to_action_flow_return_records(result)
+        if owns_artifact_scope:
+            action._release_artifact_scope(artifact_scope)
+        if owns_artifact_scope:
+            normalized = action._project_released_artifact_scope(normalized, artifact_scope)
+            for state_key in ("done_plans", "last_round_records", "action_loop_result"):
+                state_value = execution.get_state(state_key, [])
+                await execution.async_set_state(
+                    state_key,
+                    action._project_released_artifact_scope(state_value, artifact_scope),
+                )
+        normalized = action._to_action_flow_return_records(normalized)
+        normalized = action.to_model_visible_records(normalized)
         with bind_runtime_context(
             parent_run_context=action_loop_run,
             tool_phase_run_context=action_loop_run,
@@ -441,6 +486,7 @@ def _make_dag_node_handler(
     round_index: int,
     agent_name: str,
     action_loop_run,
+    artifact_scope: dict[str, str],
 ):
     """Create a handler for a single action node in the DAG."""
 
@@ -460,6 +506,7 @@ def _make_dag_node_handler(
                 source_protocol=source_protocol,
                 todo_suggestion=str(action_call.get("todo_suggestion", action_call.get("next", ""))),
                 next_value=str(action_call.get("todo_suggestion", action_call.get("next", ""))),
+                artifact_scope=artifact_scope,
             )
         except asyncio.TimeoutError:
             result = {

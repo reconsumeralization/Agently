@@ -35,7 +35,7 @@ into the next request.
 ```python
 from agently.core import Session
 
-workspace = Agently.create_workspace("./.agently/support-memory")
+workspace = Agently.create_workspace("./support-memory")
 
 session = Session()
 session.use_memory(mode="AgentlyMemory", workspace=workspace)
@@ -45,11 +45,26 @@ Agent-created sessions can bind the agent Workspace automatically:
 
 ```python
 agent = Agently.create_agent()
-agent.use_workspace("./.agently/support-memory")
+agent.use_workspace("./support-memory")
 agent.activate_session(session_id="support-demo")
 
 agent.activated_session.use_memory(mode="AgentlyMemory")
 ```
+
+The configured path is the ordinary Workspace root; applications should not
+bind `.agently` itself as a Workspace. Merely creating a Session, activating it,
+or binding a Workspace creates no private state. The first record-backed memory
+write or query lazily creates `.agently/workspace.db`. Vector providers remain
+unmaterialized in the default record-only mode. Enable them only when memory
+really needs vector writes or queries:
+
+```python
+agent.set_settings("session.memory.AgentlyMemory.vector_index.enabled", True)
+```
+
+`vector_index.enabled=True` makes extracted memory records request vector
+indexing; a real vector operation is what materializes the configured embedding
+and vector providers.
 
 `AgentlyMemory` writes memory records with:
 

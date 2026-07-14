@@ -87,12 +87,11 @@ from .runtime import (
     bind_runtime_context,
 )
 from .session import Session
-from .workspace import (
+from .Workspace import (
     AgentEmbeddingProvider,
     CallableEmbeddingProvider,
     ChromaVectorStoreProvider,
     DefaultContextBuilder,
-    LazyWorkspace,
     LocalVectorIndex,
     LocalWorkspaceBackend,
     ContextProfile,
@@ -134,7 +133,6 @@ __all__ = [
     "ExecutionExchangeManager",
     "ExecutionResourceManager",
     "ExtensionHandlers",
-    "LazyWorkspace",
     "LocalVectorIndex",
     "LocalWorkspaceBackend",
     "ModelRequest",

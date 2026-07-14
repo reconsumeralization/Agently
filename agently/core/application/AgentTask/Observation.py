@@ -19,29 +19,36 @@ from .TaskShared import *
 
 
 class AgentTaskObservationMixin(AgentTaskMixinBase):
+    def _memory_process_ref(
+        self,
+        kind: str,
+        *,
+        iteration: int | None = None,
+        phase: str | None = None,
+    ) -> "WorkspaceRecordRef":
+        """Return a compact run-local locator without touching Workspace storage."""
+
+        sequence = len(getattr(self, "_stream_items", []))
+        suffix = phase or kind
+        return cast(
+            WorkspaceRecordRef,
+            {
+                "id": f"{self.id}:{suffix}:{iteration if iteration is not None else sequence}",
+                "kind": kind,
+                "storage": "memory",
+                "task_id": self.id,
+                "iteration": iteration,
+            },
+        )
+
     async def _record_decision(
         self,
         iteration_index: int,
         plan: dict[str, Any],
         context_pack: "WorkspaceContextPackage",
     ) -> "WorkspaceRecordRef":
-        record_ref = await self.workspace.put(
-            content={
-                "iteration": iteration_index,
-                "plan": DataFormatter.sanitize(plan),
-                "process_summary": self._process_summary_from_value(plan, stage="plan"),
-                "context_pack_diagnostics": DataFormatter.sanitize(context_pack.get("diagnostics", {})),
-                "context_item_count": len(context_pack.get("items", [])),
-            },
-            collection="decisions",
-            kind="agent_task_decision",
-            summary=f"{self.id} iteration {iteration_index} planning decision",
-            scope={"task_id": self.id, "iteration": iteration_index},
-            source={"type": "agent_task", "phase": "plan"},
-            meta={"task_id": self.id, "iteration": iteration_index},
-        )
-        self._append_workspace_ref("decisions", record_ref)
-        return record_ref
+        _ = plan, context_pack
+        return self._memory_process_ref("agent_task_decision", iteration=iteration_index, phase="decision")
 
     async def _record_observation(
         self,
@@ -52,59 +59,12 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         execution_result: Any,
         execution_meta: dict[str, Any],
     ) -> tuple["WorkspaceRecordRef", "WorkspaceRecordRef | None"]:
-        record_ref = await self.workspace.put(
-            content={
-                "iteration": iteration_index,
-                "plan": DataFormatter.sanitize(plan),
-                "decision_ref": decision_ref,
-                "execution_result": DataFormatter.sanitize(execution_result),
-                "execution_meta": DataFormatter.sanitize(execution_meta),
-                "process_summary": self._process_summary_from_value(execution_result, stage="execution"),
-            },
-            collection="observations",
-            kind="agent_task_observation",
-            summary=f"{self.id} iteration {iteration_index} execution observation",
-            scope={"task_id": self.id, "iteration": iteration_index},
-            source={"type": "agent_task", "phase": "execute", "execution_id": execution_meta.get("execution_id")},
-            meta={"task_id": self.id, "iteration": iteration_index},
-        )
-        checkpoint_ref = await self.workspace.put_checkpoint(
-            self.id,
-            {
-                "task_id": self.id,
-                "iteration": iteration_index,
-                "status": self.status,
-                "decision_ref": decision_ref,
-                "observation_ref": record_ref,
-            },
-            step_id=f"iteration-{iteration_index}",
-        )
-        decision_link = await self.workspace.link_evidence(
-            record_ref,
-            decision_ref,
-            relation="implements_decision",
-            execution_id=str(execution_meta.get("execution_id") or "") or None,
-            checkpoint_id=checkpoint_ref.get("id"),
-            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
-        )
-        checkpoint_link = await self.workspace.link_evidence(
-            record_ref,
-            checkpoint_ref,
-            relation="checkpointed_by",
-            execution_id=str(execution_meta.get("execution_id") or "") or None,
-            checkpoint_id=checkpoint_ref.get("id"),
-            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
-        )
-        self._append_workspace_ref("observations", record_ref)
-        self._append_workspace_ref("checkpoints", checkpoint_ref)
-        self._append_workspace_ref("evidence_links", decision_link)
-        self._append_workspace_ref("evidence_links", checkpoint_link)
-        await self._emit(
-            "agent_task.checkpoint",
-            {"iteration": iteration_index, "checkpoint": checkpoint_ref},
+        _ = plan, decision_ref, execution_result
+        record_ref = self._memory_process_ref(
+            "agent_task_observation", iteration=iteration_index, phase="observation"
         )
         await self._emit_action_observation_events(iteration_index, execution_meta=execution_meta)
-        return record_ref, checkpoint_ref
+        return record_ref, None
 
     async def _record_taskboard_checkpoint(
         self,
@@ -118,9 +78,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
     ) -> tuple["WorkspaceRecordRef | None", "WorkspaceRecordRef | None"]:
         try:
             effective_revision = TaskBoardRevision.from_value(revision)
-            revision_dict = effective_revision.to_dict()
             evidence_view = build_task_board_evidence_view(effective_revision).to_dict()
-            schedule = TaskBoard(effective_revision, handler=lambda _context: None).schedule()
             explicit_state_facts = task_board_explicit_state_facts(effective_revision, evidence_view=evidence_view)
             previous_acceptance_index = getattr(self, "_latest_taskboard_acceptance_index", None)
             if not isinstance(previous_acceptance_index, Mapping):
@@ -146,132 +104,19 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 explicit_state_facts=explicit_state_facts,
                 previous_acceptance_index=previous_acceptance_index,
             )
-            acceptance_verification_plan = build_task_board_incremental_verification_plan(acceptance_index)
-            scoped_evidence_view = build_task_board_scoped_evidence_view(
-                acceptance_index,
-                evidence_view=evidence_view,
-            )
-            guidance_projection = self._guidance_context_projection()
             self._latest_taskboard_acceptance_index = DataFormatter.sanitize(acceptance_index)
             revision_id = str(effective_revision.revision_id)
-            step_id = f"taskboard-{stage}-{tick_index}-{revision_id}"
-            handoff_projection = build_task_board_handoff_projection(
-                task_id=self.id,
-                execution_strategy=self.execution_strategy,
-                effective_execution_strategy=self.effective_execution_strategy or "taskboard",
-                stage=stage,
-                tick_index=tick_index,
-                revision=effective_revision,
-                schedule=schedule,
-                evidence_view=evidence_view,
-                acceptance_index=acceptance_index,
-                runtime_topology=runtime_topology or {},
-                final_result=final_result or {},
-                explicit_state_facts=explicit_state_facts,
-            )
-            record_ref = await self.workspace.put(
-                content={
-                    "schema_version": "agent_task_taskboard_checkpoint/v1",
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                    "status": self.status,
-                    "revision": DataFormatter.sanitize(revision_dict),
-                    "evidence_view": DataFormatter.sanitize(evidence_view),
-                    "acceptance_index": DataFormatter.sanitize(acceptance_index),
-                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
-                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
-                    "guidance": DataFormatter.sanitize(guidance_projection),
-                    "handoff_projection": DataFormatter.sanitize(handoff_projection),
-                    "runtime_topology": DataFormatter.sanitize(runtime_topology or {}),
-                    "terminal_reason": terminal_reason,
-                    "final_result": DataFormatter.sanitize(final_result or {}),
-                },
-                collection="observations",
-                kind="agent_task_taskboard_checkpoint",
-                summary=f"{self.id} TaskBoard {stage} checkpoint {revision_id}",
-                scope={
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                    "revision_id": revision_id,
-                },
-                source={"type": "agent_task", "phase": "taskboard_checkpoint", "stage": stage},
-                meta={
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                    "revision_id": revision_id,
-                },
-            )
-            checkpoint_ref = await self.workspace.put_checkpoint(
-                self.id,
-                {
-                    "schema_version": "agent_task_taskboard_checkpoint/v1",
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                    "step_id": step_id,
-                    "status": self.status,
-                    "revision_id": revision_id,
-                    "revision_ref": record_ref.get("id"),
-                    "acceptance_index": DataFormatter.sanitize(acceptance_index),
-                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
-                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
-                    "guidance": DataFormatter.sanitize(guidance_projection),
-                    "handoff_projection": DataFormatter.sanitize(handoff_projection),
-                    "terminal_reason": terminal_reason,
-                    "final_status": (final_result or {}).get("status"),
-                    "accepted": (final_result or {}).get("accepted"),
-                },
-                step_id=step_id,
-            )
-            checkpoint_link = await self.workspace.link_evidence(
-                record_ref,
-                checkpoint_ref,
-                relation="checkpointed_by",
-                checkpoint_id=checkpoint_ref.get("id"),
-                meta={
-                    "owner": "AgentTask",
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                },
-            )
-            self._append_workspace_ref("observations", record_ref)
-            self._append_workspace_ref("checkpoints", checkpoint_ref)
-            self._append_workspace_ref("evidence_links", checkpoint_link)
             await self._emit(
-                "agent_task.checkpoint",
-                {"iteration": tick_index, "strategy": "taskboard", "checkpoint": checkpoint_ref},
-            )
-            await self._emit(
-                "agent_task.taskboard.checkpoint",
+                "agent_task.taskboard.tick_recorded",
                 {
                     "stage": stage,
                     "tick_index": tick_index,
                     "revision_id": revision_id,
-                    "checkpoint": checkpoint_ref,
-                    "revision_ref": record_ref,
+                    "terminal_reason": terminal_reason,
+                    "status": str((final_result or {}).get("status") or self.status),
                 },
             )
-            await self._write_taskboard_resume_snapshot(
-                stage=stage,
-                tick_index=tick_index,
-                revision=effective_revision,
-                evidence_view=evidence_view,
-                acceptance_index=acceptance_index,
-                handoff_projection=handoff_projection,
-                runtime_topology=runtime_topology or {},
-                terminal_reason=terminal_reason,
-                final_result=final_result,
-            )
-            return record_ref, checkpoint_ref
+            return None, None
         except Exception as error:
             self.diagnostics.setdefault("taskboard_checkpoint_errors", []).append(
                 {
@@ -289,29 +134,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         verification: dict[str, Any],
         observation_ref: "WorkspaceRecordRef",
     ) -> "WorkspaceRecordRef":
-        record_ref = await self.workspace.put(
-            content={
-                "iteration": iteration_index,
-                "verification": DataFormatter.sanitize(verification),
-                "observation_ref": observation_ref,
-                "process_summary": self._process_summary_from_value(verification, stage="verification"),
-            },
-            collection="verification",
-            kind="agent_task_verification",
-            summary=f"{self.id} iteration {iteration_index} verification",
-            scope={"task_id": self.id, "iteration": iteration_index},
-            source={"type": "agent_task", "phase": "verify"},
-            meta={"task_id": self.id, "iteration": iteration_index},
+        _ = verification, observation_ref
+        return self._memory_process_ref(
+            "agent_task_verification", iteration=iteration_index, phase="verification"
         )
-        evidence_link = await self.workspace.link_evidence(
-            record_ref,
-            observation_ref,
-            relation="verifies_observation",
-            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
-        )
-        self._append_workspace_ref("verification", record_ref)
-        self._append_workspace_ref("evidence_links", evidence_link)
-        return record_ref
 
     def _reflection_density(self) -> str:
         agent_task_options = self.options.get("agent_task")
@@ -383,52 +209,23 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "subject_ref": DataFormatter.sanitize(subject_ref),
             "completion_evidence": False,
         }
-        try:
-            record_ref = await self.workspace.put(
-                content=content,
-                collection="reflections",
-                kind="agent_task_reflection",
-                summary=f"{self.id} iteration {iteration_index} {phase} reflection",
-                scope={"task_id": self.id, "iteration": iteration_index},
-                source={"type": "agent_task", "phase": "reflect", "reflection_phase": phase},
-                meta={"task_id": self.id, "iteration": iteration_index, "completion_evidence": False},
-            )
-            if subject_ref:
-                evidence_link = await self.workspace.link_evidence(
-                    record_ref,
-                    subject_ref,
-                    relation="reflects_on",
-                    meta={
-                        "owner": "AgentTask",
-                        "task_id": self.id,
-                        "iteration": iteration_index,
-                        "completion_evidence": False,
-                    },
-                )
-                self._append_workspace_ref("evidence_links", evidence_link)
-            self._append_workspace_ref("reflections", record_ref)
-            reflection_summary = {
-                "iteration": iteration_index,
-                "phase": phase,
-                "record_ref": record_ref,
-                "summary": DataFormatter.sanitize(summary),
-                "completion_evidence": False,
-            }
-            self.reflections.append(reflection_summary)
-            await self._emit(
-                f"agent_task.iteration.{iteration_index}.reflection.{phase}",
-                {"record": record_ref, "summary": reflection_summary["summary"]},
-            )
-            return record_ref
-        except Exception as error:
-            self.diagnostics.setdefault("reflection_record_errors", []).append(
-                {
-                    "type": error.__class__.__name__,
-                    "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                    "phase": phase,
-                }
-            )
-            return None
+        _ = content, subject_ref
+        record_ref = self._memory_process_ref(
+            "agent_task_reflection", iteration=iteration_index, phase=f"reflection:{phase}"
+        )
+        reflection_summary = {
+            "iteration": iteration_index,
+            "phase": phase,
+            "record_ref": record_ref,
+            "summary": DataFormatter.sanitize(summary),
+            "completion_evidence": False,
+        }
+        self.reflections.append(reflection_summary)
+        await self._emit(
+            f"agent_task.iteration.{iteration_index}.reflection.{phase}",
+            {"record": record_ref, "summary": reflection_summary["summary"]},
+        )
+        return record_ref
 
     async def _ensure_final_reflection(self) -> None:
         if any(item.get("phase") == "final" for item in self.reflections if isinstance(item, dict)):
@@ -506,6 +303,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             await queue.put(item)
         self._stream_queues.append(queue)
         start_task = asyncio.create_task(self.async_run())
+        start_task_joined = False
         try:
             while True:
                 item = await queue.get()
@@ -515,7 +313,17 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 if projected is not None:
                     yield projected
             await start_task
+            start_task_joined = True
         finally:
+            if not start_task_joined:
+                if not start_task.done():
+                    start_task.cancel()
+                try:
+                    await start_task
+                except BaseException:
+                    # Joining is cleanup: the generator's original cancellation,
+                    # close, or child failure remains the caller-visible error.
+                    pass
             if queue in self._stream_queues:
                 self._stream_queues.remove(queue)
 
@@ -1352,7 +1160,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             if isinstance(record, Mapping):
                 key = "|".join(
                     str(record.get(field) or "")
-                    for field in ("artifact_id", "action_call_id", "path", "sha256", "source_url")
+                    for field in ("selection_key", "artifact_id", "action_call_id", "path", "sha256", "source_url")
                 )
                 if not key.strip("|"):
                     key = json.dumps(DataFormatter.sanitize(record), ensure_ascii=False, sort_keys=True)

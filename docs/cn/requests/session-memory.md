@@ -34,7 +34,7 @@ agent.deactivate_session()
 ```python
 from agently.core import Session
 
-workspace = Agently.create_workspace("./.agently/support-memory")
+workspace = Agently.create_workspace("./support-memory")
 
 session = Session()
 session.use_memory(mode="AgentlyMemory", workspace=workspace)
@@ -44,11 +44,23 @@ session.use_memory(mode="AgentlyMemory", workspace=workspace)
 
 ```python
 agent = Agently.create_agent()
-agent.use_workspace("./.agently/support-memory")
+agent.use_workspace("./support-memory")
 agent.activate_session(session_id="support-demo")
 
 agent.activated_session.use_memory(mode="AgentlyMemory")
 ```
+
+这里配置的是普通 Workspace 根目录；应用不应把 `.agently` 本身绑定成 Workspace。
+仅创建 Session、激活 Session 或绑定 Workspace 都不会创建私有状态。第一次执行基于
+record 的记忆写入或查询时，才会懒创建 `.agently/workspace.db`。默认 record-only
+模式不会物化向量 provider；只有确实需要向量写入或查询时才开启：
+
+```python
+agent.set_settings("session.memory.AgentlyMemory.vector_index.enabled", True)
+```
+
+`vector_index.enabled=True` 会让抽取出的记忆 record 请求向量索引；真正发生向量操作时，
+才会物化已配置的 embedding 和 vector provider。
 
 `AgentlyMemory` 写入的记忆 record 使用：
 

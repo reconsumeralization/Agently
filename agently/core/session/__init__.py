@@ -13,9 +13,9 @@
 # limitations under the License.
 
 # Workspace and its ContextBuilder substrate now live in the Foundation package
-# `agently.core.workspace`. Session is a Workspace consumer, not the owner
+# `agently.core.Workspace`. Session is a Workspace consumer, not the owner
 # namespace for the storage substrate, so it no longer re-exports those
-# surfaces. Import Workspace/ContextBuilder from `agently.core.workspace`.
+# surfaces. Import Workspace/ContextBuilder from `agently.core.Workspace`.
 from .Session import Session
 
 __all__ = [

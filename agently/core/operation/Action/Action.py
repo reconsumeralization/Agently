@@ -178,8 +178,7 @@ class Action:
                 "digest is not enough."
             ),
             kwargs={
-                "artifact_id": (str, "Artifact id from a previous Action execution digest."),
-                "action_call_id": (str, "Optional Action call id that should own this artifact."),
+                "selection_key": (str, "Host-issued selection key from a previous Action execution digest."),
             },
             func=self.async_read_action_artifact,
             side_effect_level="read",
@@ -193,42 +192,43 @@ class Action:
 
     async def async_read_action_artifact(
         self,
-        artifact_id: str,
-        action_call_id: str | None = None,
+        selection_key: str,
     ) -> dict[str, Any]:
         from agently.base import async_emit_runtime
+        from agently.core.runtime import get_current_agent_execution_context
         from agently.types.data import ObservationEvent
 
-        artifact = self._action_artifacts.get(str(artifact_id))
-        if artifact is None:
+        expected_scope = self._artifact_manager.current_artifact_scope()
+        if expected_scope is None:
+            execution_context = get_current_agent_execution_context()
+            expected_scope = self._artifact_scope_from_agent_execution_context(
+                execution_context,
+            )
+        transfer = (
+            self._artifact_manager.read_selection_transfer(
+                str(selection_key),
+                expected_scope=expected_scope,
+            )
+            if expected_scope is not None
+            else None
+        )
+        if transfer is None:
             result = {
                 "ok": False,
                 "status": "not_found",
-                "artifact_id": str(artifact_id),
                 "error": "Action artifact was not found or is no longer retained.",
             }
-        elif action_call_id and str(artifact.get("action_call_id", "")) != str(action_call_id):
-            result = {
-                "ok": False,
-                "status": "forbidden",
-                "artifact_id": str(artifact_id),
-                "action_call_id": str(action_call_id),
-                "error": "Action artifact does not belong to the requested action_call_id.",
-            }
         else:
-            value = artifact.get("value")
+            artifact, value = transfer
             result = {
                 "ok": True,
                 "status": "success",
-                "artifact_id": str(artifact_id),
-                "action_call_id": artifact.get("action_call_id", ""),
                 "artifact_type": artifact.get("artifact_type", ""),
                 "label": artifact.get("label", ""),
                 "media_type": artifact.get("media_type", ""),
                 "value": value,
                 "data": value,
                 "result": value,
-                "meta": artifact.get("meta", {}),
             }
 
         await async_emit_runtime(
@@ -236,10 +236,9 @@ class Action:
                 event_type="action.artifact_read",
                 source="ActionRuntime",
                 level="INFO" if result.get("ok") else "WARNING",
-                message=f"Action artifact '{ artifact_id }' read.",
+                message="Action artifact selection read completed.",
                 payload={
-                    "artifact_id": str(artifact_id),
-                    "action_call_id": action_call_id,
+                    "selection_key": selection_key,
                     "status": result.get("status"),
                     "ok": result.get("ok"),
                 },
@@ -572,8 +571,65 @@ class Action:
     def _build_execution_digest(self, record: "ActionResult", *, artifact_refs: list[ActionArtifact], redaction_report: list[str]) -> dict[str, Any]:
         return self._artifact_manager._build_execution_digest(record, artifact_refs=artifact_refs, redaction_report=redaction_report)
 
-    def _finalize_action_result(self, result: Any) -> "ActionResult":
-        return self._artifact_manager.finalize_action_result(result)
+    def _finalize_action_result(
+        self,
+        result: Any,
+        *,
+        artifact_scope: dict[str, str] | None = None,
+    ) -> "ActionResult":
+        return self._artifact_manager.finalize_action_result(
+            result,
+            artifact_scope=artifact_scope,
+        )
+
+    @staticmethod
+    def _artifact_scope_from_run_context(run_context: Any) -> dict[str, str]:
+        meta = getattr(run_context, "meta", None)
+        task_id = str(meta.get("task_id") or "").strip() if isinstance(meta, dict) else ""
+        if task_id:
+            return {"kind": "agent_task", "id": task_id}
+        execution_id = str(getattr(run_context, "execution_id", "") or "").strip()
+        if execution_id:
+            return {"kind": "agent_execution", "id": execution_id}
+        run_id = str(getattr(run_context, "run_id", "") or "").strip()
+        if not run_id:
+            raise ValueError("Action artifact scope requires a RunContext run_id or execution_id.")
+        return {"kind": "action_run", "id": run_id}
+
+    @staticmethod
+    def _artifact_scope_from_agent_execution_context(context: Any) -> dict[str, str] | None:
+        lineage = getattr(context, "lineage", None)
+        task_id = str(lineage.get("task_id") or "").strip() if isinstance(lineage, dict) else ""
+        if task_id:
+            return {"kind": "agent_task", "id": task_id}
+        execution_id = str(getattr(context, "execution_id", "") or "").strip()
+        if execution_id:
+            return {"kind": "agent_execution", "id": execution_id}
+        return None
+
+    def _release_artifact_scope(self, artifact_scope: dict[str, str]) -> int:
+        return self._artifact_manager.release_scope(artifact_scope)
+
+    def _release_artifact_scope_except(
+        self,
+        artifact_scope: dict[str, str],
+        *,
+        retained_artifact_ids: set[str],
+    ) -> int:
+        return self._artifact_manager.release_scope_except(
+            artifact_scope,
+            retained_artifact_ids=retained_artifact_ids,
+        )
+
+    def _project_released_artifact_scope(
+        self,
+        value: Any,
+        artifact_scope: dict[str, str],
+    ) -> Any:
+        return self._artifact_manager.project_released_scope(
+            value,
+            artifact_scope=artifact_scope,
+        )
 
     @classmethod
     def _to_model_visible_record(cls, record: "ActionResult") -> "ActionResult":
@@ -582,6 +638,14 @@ class Action:
     @classmethod
     def to_model_visible_records(cls, records: list["ActionResult"] | None):
         return ActionArtifactManager.to_model_visible_records(records)
+
+    @classmethod
+    def _to_action_flow_return_records(cls, records: list["ActionResult"] | None):
+        return ActionArtifactManager._to_action_flow_return_records(records)
+
+    @classmethod
+    def _to_runtime_visible_observation(cls, observation: dict[str, Any]) -> dict[str, Any]:
+        return ActionArtifactManager._to_runtime_visible_observation(observation)
 
     def _with_action_artifact_recall_action(self, action_list: list[dict[str, Any]], records: list["ActionResult"] | None):
         return self._artifact_manager.with_action_artifact_recall_action(action_list, records)
@@ -717,28 +781,61 @@ class Action:
         source_protocol: str = "direct",
         todo_suggestion: str = "",
         next_value: str = "",
+        artifact_scope: dict[str, str] | None = None,
     ):
-        result = await self.action_dispatcher.async_execute(
-            name,
-            kwargs,
-            settings=settings,
-            purpose=purpose,
-            policy_override=policy_override,
-            trusted_policy_override=trusted_policy_override,
-            source_protocol=source_protocol,
-            todo_suggestion=todo_suggestion,
-            next_value=next_value,
+        owns_scope = artifact_scope is None
+        resolved_scope = artifact_scope or {"kind": "action_call", "id": f"act_call_{uuid.uuid4().hex}"}
+        finalized: Any = None
+        try:
+            with self._artifact_manager.bind_artifact_scope(resolved_scope):
+                result = await self.action_dispatcher.async_execute(
+                    name,
+                    kwargs,
+                    settings=settings,
+                    purpose=purpose,
+                    policy_override=policy_override,
+                    trusted_policy_override=trusted_policy_override,
+                    source_protocol=source_protocol,
+                    todo_suggestion=todo_suggestion,
+                    next_value=next_value,
+                )
+                finalized = self._finalize_action_result(result, artifact_scope=resolved_scope)
+        finally:
+            if owns_scope:
+                self._release_artifact_scope(resolved_scope)
+        returned = (
+            self._project_released_artifact_scope(finalized, resolved_scope)
+            if owns_scope
+            else finalized
         )
-        return self._finalize_action_result(result)
+        bounded = self._to_action_flow_return_records([returned])
+        return bounded[0] if bounded else returned
 
     def execute_action(self, name: str, kwargs: dict[str, Any], **kwargs_options):
         return FunctionShifter.syncify(self.async_execute_action)(name, kwargs, **kwargs_options)
 
-    async def async_call_action(self, name: str, kwargs: dict[str, Any]) -> Any:
+    async def _async_call_action_with_scope(
+        self,
+        name: str,
+        kwargs: dict[str, Any],
+        *,
+        artifact_scope: dict[str, str] | None,
+    ) -> Any:
         if not self.action_registry.has(name):
             return self._legacy_error(name, as_tool=False)
-        result = await self.async_execute_action(name, kwargs)
+        result = await self.async_execute_action(
+            name,
+            kwargs,
+            artifact_scope=artifact_scope,
+        )
         return self._legacy_result(result, as_tool=False)
+
+    async def async_call_action(self, name: str, kwargs: dict[str, Any]) -> Any:
+        return await self._async_call_action_with_scope(
+            name,
+            kwargs,
+            artifact_scope=None,
+        )
 
     def call_action(self, name: str, kwargs: dict[str, Any]) -> Any:
         return FunctionShifter.syncify(self.async_call_action)(name, kwargs)
@@ -839,6 +936,7 @@ class Action:
         env: dict[str, str] | None = None,
         max_output_chars: int = 20000,
         output_artifact_dir: str | Path | None = None,
+        workspace_mounts: list[dict[str, str]] | None = None,
         sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
@@ -859,6 +957,7 @@ class Action:
             env=env,
             max_output_chars=max_output_chars,
             output_artifact_dir=output_artifact_dir,
+            workspace_mounts=workspace_mounts,
             sandbox=sandbox,
             docker_image=docker_image,
             docker_binary=docker_binary,
@@ -1139,19 +1238,31 @@ class Action:
     def _normalize_execution_record(self, record: Any, command: "ActionCall | None", index: int) -> "ActionResult":
         return normalize_execution_record(record, command, index)
 
-    def _normalize_execution_records(self, records: Any, commands: list["ActionCall"]) -> list["ActionResult"]:
-        return self._artifact_manager.normalize_execution_records(records, commands)
+    def _normalize_execution_records(
+        self,
+        records: Any,
+        commands: list["ActionCall"],
+        *,
+        artifact_scope: dict[str, str] | None = None,
+    ) -> list["ActionResult"]:
+        return self._artifact_manager.normalize_execution_records(
+            records,
+            commands,
+            artifact_scope=artifact_scope,
+        )
 
     @staticmethod
     def to_action_results(records: list["ActionResult"]):
-        return to_action_results(records)
+        return to_action_results(ActionArtifactManager.to_model_visible_records(records))
 
     @staticmethod
     def _should_continue(decision: "ActionDecision", *, round_index: int, max_rounds: int | None):
         return should_continue(decision, round_index=round_index, max_rounds=max_rounds)
 
     async def _async_emit_action_flow_observation(self, observation: dict[str, Any]):
-        await self._flow_controller.async_emit_action_flow_observation(observation)
+        from agently.core.runtime.RuntimeEvents import async_emit_action_flow_observation
+
+        await async_emit_action_flow_observation(self._to_runtime_visible_observation(observation))
 
     async def async_plan_and_execute(
         self,

@@ -247,6 +247,7 @@ from .skill import (
 
 from .workspace import (
     WorkspaceBackendCapabilities,
+    WorkspaceMode,
     WorkspaceContentSegment,
     WorkspaceContextItem,
     WorkspaceContextOmission,
@@ -261,7 +262,6 @@ from .workspace import (
     WorkspaceFileExportResult,
     WorkspaceFileInfo,
     WorkspaceFileOperation,
-    WorkspaceFilePolicyMetadata,
     WorkspaceFileReadResult,
     WorkspaceFileRef,
     WorkspaceFileWriteResult,
@@ -270,19 +270,23 @@ from .workspace import (
     WorkspaceContextPlan,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
-    WorkspaceRetentionAnchor,
+    WorkspaceRetentionDiagnostic,
+    WorkspaceRetentionResult,
+    WorkspaceRetentionTerminalStatus,
     WorkspaceRuntimeEventRecord,
-    WorkspaceScratchLease,
     WorkspaceSearchResult,
 )
 
 from .agent_execution import (
+    ActionArtifactReleaseDiagnostic,
+    ActionArtifactReleaseDiagnostics,
     AgentExecutionDiagnostics,
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
     AgentExecutionStatus,
     AgentExecutionStreamMeta,
+    AgentExecutionWorkspacePurpose,
     AgentExecutionWorkspaceRecord,
     AgentExecutionWorkspaceRefs,
     CapabilityKind,

@@ -164,9 +164,7 @@ class ActionFlowController:
         )
 
     async def async_emit_action_flow_observation(self, observation: dict[str, Any]):
-        from agently.core.runtime.RuntimeEvents import async_emit_action_flow_observation
-
-        await async_emit_action_flow_observation(observation)
+        await self._action._async_emit_action_flow_observation(observation)
 
     async def async_plan_and_execute(
         self,

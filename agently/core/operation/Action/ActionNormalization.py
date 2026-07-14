@@ -388,7 +388,11 @@ def to_action_results(records: list[ActionResult]) -> dict[str, Any]:
 
         used_keys.add(key)
         model_digest = record.get("model_digest")
-        result_value = model_digest if isinstance(model_digest, dict) else record.get("result", record.get("data"))
+        result_value = (
+            model_digest
+            if isinstance(model_digest, dict) and model_digest.get("same_as") != "result"
+            else record.get("result", record.get("data"))
+        )
         if record.get("success"):
             action_results[key] = result_value
         else:
