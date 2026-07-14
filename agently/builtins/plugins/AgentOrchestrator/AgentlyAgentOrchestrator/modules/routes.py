@@ -14,11 +14,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, Literal, TYPE_CHECKING, cast
 
-from agently.core.model.ModelRequestResultDataFlow import ModelRequestResultDataFlow
-from agently.utils import DataFormatter, DataLocator
+from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
@@ -74,24 +73,12 @@ async def run_model_request_route(
     }
     has_structured_stream = bool(execution.prompt_snapshot.get("output"))
     if has_structured_stream:
-        structured_completion_policies = _structured_stream_completion_policies(
-            result,
-            ensure_keys=ensure_keys,
-            key_style=key_style,
-        )
         async for item in result.get_async_generator(type="instant"):
             await execution.bridge_model_stream_item(
                 item,
                 route="model_request",
                 meta=stream_meta,
             )
-            if _structured_stream_snapshot_satisfies_policies(
-                result.full_result_data,
-                structured_completion_policies,
-                key_style=key_style,
-            ):
-                await _close_structured_response_stream(result)
-                break
     else:
         async for event, data in result.get_async_generator(type="all"):
             if event in {"action", "tool"}:
@@ -202,91 +189,6 @@ async def run_model_request_route(
         }
     execution.close_snapshot = {"status": "success", "route": "model_request"}
     return data
-
-
-def _structured_stream_completion_policies(
-    result: Any,
-    *,
-    ensure_keys: list[str] | None,
-    key_style: Literal["dot", "slash"],
-) -> dict[str, Literal["presence", "not_null"]]:
-    data_flow = getattr(result, "_data_flow", None)
-    auto_policies: dict[str, Literal["presence", "not_null"]] = {}
-    get_auto_policies = getattr(data_flow, "get_auto_ensure_policies", None)
-    if callable(get_auto_policies):
-        try:
-            raw_auto_policies = get_auto_policies(key_style=key_style)
-            if isinstance(raw_auto_policies, Mapping):
-                auto_policies = {
-                    str(key): cast(Literal["presence", "not_null"], value)
-                    for key, value in raw_auto_policies.items()
-                    if value in {"presence", "not_null"}
-                }
-        except Exception:
-            auto_policies = {}
-    if ensure_keys is None:
-        active_keys = list(auto_policies)
-    elif len(ensure_keys) == 0:
-        active_keys = []
-    else:
-        active_keys = ModelRequestResultDataFlow.merge_ensure_keys(list(auto_policies), ensure_keys)
-    if not active_keys:
-        return {}
-    policies = ModelRequestResultDataFlow.resolve_ensure_policies(active_keys, auto_policies)
-    policies.update(_structured_stream_preferred_mapping_policies(result, key_style=key_style))
-    return policies
-
-
-def _structured_stream_preferred_mapping_policies(
-    result: Any,
-    *,
-    key_style: Literal["dot", "slash"],
-) -> dict[str, Literal["presence"]]:
-    try:
-        prompt_output = result.prompt.to_prompt_object().output
-    except Exception:
-        return {}
-    if not isinstance(prompt_output, Mapping):
-        return {}
-    policies: dict[str, Literal["presence"]] = {}
-    for key, value in prompt_output.items():
-        if not key:
-            continue
-        field_shape = value[0] if isinstance(value, tuple) and value else value
-        if field_shape is dict or isinstance(field_shape, Mapping):
-            path = str(key) if key_style == "dot" else f"/{ key }"
-            policies[path] = "presence"
-    return policies
-
-
-def _structured_stream_snapshot_satisfies_policies(
-    full_result_data: Any,
-    policies: Mapping[str, Literal["presence", "not_null"]],
-    *,
-    key_style: Literal["dot", "slash"],
-) -> bool:
-    if not policies:
-        return False
-    if not isinstance(full_result_data, Mapping):
-        return False
-    snapshot = full_result_data.get("parsed_result")
-    if not isinstance(snapshot, (Mapping, Sequence)) or isinstance(snapshot, str | bytes | bytearray):
-        return False
-    empty = object()
-    for path, policy in policies.items():
-        located_value = DataLocator.locate_path_in_dict(snapshot, path, key_style, default=empty)
-        if located_value is empty:
-            return False
-        if policy == "not_null" and not ModelRequestResultDataFlow.ensure_value_is_present(located_value):
-            return False
-    return True
-
-
-async def _close_structured_response_stream(result: Any) -> None:
-    response_parser = getattr(result, "_response_parser", None)
-    close = getattr(response_parser, "async_close", None)
-    if callable(close):
-        await cast(Callable[[], Awaitable[Any]], close)()
 
 
 async def _required_action_failure(execution: "AgentExecution", *, route: str) -> dict[str, Any] | None:

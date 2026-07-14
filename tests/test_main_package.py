@@ -222,62 +222,6 @@ def test_response_parser_records_complete_streaming_snapshot_fields():
     assert parser.full_result_data["extra"]["parse_success"] is True
 
 
-def test_structured_route_completion_uses_ensure_policies_over_streaming_snapshot():
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routes import (
-        _structured_stream_completion_policies,
-        _structured_stream_snapshot_satisfies_policies,
-    )
-
-    class FakeDataFlow:
-        def get_auto_ensure_policies(self, *, key_style="dot"):
-            return {
-                "step_result": "not_null",
-                "artifact_manifest.path": "not_null",
-            }
-
-    class FakeResult:
-        _data_flow = FakeDataFlow()
-
-        class prompt:
-            @staticmethod
-            def to_prompt_object():
-                class PromptObject:
-                    output = {
-                        "step_result": (str, "status", True),
-                        "artifact_manifest": (dict, "manifest", False),
-                        "evidence": ([str], "notes", False),
-                    }
-
-                return PromptObject()
-
-    policies = _structured_stream_completion_policies(
-        FakeResult(),
-        ensure_keys=None,
-        key_style="dot",
-    )
-
-    assert policies == {
-        "step_result": "not_null",
-        "artifact_manifest.path": "not_null",
-        "artifact_manifest": "presence",
-    }
-    assert _structured_stream_snapshot_satisfies_policies(
-        {"parsed_result": {"step_result": "done", "artifact_manifest": {"path": "final.md"}}},
-        policies,
-        key_style="dot",
-    )
-    assert not _structured_stream_snapshot_satisfies_policies(
-        {"parsed_result": {"step_result": "done", "artifact_manifest": {}}},
-        policies,
-        key_style="dot",
-    )
-    assert not _structured_stream_snapshot_satisfies_policies(
-        {"parsed_result": {"step_result": "   ", "artifact_manifest": {"path": "final.md"}}},
-        policies,
-        key_style="dot",
-    )
-
-
 def test_model_response_direct_construction_warns_but_get_result_does_not():
     from agently.core import ModelRequest
     from agently.utils import DeprecationWarnings

@@ -77,6 +77,63 @@ class MockAgentExecutionRequester:
         yield "done", response_text
 
 
+class MockLateStructuredRequester(MockAgentExecutionRequester):
+    name = "MockLateStructuredRequester"
+    final_payload: dict[str, Any] = {
+        "answer": "Drafted the support escalation reply.",
+        "artifact_manifest": {"path": "support_reply.md"},
+        "file_refs": ["support_reply.md"],
+        "evidence": [{"id": "ev-1", "summary": "Duplicate webhook deliveries confirmed."}],
+        "evidence_use": [{"evidence_id": "ev-1", "claim": "No known data loss."}],
+        "acceptance_points": [{"criterion": "Reply and checklist are present.", "satisfied": True}],
+        "remaining_work": [],
+        "self_check": "All requested sections are present.",
+        "short_summary": "Support reply drafted and checked.",
+        "progress_message": "Draft and validation complete.",
+        "diagnostics": [],
+    }
+    natural_terminal_emitted = False
+    cancelled_before_terminal = False
+
+    @staticmethod
+    def _on_register() -> None:
+        MockAgentExecutionRequester.requests = []
+        MockLateStructuredRequester.natural_terminal_emitted = False
+        MockLateStructuredRequester.cancelled_before_terminal = False
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        MockAgentExecutionRequester.requests.append(
+            json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        )
+        response_text = json.dumps(self.final_payload, ensure_ascii=False, separators=(",", ":"))
+        split_marker = ',"file_refs"'
+        first_part, final_part = response_text.split(split_marker, 1)
+        yield "message", first_part
+        await asyncio.sleep(0)
+        yield "message", split_marker + final_part
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, object], None],
+    ):
+        response_text = ""
+        try:
+            async for event, data in response_generator:
+                if event == "message":
+                    response_text += str(data)
+                    yield "delta", str(data)
+                    await asyncio.sleep(0)
+            type(self).natural_terminal_emitted = True
+            yield "done", response_text
+            yield "meta", {
+                "provider": "mock-late-structured",
+                "usage": {"total_tokens": 321},
+            }
+        except asyncio.CancelledError:
+            type(self).cancelled_before_terminal = True
+            raise
+
+
 class MockAgentExecutionRetryStatusRequester(MockAgentExecutionRequester):
     name = "MockAgentExecutionRetryStatusRequester"
 
@@ -400,6 +457,13 @@ def _create_agent(name: str = "agent-execution-step-test"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockAgentExecutionRequester, activate=True)
+    return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
+
+def _create_late_structured_agent(name: str = "agent-execution-late-structured-test"):
+    settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
+    plugin_manager.register("ModelRequester", MockLateStructuredRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
@@ -8676,6 +8740,68 @@ async def test_real_direct_route_emits_one_canonical_agent_execution_terminal_ev
     assert [event.event_type for event in events] == ["agent_execution.completed"]
     assert [event.source for event in events] == ["BaseAgent"]
     assert events[0].payload["close_snapshot"]["terminal_result"] == result
+
+
+@pytest.mark.asyncio
+async def test_bounded_structured_agent_execution_reaches_request_terminal_with_late_fields():
+    events: list[Any] = []
+    agent = _create_late_structured_agent()
+    execution = (
+        agent.input("Produce one support reply and all downstream task evidence fields.")
+        .output(
+            {
+                "answer": (str, "Completed support reply.", True),
+                "artifact_manifest": (dict, "Workspace artifact manifest."),
+                "file_refs": ([str], "Produced file references."),
+                "evidence": ([dict], "Evidence records."),
+                "evidence_use": ([dict], "Claim-to-evidence bindings."),
+                "acceptance_points": ([dict], "Acceptance checks."),
+                "remaining_work": ([str], "Outstanding work."),
+                "self_check": (str, "Final self-check."),
+                "short_summary": (str, "Short task summary."),
+                "progress_message": (str, "Terminal progress message."),
+                "diagnostics": ([str], "Diagnostics."),
+            },
+            format="json",
+        )
+        .create_execution(
+            lineage={
+                "task_id": "support-escalation-reply",
+                "iteration_id": "taskboard:synthesize-and-write:attempt:1",
+                "step_id": "synthesize_and_write",
+            },
+            limits={"max_model_requests": 1},
+        )
+        .strategy("direct")
+    )
+
+    async def capture(event: Any) -> None:
+        if event.run is not None and event.run.execution_id == execution.id:
+            events.append(event)
+
+    hook_name = "test.bounded_structured_request_natural_terminal"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        stream_items = [item async for item in execution.get_async_generator(type="instant")]
+        data = await execution.async_get_data()
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    assert data == MockLateStructuredRequester.final_payload
+    assert MockLateStructuredRequester.natural_terminal_emitted is True
+    assert MockLateStructuredRequester.cancelled_before_terminal is False
+    assert [
+        event.event_type for event in events if event.event_type.startswith("request.")
+    ] == ["request.started", "request.completed"]
+    assert not any(
+        event.event_type == "model.status" and event.payload.get("status") == "cancelled"
+        for event in events
+    )
+    model_meta = [event for event in events if event.event_type == "model.meta"]
+    assert len(model_meta) == 1
+    assert model_meta[0].payload["meta"]["usage"]["total_tokens"] == 321
+    streamed_paths = {item.path for item in stream_items}
+    assert {"answer", "artifact_manifest.path"} <= streamed_paths
 
 
 @pytest.mark.asyncio
