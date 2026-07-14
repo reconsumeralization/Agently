@@ -147,6 +147,14 @@ Heartbeat items are structured-only and do not append synthetic `$delta` text.
 `type="all"` remains the raw audit stream and does not include those synthetic
 projection items.
 
+A structured `AgentExecution` keeps its owned `ModelRequest` open until the
+request reaches its natural provider/parser terminal boundary. Seeing an
+ensured field or a completed mapping field in `instant` means that provisional
+path is available; it does not cancel the request or prove that later evidence,
+self-check, summary, progress, diagnostics, final validation, usage, or terminal
+events have arrived. Successful final-only and streaming consumers therefore
+observe ordinary request completion, including `request.completed`.
+
 ```python
 execution = agent.input("Summarize the incident update.")
 async for item in execution.get_async_generator(type="instant"):
