@@ -181,7 +181,7 @@ class ModelRequest:
         **kwargs: Any,
     ) -> Self:
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
-        self.prompt.set("system", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
+        self.prompt.append("system", "{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!")
         self.prompt.set("system.rule", prompt, mappings=mappings)
         return self
 
@@ -194,7 +194,7 @@ class ModelRequest:
         **kwargs: Any,
     ) -> Self:
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
-        self.prompt.set("system", ["YOU MUST REACT AND RESPOND AS {system.your_role}!"])
+        self.prompt.append("system", "YOU MUST REACT AND RESPOND AS {system.your_role}!")
         self.prompt.set("system.your_role", prompt, mappings=mappings)
         return self
 
@@ -207,7 +207,7 @@ class ModelRequest:
         **kwargs: Any,
     ) -> Self:
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
-        self.prompt.set("system", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
+        self.prompt.append("system", "{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!")
         self.prompt.set("system.user_info", prompt, mappings=mappings)
         return self
 

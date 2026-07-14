@@ -117,7 +117,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         handler_name = str(work_unit.runtime_preferences.get("handler") or "agent_task_bounded_step")
         blocks_execution = flow.create_execution(
             auto_close=False,
-            workspace=self.workspace,
+            workspace=False,
             runtime_resources={
                 "blocks.handlers": {
                     "agent_task_bounded_step": handler,
@@ -125,6 +125,11 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 }
             },
         )
+        # Blocks is the execution substrate for this AgentTask work unit, not a
+        # new Workspace product owner. Preserve the task-bound record search
+        # scope and fallback-file area instead of rebinding them to the
+        # internal TriggerFlow execution id.
+        blocks_execution.set_runtime_resource("workspace", self.workspace)
         await blocks_execution.async_start(
             {
                 "task_id": self.id,

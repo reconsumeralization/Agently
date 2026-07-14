@@ -60,8 +60,9 @@ async def test_terminal_result_is_carried_once_and_closed_event_is_compact(
         event_result = completed["result"]
         assert close_result["$final_result"] == large_body
         assert isinstance(event_result, dict)
-        assert event_result["kind"] == "triggerflow_terminal_result"
-        assert event_result["record_id"]
+        assert event_result["kind"] == "triggerflow_terminal_result_omitted"
+        assert "caller still receives the full close result" in event_result["reason"]
+        assert "record_id" not in event_result
         assert set(closed) == {
             "reason",
             "closed_at",
@@ -70,13 +71,8 @@ async def test_terminal_result_is_carried_once_and_closed_event_is_compact(
         }
         assert large_body not in repr(completed)
         assert large_body not in repr(closed)
-
-        result_records = await workspace.search(
-            None,
-            filters={"kind": "triggerflow_terminal_result"},
-        )
-        assert len(result_records) == 1
-        assert await workspace.get_data(result_records[0]) == close_result
+        assert workspace._backend is None
+        assert not (tmp_path / ".agently").exists()
     finally:
         Agently.event_center.unregister_hook(hook_name)
 

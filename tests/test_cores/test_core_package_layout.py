@@ -2,12 +2,8 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import subprocess
-import sys
 from pathlib import Path
 from typing import get_args
-
-import pytest
 
 
 def test_core_root_exports_remain_stable():
@@ -128,7 +124,7 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.Workspace.ContextBuilder").ContextProfile is ContextProfile
 
 
-def test_workspace_package_uses_class_owned_canonical_name_with_released_alias():
+def test_workspace_package_uses_class_owned_canonical_name_only():
     from agently.core import Workspace as RootWorkspace
     from agently.core.Workspace import Workspace as CanonicalWorkspace
 
@@ -142,81 +138,15 @@ def test_workspace_package_uses_class_owned_canonical_name_with_released_alias()
     )
 
     assert canonical_root.name == "Workspace"
-    assert workspace_entries == ["Workspace", "workspace.py", "workspace.pyi"]
+    assert workspace_entries == ["Workspace"]
     assert (core_root / "Workspace").is_dir()
-    assert (core_root / "workspace.py").is_file()
-    assert (core_root / "workspace.pyi").is_file()
+    assert not (core_root / "workspace.py").exists()
+    assert not (core_root / "workspace.pyi").exists()
     assert workspace_directories == ["Workspace"]
     assert CanonicalWorkspace.__module__ == "agently.core.Workspace.Workspace"
     assert canonical_package.Workspace is CanonicalWorkspace
     assert RootWorkspace is CanonicalWorkspace
 
-    from agently.core.workspace import LocalVectorIndex as ReleasedLocalVectorIndex
-
-    assert ReleasedLocalVectorIndex is canonical_package.LocalVectorIndex
-
-
-def test_workspace_lowercase_compatibility_is_a_non_package_module():
-    from agently.core.Workspace import Workspace as CanonicalWorkspace
-
-    canonical_package = importlib.import_module("agently.core.Workspace")
-    compatibility_module = importlib.import_module("agently.core.workspace")
-
-    assert compatibility_module.__spec__ is not None
-    assert compatibility_module.__spec__.name == "agently.core.workspace"
-    assert compatibility_module.__spec__.origin is not None
-    assert Path(compatibility_module.__spec__.origin).name == "workspace.py"
-    assert not hasattr(compatibility_module, "__path__")
-
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agently.core.workspace.Workspace")
-
-    assert "agently.core.workspace.Workspace" not in sys.modules
-    assert canonical_package.Workspace is CanonicalWorkspace
-
-
-@pytest.mark.parametrize(
-    "imports",
-    [
-        """
-from agently.core.Workspace import Workspace as CanonicalWorkspace
-from agently.core import Workspace as RootWorkspace
-from agently.core.workspace import LocalVectorIndex as ReleasedLocalVectorIndex
-""",
-        """
-from agently.core.workspace import LocalVectorIndex as ReleasedLocalVectorIndex
-from agently.core import Workspace as RootWorkspace
-from agently.core.Workspace import Workspace as CanonicalWorkspace
-""",
-    ],
-)
-def test_workspace_import_orders_preserve_canonical_and_root_symbols(imports: str):
-    repository_root = Path(__file__).resolve().parents[2]
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            imports
-            + """
-import importlib
-import agently.core as core
-
-canonical_package = importlib.import_module("agently.core.Workspace")
-compatibility_module = importlib.import_module("agently.core.workspace")
-assert RootWorkspace is CanonicalWorkspace
-assert core.Workspace is CanonicalWorkspace
-assert canonical_package.Workspace is CanonicalWorkspace
-assert ReleasedLocalVectorIndex is canonical_package.LocalVectorIndex
-assert compatibility_module is not canonical_package
-assert not hasattr(compatibility_module, "__path__")
-""",
-        ],
-        cwd=repository_root,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
 
 
 def test_core_layout_keeps_only_classified_root_packages():
@@ -225,7 +155,7 @@ def test_core_layout_keeps_only_classified_root_packages():
     root_files = sorted(path.name for path in core_root.iterdir() if path.is_file())
     root_dirs = sorted(path.name for path in core_root.iterdir() if path.is_dir() and path.name != "__pycache__")
 
-    assert root_files == ["Agent.py", "__init__.py", "workspace.py", "workspace.pyi"]
+    assert root_files == ["Agent.py", "__init__.py"]
     assert root_dirs == [
         "Workspace",
         "application",
@@ -259,6 +189,26 @@ def test_core_layout_keeps_only_classified_root_packages():
     assert not (core_root / "execution").exists()
     assert not (core_root / "operation" / "Tool.py").exists()
     assert not (core_root / "operation" / "Tool").exists()
+
+
+def test_workspace_active_code_has_no_superseded_layout_symbols():
+    workspace_root = Path(__file__).resolve().parents[2] / "agently" / "core" / "Workspace"
+    active_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in workspace_root.rglob("*.py")
+    )
+    for symbol in (
+        "content_root",
+        "files_root",
+        "WorkspaceScratchLease",
+        "open_scratch",
+        "close_scratch",
+        "AGENTLY_WORKSPACE.md",
+        "WORKSPACE_FILE_AREAS",
+        "with_files_root",
+        "lineage_files_root",
+    ):
+        assert symbol not in active_source
 
 
 def test_removed_flat_core_submodules_do_not_resolve():

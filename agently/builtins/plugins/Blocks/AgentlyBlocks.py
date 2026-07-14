@@ -2418,7 +2418,7 @@ async def _record_block_result(data: TriggerFlowRuntimeData, result: Mapping[str
         evidence_items = _evidence_items_for_result(result)
         for evidence_item in evidence_items:
             if evidence_key == "blocks.workspace_refs":
-                await _append_state_item(data, evidence_key, _workspace_ref_id(evidence_item))
+                await _append_unique_state_item(data, evidence_key, _workspace_ref_id(evidence_item))
             else:
                 await _append_state_item(data, evidence_key, evidence_item)
     for extra_key, state_key in (
@@ -2429,7 +2429,7 @@ async def _record_block_result(data: TriggerFlowRuntimeData, result: Mapping[str
     ):
         for evidence_item in _explicit_evidence_items(result, extra_key):
             if state_key == "blocks.workspace_refs":
-                await _append_state_item(data, state_key, _workspace_ref_id(evidence_item))
+                await _append_unique_state_item(data, state_key, _workspace_ref_id(evidence_item))
             else:
                 await _append_state_item(data, state_key, evidence_item)
 
@@ -2592,6 +2592,15 @@ async def _append_state_item(data: TriggerFlowRuntimeData, dotted_key: str, item
     current = data.get_state(dotted_key, []) or []
     if not isinstance(current, list):
         current = [current]
+    await data.async_set_state(dotted_key, [*current, item], emit=False)
+
+
+async def _append_unique_state_item(data: TriggerFlowRuntimeData, dotted_key: str, item: Any) -> None:
+    current = data.get_state(dotted_key, []) or []
+    if not isinstance(current, list):
+        current = [current]
+    if item in current:
+        return
     await data.async_set_state(dotted_key, [*current, item], emit=False)
 
 

@@ -43,6 +43,44 @@ def test_trigger_flow_start_waits_for_auto_close_snapshot_without_end():
     assert flow.start(1, auto_close_timeout=0.03) == {"side": 2}
 
 
+def test_trigger_flow_sync_set_state_replaces_collection_value():
+    execution = TriggerFlow().create_execution(auto_close=False)
+
+    execution.set_state("pending", ["a", "b"], emit=False)
+    execution.set_state("pending", [], emit=False)
+
+    assert execution.get_state("pending") == []
+    execution.close()
+
+
+def test_trigger_flow_set_flow_data_replaces_collection_value():
+    flow = TriggerFlow()
+
+    flow.set_flow_data("shared", {"stale": True}, emit=False, no_warning=True)
+    flow.set_flow_data("shared", {}, emit=False, no_warning=True)
+
+    assert flow.get_flow_data("shared", no_warning=True) == {}
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_async_set_state_replaces_mapping_and_dot_path_values():
+    execution = TriggerFlow().create_execution(auto_close=False)
+
+    await execution.async_set_state("draft", {"facts": {"old": True}, "status": "stale"}, emit=False)
+    await execution.async_set_state("draft.facts", {"new": True}, emit=False)
+    assert execution.get_state("draft") == {"facts": {"new": True}, "status": "stale"}
+
+    await execution.async_set_state("draft", {}, emit=False)
+    assert execution.get_state("draft") == {}
+
+    await asyncio.gather(
+        execution.async_set_state("race", {"first": True}, emit=False),
+        execution.async_set_state("race", {"second": True}, emit=False),
+    )
+    assert execution.get_state("race") in ({"first": True}, {"second": True})
+    await execution.async_close()
+
+
 @pytest.mark.asyncio
 async def test_trigger_flow_execution_save_and_load_then_continue():
     flow = TriggerFlow()

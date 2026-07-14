@@ -247,6 +247,7 @@ from .skill import (
 
 from .workspace import (
     WorkspaceBackendCapabilities,
+    WorkspaceMode,
     WorkspaceContentSegment,
     WorkspaceContextItem,
     WorkspaceContextOmission,
@@ -261,7 +262,6 @@ from .workspace import (
     WorkspaceFileExportResult,
     WorkspaceFileInfo,
     WorkspaceFileOperation,
-    WorkspaceFilePolicyMetadata,
     WorkspaceFileReadResult,
     WorkspaceFileRef,
     WorkspaceFileWriteResult,
@@ -270,20 +270,10 @@ from .workspace import (
     WorkspaceContextPlan,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
-    WorkspaceRetainedReference,
-    WorkspaceRetentionAccounting,
-    WorkspaceRetentionAnchor,
-    WorkspaceRetentionCategory,
     WorkspaceRetentionDiagnostic,
-    WorkspaceRetentionLifecycle,
-    WorkspaceRetentionPolicy,
-    WorkspaceRetentionPreview,
-    WorkspaceRetentionRepresentation,
     WorkspaceRetentionResult,
-    WorkspaceRetentionRule,
     WorkspaceRetentionTerminalStatus,
     WorkspaceRuntimeEventRecord,
-    WorkspaceScratchLease,
     WorkspaceSearchResult,
 )
 

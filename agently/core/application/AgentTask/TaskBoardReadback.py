@@ -937,7 +937,10 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         *,
         card_id: str,
     ) -> list[dict[str, Any]]:
-        required_paths = {str(path or "").strip() for path in self._required_workspace_deliverables()}
+        required_paths = {
+            self._workspace_artifact_display_path(path)
+            for path in self._required_workspace_deliverables()
+        }
         items: list[dict[str, Any]] = []
         for index, readback in enumerate(file_readbacks):
             if not isinstance(readback, Mapping):
@@ -947,7 +950,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 continue
             ref = readback.get("ref")
             ref = ref if isinstance(ref, Mapping) else {}
-            is_workspace_artifact = path in required_paths or self._is_trusted_workspace_artifact_ref(ref)
+            logical_path = self._workspace_artifact_display_path(path)
+            is_workspace_artifact = (
+                logical_path in required_paths
+                or self._is_trusted_workspace_artifact_ref(ref)
+            )
             source_suffix = "workspace_artifact" if is_workspace_artifact else "workspace_file"
             source = f"agent_task.taskboard.card.{ card_id }.{ source_suffix }"
             prefix = "workspace_artifact_readback" if is_workspace_artifact else "workspace_file_readback"

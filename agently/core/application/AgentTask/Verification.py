@@ -2414,8 +2414,22 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return compact
 
     @classmethod
+    def _workspace_artifact_display_path(cls, path: Any) -> str:
+        """Project a private fallback carrier back to its requested logical path."""
+
+        normalized = str(path or "").strip()
+        parts = PurePosixPath(normalized).parts
+        if len(parts) >= 4 and parts[:2] == (".agently", "files"):
+            return PurePosixPath(*parts[3:]).as_posix()
+        return normalized
+
+    @classmethod
     def _workspace_artifact_final_result_from_refs(cls, refs: Sequence[Mapping[str, Any]]) -> str:
-        paths = [str(ref.get("path") or "").strip() for ref in refs if str(ref.get("path") or "").strip()]
+        paths = [
+            cls._workspace_artifact_display_path(ref.get("path"))
+            for ref in refs
+            if str(ref.get("path") or "").strip()
+        ]
         if not paths:
             return ""
         if len(paths) == 1:

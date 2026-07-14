@@ -429,7 +429,7 @@ agent.configure_skill_capabilities(
         "shell": "approval",
         "mcp": "approval",
     },
-    workspace_root="./.agently/tasks/research",
+    workspace_root="./research-project",
     search={
         "backend": "auto",
     },

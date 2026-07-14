@@ -129,8 +129,12 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
 
         def priority(item: tuple[int, Mapping[str, Any]]) -> tuple[int, int]:
             index, ref = item
-            path = str(ref.get("path") or "").strip()
-            if path and path in required_paths:
+            path = self._taskboard_workspace_path_key(ref.get("path"))
+            required_path_keys = {
+                self._taskboard_workspace_path_key(required_path)
+                for required_path in required_paths
+            }
+            if path and path in required_path_keys:
                 return (0, index)
             if self._is_trusted_workspace_artifact_ref(ref):
                 return (1, index)
@@ -146,9 +150,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             return ledger_refs
         return cls._collect_taskboard_source_refs(evidence_view, max_refs=32)
 
-    @staticmethod
-    def _taskboard_workspace_path_key(path: Any) -> str:
-        text = str(path or "").strip()
+    @classmethod
+    def _taskboard_workspace_path_key(cls, path: Any) -> str:
+        text = cls._workspace_artifact_display_path(path)
         if not text:
             return ""
         return PurePosixPath(text).as_posix()
@@ -409,7 +413,13 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             )
             return self._prioritize_taskboard_final_refs(current_refs)
 
+        trusted_refs = [
+            dict(item)
+            for item in write_result.get("file_refs", [])
+            if isinstance(item, Mapping)
+        ]
         promoted_ref = {
+            **(trusted_refs[0] if trusted_refs else {}),
             "path": str(target_read.get("path") or write_result.get("path") or target_path),
             "bytes": int(target_read.get("bytes") or write_result.get("bytes") or 0),
             "sha256": str(target_read.get("sha256") or write_result.get("sha256") or ""),
@@ -1179,8 +1189,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         )
         return materialized, "" if materialized.get("truncated") else content, None
 
-    @staticmethod
+    @classmethod
     def _taskboard_final_artifact_manifest(
+        cls,
         ref: Mapping[str, Any],
         *,
         final: Mapping[str, Any],
@@ -1191,7 +1202,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         raw_manifest = final.get("artifact_manifest") if isinstance(final, Mapping) else None
         if isinstance(raw_manifest, Mapping):
             manifest_path = str(raw_manifest.get("path") or "").strip()
-            if not manifest_path or manifest_path == path:
+            if not manifest_path or cls._workspace_artifact_display_path(
+                manifest_path
+            ) == cls._workspace_artifact_display_path(path):
                 manifest.update(dict(DataFormatter.sanitize(raw_manifest)))
         if path:
             manifest["path"] = path

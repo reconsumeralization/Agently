@@ -13,7 +13,6 @@ from agently.builtins.tools import Cmd as LegacyCmd
 from agently.builtins.tools import Search as LegacySearch
 from agently.core.application.AgentExecution.Context import AgentExecutionContext
 from agently.core.runtime.RuntimeContext import bind_runtime_context
-from agently.core.Workspace._defaults import WORKSPACE_GUIDE_FILENAME
 
 
 def test_builtins_actions_is_preferred_import_path_and_tools_is_facade():
@@ -191,9 +190,9 @@ def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
     assert run_result.get("status") == "success"
     assert run_result.get("agent_id") == "codex"
     assert run_result.get("data", {}).get("output") == "codex: inspect the current branch"
-    assert provider.runs[0]["root"] == str(agent.workspace.files_root)
-    assert provider.runs[0]["working_dir"] == str(agent.workspace.files_root)
-    assert (agent.workspace.files_root / WORKSPACE_GUIDE_FILENAME).is_file()
+    assert provider.runs[0]["root"] == str(agent.workspace.root)
+    assert provider.runs[0]["working_dir"] == str(agent.workspace.root)
+    assert not (agent.workspace.root / ".agently").exists()
 
 
 def test_agent_use_acp_skips_missing_or_failed_agents(tmp_path):
@@ -743,8 +742,8 @@ async def test_browse_curl_backend_materializes_remote_file_to_workspace(tmp_pat
 
     assert result["status"] in {"success", "partial_success"}
     assert result["data"]["kind"] == "remote_file"
-    assert result["file_refs"][0]["path"].startswith("downloads/syllabus-")
-    assert (workspace.files_root / result["file_refs"][0]["path"]).is_file()
+    assert "downloads/syllabus-" in result["file_refs"][0]["path"]
+    assert (workspace.root / result["file_refs"][0]["path"]).is_file()
 
 
 def test_browse_action_failure_is_structured_error_not_success_text():
@@ -1002,8 +1001,8 @@ async def test_browse_materializes_remote_file_to_workspace(tmp_path):
     assert result["status"] in {"success", "partial_success"}
     assert result["data"]["kind"] == "remote_file"
     assert result["data"]["media_type"] == "application/pdf"
-    assert result["file_refs"][0]["path"].startswith("downloads/syllabus-")
-    assert (workspace.files_root / result["file_refs"][0]["path"]).is_file()
+    assert "downloads/syllabus-" in result["file_refs"][0]["path"]
+    assert (workspace.root / result["file_refs"][0]["path"]).is_file()
     assert result["data"]["read_preview"]["path"] == result["file_refs"][0]["path"]
     assert "content_bytes" not in str(result)
 
@@ -1040,8 +1039,8 @@ def test_browse_action_executor_uses_settings_workspace_for_remote_file(tmp_path
     assert result.get("success") is True
     file_refs = result.get("file_refs", [])
     assert isinstance(file_refs, list)
-    assert file_refs[0]["path"].startswith("downloads/syllabus-")
-    assert (workspace.files_root / file_refs[0]["path"]).is_file()
+    assert "downloads/syllabus-" in file_refs[0]["path"]
+    assert (workspace.root / file_refs[0]["path"]).is_file()
 
 
 @pytest.mark.asyncio

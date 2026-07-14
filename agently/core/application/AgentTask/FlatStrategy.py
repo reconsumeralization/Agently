@@ -720,6 +720,19 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         return normalized
 
     async def _build_context(self) -> "WorkspaceContextPackage":
+        if str(self.context_profile or "auto").strip().lower() in {"", "auto", "none", "off"}:
+            return await self._context_pack_with_task_context(
+                cast(
+                    "WorkspaceContextPackage",
+                    {
+                        "goal": self.goal,
+                        "profile": "none",
+                        "items": [],
+                        "omitted": [],
+                        "diagnostics": {"workspace_recall": "disabled_by_default"},
+                    },
+                )
+            )
         try:
             context_pack = await self.workspace.build_context(
                 goal=self.goal,

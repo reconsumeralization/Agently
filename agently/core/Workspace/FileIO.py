@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agently.core.model.AttachmentInput import (
     SUPPORTED_IMAGE_MIME_TYPES,
@@ -130,14 +130,17 @@ def _diagnostic(
 
 
 def _file_ref(path: str, file_info: WorkspaceFileInfo, *, role: str) -> WorkspaceFileRef:
-    return {
-        "path": path,
-        "bytes": int(file_info.get("bytes", 0)),
-        "sha256": str(file_info.get("sha256", "")),
-        "media_type": file_info.get("media_type"),
-        "content_kind": str(file_info.get("content_kind", "unknown")),
-        "role": role,
-    }
+    return cast(
+        WorkspaceFileRef,
+        {
+            "path": path,
+            "bytes": int(file_info.get("bytes", 0)),
+            "sha256": str(file_info.get("sha256", "")),
+            "media_type": file_info.get("media_type"),
+            "content_kind": str(file_info.get("content_kind", "unknown")),
+            "role": role,
+        },
+    )
 
 
 def _slice_text_bytes(
@@ -415,14 +418,17 @@ class DefaultTextWorkspaceFileIOHandler:
             "handler_id": self.name,
             "diagnostics": [],
             "file_refs": [
-                {
+                cast(
+                    WorkspaceFileRef,
+                    {
                     "path": path_text,
                     "bytes": len(raw),
                     "sha256": hashlib.sha256(raw).hexdigest(),
                     "media_type": file_info.get("media_type"),
                     "content_kind": "text",
                     "role": "output",
-                }
+                    },
+                )
             ],
         }
 
@@ -982,14 +988,17 @@ class HtmlExportWorkspaceFileIOHandler:
                 message=f"Export failed: {exc}",
             )
         output_raw = output_path.read_bytes()
-        output_ref: WorkspaceFileRef = {
-            "path": str(output_info.get("path", "")),
-            "bytes": len(output_raw),
-            "sha256": hashlib.sha256(output_raw).hexdigest(),
-            "media_type": output_info.get("media_type"),
-            "content_kind": str(output_info.get("content_kind", "unknown")),
-            "role": "output",
-        }
+        output_ref = cast(
+            WorkspaceFileRef,
+            {
+                "path": str(output_info.get("path", "")),
+                "bytes": len(output_raw),
+                "sha256": hashlib.sha256(output_raw).hexdigest(),
+                "media_type": output_info.get("media_type"),
+                "content_kind": str(output_info.get("content_kind", "unknown")),
+                "role": "output",
+            },
+        )
         source_path_text = str(source_info.get("path", ""))
         return {
             "ok": True,

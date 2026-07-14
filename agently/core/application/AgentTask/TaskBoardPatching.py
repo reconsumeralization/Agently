@@ -303,7 +303,13 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 "reason": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
                 "error": {"type": error.__class__.__name__},
             }
+        trusted_refs = [
+            dict(item)
+            for item in write_result.get("file_refs", [])
+            if isinstance(item, Mapping)
+        ]
         ref = {
+            **(trusted_refs[0] if trusted_refs else {}),
             "path": str(read_result.get("path") or path),
             "bytes": int(read_result.get("bytes") or write_result.get("bytes") or 0),
             "sha256": str(read_result.get("sha256") or write_result.get("sha256") or ""),
@@ -380,7 +386,13 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 "error": {"type": error.__class__.__name__},
             }
 
+        trusted_refs = [
+            dict(item)
+            for item in write_result.get("file_refs", [])
+            if isinstance(item, Mapping)
+        ]
         ref = {
+            **(trusted_refs[0] if trusted_refs else {}),
             "path": str(read_result.get("path") or target_path),
             "bytes": int(read_result.get("bytes") or write_result.get("bytes") or 0),
             "sha256": str(read_result.get("sha256") or write_result.get("sha256") or ""),

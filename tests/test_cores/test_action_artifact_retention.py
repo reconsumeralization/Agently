@@ -608,7 +608,7 @@ async def test_action_artifact_readback_fails_closed_without_scope_or_across_exe
 
 
 @pytest.mark.asyncio
-async def test_artifacts_only_terminal_carrier_promotes_selection_without_canonical_alias_leak(tmp_path) -> None:
+async def test_artifacts_only_terminal_carrier_discards_transient_selection_without_alias_leak(tmp_path) -> None:
     from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.terminal_retention import (
         prepare_agent_execution_terminal_retention,
     )
@@ -635,13 +635,14 @@ async def test_artifacts_only_terminal_carrier_promotes_selection_without_canoni
 
     terminal_result, retained_refs = await prepare_agent_execution_terminal_retention(execution)
 
-    assert len(retained_refs) == 1
-    assert cast(Any, retained_refs[0])["collection"] == "artifacts"
-    assert terminal_result["artifact_refs"] == terminal_result["artifacts"]
+    assert retained_refs == []
+    assert terminal_result["artifacts"] == []
+    assert "artifact_refs" not in terminal_result
     terminal_json = json.dumps(terminal_result, ensure_ascii=False, default=str)
     assert canonical_ref["artifact_id"] not in terminal_json
     assert canonical_ref["action_call_id"] not in terminal_json
     assert "artifact_scope" not in terminal_json
+    assert not (tmp_path / "workspace" / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -720,18 +721,9 @@ async def test_selected_action_artifact_run_scope_release_is_concurrent_and_smal
     assert first_execution.diagnostics["action_artifact_release"]["released_count"] == 4
     terminal_result = first_execution.close_snapshot["terminal_result"]
     assert first_canonical_refs[0]["artifact_id"] not in json.dumps(terminal_result, ensure_ascii=False)
-    promoted_ref = terminal_result["artifact_refs"][0]
-    assert promoted_ref["id"]
-    stored = await first_execution.workspace.search(filters={"id": promoted_ref["id"]})
-    assert len(stored) == 1
-    readback = await first_execution.workspace.read_bounded(
-        stored[0],
-        offset=0,
-        limit=int(stored[0]["size"]) + 1,
-    )
-    durable_value = json.loads(str(readback["content"]))
-    assert durable_value["marker"] == "s"
-    assert durable_value["body"] == "s" * (1024 * 1024)
+    assert terminal_result["artifact_refs"] == []
+    assert terminal_result["reply"] == "small accepted wrapper"
+    assert not (tmp_path / "run" / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -1490,18 +1482,17 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
 
     await _finalize_terminal_execution(owner, terminal_status="completed")
 
-    if failure_stage == "promotion":
-        assert agent.action._artifact_manager.get_artifact_value(owner_canonical_ref["artifact_id"]) is not None
-    else:
-        assert agent.action._artifact_manager.get_artifact_value(owner_canonical_ref["artifact_id"]) is None
+    assert agent.action._artifact_manager.get_artifact_value(owner_canonical_ref["artifact_id"]) is None
     assert agent.action._artifact_manager.get_artifact_value(unselected_canonical_ref["artifact_id"]) is None
     assert agent.action._artifact_manager.get_artifact_value(concurrent_canonical_ref["artifact_id"]) is not None
     release_diagnostic = owner.diagnostics["action_artifact_release"]
-    assert release_diagnostic["status"] == ("deferred" if failure_stage == "promotion" else "released")
+    assert release_diagnostic["status"] == "released"
     assert release_diagnostic["scope"] == {"kind": "agent_execution", "id": owner.id}
-    assert release_diagnostic["preserved_artifact_ids"] == (
-        [owner_canonical_ref["artifact_id"]] if failure_stage == "promotion" else []
-    )
+    assert release_diagnostic["preserved_artifact_ids"] == []
     retention_diagnostics = owner.diagnostics["workspace_retention"]["diagnostics"]
-    assert retention_diagnostics
+    if failure_stage == "terminal_event":
+        assert retention_diagnostics
+        assert retention_diagnostics[0]["code"] == "agent_execution.retention.terminal_event_delivery_failed"
+    else:
+        assert retention_diagnostics == []
     assert all(len(str(item.get("message", ""))) <= 360 for item in retention_diagnostics)

@@ -5,7 +5,7 @@ from typing import Any, cast
 import pytest
 from pydantic import TypeAdapter
 
-from agently import TriggerFlow, TriggerFlowInterruptEvent, TriggerFlowRuntimeData
+from agently import TriggerFlow, TriggerFlowInterruptEvent, TriggerFlowRuntimeData, Workspace
 
 
 @pytest.mark.asyncio
@@ -24,11 +24,14 @@ async def test_trigger_flow_dynamic_pause_persists_waiting_snapshot_without_back
         )
 
     flow.to(ask_feedback)
-    execution = flow.create_execution(auto_close=False)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"workspace": Workspace(tmp_path)},
+    )
     workspace = cast(Any, execution.require_runtime_resource("workspace"))
 
     try:
-        assert getattr(workspace, "is_materialized") is False
+        assert workspace._backend is None
         assert execution._snapshot_store is None
         assert execution._runtime_event_store is None
 
@@ -37,16 +40,14 @@ async def test_trigger_flow_dynamic_pause_persists_waiting_snapshot_without_back
         pending = execution.get_pending_interrupts()
         snapshot = await workspace.get_snapshot(execution.run_context.run_id)
         runtime_events = await workspace.query_runtime_events(execution.id)
-        event_types = [event["event_type"] for event in runtime_events]
 
         assert pending["approval"]["status"] == "waiting"
         assert snapshot is not None
         assert snapshot["interrupts"]["approval"]["status"] == "waiting"
-        assert event_types[0] == "triggerflow.interrupt_planned"
-        assert "triggerflow.definition_declared" not in event_types
-        assert "triggerflow.execution_started" not in event_types
+        assert runtime_events == []
     finally:
         await execution.async_close(pending_interrupts="cancel")
+    assert not (tmp_path / ".agently").exists()
 
 
 @pytest.mark.asyncio
@@ -70,7 +71,10 @@ async def test_trigger_flow_dynamic_pause_snapshot_failure_rolls_back_before_pub
 
     execution = TriggerFlow(name="dynamic-pause-snapshot-failure").create_execution(
         auto_close=False,
-        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+        runtime_resources={
+            "execution_exchange_provider": ExchangeProvider(),
+            "workspace": Workspace(tmp_path),
+        },
     )
     workspace = cast(Any, execution.require_runtime_resource("workspace"))
     status_before_pause = execution.get_status()
@@ -548,7 +552,7 @@ async def test_close_cancellation_during_pause_snapshot_does_not_publish_stale_w
 
 
 @pytest.mark.asyncio
-async def test_close_cancellation_during_persisted_event_does_not_publish_stale_wait():
+async def test_close_cancellation_during_persisted_event_does_not_publish_stale_wait(tmp_path):
     persisted_event_entered = asyncio.Event()
     release_persisted_event = asyncio.Event()
     published: list[dict[str, Any]] = []
@@ -568,12 +572,18 @@ async def test_close_cancellation_during_persisted_event_does_not_publish_stale_
         )
 
     flow.to(pause)
+    workspace = Workspace(tmp_path)
     execution = flow.create_execution(
         auto_close=False,
-        runtime_resources={"execution_exchange_provider": ExchangeProvider()},
+        runtime_resources={
+            "execution_exchange_provider": ExchangeProvider(),
+            "workspace": workspace,
+            "runtime_event_store": workspace,
+        },
     )
     workspace = cast(Any, execution.require_runtime_resource("workspace"))
-    original_append_runtime_event = workspace.append_runtime_event
+    runtime_event_store = cast(Any, execution._runtime_event_store)
+    original_append_runtime_event = runtime_event_store.append_runtime_event
 
     async def blocked_persisted_event(execution_id, event, **kwargs):
         if event.event_type == "triggerflow.interrupt_persisted":
@@ -581,7 +591,7 @@ async def test_close_cancellation_during_persisted_event_does_not_publish_stale_
             await release_persisted_event.wait()
         return await original_append_runtime_event(execution_id, event, **kwargs)
 
-    workspace.append_runtime_event = blocked_persisted_event
+    runtime_event_store.append_runtime_event = blocked_persisted_event
     start_task = asyncio.create_task(execution.async_start("draft"))
     await asyncio.wait_for(persisted_event_entered.wait(), timeout=2)
     close_task = asyncio.create_task(

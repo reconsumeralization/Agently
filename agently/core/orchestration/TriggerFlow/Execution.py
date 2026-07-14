@@ -1131,7 +1131,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                             payload={
                                 "execution_id": self.id,
                                 "status": retention_result["status"],
-                                "accounting": retention_result["accounting"],
+                                "retained_bytes": retention_result["retained_bytes"],
+                                "deleted_bytes": retention_result["deleted_bytes"],
                                 "diagnostics": retention_result["diagnostics"],
                             },
                             persist=False,
@@ -1629,7 +1630,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     def _get_runtime_resource(self, key: str, default: Any = None):
         return self._runtime_resources.get(str(key), default)
 
-    def require_runtime_resource(self, key: str):
+    def require_runtime_resource(self, key: str) -> Any:
         key = str(key)
         if key not in self._runtime_resources:
             available = sorted(str(resource_key) for resource_key in self.get_runtime_resources().keys())
@@ -1664,17 +1665,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     def _activate_recovery_durability(self, *, reason: str) -> Any | None:
         provider = self._recovery_provider_candidate()
         supports_snapshot = callable(getattr(provider, "put_snapshot", None))
-        supports_runtime_events = callable(
-            getattr(provider, "append_runtime_event", None)
-        )
         if provider is not None:
             if self._snapshot_store is None and supports_snapshot:
                 self._bind_snapshot_store(provider)
-            if self._runtime_event_store is None and supports_runtime_events:
-                self._bind_runtime_event_store(provider)
-        if (
-            self._snapshot_store is not None or self._runtime_event_store is not None
-        ) and self._system_runtime_data.get(
+        if self._snapshot_store is not None and self._system_runtime_data.get(
             "recovery_durability_activation", None, inherit=False
         ) is None:
             self._system_runtime_data.set(
@@ -1712,8 +1706,6 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             self._bind_snapshot_store(durable_provider)
         if runtime_event_store is not None:
             self._bind_runtime_event_store(runtime_event_store)
-        elif callable(getattr(durable_provider, "append_runtime_event", None)):
-            self._bind_runtime_event_store(durable_provider)
 
     def _bind_durable_provider_resource(self, key: str, value: Any):
         if key == "workspace":
@@ -2028,15 +2020,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return latest
 
     def _compaction_provider(self, snapshot_store: Any, runtime_event_store: Any):
-        if snapshot_store is not None and (
-            hasattr(snapshot_store, "put_artifact_ref")
-            or hasattr(snapshot_store, "add_retention_anchor")
-        ):
+        if snapshot_store is not None and hasattr(snapshot_store, "put_artifact_ref"):
             return snapshot_store
-        if runtime_event_store is not None and (
-            hasattr(runtime_event_store, "put_artifact_ref")
-            or hasattr(runtime_event_store, "add_retention_anchor")
-        ):
+        if runtime_event_store is not None and hasattr(runtime_event_store, "put_artifact_ref"):
             return runtime_event_store
         return snapshot_store
 
@@ -2131,7 +2117,6 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         if isinstance(retained_anchors, dict):
             retained_anchors = [retained_anchors]
         anchor_ids: list[str] = []
-        event_ids = [str(record.get("event_id")) for record in records if record.get("event_id")]
         for anchor in retained_anchors or []:
             if not isinstance(anchor, dict):
                 continue
@@ -2143,15 +2128,6 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 **metadata,
                 **anchor_result_metadata,
             }
-            if provider is not None and hasattr(provider, "add_retention_anchor"):
-                anchor_ref = await provider.add_retention_anchor(
-                    self.id,
-                    anchor_type=str(anchor.get("anchor_type", "compaction")),
-                    sequence=anchor.get("sequence", segment_from),
-                    preserved_event_ids=event_ids,
-                    meta=anchor_metadata,
-                )
-                anchor_metadata["retention_anchor_ref"] = self._to_serializable_value(anchor_ref)
             self._record_retained_lineage_anchor(
                 anchor_id,
                 anchor_type=str(anchor.get("anchor_type", "compaction")),

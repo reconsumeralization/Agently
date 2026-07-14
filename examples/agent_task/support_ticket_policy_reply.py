@@ -13,6 +13,7 @@ from _business_example_common import (
     default_workspace,
     judge_business_artifact,
     print_stream_item,
+    resolve_result_artifact_path,
     write_summary,
 )
 
@@ -142,7 +143,7 @@ async def main() -> None:
 
     result = await execution.async_start()
     meta = await execution.async_get_meta()
-    output_path = workspace.files_root / OUTPUT_FILE
+    output_path = resolve_result_artifact_path(workspace, result, OUTPUT_FILE)
     artifact_text = output_path.read_text(encoding="utf-8") if output_path.is_file() else ""
     model_judge = await judge_business_artifact(
         agent,
@@ -168,8 +169,8 @@ async def main() -> None:
             and item.value["verification"].get("is_complete") is False
             for item in stream_items
         ),
-        "workspace_checkpoint_count": len(await workspace.checkpoint_history(TASK_ID)),
-        "workspace_decision_count": len(meta["workspace_refs"]["decisions"]),
+        "workspace_recovery_ref_count": len(meta.get("workspace_refs", {}).get("checkpoints", [])),
+        "workspace_process_record_count": len(meta.get("workspace_refs", {}).get("decisions", [])),
         "stream_trace_file": str(stream_trace_path),
         "output_file": str(output_path),
     }

@@ -15,17 +15,14 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
 import re
-from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from agently.types.data import (
     WorkspaceFileRef,
     WorkspaceRecordRef,
     WorkspaceReferenceEnvelope,
-    WorkspaceRetentionPolicy,
     WorkspaceRetentionResult,
     WorkspaceRetentionTerminalStatus,
 )
@@ -59,329 +56,115 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
     async def _register_terminal_deliverables(
         self,
         refs: Sequence[WorkspaceFileRef | WorkspaceRecordRef | WorkspaceReferenceEnvelope],
-    ) -> list[WorkspaceRecordRef]:
-        """Promote only caller-selected, readback-verified terminal deliverables."""
+    ) -> list[WorkspaceFileRef]:
+        """Retain only caller-selected, readback-verified file deliverables."""
 
-        promoted: list[WorkspaceRecordRef] = []
-        retained = list(getattr(self, "_terminal_retained_refs", []) or [])
-
-        def defer(code: str, message: str, *, path: str = "") -> None:
-            setattr(self, "_terminal_retention_deferred", True)
-            diagnostic = {"code": code, "message": message}
-            if path:
-                diagnostic["path"] = path
-            self.diagnostics.setdefault("workspace_retention", {}).setdefault("diagnostics", []).append(diagnostic)
-
-        def ref_key(ref: Mapping[str, Any]) -> str:
-            return json.dumps(ref, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-
-        retained_keys = {ref_key(ref) for ref in retained if isinstance(ref, Mapping)}
-
-        def retain(ref: Mapping[str, Any]) -> None:
-            value = dict(DataFormatter.sanitize(dict(ref)))
-            key = ref_key(value)
-            if key not in retained_keys:
-                retained.append(value)
-                retained_keys.add(key)
-
-        async def canonical_artifact_record(
-            raw_ref: Mapping[str, Any],
-        ) -> WorkspaceRecordRef | None:
-            is_envelope = "workspace_id" in raw_ref
-            record_id = str((raw_ref.get("record_id") if is_envelope else raw_ref.get("id")) or "").strip()
-            if not record_id:
-                defer(
-                    "agent_task.retention.deliverable_ref_invalid",
-                    "Terminal Workspace reference has no record id.",
-                )
-                return None
-            try:
-                matches = await self.workspace.search(filters={"id": record_id})
-            except Exception as error:
-                defer(
-                    "agent_task.retention.deliverable_lookup_failed",
-                    _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                )
-                return None
-            if len(matches) != 1:
-                defer(
-                    "agent_task.retention.deliverable_lookup_failed",
-                    "Terminal Workspace record is absent from the current scoped Workspace.",
-                )
-                return None
-            canonical_ref = matches[0]
-            canonical_meta = canonical_ref.get("meta")
-            canonical_source = canonical_ref.get("source")
-            if not (
-                canonical_ref.get("collection") == "artifacts"
-                and isinstance(canonical_meta, Mapping)
-                and canonical_meta.get("artifact_ref") is True
-                and isinstance(canonical_source, Mapping)
-                and canonical_source.get("type") == "workspace"
-                and canonical_source.get("name") == "artifact_ref"
-            ):
-                defer(
-                    "agent_task.retention.deliverable_provenance_mismatch",
-                    "Persisted Workspace record is not a canonical artifact ref.",
-                )
-                return None
-            try:
-                canonical_size = int(canonical_ref.get("size") or 0)
-                readback = await self.workspace.read_bounded(
-                    canonical_ref,
-                    offset=0,
-                    limit=canonical_size + 1,
-                )
-                canonical_envelope = await self.workspace.ref_envelope(canonical_ref)
-            except Exception as error:
-                defer(
-                    "agent_task.retention.deliverable_readback_failed",
-                    _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                )
-                return None
-            readback_raw = str(readback.get("content") or "").encode("utf-8")
-            if not (
-                readback.get("eof") is True
-                and int(readback.get("size") or 0) == canonical_size
-                and len(readback_raw) == canonical_size
-                and hashlib.sha256(readback_raw).hexdigest() == str(canonical_ref.get("sha256") or "")
-            ):
-                defer(
-                    "agent_task.retention.deliverable_integrity_mismatch",
-                    "Persisted Workspace artifact content does not match its canonical record ref.",
-                )
-                return None
-            if is_envelope:
-                identity_fields = (
-                    "workspace_id",
-                    "kind",
-                    "collection",
-                    "record_id",
-                    "version",
-                    "content_ref",
-                    "digest",
-                    "size",
-                    "created_at",
-                )
-                identity_matches = all(raw_ref.get(key) == canonical_envelope.get(key) for key in identity_fields)
-            else:
-                identity_fields = ("id", "kind", "collection", "path", "sha256", "size", "created_at")
-                identity_matches = all(raw_ref.get(key) == canonical_ref.get(key) for key in identity_fields)
-            if not identity_matches:
-                defer(
-                    "agent_task.retention.deliverable_identity_mismatch",
-                    "Terminal Workspace reference does not match the canonical persisted identity.",
-                )
-                return None
-            return canonical_ref
-
+        retained: list[dict[str, Any]] = []
+        retention_candidates: list[dict[str, Any]] = []
+        retained_keys: set[tuple[str, str, int]] = set()
         for raw_ref in refs:
-            if not isinstance(raw_ref, Mapping):
+            if not isinstance(raw_ref, Mapping) or raw_ref.get("type") != "file":
+                self._terminal_retention_deferred = True
+                self.diagnostics.setdefault("workspace_retention", {}).setdefault("diagnostics", []).append(
+                    {
+                        "code": "agent_task.retention.file_ref_required",
+                        "message": "Terminal deliverables must be trusted Workspace file refs.",
+                    }
+                )
                 continue
-            if "id" in raw_ref or "workspace_id" in raw_ref:
-                record_ref = await canonical_artifact_record(raw_ref)
-                if record_ref is None:
-                    continue
-                if any(ref.get("id") == record_ref.get("id") for ref in promoted):
-                    retain(record_ref)
-                    continue
-                try:
-                    await self.workspace.add_retention_anchor(
-                        self._workspace_execution_id,
-                        anchor_type="deliverable",
-                        record_ref=record_ref,
-                    )
-                except Exception as error:
-                    defer(
-                        "agent_task.retention.deliverable_promotion_failed",
-                        _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                    )
-                    continue
-                promoted.append(record_ref)
-                retain(record_ref)
-                continue
-
+            candidate_ref = {
+                key: DataFormatter.sanitize(raw_ref.get(key))
+                for key in (
+                    "type",
+                    "path",
+                    "workspace_id",
+                    "execution_id",
+                    "size",
+                    "available",
+                    "sha256",
+                    "bytes",
+                    "media_type",
+                    "content_kind",
+                    "role",
+                )
+                if key in raw_ref
+            }
             path = str(raw_ref.get("path") or "").strip()
             expected_digest = str(raw_ref.get("sha256") or "").strip()
-            raw_size = raw_ref.get("bytes") if "bytes" in raw_ref else None
-            expected_size = (
-                raw_size
-                if isinstance(raw_size, int) and not isinstance(raw_size, bool)
-                else -1
-            )
-            if not path or not expected_digest or expected_size < 0:
-                defer(
-                    "agent_task.retention.deliverable_ref_invalid",
-                    "Terminal Workspace file ref has no verifiable path, non-negative size, or digest.",
-                    path=path,
+            raw_size = raw_ref.get("size")
+            expected_size = raw_size if isinstance(raw_size, int) and not isinstance(raw_size, bool) else -1
+            if (
+                not path
+                or expected_size < 0
+                or not expected_digest
+                or str(raw_ref.get("workspace_id") or "") != self.workspace.workspace_id
+                or str(raw_ref.get("execution_id") or "") != self.workspace.execution_id
+            ):
+                self._terminal_retention_deferred = True
+                self.diagnostics.setdefault("workspace_retention", {}).setdefault("diagnostics", []).append(
+                    {
+                        "code": "agent_task.retention.file_ref_invalid",
+                        "message": "Terminal file ref identity, size, or digest is incomplete.",
+                        "path": path,
+                    }
                 )
+                retention_candidates.append(candidate_ref)
                 continue
             try:
                 readback = await self.workspace.read_file(path, max_bytes=1)
-            except Exception as error:
-                defer(
-                    "agent_task.retention.deliverable_readback_failed",
-                    _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                    path=path,
-                )
-                continue
-            actual_digest = str(readback.get("sha256") or "")
-            try:
                 actual_size = int(readback.get("bytes") or 0)
-            except (TypeError, ValueError):
-                actual_size = 0
-            if actual_digest != expected_digest or actual_size != expected_size:
-                defer(
-                    "agent_task.retention.deliverable_integrity_mismatch",
-                    "Terminal deliverable size or digest changed after trusted readback.",
-                    path=path,
-                )
-                continue
-            canonical_file_ref = cast(
-                WorkspaceFileRef,
-                {
-                    "path": path,
-                    "bytes": actual_size,
-                    "sha256": actual_digest,
-                    "media_type": raw_ref.get("media_type") or readback.get("media_type"),
-                    "content_kind": str(raw_ref.get("content_kind") or readback.get("content_kind") or "unknown"),
-                    "role": str(raw_ref.get("role") or "workspace_artifact"),
-                },
-            )
-            if ref_key(canonical_file_ref) in retained_keys:
-                continue
-            try:
-                record_ref = await self.workspace.put_artifact_ref(
-                    self.id,
-                    canonical_file_ref,
-                    metadata={
-                        "scope": {"task_id": self.id},
-                        "kind": "agent_task_deliverable",
-                    },
-                )
-                await self.workspace.add_retention_anchor(
-                    self._workspace_execution_id,
-                    anchor_type="deliverable",
-                    record_ref=record_ref,
-                )
+                actual_digest = str(readback.get("sha256") or "")
             except Exception as error:
-                defer(
-                    "agent_task.retention.deliverable_promotion_failed",
-                    _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                    path=path,
+                actual_size = -1
+                actual_digest = ""
+                self.diagnostics.setdefault("workspace_retention", {}).setdefault("diagnostics", []).append(
+                    {
+                        "code": "agent_task.retention.file_readback_failed",
+                        "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                        "path": path,
+                    }
                 )
+            if actual_size != expected_size or actual_digest != expected_digest:
+                self._terminal_retention_deferred = True
+                self.diagnostics.setdefault("workspace_retention", {}).setdefault("diagnostics", []).append(
+                    {
+                        "code": "agent_task.retention.file_integrity_mismatch",
+                        "message": "Terminal file size or digest changed after trusted readback.",
+                        "path": path,
+                    }
+                )
+                retention_candidates.append(candidate_ref)
                 continue
-            promoted.append(record_ref)
-            retain(canonical_file_ref)
-            retain(record_ref)
+            key = (path, expected_digest, expected_size)
+            if key in retained_keys:
+                continue
+            retained_keys.add(key)
+            retained.append(candidate_ref)
+            retention_candidates.append(candidate_ref)
 
-        self._terminal_deliverable_refs = [
-            *list(getattr(self, "_terminal_deliverable_refs", []) or []),
-            *promoted,
-        ]
-        self._terminal_retained_refs = retained
-        return promoted
+        self._terminal_retained_refs = retention_candidates
+        self._terminal_deliverable_refs = cast(Any, retained)
+        return cast(list[WorkspaceFileRef], retained)
 
     async def _apply_terminal_workspace_retention(
         self,
         *,
         status: WorkspaceRetentionTerminalStatus,
     ) -> WorkspaceRetentionResult | None:
-        """Apply Workspace-owned cleanup without changing the business result."""
+        """Close task-owned fallback files without touching the external root."""
 
-        if bool(getattr(self, "_terminal_retention_deferred", False)):
-            diagnostics = list(
-                cast(Mapping[str, Any], self.diagnostics.get("workspace_retention", {})).get("diagnostics", [])
-                or []
-            )
-            result = cast(
-                WorkspaceRetentionResult,
-                {
-                    "status": "deferred",
-                    "plan_fingerprint": "",
-                    "manifest_ref": None,
-                    "retained_refs": list(getattr(self, "_terminal_retained_refs", []) or []),
-                    "accounting": {
-                        "entities": {},
-                        "logical_bytes_deleted": 0,
-                        "physical_bytes_reclaimed": 0,
-                        "physical_bytes_pending": 0,
-                    },
-                    "diagnostics": diagnostics,
-                },
-            )
-            self.diagnostics["workspace_retention"] = {
-                "status": "deferred",
-                "accounting": DataFormatter.sanitize(result["accounting"]),
-                "diagnostics": diagnostics,
-            }
-            return result
-        try:
-            retention_policy = cast(
-                WorkspaceRetentionPolicy | None,
-                self._agent_task_option("workspace_retention_policy", None),
-            )
-            # A failed task may have a compact resume snapshot from its last
-            # completed iteration. Anchor that verified Workspace record before
-            # destructive cleanup so failure discards transient process data
-            # without destroying the task's recovery point. Successful and
-            # cancelled runs do not gain this recovery root by default.
-            if status == "failed":
-                resume_ref = await self.workspace.latest_snapshot(self._resume_run_id(self.id))
-                if resume_ref is not None:
-                    await self.workspace.add_retention_anchor(
-                        self._workspace_execution_id,
-                        anchor_type="recovery",
-                        record_ref=resume_ref,
-                    )
-            lifecycle = await self.workspace.get_retention_lifecycle(
-                self._workspace_execution_id,
-                status=status,
-                terminal_at=datetime.now(timezone.utc).isoformat(),
-            )
-            preview = await self.workspace.inspect_retention(
-                {},
-                lifecycle=lifecycle,
-                retained_refs=list(getattr(self, "_terminal_retained_refs", []) or []),
-                inline_result=DataFormatter.sanitize(self.result),
-                policy=retention_policy,
-            )
-            if preview["status"] == "ready":
-                result = await self.workspace.apply_retention(preview)
-            else:
-                result = cast(
-                    WorkspaceRetentionResult,
-                    {
-                        "status": "deferred",
-                        "plan_fingerprint": preview["plan_fingerprint"],
-                        "manifest_ref": None,
-                        "retained_refs": preview["retained_refs"],
-                        "accounting": preview["accounting"],
-                        "diagnostics": preview["diagnostics"],
-                    },
-                )
-        except Exception as error:
-            self.diagnostics["workspace_retention"] = {
-                "status": "deferred",
-                "accounting": {},
-                "diagnostics": [
-                    {
-                        "code": "agent_task.retention.apply_failed",
-                        "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                    }
-                ],
-            }
-            return None
+        retained = list(getattr(self, "_terminal_retained_refs", []) or [])
+        close_status = "completed" if status == "completed" else "cancelled" if status == "cancelled" else "failed"
+        closed = await self.workspace._close_execution_files(
+            retained_refs=cast(Any, retained),
+            status=close_status,
+        )
+        result = cast(WorkspaceRetentionResult, closed)
         self.diagnostics["workspace_retention"] = {
             "status": result["status"],
-            "accounting": DataFormatter.sanitize(result["accounting"]),
-            "diagnostics": [
-                {
-                    "code": str(item.get("code") or ""),
-                    "message": str(item.get("message") or "")[:360],
-                }
-                for item in result["diagnostics"][:8]
-            ],
+            "retained_bytes": result["retained_bytes"],
+            "deleted_bytes": result["deleted_bytes"],
+            "diagnostics": DataFormatter.sanitize(result["diagnostics"]),
         }
         return result
 
@@ -469,7 +252,16 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         return [
             dict(ref)
             for ref in cls._trusted_terminal_refs(*values)
-            if "workspace_id" not in ref and "id" not in ref
+            if (
+                str(ref.get("type") or "").strip().lower() == "file"
+                or (
+                    "id" not in ref
+                    and "record_id" not in ref
+                    and bool(str(ref.get("path") or "").strip())
+                    and bool(str(ref.get("sha256") or "").strip())
+                    and isinstance(ref.get("bytes"), int)
+                )
+            )
         ]
 
     @staticmethod
@@ -681,7 +473,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         if not trusted_refs:
             return result
         ref = trusted_refs[0]
-        path = str(ref.get("path") or "")
+        path = cls._workspace_artifact_display_path(ref.get("path"))
         replacement = f"Workspace artifact delivered at {path}; full content is available through file_refs/readback."
         omitted: list[dict[str, Any]] = []
         for key in _WORKSPACE_ARTIFACT_RESULT_BODY_KEYS:
@@ -1586,16 +1378,22 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 ordered.append(path)
         return ordered
 
-    @staticmethod
     def _workspace_artifact_ref_from_readback(
+        self,
         read_result: Mapping[str, Any],
         *,
         path: str,
         source: str,
     ) -> dict[str, Any]:
+        byte_count = int(read_result.get("bytes") or 0)
         return {
+            "type": "file",
             "path": str(read_result.get("path") or path),
-            "bytes": int(read_result.get("bytes") or 0),
+            "workspace_id": self.workspace.workspace_id,
+            "execution_id": self.workspace.execution_id,
+            "size": byte_count,
+            "available": bool(read_result.get("exists", True)),
+            "bytes": byte_count,
             "sha256": str(read_result.get("sha256") or ""),
             "media_type": read_result.get("media_type"),
             "content_kind": str(read_result.get("content_kind") or "text"),
@@ -2191,8 +1989,12 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
             return DataFormatter.sanitize(result)
 
+        written_path = str(write_result.get("path") or path)
         try:
-            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+            read_result = await self.workspace.read_file(
+                written_path,
+                max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES,
+            )
         except Exception as error:
             message = _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
             delivery_record.update(
@@ -2206,7 +2008,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 self._workspace_artifact_readback_missing_diagnostic(
                     code="agent_task.workspace_artifact.readback_failed",
                     message=("Workspace artifact readback failed after write; trusted file_refs were not produced."),
-                    path=path,
+                    path=written_path,
                     source=source,
                     error=error,
                 )
@@ -2218,7 +2020,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 execution_meta,
                 [
                     self._workspace_artifact_failure_evidence_item(
-                        path=path,
+                        path=written_path,
                         source=source,
                         code="agent_task.workspace_artifact.readback_failed",
                         message="Workspace artifact readback failed after write; trusted file_refs were not produced.",
@@ -2229,19 +2031,11 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
             return DataFormatter.sanitize(result)
 
-        ref = {
-            "path": str(read_result.get("path") or write_result.get("path") or path),
-            "bytes": int(read_result.get("bytes") or write_result.get("bytes") or 0),
-            "sha256": str(read_result.get("sha256") or write_result.get("sha256") or ""),
-            "media_type": read_result.get("media_type") or write_result.get("media_type"),
-            "content_kind": str(read_result.get("content_kind") or write_result.get("content_kind") or "text"),
-            "role": "workspace_artifact",
-            "source": source,
-            "preview": str(read_result.get("content") or ""),
-            "truncated": bool(read_result.get("truncated")),
-            "read_bytes": int(read_result.get("read_bytes") or 0),
-            "handler_id": read_result.get("handler_id"),
-        }
+        ref = self._workspace_artifact_ref_from_readback(
+            read_result,
+            path=written_path,
+            source=source,
+        )
         if not self._workspace_artifact_ref_has_trusted_readback(ref):
             delivery_record.update(
                 {
@@ -2377,19 +2171,11 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             return None
         if existing_bytes < max(new_bytes * 2, new_bytes + 1024):
             return None
-        ref = {
-            "path": str(read_result.get("path") or path),
-            "bytes": existing_bytes,
-            "sha256": str(read_result.get("sha256") or ""),
-            "media_type": read_result.get("media_type"),
-            "content_kind": str(read_result.get("content_kind") or "text"),
-            "role": "workspace_artifact",
-            "source": source,
-            "preview": str(read_result.get("content") or ""),
-            "truncated": bool(read_result.get("truncated")),
-            "read_bytes": int(read_result.get("read_bytes") or 0),
-            "handler_id": read_result.get("handler_id"),
-        }
+        ref = self._workspace_artifact_ref_from_readback(
+            read_result,
+            path=path,
+            source=source,
+        )
         return {
             "file_ref": DataFormatter.sanitize(ref),
             "existing_bytes": existing_bytes,
@@ -2550,6 +2336,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         }
         wrote_any = False
         bytes_written = 0
+        carrier_path = path
         draft_stream = draft_execution.get_async_generator(
             type="specific",
             specific=["delta", "status", "done"],
@@ -2558,11 +2345,12 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         public_replay_markers: list[dict[str, Any]] = []
 
         async def handle_retry_boundary(retry_boundary: Mapping[str, Any]) -> None:
-            nonlocal wrote_any, bytes_written
+            nonlocal wrote_any, bytes_written, carrier_path
             retry_boundaries.append(DataFormatter.sanitize(dict(retry_boundary)))
             delivery_record["retry_boundaries"] = DataFormatter.sanitize(retry_boundaries)
             if wrote_any:
-                await self.workspace.write_file(path, "", append=False)
+                reset = await self.workspace.write_file(carrier_path, "", append=False)
+                carrier_path = str(reset.get("path") or carrier_path)
             wrote_any = False
             bytes_written = 0
             if iteration_index is not None:
@@ -2579,11 +2367,12 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 )
 
         async def handle_public_replay_marker(marker: Mapping[str, Any]) -> None:
-            nonlocal wrote_any, bytes_written
+            nonlocal wrote_any, bytes_written, carrier_path
             public_replay_markers.append(DataFormatter.sanitize(dict(marker)))
             delivery_record["public_replay_markers"] = DataFormatter.sanitize(public_replay_markers)
             if wrote_any:
-                await self.workspace.write_file(path, "", append=False)
+                reset = await self.workspace.write_file(carrier_path, "", append=False)
+                carrier_path = str(reset.get("path") or carrier_path)
             wrote_any = False
             bytes_written = 0
             if iteration_index is not None:
@@ -2600,14 +2389,15 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 )
 
         async def write_chunk(chunk: str) -> None:
-            nonlocal wrote_any, bytes_written
+            nonlocal wrote_any, bytes_written, carrier_path
             if not chunk:
                 return
             replay_marker = self._workspace_artifact_public_delta_replay_marker(chunk)
             if replay_marker is not None:
                 await handle_public_replay_marker(replay_marker)
                 return
-            await self.workspace.write_file(path, chunk, append=wrote_any)
+            write_result = await self.workspace.write_file(carrier_path, chunk, append=wrote_any)
+            carrier_path = str(write_result.get("path") or carrier_path)
             wrote_any = True
             bytes_written += len(chunk.encode("utf-8"))
             if iteration_index is not None:
@@ -2726,12 +2516,15 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             return None
 
         try:
-            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+            read_result = await self.workspace.read_file(
+                carrier_path,
+                max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES,
+            )
         except Exception as error:
             diagnostic = self._workspace_artifact_readback_missing_diagnostic(
                 code="agent_task.workspace_artifact.readback_failed",
                 message="Workspace artifact draft readback failed after write; trusted file_refs were not produced.",
-                path=path,
+                path=carrier_path,
                 source=source,
                 error=error,
             )
@@ -2753,7 +2546,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 execution_meta,
                 [
                     self._workspace_artifact_failure_evidence_item(
-                        path=path,
+                        path=carrier_path,
                         source=source,
                         code="agent_task.workspace_artifact.readback_failed",
                         message="Workspace artifact draft readback failed after write; trusted file_refs were not produced.",
@@ -2762,19 +2555,11 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
             return None
 
-        ref = {
-            "path": str(read_result.get("path") or path),
-            "bytes": int(read_result.get("bytes") or 0),
-            "sha256": str(read_result.get("sha256") or ""),
-            "media_type": read_result.get("media_type"),
-            "content_kind": str(read_result.get("content_kind") or "text"),
-            "role": "workspace_artifact",
-            "source": source,
-            "preview": str(read_result.get("content") or ""),
-            "truncated": bool(read_result.get("truncated")),
-            "read_bytes": int(read_result.get("read_bytes") or 0),
-            "handler_id": read_result.get("handler_id"),
-        }
+        ref = self._workspace_artifact_ref_from_readback(
+            read_result,
+            path=carrier_path,
+            source=source,
+        )
         if self._workspace_artifact_draft_is_structured_wrapper(str(read_result.get("content") or "")):
             diagnostic = self._workspace_artifact_readback_missing_diagnostic(
                 code="agent_task.workspace_artifact.structured_wrapper_draft",
@@ -2787,7 +2572,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 readback=read_result,
             )
             with suppress(Exception):
-                await self.workspace.write_file(path, "", append=False)
+                await self.workspace.write_file(carrier_path, "", append=False)
             delivery_record.update(
                 {
                     "status": "failed",

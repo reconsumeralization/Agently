@@ -93,9 +93,13 @@ async def main() -> None:
     model = configure_vlm(require_api_key())
 
     with TemporaryDirectory() as temp_dir:
-        workspace = Agently.create_workspace(Path(temp_dir) / "workspace")
-        red_path = workspace.files_root / "red.png"
-        green_path = workspace.files_root / "green.png"
+        workspace = Agently.create_workspace(
+            Path(temp_dir) / "workspace",
+            mode="read_write",
+        )
+        workspace.root.mkdir(parents=True)
+        red_path = workspace.root / "red.png"
+        green_path = workspace.root / "green.png"
         write_solid_png(red_path, (220, 20, 20))
         write_solid_png(green_path, (20, 170, 70))
 

@@ -203,26 +203,47 @@ class TestRuntimeDataCollectionMethods:
 class TestRuntimeDataComplexOperations:
     """Test complex data manipulation"""
 
-    def test_merge_behavior_dicts(self):
+    def test_set_replaces_dicts(self):
         rd = StateData({'a': {'x': 1}})
         rd['a'] = {'y': 2}
 
-        # Should merge, not replace
-        assert rd['a'] == {'x': 1, 'y': 2}
+        assert rd['a'] == {'y': 2}
 
-    def test_merge_behavior_lists(self):
+    def test_set_replaces_lists_including_with_empty_list(self):
         rd = StateData({'items': [1, 2]})
         rd['items'] = [3, 4]
+        assert rd['items'] == [3, 4]
 
-        # Should extend, not replace
-        assert set(rd['items']) == {1, 2, 3, 4}
+        rd.set('items', [])
+        assert rd['items'] == []
 
-    def test_merge_behavior_sets(self):
+    def test_set_replaces_sets(self):
         rd = StateData({'items': {1, 2}})
         rd['items'] = {2, 3}
 
-        # Should union
-        assert rd['items'] == {1, 2, 3}
+        assert rd['items'] == {2, 3}
+
+    def test_set_replaces_scalar(self):
+        rd = StateData({'status': 'pending'})
+
+        rd.set('status', 'done')
+
+        assert rd['status'] == 'done'
+
+    def test_set_replaces_dot_path_value(self):
+        rd = StateData({'draft': {'facts': {'old': True}, 'status': 'stale'}})
+
+        rd.set('draft.facts', {'new': True})
+
+        assert rd['draft'] == {'facts': {'new': True}, 'status': 'stale'}
+
+    def test_update_remains_explicit_merge_operation(self):
+        rd = StateData({'draft': {'facts': {'old': True}}, 'items': [1]})
+
+        rd.update({'draft': {'facts': {'new': True}}, 'items': [2]})
+
+        assert rd['draft'] == {'facts': {'old': True, 'new': True}}
+        assert rd['items'] == [1, 2]
 
     def test_append_operations(self):
         rd = StateData()
@@ -519,13 +540,13 @@ class TestRuntimeDataEdgeCases:
         rd = StateData({'list': [1, 2], 'dict': {'a': 1}})
 
         # Ensure types are preserved correctly
-        rd['list'] = [3]  # Should extend, not replace
+        rd['list'] = [3]
         assert isinstance(rd['list'], list)
-        assert 1 in rd['list']  # Original items should still be there
+        assert rd['list'] == [3]
 
-        rd['dict'] = {'b': 2}  # Should merge, not replace
+        rd['dict'] = {'b': 2}
         assert isinstance(rd['dict'], dict)
-        assert 'a' in rd['dict']  # Original key should still be there
+        assert rd['dict'] == {'b': 2}
 
 
 class TestRuntimeDataStandardDictCompatibility:

@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from agently.core.Workspace import LazyWorkspace, Workspace
+from agently.core.Workspace import Workspace
 
 from .TaskShared import *
 from .StrategyRouter import AgentTaskStrategyRouterMixin
@@ -55,7 +55,7 @@ class AgentTask(
         goal: str,
         success_criteria: list[str],
         execution: AgentTaskExecutionStrategy | str | None = "auto",
-        workspace: str | os.PathLike[str] | Workspace | LazyWorkspace | None = None,
+        workspace: str | os.PathLike[str] | Workspace | None = None,
         max_iterations: int | None = _AGENT_TASK_DEFAULT_MAX_ITERATIONS,
         verify: Literal["before_done"] = "before_done",
         context_profile: str = "auto",
@@ -86,7 +86,7 @@ class AgentTask(
         self.limits = dict(limits or {})
         self.options = dict(options or {})
         agent_with_workspace = cast(Any, agent)
-        if isinstance(workspace, (Workspace, LazyWorkspace)):
+        if isinstance(workspace, Workspace):
             bound_workspace = workspace
         else:
             if workspace is not None:
@@ -94,34 +94,19 @@ class AgentTask(
             bound_workspace = getattr(agent, "workspace", None)
         if bound_workspace is None:
             raise RuntimeError(
-                "AgentTask requires a Workspace binding. Standard Agents include a lazy Workspace; "
+                "AgentTask requires a Workspace binding. Standard Agents include a Workspace; "
                 "pass workspace=... or call agent.use_workspace(...) only when you need an explicit "
                 "root, mode, or provider."
             )
-        # The route owner may pass its execution-scoped Workspace directly. The
-        # task derives one child view without mutating the shared Agent binding.
-        inherited_execution_id = next(
-            (
-                str(node.get("id") or "")
-                for node in reversed(bound_workspace.scope_lineage)
-                if node.get("kind") == "executions" and str(node.get("id") or "")
-            ),
-            "",
+        # AgentTask shares the caller's ordinary file root. Only execution
+        # identity changes so private fallback files stay task-owned; binding
+        # must not materialize storage or invent a scoped file tree.
+        self._workspace_execution_id = self.id
+        self.workspace: Workspace = bound_workspace._bind_execution(
+            self.id,
+            scope={"task_id": self.id, "execution_id": self.id},
+            search_scope={"task_id": self.id, "execution_id": self.id},
         )
-        self._workspace_execution_id = inherited_execution_id or self.id
-        task_scope = {"task_id": self.id}
-        if not inherited_execution_id:
-            task_scope["execution_id"] = self.id
-        with_scope_node = getattr(bound_workspace, "with_scope_node", None)
-        if callable(with_scope_node):
-            self.workspace: Any = with_scope_node(
-                "tasks",
-                self.id,
-                scope=task_scope,
-                search_scope=task_scope,
-            )
-        else:
-            self.workspace = bound_workspace
         self.status: AgentTaskStatus = "created"
         self.result: Any = None
         self.diagnostics: dict[str, Any] = {}

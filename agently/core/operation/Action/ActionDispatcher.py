@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from typing import Any, cast
 
@@ -24,6 +25,7 @@ from agently.core.operation.ExecutionResource import (
     ExecutionResourceError,
 )
 from agently.core.operation.PolicyApproval import merge_access_control_policy
+from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.types.data import (
     ActionApproval,
     ActionCall,
@@ -287,21 +289,33 @@ class ActionDispatcher:
         from agently.base import policy_approval
 
         action_id = str(spec.get("action_id", ""))
+        host_approval_context = cast(dict[str, Any], action_call).get("_host_approval_context", {})
+        if not isinstance(host_approval_context, dict):
+            host_approval_context = {}
+        public_action_call = {
+            key: value
+            for key, value in dict(action_call).items()
+            if not str(key).startswith("_")
+        }
+        approval_payload: dict[str, Any] = {
+            "action_call": public_action_call,
+            "action_spec": {
+                "action_id": action_id,
+                "name": str(spec.get("name", action_id)),
+                "side_effect_level": str(spec.get("side_effect_level", "")),
+                "executor_type": str(spec.get("executor_type", "")),
+            },
+        }
+        extra_payload = host_approval_context.get("payload")
+        if isinstance(extra_payload, dict):
+            approval_payload.update(extra_payload)
         decision = await policy_approval.async_resolve(
             {
                 "source": "action",
                 "capability": action_id,
-                "subject": str(spec.get("name") or action_id),
-                "risk": str(spec.get("side_effect_level", "")),
-                "payload": {
-                    "action_call": dict(action_call),
-                    "action_spec": {
-                        "action_id": action_id,
-                        "name": str(spec.get("name", action_id)),
-                        "side_effect_level": str(spec.get("side_effect_level", "")),
-                        "executor_type": str(spec.get("executor_type", "")),
-                    },
-                },
+                "subject": str(host_approval_context.get("subject") or spec.get("name") or action_id),
+                "risk": str(host_approval_context.get("risk") or spec.get("side_effect_level", "")),
+                "payload": approval_payload,
                 "policy": dict(policy),
             },
             handler=str(policy.get("policy_approval_handler") or "") or None,
@@ -612,7 +626,30 @@ class ActionDispatcher:
         if policy_approval_handler is not None and not policy.get("policy_approval_handler"):
             policy["policy_approval_handler"] = str(policy_approval_handler)
 
-        if spec.get("approval_required") is True or policy.get("approval_mode") == "always":
+        dynamic_approval_required = False
+        spec_meta = spec.get("meta")
+        approval_predicate = (
+            spec_meta.get("_host_approval_required_when")
+            if isinstance(spec_meta, dict)
+            else None
+        )
+        if callable(approval_predicate):
+            predicate_result = approval_predicate(action_call)
+            if inspect.isawaitable(predicate_result):
+                predicate_result = await predicate_result
+            if isinstance(predicate_result, dict):
+                dynamic_approval_required = bool(predicate_result.get("required"))
+                context = predicate_result.get("context")
+                if isinstance(context, dict):
+                    cast(dict[str, Any], action_call)["_host_approval_context"] = dict(context)
+            else:
+                dynamic_approval_required = bool(predicate_result)
+
+        if (
+            spec.get("approval_required") is True
+            or policy.get("approval_mode") == "always"
+            or dynamic_approval_required
+        ):
             approved, approved_policy, approval_result = await self._resolve_action_approval(
                 spec=spec,
                 action_call=action_call,
@@ -730,23 +767,24 @@ class ActionDispatcher:
         timeout = policy.get("timeout_seconds", None)
         timeout_seconds = float(timeout) if isinstance(timeout, (int, float)) else 0.0
         try:
-            if isinstance(timeout, (int, float)) and timeout > 0:
-                output = await asyncio.wait_for(
-                    executor.execute(
+            with bind_runtime_context(action_policy=cast(dict[str, Any], dict(policy))):
+                if isinstance(timeout, (int, float)) and timeout > 0:
+                    output = await asyncio.wait_for(
+                        executor.execute(
+                            spec=spec,
+                            action_call=action_call,
+                            policy=policy,
+                            settings=execution_settings,
+                        ),
+                        timeout=float(timeout),
+                    )
+                else:
+                    output = await executor.execute(
                         spec=spec,
                         action_call=action_call,
                         policy=policy,
                         settings=execution_settings,
-                    ),
-                    timeout=float(timeout),
-                )
-            else:
-                output = await executor.execute(
-                    spec=spec,
-                    action_call=action_call,
-                    policy=policy,
-                    settings=execution_settings,
-                )
+                    )
         except asyncio.TimeoutError:
             for handle in ensured_handles:
                 if handle.get("scope") == "action_call":

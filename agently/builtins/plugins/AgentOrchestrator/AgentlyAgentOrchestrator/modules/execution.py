@@ -153,22 +153,18 @@ class AgentExecution:
         self.effective_options: dict[str, Any] = {}
         self.consumed_options: dict[str, Any] = {}
         self.workspace: Any = getattr(self.agent, "workspace", None)
-        # Bind the execution file root from the full resolved scope chain instead
-        # of a lineage-scoped execution file root. The effective parent scope is
-        # known at construction via ``self.lineage`` (parent task and/or parent
-        # execution), so the execution nests under its real ancestors and shares
-        # a single prunable lineage subtree with them (spec sections 8.2 / 9).
-        with_scope_lineage = getattr(self.workspace, "with_scope_lineage", None)
-        if callable(with_scope_lineage):
-            lineage_nodes: list[dict[str, Any]] = []
-            parent_task_id = self.lineage.get("task_id")
-            if parent_task_id:
-                lineage_nodes.append({"kind": "tasks", "id": str(parent_task_id)})
-            parent_execution_id = self.lineage.get("parent_execution_id")
-            if parent_execution_id:
-                lineage_nodes.append({"kind": "executions", "id": str(parent_execution_id)})
-            lineage_nodes.append({"kind": "executions", "id": self.id})
-            self.workspace = with_scope_lineage(lineage_nodes)
+        bind_execution = getattr(self.workspace, "_bind_execution", None)
+        if callable(bind_execution):
+            execution_scope = {"execution_id": self.id}
+            for key in ("task_id", "iteration_id", "step_id"):
+                value = self.lineage.get(key)
+                if value is not None:
+                    execution_scope[key] = value
+            self.workspace = bind_execution(
+                self.id,
+                scope=execution_scope,
+                search_scope=execution_scope,
+            )
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
         self._load_inherited_strategy_context()
         self.execution_context = AgentExecutionContext(
@@ -198,8 +194,6 @@ class AgentExecution:
         self.result: Any = None
         self._terminal_inline_result: Any = None
         self._terminal_retained_refs: list[Any] = []
-        self._terminal_anchored_ref_ids: set[str] = set()
-        self._terminal_retention_policy: Any = None
         self._terminal_retention_deferred = False
         self._terminal_retention_diagnostics: list[dict[str, Any]] = []
         self._terminal_task_handoff_refs: list[Any] = []

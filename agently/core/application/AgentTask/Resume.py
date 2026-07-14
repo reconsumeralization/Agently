@@ -48,6 +48,10 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         last verification outcome so a crashed task can continue (or report its
         terminal result) from a fresh process.
         """
+        # AgentTask process state is run-local by default. Hosts explicitly opt
+        # into durable Workspace recovery when cross-process resume is needed.
+        if not bool(self._agent_task_option("workspace_recovery", False)):
+            return
         try:
             await self.workspace.put_snapshot(
                 self._resume_run_id(self.id),
@@ -108,6 +112,10 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         terminal result or continue from a board revision without repeating
         completed cards.
         """
+        # See _write_resume_snapshot: TaskBoard ticks persist only when the host
+        # explicitly requests cross-process recovery.
+        if not bool(self._agent_task_option("workspace_recovery", False)):
+            return
         final_result = final_result if isinstance(final_result, Mapping) else {}
         status = str(final_result.get("status") or self.status or "").strip().lower()
         accepted = bool(final_result.get("accepted"))

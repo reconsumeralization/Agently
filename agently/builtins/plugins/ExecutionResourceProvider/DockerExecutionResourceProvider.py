@@ -653,6 +653,26 @@ class DockerExecutionResource:
                 "cmd": args,
                 "diagnostics": [{"code": "shell.cmd_not_allowed", "cmd": args}],
             }
+        declared_mounts = profile.get("workspace_mounts")
+        extra_mounts: list[str] = []
+        if isinstance(declared_mounts, list) and declared_mounts:
+            for item in declared_mounts:
+                if not isinstance(item, dict):
+                    raise ValueError("Docker Workspace mount entries must be mappings.")
+                host_path = Path(str(item.get("host_path") or "")).expanduser().resolve()
+                container_path = str(item.get("container_path") or "").strip()
+                mode = str(item.get("mode") or "ro").strip().lower()
+                if not container_path.startswith("/") or ":" in container_path:
+                    raise ValueError("Docker Workspace mount container_path must be an absolute container path.")
+                if mode not in {"ro", "rw"}:
+                    raise ValueError("Docker Workspace mount mode must be 'ro' or 'rw'.")
+                if mode == "rw":
+                    host_path.mkdir(parents=True, exist_ok=True)
+                elif not host_path.exists():
+                    raise FileNotFoundError(f"Read-only Docker Workspace mount does not exist: {host_path}")
+                extra_mounts.append(f"{host_path}:{container_path}:{mode}")
+        else:
+            extra_mounts = [f"{root}:/workspace:rw"]
         image = str(profile.get("image") or self._default_image("shell"))
         return await self._run_container(
             image=image,
@@ -660,7 +680,7 @@ class DockerExecutionResource:
             profile=profile,
             workdir=container_workdir,
             timeout=timeout,
-            extra_mounts=[f"{ root }:/workspace"],
+            extra_mounts=extra_mounts,
             env=profile.get("env") if isinstance(profile.get("env"), dict) else None,
         )
 

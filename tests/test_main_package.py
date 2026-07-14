@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 import warnings
 from typing import Any, cast
 
@@ -39,6 +40,12 @@ _RUNTIME_LOG_KEYS = (
 
 def test_public_core_instance_creation_styles(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys.modules["__main__"],
+        "__file__",
+        str(tmp_path / "main.py"),
+        raising=False,
+    )
     anonymous_agent = Agent()
     direct_agent = Agent("direct-agent")
     factory_agent = Agently.create_agent("factory-agent")
@@ -54,14 +61,14 @@ def test_public_core_instance_creation_styles(tmp_path, monkeypatch):
     assert anonymous_agent.name
     assert direct_agent.name == "direct-agent"
     assert factory_agent.name == "factory-agent"
-    assert getattr(anonymous_agent.workspace, "is_materialized") is False
-    assert getattr(direct_agent.workspace, "is_materialized") is False
-    assert getattr(factory_agent.workspace, "is_materialized") is False
+    assert anonymous_agent.workspace._backend is None
+    assert direct_agent.workspace._backend is None
+    assert factory_agent.workspace._backend is None
     assert direct_flow.name == "direct-flow"
     assert factory_flow.name == "factory-flow"
     assert workspace.root == (tmp_path / "public-workspace").resolve()
     assert direct_workspace.root == (tmp_path / "direct-public-workspace").resolve()
-    assert default_workspace.root == (tmp_path / ".agently" / "workspaces" / "default").resolve()
+    assert default_workspace.root == tmp_path.resolve()
     assert factory_default_workspace.root == default_workspace.root
     assert "workspace" not in direct_flow_execution.get_runtime_resources()
 

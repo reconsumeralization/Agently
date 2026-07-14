@@ -149,7 +149,13 @@ async def test_policy_approval_gate_loads_from_workspace_provider_snapshot(tmp_p
             await data.async_set_state("policy_decision", result, emit=False)
 
         flow.to(gate)
-        execution = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+        execution = flow.create_execution(
+            auto_close=False,
+            runtime_resources={
+                "workspace": workspace,
+                "runtime_event_store": workspace,
+            },
+        )
         await execution.async_start(None)
         assert "policy:provider-approval" in execution.get_pending_interrupts()
 
@@ -157,10 +163,19 @@ async def test_policy_approval_gate_loads_from_workspace_provider_snapshot(tmp_p
         snapshot_state = await workspace.get_data(snapshot_ref)
         assert snapshot_state["interrupts"]["policy:provider-approval"]["status"] == "waiting"
 
-        restored = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+        restored = flow.create_execution(
+            auto_close=False,
+            runtime_resources={
+                "workspace": workspace,
+                "runtime_event_store": workspace,
+            },
+        )
         load = await restored.async_load(
             snapshot_state,
-            runtime_resources={"workspace": workspace},
+            runtime_resources={
+                "workspace": workspace,
+                "runtime_event_store": workspace,
+            },
         )
         assert load["ready"] is True
         await restored.async_continue_with(

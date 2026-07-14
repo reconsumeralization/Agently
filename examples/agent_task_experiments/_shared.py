@@ -126,7 +126,7 @@ def create_task_agent(
 ) -> tuple[Any, ProviderName, Path]:
     workspace = default_workspace(workspace_prefix)
     workspace.mkdir(parents=True, exist_ok=True)
-    agent = Agently.create_agent(name).use_workspace(workspace)
+    agent = Agently.create_agent(name).use_workspace(workspace, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=temperature)
     if language != "auto":
         agent.language(language)
@@ -139,7 +139,7 @@ def enable_coding_workspace(agent: Any) -> None:
     workspace = getattr(agent, "workspace", None)
     if workspace is None:
         raise RuntimeError("Coding examples require a Workspace-bound agent.")
-    root = Path(str(getattr(workspace, "files_root", getattr(workspace, "content_root")))).resolve()
+    root = Path(str(workspace.root)).resolve()
     RuntimePreflight().register_actions(agent.action, action_id="inspect_code_runtimes")
     agent.enable_workspace_file_actions(
         root=root,
@@ -234,7 +234,7 @@ def enable_workspace_report_actions(agent: Any) -> None:
     workspace = getattr(agent, "workspace", None)
     if workspace is None:
         raise RuntimeError("Workspace report examples require a Workspace-bound agent.")
-    root = Path(str(getattr(workspace, "files_root", getattr(workspace, "content_root")))).resolve()
+    root = Path(str(workspace.root)).resolve()
     agent.enable_workspace_file_actions(
         root=root,
         read=True,

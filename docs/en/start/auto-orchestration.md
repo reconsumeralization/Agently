@@ -124,8 +124,9 @@ For task-strategy executions, effort also controls reflection density:
 `low` records the final reflection and only planner-marked important process
 points, `medium` reflects after each major task node or TaskBoard card/tick, and
 `high` reflects after every framework-observable bounded step, Action/ACP call,
-TaskBoard card, and final result. Reflection records are Workspace evidence and
-verifier/replan input, but they are not completion evidence by themselves.
+TaskBoard card, and final result. Reflection records stay in task memory and
+runtime observation output by default and may enter verifier/replan input, but
+they are not completion evidence by themselves.
 
 `execution.step_plan` is retained only as compatibility guidance. Users
 normally do not need to spell it out. AgentTask no longer uses TaskDAG /
@@ -139,7 +140,7 @@ separately when the host owns a submitted or visual automation graph.
 Use `agent.create_task(...)` when the business goal needs a bounded multi-round
 loop instead of one direct AgentExecution. It returns a task-strategy
 `AgentExecution` draft; internally the retained `AgentTask` record runs one task
-owned by one Agent: plan, execute one bounded step, write Workspace evidence,
+owned by one Agent: plan, execute one bounded step, collect bounded evidence,
 verify, replan when needed, then finish as complete or blocked.
 
 Internally, `flat` and `taskboard` are coordination strategies, not separate
@@ -162,11 +163,11 @@ consume data, text, stream, metadata, status, and task refs through
 
 While a task-strategy `AgentExecution` is still running, host code may add
 non-blocking operator context with `await execution.async_add_guidance(...)` or
-`execution.add_guidance(...)`. Guidance is recorded immediately, written to the
-retained AgentTask Workspace under `workspace_refs["guidance"]`, surfaced in
-`guidance_items` / `guidance_refs`, and applied at the next safe Flat or
-TaskBoard boundary. It does not pause execution, does not mutate non-task route
-prompts, and does not count as completion evidence.
+`execution.add_guidance(...)`. Guidance is recorded immediately in running task
+memory, surfaced through runtime events and `guidance_items`, and applied at the
+next safe Flat or TaskBoard boundary. It does not create a Workspace record by
+default, pause execution, mutate non-task route prompts, or count as completion
+evidence.
 
 ```python
 execution = agent.create_task(
@@ -183,8 +184,7 @@ await execution.async_add_guidance(
 )
 
 data = await run_task
-meta = await execution.async_get_meta()
-guidance_refs = meta["task_refs"]["workspace_refs"]["guidance"]
+assert guidance["storage"] == "memory"
 ```
 
 `AgentExecution.strategy("auto" | "direct" | "flat" | "taskboard")` is the
@@ -224,7 +224,7 @@ execution = agent.create_task(
         "The script no longer uses incompatible legacy API calls.",
         "The fixed script runs and produces the expected structured result.",
     ],
-    workspace="./.agently/tasks/legacy-script-upgrade",
+    workspace="./legacy-script-project",
     max_iterations=4,
     verify="before_done",
     options={
@@ -256,12 +256,16 @@ meta = await result.async_get_meta()
 task_refs = result.task_refs
 ```
 
-Each iteration writes planning decisions, execution observations, verification
-evidence, evidence links, and checkpoints to Workspace. Checkpoints use the
-Workspace checkpoint-store port, and task evidence relationships use
-`workspace.link_evidence(...)`. The next iteration receives a ContextPackage from
-`workspace.build_context(...)`, so the loop can carry evidence forward without
-turning Workspace into an autonomous planner.
+AgentTask process state stays in memory and runtime logs by default. Planning,
+observations, verification, evidence links, reflections, and TaskBoard
+checkpoints do not materialize Workspace records merely because a task runs.
+The next iteration receives a bounded in-process ContextPackage, while trusted
+file products still use Workspace write/readback and terminal retention.
+
+Set `options={"agent_task": {"workspace_recovery": True}}` only when the host
+needs restart-safe continuation. That option persists a compact resumable
+snapshot; it does not turn Workspace into a complete process-event or audit
+archive.
 
 TaskBoard checkpoints also include bounded orientation projections for long
 runs: an acceptance index over declared criteria/card refs and a handoff
@@ -608,9 +612,22 @@ lifecycle.
 
 ### Resume a task after a crash
 
-AgentTask persists a resumable snapshot after every completed iteration. If
-the process crashes, resume the task as a fresh `AgentExecution` and continue
-from the next iteration. Completed iterations are not re-executed:
+Workspace recovery is opt-in. Create the original task with a stable `task_id`
+and `workspace_recovery=True` when a crash must be resumable:
+
+```python
+execution = agent.create_task(
+    task_id="issue-123",
+    goal="Repair the issue and verify the result.",
+    options={"agent_task": {"workspace_recovery": True}},
+)
+await execution.async_start()
+```
+
+With that option, AgentTask persists a compact resumable snapshot after each
+completed iteration. If the process crashes, resume the task as a fresh
+`AgentExecution` and continue from the next iteration. Completed iterations are
+not re-executed:
 
 ```python
 execution = await agent.async_resume("issue-123")   # or agent.resume("issue-123")

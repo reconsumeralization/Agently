@@ -162,7 +162,8 @@ allowlist, Agently uses a small safe shell profile for commands such as `pwd`,
 `ls`, `rg`, `cat`, `git status`, `git diff`, `git log`, `python -m pytest`, and
 `python -m pyright`. Stdout and stderr are returned as bounded previews; if a
 stream exceeds `max_output_chars`, the full stream is written under the
-Workspace root at `artifacts/shell/` and referenced from the action result.
+current execution fallback at `.agently/files/<execution-id>/shell-output/`
+and referenced from the action result.
 `allow_unsafe` is a host-only direct execution grant; it is not exposed in
 model-visible shell action schemas and is stripped from model-planned action
 inputs. If a model-selected command is outside the safe profile, route it
@@ -210,7 +211,7 @@ The default `on_missing="skip"` records diagnostics and avoids fake runnable
 agents; `on_missing="error"` fails closed. ACP run actions declare
 `ExecutionResource(kind="acp")` so root scope and lifecycle facts stay in the
 resource layer. If `root` is omitted, `agent.use_acp()` uses the Agent's bound
-Workspace `files_root` as the coding-agent project root; pass `root=...` only
+Workspace `root` as the coding-agent project root; pass `root=...` only
 when the host intentionally authorizes a different project directory. ACP
 session reuse is an internal AgentExecution resource policy, not an ordinary
 task-start option. CLI adapters are marked
@@ -307,9 +308,8 @@ records before they enter a TriggerFlow state or return boundary. This covers
 large kwargs/instructions as well as large output fields and avoids retaining
 duplicate `data`, `result`, and `model_digest` payloads. Finite internal
 ActionRuntime execution flows, ActionFlows, and TaskDAG executions do not bind a
-Workspace. A
-`TriggerFlowActionFlow` binds a lazy Workspace only when an approval pause needs
-save/resume recovery.
+Workspace. `TriggerFlowActionFlow` binds Workspace recovery only when an
+approval pause needs save/resume.
 
 `Action.to_action_results(records)` uses the digest for instruction-heavy
 actions, so follow-up replies can reason about what happened without receiving

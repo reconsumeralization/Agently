@@ -114,7 +114,8 @@ host guards。
 reflection，只在 planner 标记的重要过程节点记录过程 reflection；`medium` 在每个
 大任务节点或 TaskBoard card/tick 后记录 reflection；`high` 在每个框架可观测的
 bounded step、Action/ACP call、TaskBoard card 和最终结果后记录 reflection。
-Reflection 会作为 Workspace evidence 进入 verifier/replan 输入，但它本身不是完成证据。
+Reflection 默认只保留在任务内存和运行观测输出中，也可以进入 verifier/replan 输入，
+但它本身不是完成证据。
 
 `execution.step_plan` 只作为兼容指导保留，普通用户不需要显式写出来。AgentTask
 不再把 TaskDAG / DynamicTask 作为内部 bounded step 策略；旧模型输出
@@ -127,7 +128,7 @@ direct bounded execution，并留下 diagnostics。当宿主拥有提交式 DAG 
 当业务目标需要一个有边界的多轮闭环，而不是一次 direct AgentExecution 时，使用
 `agent.create_task(...)`。它返回一个 task-strategy `AgentExecution` draft；
 内部保留的 `AgentTask` record 运行一个由单个 Agent 持有的任务：计划、执行一个
-bounded step、写入 Workspace 证据、验证、必要时 replan，最后以 complete 或
+bounded step、收集有界证据、验证、必要时 replan，最后以 complete 或
 blocked 结束。
 
 内部实现上，`flat` 和 `taskboard` 是协调策略，不是两套独立 execution carrier。
@@ -149,10 +150,10 @@ stream/meta facade 消费 data、text、stream、metadata、status 和 task refs
 
 当 task-strategy `AgentExecution` 仍在运行时，host 可以用
 `await execution.async_add_guidance(...)` 或 `execution.add_guidance(...)`
-追加非阻塞的操作员上下文。guidance 会被立即记录，写入保留的 AgentTask Workspace
-`workspace_refs["guidance"]`，并在 `guidance_items` / `guidance_refs` 中可见；
-后续 Flat 或 TaskBoard 安全边界会应用它。它不会暂停 execution，不会改写非 task
-route 的 prompt，也不能作为完成证据。
+追加非阻塞的操作员上下文。guidance 会被立即记录在运行中的任务内存，通过 runtime
+event 和 `guidance_items` 暴露，并在后续 Flat 或 TaskBoard 安全边界应用。默认不会
+为它创建 Workspace record；它不会暂停 execution，不会改写非 task route 的 prompt，
+也不能作为完成证据。
 
 ```python
 execution = agent.create_task(
@@ -169,8 +170,7 @@ await execution.async_add_guidance(
 )
 
 data = await run_task
-meta = await execution.async_get_meta()
-guidance_refs = meta["task_refs"]["workspace_refs"]["guidance"]
+assert guidance["storage"] == "memory"
 ```
 
 `AgentExecution.strategy("auto" | "direct" | "flat" | "taskboard")` 是外层
@@ -205,7 +205,7 @@ execution = agent.create_task(
         "脚本不再使用不兼容的旧 API。",
         "修复后的脚本可以运行，并产出预期结构化结果。",
     ],
-    workspace="./.agently/tasks/legacy-script-upgrade",
+    workspace="./legacy-script-project",
     max_iterations=4,
     verify="before_done",
     options={
@@ -237,11 +237,14 @@ meta = await result.async_get_meta()
 task_refs = result.task_refs
 ```
 
-每轮会把 planning decision、execution observation、verification evidence、
-evidence links 和 checkpoint 写入 Workspace。checkpoint 通过 Workspace
-checkpoint-store port 写入，task evidence 关系通过 `workspace.link_evidence(...)`
-记录。下一轮通过 `workspace.build_context(...)` 取得 ContextPackage，因此 loop
-可以把证据带入下一轮，但 Workspace 不会变成自主规划器。
+AgentTask 过程状态默认只保留在内存和运行日志中。任务运行本身不会把 planning、
+observation、verification、evidence link、reflection 或 TaskBoard checkpoint
+物化成 Workspace record。下一轮从有界的进程内 ContextPackage 继续工作；可信文件
+制品仍通过 Workspace 写入、回读和终态保留。
+
+只有宿主确实需要跨进程恢复时，才设置
+`options={"agent_task": {"workspace_recovery": True}}`。该选项只持久化紧凑恢复快照，
+不会把 Workspace 变成完整的过程事件或审计档案。
 
 TaskBoard checkpoint 还会包含有界的长任务定向投影：基于声明 criteria/card refs
 生成的 acceptance index，以及包含 active/setback/blocked/deferred card、evidence
@@ -499,7 +502,19 @@ AgentTask 暴露成第二套公开生命周期。
 
 ### 崩溃后恢复任务
 
-AgentTask 在每次迭代完成后都会持久化一份可恢复快照。若进程崩溃，可以恢复成一个
+Workspace 恢复需要显式启用。原始任务必须使用稳定的 `task_id` 并设置
+`workspace_recovery=True`：
+
+```python
+execution = agent.create_task(
+    task_id="issue-123",
+    goal="修复问题并验证结果。",
+    options={"agent_task": {"workspace_recovery": True}},
+)
+await execution.async_start()
+```
+
+启用后，AgentTask 才会在每次已完成迭代后持久化紧凑恢复快照。若进程崩溃，可以恢复成
 新的 `AgentExecution` 并从下一次迭代继续。已完成的迭代不会重复执行：
 
 ```python

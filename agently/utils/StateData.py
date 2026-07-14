@@ -290,14 +290,11 @@ class StateData:
 
     def __setitem__(self, key: Any, value: Any) -> None:
         if isinstance(key, str) and "." in key:
-            return self._set_item_by_dot_path(key, value)
-        if key in self._data:
-            ref = DictRef(self._data, key)
-            self._set_item(ref, value)
-        else:
-            self._data[key] = self._copy(value)
+            return self._set_item_by_dot_path(key, value, cover=True)
+        self._data[key] = self._copy(value)
 
     def set(self, key: Any, value: Any) -> None:
+        """Replace ``key`` with an isolated copy of ``value``."""
         return self.__setitem__(key, value)
 
     def setdefault(self, key: Any, value: Any, *, inherit: bool = True) -> Any:
@@ -306,8 +303,14 @@ class StateData:
         return self.get(key, inherit=inherit)
 
     def update(self, new: dict[Any, Any]) -> None:
+        """Recursively merge a partial mapping into the current local data."""
         for key, value in new.items():
-            self.set(key, value)
+            if isinstance(key, str) and "." in key:
+                self._set_item_by_dot_path(key, value)
+            elif key in self._data:
+                self._set_item(DictRef(self._data, key), value)
+            else:
+                self._data[key] = self._copy(value)
 
     def load(
         self,
@@ -571,7 +574,7 @@ class StateDataNamespace:
 
     def update(self, new: dict[Any, Any]) -> None:
         for key, value in new.items():
-            self.set(key, value)
+            self.root.update({f"{self.namespace}.{key}": value})
 
     def append(self, key: Any, value: Any) -> None:
         return self.root.append(f"{self.namespace}.{key}", value)

@@ -245,17 +245,19 @@ snapshot_ref = await execution.async_save(step_id="after-approval")
 如果需要共享任务信息，优先使用由应用显式创建并管理的 Workspace 实例：
 
 ```python
-shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
+shared_workspace = Agently.create_workspace("./project")
 execution = flow.create_execution(workspace=shared_workspace)
 ```
 
-`flow.create_execution()` 默认绑定当前 session/script 的默认 Workspace，并给 execution
-分配
-`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`
-下的独立文件 root。传 `workspace=False` 可以显式关闭；传 Workspace 实例、路径或
+`flow.create_execution()` 默认在入口脚本目录上绑定轻量 Workspace。每个 execution
+看到同一个直接普通文件 root；没有外部写权限时创建的新文件隔离在
+`.agently/files/<execution-id>/`。传 `workspace=False` 可以显式关闭；传 Workspace 实例、路径或
 backend 时，execution 会使用显式选择的 Workspace。
 解析后的 execution-local Workspace facade 会作为 `runtime_resources["workspace"]`
 暴露给 TriggerFlow chunks，也可以通过 `data.require_resource("workspace")` 读取。
+
+该绑定不会开启 RuntimeEvent 持久化，也不会创建 `.agently`。只有真实文件制品、
+records、recovery 或显式配置的 event storage 才会物化私有状态。
 
 它是 live resource，不会被序列化进 execution state。如果某个 chunk 需要 Agent
 使用同一个显式信息范围，应在业务代码里把该 Agent 或单次 AgentExecution 绑定到同一个

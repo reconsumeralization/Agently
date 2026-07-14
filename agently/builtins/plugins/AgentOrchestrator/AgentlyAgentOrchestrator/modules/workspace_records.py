@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from agently.types.data import AgentExecutionWorkspacePurpose, AgentExecutionWorkspaceRecord
-from agently.core.Workspace.Retention import resolve_retention_policy
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
@@ -44,12 +43,10 @@ async def record_workspace(
         raise ValueError(f"Unsupported AgentExecution Workspace purpose: { purpose }.")
     if purpose == "deliverable" and checkpoint:
         raise ValueError("AgentExecution Workspace deliverable records cannot also be recovery checkpoints.")
-    if purpose == "audit" and owner.options.get("workspace_retention_policy") is None:
-        raise ValueError("AgentExecution Workspace audit records require an explicit retention policy override.")
     if owner.workspace is None:
         raise RuntimeError(
             "AgentExecution has no Workspace binding. "
-            "Standard Agents include a lazy Workspace; call agent.use_workspace(...) "
+            "Standard Agents include a Workspace; call agent.use_workspace(...) "
             "only when you need an explicit root, mode, or provider."
         )
     if purpose in {"process", "recovery"}:
@@ -138,18 +135,6 @@ async def _record_workspace_locked(
         profile=profile,
     )
     append_workspace_ref(owner, collection, record_ref)
-    if purpose == "deliverable":
-        stored_ref = await owner.workspace.ref_envelope(record_ref)
-        if stored_ref.get("record_id") != record_ref.get("id"):
-            raise RuntimeError("AgentExecution Workspace deliverable record could not be verified after storage.")
-        await owner.workspace.add_retention_anchor(
-            owner.id,
-            anchor_type="deliverable",
-            record_ref=record_ref,
-            meta={"owner": "AgentExecution", "workspace_purpose": purpose},
-        )
-        owner._terminal_anchored_ref_ids.add(record_ref["id"])
-
     checkpoint_ref = None
     if checkpoint:
         checkpoint_ref = await owner.workspace.put_checkpoint(
@@ -179,10 +164,6 @@ async def _record_workspace_locked(
     if post_terminal:
         from .terminal_retention import apply_agent_execution_terminal_retention
 
-        owner._terminal_retention_policy = resolve_retention_policy(
-            owner.options.get("workspace_retention_policy"),
-            supports_cold=True,
-        )
         await apply_agent_execution_terminal_retention(
             owner,
             status=(

@@ -696,7 +696,10 @@ async def test_blocks_workspace_operation_search_empty_result_enters_ledger(tmp_
 
 @pytest.mark.asyncio
 async def test_blocks_workspace_operation_search_can_use_workspace_files_surface(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-file-search")
+    workspace = Agently.create_workspace(
+        tmp_path / "blocks-workspace-file-search",
+        mode="read_write",
+    )
     await workspace.write_file("notes/todo.md", "alpha\nrelease deadline is 2026-07-01\n")
     await workspace.put(
         content="Indexed record is unrelated to the file-only query.",

@@ -31,7 +31,7 @@ async def main() -> dict[str, object]:
         os.chdir(temp_dir)
         try:
             workspace = Agently.create_workspace(
-                ".agently/workspaces/provider-demo",
+                ".",
                 db_store_provider="sqlite",
                 embedding_provider=embed_texts,
                 vector_store_provider="auto",
@@ -42,6 +42,7 @@ async def main() -> dict[str, object]:
                 kind="provider_probe",
                 summary="alpha rollout controls",
                 scope={"case_id": "provider-demo"},
+                vector=True,
             )
             await workspace.put(
                 {"memory": "beta billing exception"},
@@ -49,6 +50,7 @@ async def main() -> dict[str, object]:
                 kind="provider_probe",
                 summary="beta billing exception",
                 scope={"case_id": "provider-demo"},
+                vector=True,
             )
 
             package = await workspace.retrieve(
@@ -61,19 +63,23 @@ async def main() -> dict[str, object]:
             selected_item = cast(dict[str, Any], package["items"][0])
             selected_ref = selected_item["ref"]
             selected_data = await workspace.get_data(selected_ref)
-            capabilities = workspace.capabilities()["components"]
+            capabilities = workspace.capabilities()
+            vector_diagnostics = package["diagnostics"]["vector"]
             result = {
                 "top_memory": selected_data["memory"],
-                "vector_used": package["diagnostics"]["vector"]["used"],
-                "db_store_provider": capabilities["db_store_provider"],
-                "embedding_provider": capabilities["embedding_provider"],
-                "vector_store_provider": capabilities["vector_store_provider"],
+                "vector_used": vector_diagnostics["used"],
+                "materialized_components": capabilities["materialized_components"],
+                "configured_db_store_provider": "sqlite",
+                "configured_embedding_provider": "callable",
+                "selected_vector_store_provider": vector_diagnostics.get("vector_store_provider"),
+                "vector_diagnostics": vector_diagnostics,
             }
             assert result["top_memory"] == "alpha rollout controls"
             assert result["vector_used"] is True
-            assert result["db_store_provider"] == "sqlite"
-            assert result["embedding_provider"] == "callable"
-            assert result["vector_store_provider"] in {"chroma", "sqlite"}
+            assert "records" in result["materialized_components"]
+            assert result["configured_db_store_provider"] == "sqlite"
+            assert result["configured_embedding_provider"] == "callable"
+            assert result["selected_vector_store_provider"] in {"chroma", "sqlite"}
             return result
         finally:
             os.chdir(previous_cwd)
@@ -86,9 +92,9 @@ if __name__ == "__main__":
 # Expected key output:
 # top_memory: alpha rollout controls
 # vector_used: True
-# db_store_provider: sqlite
-# embedding_provider: callable
-# vector_store_provider: chroma when chromadb is installed and initializes, otherwise sqlite
+# configured_db_store_provider: sqlite
+# configured_embedding_provider: callable
+# selected_vector_store_provider: chroma when chromadb is installed and initializes, otherwise sqlite
 #
 # This infrastructure-only probe does not call a model. It demonstrates that
 # record DB, embedding, and vector storage are separate Workspace providers:
