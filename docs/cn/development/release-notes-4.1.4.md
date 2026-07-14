@@ -253,6 +253,7 @@ result = (
 | Result text | task-strategy results 暴露 `final_response`；`get_text()` 与 `async_get_text()` 优先返回该 final response。 | 用 result text facades 获取面向用户的最终答案。 |
 | Result payloads | execution result payloads 暴露 terminal status、artifact status、final result data、task refs、completion notes、diagnostics。 | 用 structured result/meta data 驱动应用状态、审计和 UI detail panels。 |
 | Streams | AgentExecution streams 暴露 process events、instant items、delta text、retry boundaries、exchange state、action observations、terminal summaries。 | 从 `delta` 渲染用户文本；从 `instant` 或 RuntimeEvents 渲染结构化 UI state。 |
+| Structured request completion | AgentExecution 会投影 provisional `instant` fields，但其持有的 ModelRequest 会继续到自然 parsing、validation、usage/meta 与 `request.completed`。 | `instant` 只用于 UI 或可取消/幂等准备；AgentTask evidence 与业务决策使用最终 parsed data。 |
 | Runtime context | runtime context 保留为 diagnostics；model-hot task prompts 不把具体 runtime timestamps 写入生成制品。 | 将业务日期放入 caller input 或 source evidence。 |
 | Incremental acceptance | TaskBoard acceptance 携带 dirty/cache markers、card/evidence ids、verdict fingerprints、verification refs、counters、progress percent。 | 用 acceptance metadata 驱动 task status、board UI 和 verification efficiency。 |
 | Verifier reuse | TaskBoard final verification 可复用未变化的 green verifier verdict，并将 dirty verifier input 限定到受影响 acceptance items。 | 让 TaskBoard 只验证变化的 acceptance areas，同时保留 final verifier authority。 |
