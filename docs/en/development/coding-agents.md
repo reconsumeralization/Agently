@@ -106,6 +106,26 @@ tokens, customer data, or local absolute paths.
 
 When adding a framework deprecation, route the warning through `agently.utils.DeprecationWarnings.warn_deprecated_once(...)` or the `agently.utils.warn_deprecated_once(...)` alias with a stable API key. Do not add direct `warnings.warn(..., DeprecationWarning, ...)` calls; deprecated API warnings are intentionally once per API per Python process and respect `runtime.show_deprecation_warnings`.
 
+## Simulation-first model experiments
+
+When problem discovery or strategy tuning is likely to require multiple model
+rounds, ask the development agent to self-simulate a realistic target request,
+response, and behavior chain first. Define the acceptance criteria up front and
+iterate the prompt, output schema, topology, instrumentation, and failure paths
+against that preflight without external model calls. Mark all simulated outputs
+as `simulated`: they are low-cost hypothesis and protocol-design material, not
+observed facts or real-model evidence for capability, semantic quality,
+latency, cost, stability, or provider behavior.
+
+After the preflight meets its written criteria, run the smallest representative
+and bounded real-model comparison needed for validation. Base the final
+experiment conclusion on those real traces; if simulation and reality differ,
+the real trace wins and the design returns to the analysis/revision loop. Use
+authorized project- or developer-owned test credentials by default, with
+explicit call, concurrency, and budget limits. Do not consume customer API
+credentials or quota without explicit customer authorization and a disclosed
+maximum call count or spend.
+
 ## Post-4.1 defaults
 
 When you audit or author guidance for Agently `4.1+`, these are the defaults coding agents should prefer:
