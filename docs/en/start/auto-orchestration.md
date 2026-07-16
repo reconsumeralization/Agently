@@ -800,7 +800,10 @@ owns synthesis. When the task contract explicitly requires Workspace write and
 read Actions, the synthesized body is then materialized and read back through
 those Actions before normal artifact adoption. This keeps Action success,
 Workspace readback, and final content ownership on one visible value/event
-chain instead of relying on a later repair loop.
+chain instead of relying on a later repair loop. Control-card Action records use
+the same execution-summary carrier as ordinary Action cards, so terminal
+capability checks observe the completed write/read events instead of scheduling
+a duplicate repair.
 
 Flat AgentTask steps use the same command-lowering owner. The Flat planner
 selects `required_action_ids` from the compact capability list; it is not asked

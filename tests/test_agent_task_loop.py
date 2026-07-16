@@ -18,6 +18,7 @@ from agently import Agently
 from agently.core import PluginManager
 from agently.core.orchestration import (
     TaskBoard,
+    TaskBoardValidator,
     build_task_board_acceptance_index,
     build_task_board_evidence_view,
     resolve_task_board_planning_policy,
@@ -5191,6 +5192,117 @@ async def test_taskboard_control_delivery_uses_required_workspace_actions(tmp_pa
     )
     assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
     assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_control_delivery_preserves_workspace_action_evidence_for_terminal_gate(
+    tmp_path,
+):
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent("agent-taskboard-control-terminal-action-evidence").use_workspace(
+        workspace_root,
+        mode="read_write",
+    )
+    agent.enable_workspace_file_actions(
+        root=workspace_root,
+        read=True,
+        write=True,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-control-terminal-action-evidence",
+        goal="Write the completed report to final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="taskboard",
+        options={
+            "agent_task": {"required_deliverables": [{"path": "final.md"}]},
+            "capability_evidence_requirements": [
+                {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"},
+                {"capability_id": "read_file", "capability_kind": "action", "kind": "action_succeeded"},
+            ],
+        },
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "synthesis",
+            "objective": "Synthesize and deliver the final report.",
+            "allowed_execution_shape": "control",
+            "metadata": {"final_workspace_deliverables": ["final.md"]},
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    assert task._set_taskboard_planned_workspace_deliverables(revision) == ["final.md"]
+    body = "# Final report\n\nGrounded synthesized body.\n"
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any):
+        work_unit = kwargs["work_unit"]
+        return (
+            {
+                "status": "completed",
+                "sufficient": True,
+                "next_board_action": "finalize",
+                "artifact_markdown": body,
+                "artifact_manifest": {"path": "final.md"},
+                "remaining_work": ["Write artifact_markdown content to final.md."],
+            },
+            {
+                "execution_id": f"{task.id}:taskboard:synthesis:control",
+                "status": "completed",
+                "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+            },
+            WorkUnitResult(id=str(work_unit.id), status="completed"),
+        )
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    result = await task._run_taskboard_control_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    summaries = [
+        diagnostic["evidence_summary"]
+        for diagnostic in result.diagnostics
+        if isinstance(diagnostic, Mapping) and isinstance(diagnostic.get("evidence_summary"), Mapping)
+    ]
+    assert len(summaries) == 1
+    assert [item["id"] for item in summaries[0]["actions"]] == ["write_file", "read_file"]
+    terminal_logs = task._taskboard_final_capability_logs(
+        TaskBoardValidator().apply_patch(
+            revision,
+            {
+                "base_revision": revision.revision_id,
+                "operations": [
+                    {"op": "record_card_result", "result": result.to_dict()}
+                ],
+            },
+        ),
+        context_pack=None,
+    )
+    assert [item["id"] for item in terminal_logs["action_logs"]] == ["write_file", "read_file"]
+    terminal_summary = task._execution_log_summary(
+        {
+            "status": "completed",
+            "effective_options": task._taskboard_verification_options(),
+            "logs": terminal_logs,
+        }
+    )
+    task._accumulate_capability_evidence(terminal_summary)
+    missing, _unenforced = task._evaluate_capability_evidence(terminal_summary)
+    assert missing == []
 
 
 def test_taskboard_planned_workspace_deliverables_reject_escape_paths(tmp_path):

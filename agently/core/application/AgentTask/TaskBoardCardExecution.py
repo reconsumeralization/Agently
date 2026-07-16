@@ -1817,6 +1817,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             cast(dict[str, Any], execution_meta),
             self._taskboard_dependency_readback_evidence_items(dependency_readbacks),
         )
+        summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
         execution_evidence_ledger = self._evidence_ledger_from_execution_meta(cast(Mapping[str, Any], execution_meta))
         card_evidence_ledger = self._stable_evidence_ledger_view(
             {
@@ -1873,6 +1874,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     execution_meta.get("block_carrier", {}),
                     blocks=execution_meta.get("blocks"),
                 ),
+                "evidence_summary": DataFormatter.sanitize(summary),
                 "evidence_use_guard": evidence_use_guard,
             }
         )
