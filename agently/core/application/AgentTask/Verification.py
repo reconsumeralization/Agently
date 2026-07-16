@@ -4718,16 +4718,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             final_action_statuses,
             {"approval_required"},
         )
-        final_succeeded_actions = self._action_ids_by_final_status(
-            final_action_statuses,
-            {"success", "succeeded", "partial_success"},
-        )
         capability_evidence_summary = combined.get("capability_evidence")
         capability_actions = (
             capability_evidence_summary.get("actions") if isinstance(capability_evidence_summary, dict) else None
         )
         if isinstance(capability_actions, dict):
-            capability_actions["succeeded"] = final_succeeded_actions
             capability_actions["failed"] = combined["failed_actions"]
         combined["artifact_refs"] = self._dedupe_ref_records(combined["artifact_refs"])
         combined["errors"] = self._dedupe_jsonable_records(combined["errors"])

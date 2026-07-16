@@ -5109,6 +5109,120 @@ def test_taskboard_initial_plan_splits_action_commands_from_final_delivery(tmp_p
     assert final_card["final_workspace_deliverables"] == ["final.md"]
 
 
+def test_taskboard_initial_plan_rejects_undeclared_action_input_keys(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent("agent-taskboard-reject-invalid-action-input").use_workspace(
+        workspace_root,
+        mode="read_write",
+    )
+    agent.enable_workspace_file_actions(
+        root=workspace_root,
+        read=True,
+        write=False,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-reject-invalid-action-input",
+        goal="Read back final.md.",
+        success_criteria=["The read_file Action succeeds."],
+        execution="taskboard",
+    )
+    raw_plan = {
+        "board_goal": task.goal,
+        "cards": [
+            {
+                "id": "read_back_plan",
+                "objective": "Read back final.md.",
+                "allowed_execution_shape": "actions",
+                "requires_capability_ids": ["read_file"],
+                "action_commands": [
+                    {
+                        "purpose": "Read back the final plan.",
+                        "action_id": "read_file",
+                        "action_input": {"filepath": "final.md"},
+                    }
+                ],
+            }
+        ],
+        "completion_gate": "The file is read back.",
+        "why_this_effort_shape": "One bounded Action is sufficient.",
+    }
+
+    normalized = task._normalize_taskboard_initial_plan(raw_plan)
+
+    card = normalized["cards"][0]
+    assert card["allowed_execution_shape"] == "actions"
+    assert card["requires_capability_ids"] == ["read_file"]
+    assert "action_commands" not in card
+    assert normalized["diagnostics"][-1]["code"] == (
+        "taskboard.initial_plan.action_commands_rejected"
+    )
+    assert normalized["diagnostics"][-1]["validation_code"] == "invalid_input_keys"
+
+
+@pytest.mark.asyncio
+async def test_bounded_action_commands_reject_undeclared_input_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent("agent-task-bounded-action-invalid-input").use_workspace(
+        workspace_root,
+        mode="read_write",
+    )
+    agent.enable_workspace_file_actions(
+        root=workspace_root,
+        read=True,
+        write=False,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="bounded-action-invalid-input",
+        goal="Read back final.md.",
+        success_criteria=["The read_file Action succeeds."],
+        execution="taskboard",
+    )
+
+    async def fail_if_dispatched(*_args, **_kwargs):
+        raise AssertionError("invalid Action kwargs must fail before ActionRuntime dispatch")
+
+    monkeypatch.setattr(
+        cast(Any, agent.action),
+        "_async_execute_action_calls",
+        fail_if_dispatched,
+    )
+    result, execution_meta = await task._execute_bounded_action_commands(
+        raw_commands=[
+            {
+                "purpose": "Read back the final plan.",
+                "action_id": "read_file",
+                "action_input": {"filepath": "final.md"},
+            }
+        ],
+        required_action_ids=["read_file"],
+        execution_id="bounded-action-invalid-input:execution",
+        code_prefix="taskboard.action_commands",
+        execution_kind="taskboard_preplanned_action_calls",
+        command_source="taskboard_plan",
+        action_planning_model_requests=0,
+        unit_label="TaskBoard",
+        todo_suggestion="Read the file.",
+    )
+
+    assert result["status"] == "failed"
+    assert execution_meta["logs"]["action_logs"] == []
+    assert execution_meta["diagnostics"][0]["code"] == (
+        "taskboard.action_commands.invalid_input_keys"
+    )
+    assert "filepath" in execution_meta["diagnostics"][0]["message"]
+
+
 @pytest.mark.asyncio
 async def test_taskboard_control_delivery_uses_required_workspace_actions(tmp_path):
     workspace_root = tmp_path / "workspace"
@@ -16105,6 +16219,53 @@ def test_execution_log_summary_infers_action_success_from_route_history():
     assert summary["action_statuses"]["read_file"] == "failed"
     assert summary["capability_evidence"]["actions"]["succeeded"] == ["write_file"]
     assert summary["capability_evidence"]["actions"]["failed"] == ["read_file"]
+
+
+def test_action_succeeded_evidence_survives_an_independent_failed_call(tmp_path):
+    from agently.core.application import AgentTask
+
+    task = AgentTask(
+        _create_agent("agent-task-action-succeeded-any-call"),
+        goal="Read the required artifact.",
+        success_criteria=["The read Action succeeds."],
+        workspace=tmp_path / "workspace",
+        options={
+            "capability_evidence_requirements": [
+                {
+                    "capability_id": "read_file",
+                    "capability_kind": "action",
+                    "kind": "action_succeeded",
+                }
+            ]
+        },
+    )
+    summary = task._execution_log_summary(
+        {
+            "status": "completed",
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "read_file",
+                        "action_call_id": "read-success",
+                        "status": "success",
+                    },
+                    {
+                        "action_id": "read_file",
+                        "action_call_id": "read-failed",
+                        "status": "error",
+                    },
+                ],
+                "route_logs": {},
+            },
+        }
+    )
+
+    assert summary["action_statuses"]["read_file"] == "error"
+    assert summary["failed_actions"] == ["read_file"]
+    assert summary["capability_evidence"]["actions"]["succeeded"] == ["read_file"]
+    task._accumulate_capability_evidence(summary)
+    missing, _unenforced = task._evaluate_capability_evidence(summary)
+    assert missing == []
 
 
 def test_execution_log_summary_treats_partial_success_search_as_succeeded_action():

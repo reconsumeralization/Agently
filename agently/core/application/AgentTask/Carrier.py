@@ -19,6 +19,88 @@ from .TaskShared import *
 
 
 class AgentTaskCarrierMixin(AgentTaskMixinBase):
+    def _normalize_bounded_action_commands(
+        self,
+        *,
+        raw_commands: Any,
+        required_action_ids: Sequence[str],
+        unit_label: str,
+    ) -> tuple[list[dict[str, Any]], tuple[str, str] | None]:
+        """Validate model-authored Action commands against mounted contracts."""
+
+        if not isinstance(raw_commands, Sequence) or isinstance(
+            raw_commands, str | bytes | bytearray
+        ):
+            return [], (
+                "invalid_shape",
+                f"{unit_label} action_commands must be a sequence of command mappings.",
+            )
+
+        registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
+        has_action = getattr(registry, "has", None)
+        get_spec = getattr(registry, "get_spec", None)
+        commands: list[dict[str, Any]] = []
+        for index, raw_command in enumerate(raw_commands):
+            if not isinstance(raw_command, Mapping):
+                return [], (
+                    "invalid_command",
+                    f"{unit_label} action_commands[{index}] must be a mapping.",
+                )
+            action_id = str(raw_command.get("action_id") or "").strip()
+            action_input = raw_command.get("action_input")
+            if not action_id or not callable(has_action) or not has_action(action_id):
+                return [], (
+                    "unknown_action",
+                    f"{unit_label} action command references unavailable Action '{action_id}'.",
+                )
+            if not isinstance(action_input, Mapping):
+                return [], (
+                    "invalid_input",
+                    f"{unit_label} action command '{action_id}' requires an action_input mapping.",
+                )
+
+            spec = get_spec(action_id) if callable(get_spec) else None
+            kwargs = spec.get("kwargs") if isinstance(spec, Mapping) else None
+            meta = spec.get("meta") if isinstance(spec, Mapping) else None
+            if isinstance(kwargs, Mapping):
+                declared_keys = {str(key) for key in kwargs}
+                host_only_keys = set(
+                    self._normalize_string_list(
+                        meta.get("host_only_input_keys") if isinstance(meta, Mapping) else []
+                    )
+                )
+                unexpected_keys = sorted(
+                    str(key)
+                    for key in action_input
+                    if str(key) not in declared_keys or str(key) in host_only_keys
+                )
+                if unexpected_keys:
+                    return [], (
+                        "invalid_input_keys",
+                        f"{unit_label} action command '{action_id}' includes undeclared or host-only "
+                        f"input keys: {', '.join(unexpected_keys)}.",
+                    )
+
+            commands.append(
+                {
+                    "purpose": str(raw_command.get("purpose") or f"Use {action_id}").strip(),
+                    "action_id": action_id,
+                    "action_input": dict(action_input),
+                }
+            )
+
+        required = set(self._normalize_string_list(required_action_ids))
+        command_action_ids = {command["action_id"] for command in commands}
+        missing_required = sorted(required - command_action_ids)
+        if missing_required:
+            return [], (
+                "missing_required_action",
+                f"{unit_label} action_commands omitted required Action ids: "
+                + ", ".join(missing_required)
+                + ".",
+            )
+        return commands, None
+
     def _bounded_action_command_failure(
         self,
         *,
@@ -79,55 +161,21 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 action_planning_model_requests=action_planning_model_requests,
             )
 
-        if not isinstance(raw_commands, Sequence) or isinstance(
-            raw_commands, str | bytes | bytearray
-        ):
-            return failure(
-                "invalid_shape",
-                f"{unit_label} action_commands must be a sequence of command mappings.",
-            )
-
-        registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
-        has_action = getattr(registry, "has", None)
-        commands: list[dict[str, Any]] = []
-        for index, raw_command in enumerate(raw_commands):
-            if not isinstance(raw_command, Mapping):
-                return failure(
-                    "invalid_command",
-                    f"{unit_label} action_commands[{index}] must be a mapping.",
-                )
-            action_id = str(raw_command.get("action_id") or "").strip()
-            action_input = raw_command.get("action_input")
-            if not action_id or not callable(has_action) or not has_action(action_id):
-                return failure(
-                    "unknown_action",
-                    f"{unit_label} action command references unavailable Action '{action_id}'.",
-                )
-            if not isinstance(action_input, Mapping):
-                return failure(
-                    "invalid_input",
-                    f"{unit_label} action command '{action_id}' requires an action_input mapping.",
-                )
-            commands.append(
-                {
-                    "purpose": str(raw_command.get("purpose") or f"Use {action_id}").strip(),
-                    "action_id": action_id,
-                    "action_input": dict(action_input),
-                    "todo_suggestion": todo_suggestion,
-                    "source_protocol": command_source,
-                }
-            )
-
-        required = set(self._normalize_string_list(required_action_ids))
-        command_action_ids = {command["action_id"] for command in commands}
-        missing_required = sorted(required - command_action_ids)
-        if missing_required:
-            return failure(
-                "missing_required_action",
-                f"{unit_label} action_commands omitted required Action ids: "
-                + ", ".join(missing_required)
-                + ".",
-            )
+        commands, validation_error = self._normalize_bounded_action_commands(
+            raw_commands=raw_commands,
+            required_action_ids=required_action_ids,
+            unit_label=unit_label,
+        )
+        if validation_error is not None:
+            return failure(*validation_error)
+        commands = [
+            {
+                **command,
+                "todo_suggestion": todo_suggestion,
+                "source_protocol": command_source,
+            }
+            for command in commands
+        ]
 
         action_logs = [
             dict(record)

@@ -1025,6 +1025,7 @@ class AgentTaskTaskBoardStrategyMixin(
         used_ids.discard("")
         split_final_ids: dict[str, str] = {}
         prepared: list[Any] = []
+        normalization_diagnostics: list[dict[str, Any]] = []
 
         for index, raw_card in enumerate(raw_cards):
             if not isinstance(raw_card, Mapping):
@@ -1032,10 +1033,6 @@ class AgentTaskTaskBoardStrategyMixin(
                 continue
             card = dict(raw_card)
             final_paths = self._normalize_string_list(card.get("final_workspace_deliverables"))
-            if not final_paths:
-                prepared.append(card)
-                continue
-
             commands_value = card.get("action_commands")
             commands = (
                 [dict(command) for command in commands_value if isinstance(command, Mapping)]
@@ -1043,6 +1040,37 @@ class AgentTaskTaskBoardStrategyMixin(
                 and not isinstance(commands_value, str | bytes | bytearray)
                 else []
             )
+            if commands_value not in (None, [], ()):
+                required_action_ids = self._normalize_string_list(
+                    card.get("requires_capability_ids")
+                )
+                _normalized_commands, validation_error = (
+                    self._normalize_bounded_action_commands(
+                        raw_commands=commands_value,
+                        required_action_ids=([] if final_paths else required_action_ids),
+                        unit_label="TaskBoard",
+                    )
+                )
+                if validation_error is not None:
+                    validation_code, message = validation_error
+                    card.pop("action_commands", None)
+                    commands = []
+                    normalization_diagnostics.append(
+                        {
+                            "code": "taskboard.initial_plan.action_commands_rejected",
+                            "card_id": str(
+                                card.get("id") or card.get("card_id") or f"card-{index + 1}"
+                            ),
+                            "validation_code": validation_code,
+                            "message": message,
+                            "fallback": "taskboard_action_command_request",
+                        }
+                    )
+
+            if not final_paths:
+                prepared.append(card)
+                continue
+
             if not commands:
                 card["allowed_execution_shape"] = "control"
                 card.pop("action_commands", None)
@@ -1148,6 +1176,13 @@ class AgentTaskTaskBoardStrategyMixin(
 
         normalized["cards"] = prepared
         if split_final_ids:
+            normalization_diagnostics.append(
+                {
+                    "code": "taskboard.initial_plan.final_delivery_split",
+                    "split_cards": dict(split_final_ids),
+                }
+            )
+        if normalization_diagnostics:
             diagnostics = normalized.get("diagnostics")
             normalized_diagnostics = (
                 [dict(item) for item in diagnostics if isinstance(item, Mapping)]
@@ -1155,12 +1190,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 and not isinstance(diagnostics, str | bytes | bytearray)
                 else []
             )
-            normalized_diagnostics.append(
-                {
-                    "code": "taskboard.initial_plan.final_delivery_split",
-                    "split_cards": dict(split_final_ids),
-                }
-            )
+            normalized_diagnostics.extend(normalization_diagnostics)
             normalized["diagnostics"] = normalized_diagnostics
         return normalized
 

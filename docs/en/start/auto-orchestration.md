@@ -781,7 +781,10 @@ preserving the declared hint and normalization reason in diagnostics. When the
 Action ids are known but arguments depend on upstream
 card results, one narrow structured request returns only the bounded
 `action_commands` batch; host validation then performs the same direct
-dispatch. Exact Workspace final-artifact handoff is likewise lowered to the
+dispatch. Every model-authored command is checked against the mounted Action's
+declared input keys before dispatch. An invalid initial-plan command is removed
+and re-planned once through that authoritative narrow contract; an invalid
+narrow response fails closed without reaching ActionRuntime. Exact Workspace final-artifact handoff is likewise lowered to the
 required write/readback Actions. Unknown Action ids, missing required ids, and
 invalid arguments fail closed. The ordinary multi-round ActionLoop remains for
 open-ended Agent execution where later Action choices genuinely depend on
@@ -803,7 +806,10 @@ Workspace readback, and final content ownership on one visible value/event
 chain instead of relying on a later repair loop. Control-card Action records use
 the same execution-summary carrier as ordinary Action cards, so terminal
 capability checks observe the completed write/read events instead of scheduling
-a duplicate repair.
+a duplicate repair. An `action_succeeded` requirement is satisfied by an actual
+successful call record even when a separate call of the same Action failed;
+that failure remains visible to execution-risk handling and does not erase the
+successful event.
 
 Flat AgentTask steps use the same command-lowering owner. The Flat planner
 selects `required_action_ids` from the compact capability list; it is not asked

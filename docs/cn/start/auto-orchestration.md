@@ -611,7 +611,10 @@ TaskBoard Action card 默认不使用开放式 ActionLoop。board plan 已经包
 同时返回两者且发生冲突，宿主会把该 card 归一化为 Action 执行，并在 diagnostics 中保留
 原始提示与归一化原因。Action id
 已知、但参数依赖上游 card 结果时，只发出一次窄结构化请求来返回有界的
-`action_commands` 批次，宿主校验后仍走同一条直接执行路径。精确的 Workspace 最终产物
+`action_commands` 批次，宿主校验后仍走同一条直接执行路径。所有模型生成的命令都会在
+dispatch 前按已挂载 Action 声明的输入字段校验。首轮 plan 中的无效命令会被移除，并通过
+携带权威契约的窄请求重做一次；窄请求仍返回无效参数时会在进入 ActionRuntime 前 fail
+closed。精确的 Workspace 最终产物
 交接同样会直接降低为必需的 write/readback Actions。未知 Action id、遗漏必需 Action id
 或无效参数都会 fail closed。只有后续 Action 选择确实依赖前一轮 Action 结果的开放式普通
 Agent 执行才保留多轮 ActionLoop。
@@ -627,7 +630,9 @@ Actions 时，合成正文会先通过这些 Actions 真实写入并读回，再
 接纳。这样 Action success、Workspace readback 与最终正文所有权位于同一条可见的值/事件链，
 不再依赖后续 repair loop 补救。control card 产生的 Action records 与普通 Action card
 使用同一个 execution-summary carrier，因此终态 capability check 能看到已经完成的
-write/read 事件，不会再调度重复 repair。
+write/read 事件，不会再调度重复 repair。`action_succeeded` requirement 由任意一条真实成功
+Action record 满足；同一 Action 的另一次失败仍保留给 execution-risk 处理，但不会抹掉已经
+发生的成功事件。
 
 Flat AgentTask step 使用同一个命令降低 owner。Flat planner 只从紧凑 capability list
 选择 `required_action_ids`，不会在缺少严格 kwargs schema 时猜测参数。如果内部结构化 plan
