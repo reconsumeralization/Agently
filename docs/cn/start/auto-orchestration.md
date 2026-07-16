@@ -634,6 +634,11 @@ write/read 事件，不会再调度重复 repair。`action_succeeded` requiremen
 Action record 满足；同一 Action 的另一次失败仍保留给 execution-risk 处理，但不会抹掉已经
 发生的成功事件。
 
+如果后续 TaskBoard leaf 只验证或引用同一产物，宿主会把它请求的 path 与 canonical
+dependency `TaskBoardCardResult` 中的可信 artifact refs 做确定性关联，并接纳当前物理读回。
+模型重复返回的 `artifact_manifest` 或 `file_refs` 投影不会授权再次发起 artifact-draft
+请求，也不能覆盖 dependency owner 已写入的正文。
+
 Flat AgentTask step 使用同一个命令降低 owner。Flat planner 只从紧凑 capability list
 选择 `required_action_ids`，不会在缺少严格 kwargs schema 时猜测参数。如果内部结构化 plan
 已经携带通过校验的 `action_commands`，宿主无需追加规划请求即可执行；否则只发出一次窄结构化

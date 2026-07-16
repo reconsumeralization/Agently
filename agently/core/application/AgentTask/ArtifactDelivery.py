@@ -1809,6 +1809,31 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         return paths
 
     @classmethod
+    def _taskboard_dependency_trusted_artifact_paths(cls, card_context: Any | None) -> list[str]:
+        dependency_results = getattr(card_context, "dependency_results", None)
+        if not isinstance(dependency_results, Mapping):
+            return []
+        paths: list[str] = []
+        for raw_result in dependency_results.values():
+            try:
+                result = TaskBoardCardResult.from_value(raw_result)
+            except (TypeError, ValueError):
+                continue
+            for ref in (*result.artifact_refs, *result.file_refs):
+                if not isinstance(ref, Mapping):
+                    continue
+                if not cls._is_trusted_workspace_artifact_ref(ref):
+                    continue
+                if not cls._workspace_artifact_ref_has_trusted_readback(ref):
+                    continue
+                path = str(ref.get("path") or "").strip()
+                if not cls._workspace_artifact_candidate_path_is_local(path):
+                    continue
+                if path not in paths:
+                    paths.append(path)
+        return paths
+
+    @classmethod
     def _workspace_artifact_ordered_action_candidate_paths(
         cls,
         action_paths: Sequence[str],
@@ -1880,13 +1905,23 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         source: str,
         card_context: Any | None = None,
         exact_manifest_path: bool = False,
+        trusted_candidate_paths: Sequence[str] | None = None,
+        candidate_source: str = "execution_meta.action_logs",
     ) -> dict[str, Any] | None:
         if (
             deliverable_mode not in {"workspace_artifact", "sectioned_workspace_artifact"}
             and not str(path or "").strip()
         ):
             return None
-        action_paths = self._workspace_artifact_successful_action_file_paths(execution_meta)
+        action_paths = (
+            [
+                str(candidate_path).strip()
+                for candidate_path in trusted_candidate_paths
+                if self._workspace_artifact_candidate_path_is_local(candidate_path)
+            ]
+            if trusted_candidate_paths is not None
+            else self._workspace_artifact_successful_action_file_paths(execution_meta)
+        )
         if not action_paths:
             return None
         try:
@@ -1983,7 +2018,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 "status": "adopted_existing",
                 "mode": deliverable_mode,
                 "content_key": content_key or "action_file_ref",
-                "candidate_source": "execution_meta.action_logs",
+                "candidate_source": candidate_source,
                 "readback": {
                     "path": ref["path"],
                     "bytes": ref["bytes"],
@@ -2017,12 +2052,22 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
             if locator_items:
                 delivery_record["acceptance_locator_count"] = len(locator_items)
+            dependency_owned = candidate_source == "taskboard_context.dependency_results"
             diagnostics.append(
                 {
-                    "code": "agent_task.workspace_artifact.action_file_adopted",
+                    "code": (
+                        "agent_task.workspace_artifact.dependency_file_adopted"
+                        if dependency_owned
+                        else "agent_task.workspace_artifact.action_file_adopted"
+                    ),
                     "message": (
-                        "A successful Workspace file action produced the artifact path; AgentTask read it back "
-                        "and adopted the readback as trusted Workspace artifact evidence."
+                        "A trusted TaskBoard dependency already owns this Workspace artifact path; AgentTask "
+                        "read it back and adopted the current content without model redrafting."
+                        if dependency_owned
+                        else (
+                            "A successful Workspace file action produced the artifact path; AgentTask read it back "
+                            "and adopted the readback as trusted Workspace artifact evidence."
+                        )
                     ),
                     "path": ref["path"],
                     "source": source,
@@ -2161,32 +2206,54 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         action_paths = self._workspace_artifact_successful_action_file_paths(
             execution_meta
         )
+        dependency_paths = self._taskboard_dependency_trusted_artifact_paths(card_context)
+        trusted_owner_paths = [*action_paths]
+        for dependency_path in dependency_paths:
+            if dependency_path not in trusted_owner_paths:
+                trusted_owner_paths.append(dependency_path)
+        trusted_candidate_source = (
+            "execution_meta.action_logs"
+            if action_paths
+            else "taskboard_context.dependency_results"
+        )
         action_owns_target = False
-        if path and action_paths:
+        target_owner_source = ""
+        if path and trusted_owner_paths:
             try:
                 target_path = self.workspace.resolve_file_path(path)
             except (TypeError, ValueError):
                 target_path = None
-            for action_path in action_paths:
+            for action_path in trusted_owner_paths:
                 try:
                     action_target = self.workspace.resolve_file_path(action_path)
                 except (TypeError, ValueError):
                     continue
                 if target_path is not None and action_target == target_path:
                     action_owns_target = True
+                    target_owner_source = (
+                        "execution_meta.action_logs"
+                        if action_path in action_paths
+                        else "taskboard_context.dependency_results"
+                    )
                     break
         if action_owns_target:
             if content:
+                dependency_owned = target_owner_source == "taskboard_context.dependency_results"
                 diagnostics.append(
                     {
                         "code": (
-                            "agent_task.workspace_artifact."
-                            "action_file_preferred_over_model_body"
+                            "agent_task.workspace_artifact.dependency_file_preferred_over_model_body"
+                            if dependency_owned
+                            else "agent_task.workspace_artifact.action_file_preferred_over_model_body"
                         ),
                         "message": (
-                            "A successful file Action already owns this Workspace "
-                            "artifact path; its current readback is authoritative and "
-                            "the model-returned body was not written again."
+                            "A trusted TaskBoard dependency already owns this Workspace artifact path; its "
+                            "current readback is authoritative and the model-returned body was not written again."
+                            if dependency_owned
+                            else (
+                                "A successful file Action already owns this Workspace artifact path; its current "
+                                "readback is authoritative and the model-returned body was not written again."
+                            )
                         ),
                         "path": path,
                         "source": source,
@@ -2204,6 +2271,8 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 source=source,
                 card_context=card_context,
                 exact_manifest_path=True,
+                trusted_candidate_paths=trusted_owner_paths,
+                candidate_source=target_owner_source or trusted_candidate_source,
             )
             if adopted is not None:
                 return adopted
@@ -2215,11 +2284,15 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 source=source,
                 deliverable_mode=deliverable_mode,
                 content_key=content_key,
-                code="agent_task.workspace_artifact.action_file_owner_readback_failed",
+                code=(
+                    "agent_task.workspace_artifact.dependency_file_owner_readback_failed"
+                    if target_owner_source == "taskboard_context.dependency_results"
+                    else "agent_task.workspace_artifact.action_file_owner_readback_failed"
+                ),
                 message=(
-                    "A successful file Action owns the requested Workspace artifact "
-                    "path, but its current readback could not be adopted; the "
-                    "model-returned body was not allowed to mask the failed readback."
+                    "A trusted existing owner produced the requested Workspace artifact path, but its current "
+                    "readback could not be adopted; the model-returned body was not allowed to mask the failed "
+                    "readback."
                 ),
                 error_type="ActionFileOwnerReadbackError",
             )
@@ -2234,6 +2307,8 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 execution_meta=execution_meta,
                 source=source,
                 card_context=card_context,
+                trusted_candidate_paths=(trusted_owner_paths or None),
+                candidate_source=trusted_candidate_source,
             )
             if adopted is not None:
                 return adopted

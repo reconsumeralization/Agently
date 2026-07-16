@@ -7454,6 +7454,91 @@ async def test_taskboard_completed_sufficient_leaf_materializes_declared_path_be
 
 
 @pytest.mark.asyncio
+async def test_taskboard_leaf_adopts_trusted_dependency_artifact_without_redrafting(tmp_path):
+    agent = _create_agent("taskboard-leaf-adopt-dependency-artifact").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-leaf-adopt-dependency-artifact",
+        goal="Verify the already delivered report.",
+        success_criteria=["The existing final.md remains the authoritative deliverable."],
+        execution="taskboard",
+    )
+    original_body = "# Final Report\n\nTrusted dependency-owned body.\n"
+    written = await task.workspace.write_file("final.md", original_body, append=False)
+    trusted_ref = {
+        "path": "final.md",
+        "role": "workspace_artifact",
+        "source": "agent_task.taskboard.card.write_plan.workspace_artifact",
+        "bytes": written["bytes"],
+        "sha256": written["sha256"],
+        "available": True,
+    }
+    dependency_result = TaskBoardCardResult(
+        card_id="write_plan",
+        status="completed",
+        artifact_refs=(trusted_ref,),
+        file_refs=(trusted_ref,),
+    )
+    verify_card = TaskBoardCard.from_value(
+        {
+            "id": "verify_plan",
+            "objective": "Verify final.md through its trusted dependency readback.",
+            "depends_on": ["write_plan"],
+            "allowed_execution_shape": "actions",
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {
+                        "id": "write_plan",
+                        "objective": "Write final.md.",
+                        "allowed_execution_shape": "control",
+                    },
+                    verify_card.to_dict(),
+                ],
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        card=verify_card,
+        revision=revision,
+        dependency_results={"write_plan": dependency_result},
+        planning_policy=None,
+    )
+
+    async def fail_if_redrafted(**_kwargs):
+        raise AssertionError("A trusted dependency artifact must not be model-redrafted.")
+
+    task._stream_workspace_artifact_draft = fail_if_redrafted
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "status": "completed",
+            "answer": "The dependency artifact is readable.",
+            "artifact_manifest": {
+                "path": "final.md",
+                "sections": [{"id": "report", "title": "Final report"}],
+            },
+            "file_refs": [{"path": "final.md", "role": "workspace_artifact"}],
+        },
+        plan={"deliverable_mode": "sectioned_workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="agent_task.taskboard.card.verify_plan.workspace_artifact",
+        card_context=context,
+    )
+
+    assert task.workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == original_body
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+    assert delivered["workspace_artifact_delivery"]["candidate_source"] == (
+        "taskboard_context.dependency_results"
+    )
+    assert delivered["file_refs"][0]["sha256"] == written["sha256"]
+
+
+@pytest.mark.asyncio
 async def test_agent_task_workspace_artifact_delivery_adopts_successful_action_written_file(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-action-adopt")
     task = AgentTask.__new__(AgentTask)

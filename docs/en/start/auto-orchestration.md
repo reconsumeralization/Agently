@@ -811,6 +811,12 @@ successful call record even when a separate call of the same Action failed;
 that failure remains visible to execution-risk handling and does not erase the
 successful event.
 
+If a later TaskBoard leaf only verifies or references that same artifact, the
+host joins its requested path to the trusted artifact refs in the canonical
+dependency `TaskBoardCardResult` and adopts the current physical readback. A
+model-repeated `artifact_manifest` or `file_refs` projection does not authorize
+another artifact-draft request and cannot overwrite the dependency-owned body.
+
 Flat AgentTask steps use the same command-lowering owner. The Flat planner
 selects `required_action_ids` from the compact capability list; it is not asked
 to guess strict kwargs from that list. If an internal structured plan already
