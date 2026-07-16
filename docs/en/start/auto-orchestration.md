@@ -787,6 +787,21 @@ invalid arguments fail closed. The ordinary multi-round ActionLoop remains for
 open-ended Agent execution where later Action choices genuinely depend on
 earlier Action results.
 
+The initial TaskBoard planner receives the task's structured capability-evidence
+requirements as part of the planning contract. Its `action_commands` field is
+an exhaustive batch, not the first phase of a card that will silently continue
+with synthesis after dispatch. If an initial card combines non-delivery Action
+commands with `final_workspace_deliverables`, AgentTask separates it into an
+upstream Action card and a dependent control card before board validation. A
+final-delivery card without an exact command batch is treated as a control card,
+while an already complete, schema-valid Workspace write command remains an
+Action card. The dependent control request receives the collected evidence and
+owns synthesis. When the task contract explicitly requires Workspace write and
+read Actions, the synthesized body is then materialized and read back through
+those Actions before normal artifact adoption. This keeps Action success,
+Workspace readback, and final content ownership on one visible value/event
+chain instead of relying on a later repair loop.
+
 Flat AgentTask steps use the same command-lowering owner. The Flat planner
 selects `required_action_ids` from the compact capability list; it is not asked
 to guess strict kwargs from that list. If an internal structured plan already

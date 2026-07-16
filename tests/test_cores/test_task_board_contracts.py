@@ -2353,6 +2353,8 @@ def test_task_board_planning_canonicalizes_optional_card_id_hints():
     assert schema["cards"][0]["id"][2] is False
     assert schema["cards"][0]["final_workspace_deliverables"][2] is False
     assert schema["cards"][0]["action_commands"][2] is False
+    assert "exhaustive" in schema["cards"][0]["action_commands"][1]
+    assert "dependent control card" in schema["cards"][0]["action_commands"][1]
 
     result = coerce_task_board_planning_result(
         {

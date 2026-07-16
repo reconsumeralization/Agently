@@ -941,6 +941,7 @@ class AgentTaskTaskBoardStrategyMixin(
                     },
                 },
                 "planner_capabilities": self._planner_capabilities(),
+                "capability_evidence_requirements": self._capability_evidence_requirements(),
                 "language_policy": language_policy,
             }
         )
@@ -969,6 +970,13 @@ class AgentTaskTaskBoardStrategyMixin(
             "For an actions card, include action_commands only when the exact offered Action ids and every required "
             "argument are already known now. Omit action_commands when any argument depends on a future card result; "
             "do not invent placeholders, copy opaque ids, or guess arguments. "
+            "Treat action_commands as the exhaustive command batch for that card: completion follows after that exact "
+            "batch finishes. Never combine evidence-gathering action_commands with later synthesis or final Workspace "
+            "delivery in the same card. Put synthesis and final_workspace_deliverables on a dependent control card so "
+            "the complete dependency evidence is available to its structured request. "
+            "Use capability_evidence_requirements as hard completion evidence contracts. When an exact Action success "
+            "is required, ensure the board has a card whose execution can produce that Action event; prose or an "
+            "ordinary Workspace readback does not satisfy it. "
             "When readiness checks are necessary, express them as optional preflight metadata on cards "
             "(preflight_kind, requires_capability_ids, requires_workspace_refs, focus_item_ids) and only for mounted "
             "capabilities or existing Workspace refs; do not require universal git, browser, shell, or init-script checks. "
@@ -985,6 +993,7 @@ class AgentTaskTaskBoardStrategyMixin(
         raw_plan = await self._await_task_request(request.async_get_data(), stage="taskboard_plan")
         if not isinstance(raw_plan, Mapping):
             raise TypeError("TaskBoard planning request must return a mapping.")
+        raw_plan = self._normalize_taskboard_initial_plan(raw_plan)
         return coerce_task_board_planning_result(
             raw_plan,
             board_id=self.id,
@@ -993,6 +1002,167 @@ class AgentTaskTaskBoardStrategyMixin(
             planning_policy=policy,
             metadata={"execution_strategy": self.execution_strategy},
         )
+
+    def _normalize_taskboard_initial_plan(
+        self,
+        raw_plan: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Separate exact Action batches from dependency-aware final synthesis."""
+
+        normalized = dict(raw_plan)
+        raw_cards = raw_plan.get("cards")
+        if not isinstance(raw_cards, Sequence) or isinstance(
+            raw_cards,
+            str | bytes | bytearray,
+        ):
+            return normalized
+
+        used_ids = {
+            str(card.get("id") or card.get("card_id") or "").strip()
+            for card in raw_cards
+            if isinstance(card, Mapping)
+        }
+        used_ids.discard("")
+        split_final_ids: dict[str, str] = {}
+        prepared: list[Any] = []
+
+        for index, raw_card in enumerate(raw_cards):
+            if not isinstance(raw_card, Mapping):
+                prepared.append(raw_card)
+                continue
+            card = dict(raw_card)
+            final_paths = self._normalize_string_list(card.get("final_workspace_deliverables"))
+            if not final_paths:
+                prepared.append(card)
+                continue
+
+            commands_value = card.get("action_commands")
+            commands = (
+                [dict(command) for command in commands_value if isinstance(command, Mapping)]
+                if isinstance(commands_value, Sequence)
+                and not isinstance(commands_value, str | bytes | bytearray)
+                else []
+            )
+            if not commands:
+                card["allowed_execution_shape"] = "control"
+                card.pop("action_commands", None)
+                prepared.append(card)
+                continue
+
+            exact_final_write = False
+            for command in commands:
+                action_id = str(command.get("action_id") or "").strip()
+                action_input = command.get("action_input")
+                if (
+                    self._taskboard_workspace_write_action_ids([action_id])
+                    and isinstance(action_input, Mapping)
+                    and str(action_input.get("path") or "").strip() in final_paths
+                    and isinstance(action_input.get("content"), str)
+                ):
+                    exact_final_write = True
+                    break
+            if exact_final_write:
+                prepared.append(card)
+                continue
+
+            card_id = str(card.get("id") or card.get("card_id") or "").strip()
+            if not card_id:
+                card_id = f"card-{index + 1}"
+                while card_id in used_ids:
+                    card_id = f"{card_id}-action"
+                card["id"] = card_id
+                used_ids.add(card_id)
+            final_id = f"{card_id}-finalize"
+            suffix = 2
+            while final_id in used_ids:
+                final_id = f"{card_id}-finalize-{suffix}"
+                suffix += 1
+            used_ids.add(final_id)
+            split_final_ids[card_id] = final_id
+
+            original_dependencies = self._normalize_string_list(card.get("depends_on"))
+            source_card = dict(card)
+            source_card["objective"] = (
+                "Execute the declared Action command batch and preserve its results as dependency evidence."
+            )
+            source_card["action_block"] = source_card["objective"]
+            source_card["done_when"] = (
+                "Every declared action_commands entry has a recorded terminal result."
+            )
+            source_card["allowed_execution_shape"] = "actions"
+            source_card["action_commands"] = commands
+            source_card.pop("final_workspace_deliverables", None)
+            command_action_ids = self._normalize_string_list(
+                [command.get("action_id") for command in commands]
+            )
+            if command_action_ids:
+                source_card["requires_capability_ids"] = command_action_ids
+
+            final_card = dict(card)
+            final_card["id"] = final_id
+            final_card["objective"] = (
+                "Synthesize the dependency evidence and materialize the declared final Workspace deliverable."
+            )
+            final_card["action_block"] = final_card["objective"]
+            final_card["depends_on"] = self._merge_string_lists(
+                [*original_dependencies, card_id]
+            )
+            final_card["allowed_execution_shape"] = "control"
+            final_card.pop("action_commands", None)
+            final_required_action_ids = [
+                action_id
+                for action_id in self._normalize_string_list(
+                    card.get("requires_capability_ids")
+                )
+                if action_id not in set(command_action_ids)
+            ]
+            if final_required_action_ids:
+                final_card["requires_capability_ids"] = final_required_action_ids
+            else:
+                final_card.pop("requires_capability_ids", None)
+            prepared.extend([source_card, final_card])
+
+        if split_final_ids:
+            for card in prepared:
+                if not isinstance(card, dict):
+                    continue
+                card_id = str(card.get("id") or card.get("card_id") or "").strip()
+                own_source_id = next(
+                    (
+                        source_id
+                        for source_id, final_id in split_final_ids.items()
+                        if final_id == card_id
+                    ),
+                    None,
+                )
+                dependencies = self._normalize_string_list(card.get("depends_on"))
+                if dependencies:
+                    card["depends_on"] = [
+                        (
+                            dependency_id
+                            if dependency_id == own_source_id
+                            else split_final_ids.get(dependency_id, dependency_id)
+                        )
+                        for dependency_id in dependencies
+                    ]
+
+        normalized["cards"] = prepared
+        if split_final_ids:
+            diagnostics = normalized.get("diagnostics")
+            normalized_diagnostics = (
+                [dict(item) for item in diagnostics if isinstance(item, Mapping)]
+                if isinstance(diagnostics, Sequence)
+                and not isinstance(diagnostics, str | bytes | bytearray)
+                else []
+            )
+            normalized_diagnostics.append(
+                {
+                    "code": "taskboard.initial_plan.final_delivery_split",
+                    "split_cards": dict(split_final_ids),
+                }
+            )
+            normalized["diagnostics"] = normalized_diagnostics
+        return normalized
 
     def _initial_taskboard_plan_from_shape_analysis(self):
         if self.execution_strategy != "auto":
@@ -1004,6 +1174,7 @@ class AgentTaskTaskBoardStrategyMixin(
         )
         if not isinstance(raw_plan, Mapping) or not raw_plan:
             return None
+        raw_plan = self._normalize_taskboard_initial_plan(raw_plan)
         policy = resolve_task_board_planning_policy(
             self._taskboard_effort(),
             metadata={

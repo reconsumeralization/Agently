@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from .TaskShared import *
 from .TaskBoardSourceRefs import _TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION
 
@@ -192,6 +194,51 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             action_planning_model_requests=1,
         )
 
+    def _taskboard_registered_action_spec(self, action_id: str) -> Mapping[str, Any] | None:
+        registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
+        get_spec = getattr(registry, "get_spec", None)
+        if not callable(get_spec):
+            return None
+        spec = get_spec(str(action_id or "").strip())
+        return spec if isinstance(spec, Mapping) else None
+
+    def _taskboard_workspace_write_action_ids(self, action_ids: Iterable[Any]) -> list[str]:
+        matched: list[str] = []
+        for action_id in self._normalize_string_list(list(action_ids)):
+            spec = self._taskboard_registered_action_spec(action_id)
+            meta = spec.get("meta") if isinstance(spec, Mapping) else None
+            kwargs = spec.get("kwargs") if isinstance(spec, Mapping) else None
+            if (
+                isinstance(meta, Mapping)
+                and str(meta.get("component") or "") == "workspace"
+                and meta.get("write") is True
+                and isinstance(kwargs, Mapping)
+                and {"path", "content"}.issubset(kwargs)
+            ):
+                matched.append(action_id)
+        return matched
+
+    def _taskboard_workspace_read_action_ids(self, action_ids: Iterable[Any]) -> list[str]:
+        matched: list[str] = []
+        for action_id in self._normalize_string_list(list(action_ids)):
+            spec = self._taskboard_registered_action_spec(action_id)
+            meta = spec.get("meta") if isinstance(spec, Mapping) else None
+            kwargs = spec.get("kwargs") if isinstance(spec, Mapping) else None
+            side_effect_level = (
+                str(spec.get("side_effect_level") or "").strip().lower()
+                if isinstance(spec, Mapping)
+                else ""
+            )
+            if (
+                isinstance(meta, Mapping)
+                and str(meta.get("component") or "") == "workspace"
+                and side_effect_level == "read"
+                and isinstance(kwargs, Mapping)
+                and "path" in kwargs
+            ):
+                matched.append(action_id)
+        return matched
+
     async def _try_taskboard_workspace_artifact_action_transfer(
         self,
         context: Any,
@@ -218,29 +265,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         except Exception:
             return None
 
-        action_requirements = self._taskboard_card_action_requirements(card)
         required_card_action_ids = self._taskboard_card_required_action_ids(card)
-        registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
-        get_spec = getattr(registry, "get_spec", None)
-        if not callable(get_spec):
-            return None
-
-        def action_spec(action_id: str) -> Mapping[str, Any] | None:
-            spec = get_spec(action_id)
-            return spec if isinstance(spec, Mapping) else None
-
-        def is_workspace_write(action_id: str) -> bool:
-            spec = action_spec(action_id)
-            meta = spec.get("meta") if isinstance(spec, Mapping) else None
-            return bool(
-                isinstance(meta, Mapping)
-                and str(meta.get("component") or "") == "workspace"
-                and meta.get("write") is True
-                and isinstance(spec.get("kwargs"), Mapping)
-                and {"path", "content"}.issubset(spec["kwargs"])
-            )
-
-        write_action_ids = [action_id for action_id in required_card_action_ids if is_workspace_write(action_id)]
+        write_action_ids = self._taskboard_workspace_write_action_ids(required_card_action_ids)
         if len(write_action_ids) != 1:
             return None
 
@@ -306,20 +332,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
 
         task_required_action_ids = self._task_contract_required_action_ids()
 
-        def is_workspace_read(action_id: str) -> bool:
-            spec = action_spec(action_id)
-            meta = spec.get("meta") if isinstance(spec, Mapping) else None
-            return bool(
-                isinstance(meta, Mapping)
-                and str(meta.get("component") or "") == "workspace"
-                and str(spec.get("side_effect_level") or "").strip().lower() == "read"
-                and isinstance(spec.get("kwargs"), Mapping)
-                and "path" in spec["kwargs"]
-            )
-
-        read_action_ids = sorted(
-            action_id for action_id in task_required_action_ids if is_workspace_read(action_id)
-        )
+        read_action_ids = sorted(self._taskboard_workspace_read_action_ids(task_required_action_ids))
         write_succeeded = self._taskboard_direct_action_succeeded(write_result)
         if write_succeeded:
             read_records = await self.agent.action._async_execute_action_calls(
@@ -383,6 +396,135 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 ],
             },
         )
+
+    @staticmethod
+    def _append_taskboard_action_logs(
+        execution_meta: dict[str, Any],
+        records: Sequence[Mapping[str, Any]],
+    ) -> None:
+        logs = execution_meta.setdefault("logs", {})
+        if not isinstance(logs, dict):
+            logs = {}
+            execution_meta["logs"] = logs
+        existing = logs.get("action_logs")
+        action_logs = (
+            [dict(item) for item in existing if isinstance(item, Mapping)]
+            if isinstance(existing, Sequence)
+            and not isinstance(existing, str | bytes | bytearray)
+            else []
+        )
+        action_logs.extend(dict(record) for record in records if isinstance(record, Mapping))
+        logs["action_logs"] = action_logs
+
+    async def _try_taskboard_control_workspace_artifact_actions(
+        self,
+        context: Any,
+        card_output: Mapping[str, Any],
+        *,
+        execution_meta: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Materialize a control-card body through explicitly required Workspace Actions."""
+
+        required_action_ids = self._task_contract_required_action_ids()
+        write_action_ids = self._taskboard_workspace_write_action_ids(required_action_ids)
+        if len(write_action_ids) != 1:
+            return None
+        read_action_ids = sorted(self._taskboard_workspace_read_action_ids(required_action_ids))
+
+        card = getattr(context, "card", None)
+        metadata = getattr(card, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            return None
+        target_paths = self._normalize_string_list(metadata.get("final_workspace_deliverables"))
+        if len(target_paths) != 1:
+            return None
+        target_path = target_paths[0]
+        try:
+            self.workspace.resolve_file_path(target_path)
+        except Exception:
+            return None
+
+        manifest = card_output.get("artifact_manifest")
+        manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {"path": target_path}
+        content, content_key = self._select_workspace_artifact_content(
+            card_output,
+            manifest_dict,
+            deliverable_mode="workspace_artifact",
+            manifest_path=target_path,
+        )
+        if not content:
+            return None
+
+        write_action_id = write_action_ids[0]
+        write_records = await self.agent.action._async_execute_action_calls(
+            action_calls=[
+                {
+                    "action_id": write_action_id,
+                    "action_input": {"path": target_path, "content": content, "append": False},
+                    "purpose": f"Materialize the completed TaskBoard deliverable at {target_path}.",
+                    "source_protocol": "taskboard_control_delivery",
+                }
+            ],
+            settings=self.agent.settings,
+            agent_name=self.agent.name,
+        )
+        action_logs = [dict(record) for record in write_records if isinstance(record, Mapping)]
+        write_result = action_logs[0] if action_logs else None
+        if self._taskboard_direct_action_succeeded(write_result):
+            read_calls: list[dict[str, Any]] = []
+            max_bytes = max(len(content.encode("utf-8")) + 1, 1)
+            for read_action_id in read_action_ids:
+                spec = self._taskboard_registered_action_spec(read_action_id)
+                kwargs = spec.get("kwargs") if isinstance(spec, Mapping) else None
+                action_input: dict[str, Any] = {"path": target_path}
+                if isinstance(kwargs, Mapping) and "max_bytes" in kwargs:
+                    action_input["max_bytes"] = max_bytes
+                if isinstance(kwargs, Mapping) and "offset" in kwargs:
+                    action_input["offset"] = 0
+                read_calls.append(
+                    {
+                        "action_id": read_action_id,
+                        "action_input": action_input,
+                        "purpose": f"Read back the completed TaskBoard deliverable at {target_path}.",
+                        "source_protocol": "taskboard_control_delivery",
+                    }
+                )
+            if read_calls:
+                read_records = await self.agent.action._async_execute_action_calls(
+                    action_calls=read_calls,
+                    settings=self.agent.settings,
+                    agent_name=self.agent.name,
+                )
+                action_logs.extend(
+                    dict(record) for record in read_records if isinstance(record, Mapping)
+                )
+
+        self._append_taskboard_action_logs(execution_meta, action_logs)
+        expected_count = 1 + len(read_action_ids)
+        succeeded = len(action_logs) == expected_count and all(
+            self._taskboard_direct_action_succeeded(record) for record in action_logs
+        )
+        diagnostic = {
+            "execution_kind": "taskboard_control_workspace_artifact_actions",
+            "target_path": target_path,
+            "content_key": content_key,
+            "required_action_ids": [write_action_id, *read_action_ids],
+            "action_planning_model_requests": 0,
+        }
+        if succeeded:
+            return {
+                "status": "completed",
+                "path": target_path,
+                "content_key": content_key,
+                "diagnostic": diagnostic,
+            }
+        diagnostic["error"] = "A required Workspace artifact Action did not succeed."
+        return {
+            "status": "failed",
+            "path": target_path,
+            "content_key": content_key,
+            "diagnostic": diagnostic,
+        }
 
     @staticmethod
     def _taskboard_direct_action_succeeded(record: Any) -> bool:
@@ -1633,14 +1775,42 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 deliverable_mode=deliverable_mode,
                 prefer_stream_draft=prefer_stream_draft,
             )
-            card_output = await self._deliver_workspace_artifact(
-                card_output,
-                plan=delivery_plan,
-                execution_meta=cast(dict[str, Any], execution_meta),
-                source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
-                context_pack=context_pack,
-                card_context=context,
+            workspace_action_delivery = (
+                await self._try_taskboard_control_workspace_artifact_actions(
+                    context,
+                    card_output,
+                    execution_meta=cast(dict[str, Any], execution_meta),
+                )
             )
+            if (
+                isinstance(workspace_action_delivery, Mapping)
+                and workspace_action_delivery.get("status") == "failed"
+            ):
+                card_output = dict(card_output)
+                card_output["status"] = "blocked"
+                remaining_work = self._normalize_string_list(card_output.get("remaining_work"))
+                remaining_work.append("A required Workspace artifact Action did not succeed.")
+                card_output["remaining_work"] = self._merge_string_lists(remaining_work)
+                raw_diagnostics = card_output.get("diagnostics")
+                diagnostics = (
+                    [dict(item) for item in raw_diagnostics if isinstance(item, Mapping)]
+                    if isinstance(raw_diagnostics, Sequence)
+                    and not isinstance(raw_diagnostics, str | bytes | bytearray)
+                    else []
+                )
+                diagnostic = workspace_action_delivery.get("diagnostic")
+                if isinstance(diagnostic, Mapping):
+                    diagnostics.append(dict(diagnostic))
+                card_output["diagnostics"] = diagnostics
+            else:
+                card_output = await self._deliver_workspace_artifact(
+                    card_output,
+                    plan=delivery_plan,
+                    execution_meta=cast(dict[str, Any], execution_meta),
+                    source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
+                    context_pack=context_pack,
+                    card_context=context,
+                )
         if isinstance(card_output, Mapping):
             card_output = await self._materialize_taskboard_workspace_patch(context, card_output)
         self._append_execution_meta_evidence_items(

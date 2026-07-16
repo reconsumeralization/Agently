@@ -238,7 +238,7 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                             ),
                         }
                     ],
-                    "Optional exact Action calls for an actions card when every argument is already known at board-planning time. Omit when an argument depends on a future card result.",
+                    "Complete exhaustive Action call batch for this card when every argument is already known at board-planning time. The card completes after this exact batch. Omit when an argument depends on a future card result, and put later synthesis or final delivery on a dependent control card.",
                     False,
                 ),
                 "requires_workspace_refs": (

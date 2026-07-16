@@ -616,6 +616,17 @@ TaskBoard Action card 默认不使用开放式 ActionLoop。board plan 已经包
 或无效参数都会 fail closed。只有后续 Action 选择确实依赖前一轮 Action 结果的开放式普通
 Agent 执行才保留多轮 ActionLoop。
 
+首轮 TaskBoard planner 会把任务的结构化 capability-evidence requirements 作为规划
+contract 的一部分接收。`action_commands` 表示该 card 的穷尽命令批次，不是执行后还会
+静默继续 synthesis 的第一阶段。如果首轮 card 同时包含非交付 Action 命令和
+`final_workspace_deliverables`，AgentTask 会在 board validation 前把它拆成上游 Action
+card 与依赖该 card 的 control card。没有精确命令批次的最终交付 card 会按 control card
+处理；已经完整且通过 schema 校验的 Workspace write 命令仍保持 Action card。下游 control
+request 接收已收集 evidence 并拥有 synthesis。任务 contract 显式要求 Workspace write/read
+Actions 时，合成正文会先通过这些 Actions 真实写入并读回，再由普通 artifact delivery
+接纳。这样 Action success、Workspace readback 与最终正文所有权位于同一条可见的值/事件链，
+不再依赖后续 repair loop 补救。
+
 Flat AgentTask step 使用同一个命令降低 owner。Flat planner 只从紧凑 capability list
 选择 `required_action_ids`，不会在缺少严格 kwargs schema 时猜测参数。如果内部结构化 plan
 已经携带通过校验的 `action_commands`，宿主无需追加规划请求即可执行；否则只发出一次窄结构化

@@ -4906,7 +4906,7 @@ async def test_taskboard_workspace_artifact_action_card_dispatches_without_actio
     assert task._set_taskboard_planned_workspace_deliverables(revision) == ["final.md"]
     assert task._required_workspace_deliverables() == ["final.md"]
     assert task._taskboard_card_action_requirements(card)[0]["capability_id"] == "write_file"
-    assert task.agent.action.action_registry.get_spec("write_file")["meta"]["write"] is True
+    assert cast(Any, task.agent).action.action_registry.get_spec("write_file")["meta"]["write"] is True
     assert task._task_contract_required_action_ids() >= {"write_file", "read_file"}
 
     action_events: list[Any] = []
@@ -4962,6 +4962,235 @@ async def test_taskboard_workspace_artifact_action_card_dispatches_without_actio
     assert result.metadata["block_carrier"]["block_graph"]["execution_block_kinds"] == [
         "action_call"
     ]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_initial_plan_receives_capability_contract_and_normalizes_final_card(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-initial-capability-contract").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-initial-capability-contract",
+        goal="Write the completed report to final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="taskboard",
+        options={
+            "agent_task": {"required_deliverables": [{"path": "final.md"}]},
+            "capability_evidence_requirements": [
+                {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"},
+                {"capability_id": "read_file", "capability_kind": "action", "kind": "action_succeeded"},
+            ],
+        },
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output"] = value
+            captured["format"] = format
+            return self
+
+        async def async_get_data(self):
+            return {
+                "board_goal": task.goal,
+                "cards": [
+                    {
+                        "id": "finalize",
+                        "action_block": "Synthesize and deliver the report.",
+                        "objective": "Synthesize and deliver the report.",
+                        "depends_on": [],
+                        "done_when": "final.md is complete.",
+                        "allowed_execution_shape": "actions",
+                        "requires_capability_ids": ["write_file"],
+                        "final_workspace_deliverables": ["final.md"],
+                    }
+                ],
+                "completion_gate": "final.md is written and read back.",
+                "why_this_effort_shape": "One bounded finalization card is sufficient.",
+            }
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: FakeRequest())
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_apply_language_policy_to_request",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = await task._request_taskboard_plan(
+        {
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        }
+    )
+
+    requirements = captured["input"]["capability_evidence_requirements"]
+    assert {item["capability_id"] for item in requirements} == {"write_file", "read_file"}
+    assert "exhaustive command batch" in captured["instruct"]
+    assert "final_workspace_deliverables" in captured["instruct"]
+    final_card = result.revision.graph.cards[0]
+    assert final_card.allowed_execution_shape == "control"
+    assert final_card.metadata["final_workspace_deliverables"] == ["final.md"]
+
+
+def test_taskboard_initial_plan_splits_action_commands_from_final_delivery(tmp_path):
+    agent = _create_agent("agent-taskboard-split-initial-final").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+
+    @agent.action_func
+    def get_policy(topic: str) -> dict[str, str]:
+        return {"topic": topic, "policy": "observed"}
+
+    task = AgentTask(
+        agent,
+        task_id="taskboard-split-initial-final",
+        goal="Collect policy evidence and write final.md.",
+        success_criteria=["final.md uses the collected policy evidence."],
+        execution="taskboard",
+    )
+    raw_plan = {
+        "board_goal": task.goal,
+        "cards": [
+            {
+                "id": "gather-synthesize-write",
+                "action_block": "Gather evidence, synthesize it, and write the final report.",
+                "objective": "Gather evidence, synthesize it, and write the final report.",
+                "depends_on": [],
+                "done_when": "final.md is complete.",
+                "allowed_execution_shape": "actions",
+                "requires_capability_ids": ["get_policy", "write_file"],
+                "action_commands": [
+                    {
+                        "purpose": "Collect the required policy.",
+                        "action_id": "get_policy",
+                        "action_input": {"topic": "travel"},
+                    }
+                ],
+                "final_workspace_deliverables": ["final.md"],
+            }
+        ],
+        "completion_gate": "final.md is complete.",
+        "why_this_effort_shape": "One evidence branch feeds one final deliverable.",
+    }
+
+    normalized = task._normalize_taskboard_initial_plan(raw_plan)
+
+    assert [card["id"] for card in normalized["cards"]] == [
+        "gather-synthesize-write",
+        "gather-synthesize-write-finalize",
+    ]
+    action_card, final_card = normalized["cards"]
+    assert action_card["allowed_execution_shape"] == "actions"
+    assert [item["action_id"] for item in action_card["action_commands"]] == ["get_policy"]
+    assert action_card["requires_capability_ids"] == ["get_policy"]
+    assert "final_workspace_deliverables" not in action_card
+    assert final_card["allowed_execution_shape"] == "control"
+    assert final_card["depends_on"] == ["gather-synthesize-write"]
+    assert "action_commands" not in final_card
+    assert final_card["requires_capability_ids"] == ["write_file"]
+    assert final_card["final_workspace_deliverables"] == ["final.md"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_control_delivery_uses_required_workspace_actions(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent("agent-taskboard-control-workspace-actions").use_workspace(
+        workspace_root,
+        mode="read_write",
+    )
+    agent.enable_workspace_file_actions(
+        root=workspace_root,
+        read=True,
+        write=True,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-control-workspace-actions",
+        goal="Write the completed report to final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="taskboard",
+        options={
+            "agent_task": {"required_deliverables": [{"path": "final.md"}]},
+            "capability_evidence_requirements": [
+                {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"},
+                {"capability_id": "read_file", "capability_kind": "action", "kind": "action_succeeded"},
+            ],
+        },
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "finalize",
+            "objective": "Synthesize and deliver the final report.",
+            "allowed_execution_shape": "control",
+            "metadata": {"final_workspace_deliverables": ["final.md"]},
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    assert task._set_taskboard_planned_workspace_deliverables(revision) == ["final.md"]
+    body = "# Final report\n\nGrounded synthesized body.\n"
+    card_output = {
+        "status": "completed",
+        "artifact_markdown": body,
+        "artifact_manifest": {"path": "final.md"},
+        "remaining_work": [],
+    }
+    execution_meta: dict[str, Any] = {
+        "status": "completed",
+        "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+    }
+
+    direct = await task._try_taskboard_control_workspace_artifact_actions(
+        context,
+        card_output,
+        execution_meta=execution_meta,
+    )
+
+    assert direct is not None
+    assert direct["status"] == "completed"
+    action_logs = execution_meta["logs"]["action_logs"]
+    assert [record["action_id"] for record in action_logs] == ["write_file", "read_file"]
+    assert all(task._taskboard_direct_action_succeeded(record) for record in action_logs)
+    assert task.workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == body.strip()
+
+    delivered = await task._deliver_workspace_artifact(
+        card_output,
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.taskboard.control.workspace_actions",
+    )
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
 
 
 def test_taskboard_planned_workspace_deliverables_reject_escape_paths(tmp_path):
