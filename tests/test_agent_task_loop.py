@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import importlib
 import json
 import os
+import re
 import time
 from collections.abc import AsyncGenerator, Mapping
 from pathlib import Path
@@ -15,9 +18,11 @@ from agently import Agently
 from agently.core import PluginManager
 from agently.core.orchestration import (
     TaskBoard,
+    TaskBoardValidator,
     build_task_board_acceptance_index,
     build_task_board_evidence_view,
     resolve_task_board_planning_policy,
+    task_board_planning_output_schema,
 )
 from agently.core.application.AgentTask.BlockCarrier import (
     WorkUnitIntent,
@@ -254,7 +259,125 @@ async def test_taskboard_final_prompt_omits_duplicate_revision_card_results(tmp_
     assert "card_results" not in prompt_revision
     assert prompt_revision["card_result_statuses"] == {"collect": "completed"}
     assert payload["taskboard_evidence_view"]["cards"][0]["preview"]
-    assert payload["evidence_ledger"]["items"][0]["body"] == "Collected evidence body."
+    prompt_evidence = payload["evidence_ledger"]["items"][0]
+    assert prompt_evidence["body_preview"] == "Collected evidence body."
+    assert prompt_evidence["reference_id"].startswith("ref_")
+    assert "id" not in prompt_evidence
+    assert "evidence_id" not in prompt_evidence
+    assert "cite_as" not in prompt_evidence
+    assert "aliases" not in prompt_evidence
+
+
+def test_taskboard_dependency_prompt_projection_omits_recursive_result_state():
+    huge = "dependency-payload-" * 4000
+    result = TaskBoardCardResult(
+        card_id="collect",
+        status="completed",
+        output_digest="Collected bounded market evidence.",
+        preview={
+            "status": "completed",
+            "answer": "Collected bounded market evidence.",
+            "short_summary": "NVDA and AVGO evidence is available through stable refs.",
+            "evidence_ledger": {f"item-{index}": huge for index in range(40)},
+            "execution_meta": {f"record-{index}": huge for index in range(40)},
+        },
+        metadata={
+            "evidence_ledger": {"items": [{"body": huge} for _ in range(40)]},
+            "execution_id": "exec-collect",
+        },
+    )
+
+    compact = AgentTask._compact_taskboard_dependency_results({"collect": result})
+    compact_text = json.dumps(compact, ensure_ascii=False)
+
+    assert len(compact_text) < 8000
+    assert "Collected bounded market evidence." in compact_text
+    assert "NVDA and AVGO evidence is available through stable refs." in compact_text
+    assert "evidence_ledger" not in compact["collect"]["preview"]
+    assert "execution_meta" not in compact["collect"]["preview"]
+
+
+def test_taskboard_card_binding_ledger_prioritizes_current_execution_evidence_before_history():
+    task = AgentTask(
+        _create_agent("taskboard-current-binding-priority"),
+        task_id="taskboard-current-binding-priority",
+        goal="Bind current evidence before historical evidence.",
+        success_criteria=["The current evidence remains selectable."],
+        execution="taskboard",
+    )
+    historical_items = [
+        {
+            "id": f"historical:{index}",
+            "kind": "taskboard_diagnostic",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": f"Historical evidence {index}",
+        }
+        for index in range(100)
+    ]
+    current_item = {
+        "id": "workspace_artifact_readback:repair:final.md",
+        "kind": "workspace_artifact.readback",
+        "status": "ok",
+        "body_state": "bounded",
+        "path": "final.md",
+        "body": "The corrected current artifact body.",
+    }
+
+    historical_ledger = task._stable_evidence_ledger_view(
+        {"evidence_items": historical_items},
+        max_items=120,
+        body_chars=1800,
+    )
+    current_ledger = task._stable_evidence_ledger_view(
+        {"evidence_items": [current_item]},
+        max_items=16,
+        body_chars=1800,
+    )
+    current_reference_id = current_ledger["items"][0]["reference_id"]
+    ledger = task._taskboard_card_binding_evidence_ledger(historical_ledger, current_ledger)
+    candidates = task._evidence_binding_repair_candidate_refs(ledger, max_items=80)
+
+    assert candidates[0]["reference_id"] == current_reference_id
+    assert any(item["reference_id"] == current_reference_id for item in candidates)
+    assert len(candidates) == 80
+
+
+def test_taskboard_revision_prompt_projection_omits_recursive_diagnostics_and_acceptance_metadata():
+    huge = "revision-payload-" * 4000
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": "bounded-revision",
+            "revision_id": "rev-9",
+            "status": "blocked",
+            "graph": {
+                "graph_id": "bounded-revision-graph",
+                "cards": [{"id": "final", "objective": "Finalize the report."}],
+            },
+            "diagnostics": [
+                {
+                    "code": f"terminal.grounding.{index}",
+                    "status": "blocked",
+                    "message": "Grounding repair remains required.",
+                    "recursive": {f"claim-{claim_index}": huge for claim_index in range(20)},
+                }
+                for index in range(12)
+            ],
+            "metadata": {
+                "taskboard_acceptance_index": {f"criterion-{index}": huge for index in range(30)},
+                "terminal_repair_count": 2,
+            },
+        }
+    )
+
+    compact = AgentTask._compact_taskboard_revision_for_prompt(revision, include_card_results=False)
+    compact_text = json.dumps(compact, ensure_ascii=False)
+
+    assert len(compact_text) < 10000
+    assert "terminal.grounding.0" in compact_text
+    assert "Grounding repair remains required." in compact_text
+    assert "taskboard_acceptance_index" not in compact.get("metadata", {})
+    assert huge not in compact_text
 
 
 def test_verifier_prompt_keeps_optional_risk_sections_optional():
@@ -787,11 +910,7 @@ def test_evidence_ledger_guard_rejects_structurally_invalid_support():
 
     assert guard["valid"] is False
     assert guard["blocking_count"] == 3
-    assert {
-        diagnostic["code"]
-        for diagnostic in guard["diagnostics"]
-        if diagnostic.get("blocking") is True
-    } == {
+    assert {diagnostic["code"] for diagnostic in guard["diagnostics"] if diagnostic.get("blocking") is True} == {
         "evidence_ledger.unavailable_item_used_as_positive_support",
         "evidence_ledger.ref_only_item_used_as_content_support",
         "evidence_ledger.invalid_evidence_id",
@@ -831,13 +950,18 @@ def test_evidence_ledger_acceptance_locator_is_ref_pointer_only():
     assert locator_view["items"][0]["heading"] == "Middle Section"
 
     invalid_guard = validate_evidence_use(
-        [{"claim": "The middle section is present.", "evidence_ids": ["locator.final.middle"], "support_type": "content"}],
+        [
+            {
+                "claim": "The middle section is present.",
+                "evidence_ids": ["locator.final.middle"],
+                "support_type": "content",
+            }
+        ],
         ledger,
     )
     assert invalid_guard["valid"] is False
     assert any(
-        item["code"] == "evidence_ledger.ref_only_item_used_as_content_support"
-        for item in invalid_guard["diagnostics"]
+        item["code"] == "evidence_ledger.ref_only_item_used_as_content_support" for item in invalid_guard["diagnostics"]
     )
 
     pointer_guard = validate_evidence_use(
@@ -894,6 +1018,37 @@ def test_acceptance_locator_matches_unicode_dash_heading_variants():
     assert required_locator["status"] == "ok"
     assert required_locator["requirement_level"] == "required"
     assert required_locator["heading"] == "Implementation & Product Highlights"
+
+
+def test_acceptance_locator_projects_every_actual_markdown_heading_for_progressive_readback():
+    from agently.core.application.AgentTask.AcceptanceLocator import (
+        build_workspace_artifact_acceptance_locator_items,
+    )
+
+    items = build_workspace_artifact_acceptance_locator_items(
+        path="final.md",
+        source="test",
+        text=(
+            "# Semiconductor Portfolio Risk Brief\n\n"
+            "### NVDA\n\nNVDA facts.\n\n"
+            "### AMD\n\nAMD facts.\n\n"
+            "### AVGO\n\nAVGO facts.\n\n"
+            "### Data Boundary and Non-Investment-Advice\n\nBoundary.\n"
+        ),
+        acceptance_points=[
+            {
+                "criterion": "Each ticker section contains the required evidence.",
+                "expected_anchor": "all ticker evidence sections",
+            }
+        ],
+    )
+
+    structure_headings = {
+        item.get("heading")
+        for item in items
+        if item.get("point_source") == "artifact_structure" and item.get("status") == "ok"
+    }
+    assert {"NVDA", "AMD", "AVGO", "Data Boundary and Non-Investment-Advice"}.issubset(structure_headings)
 
 
 def test_acceptance_locator_matches_cjk_numeric_spacing_variants():
@@ -1131,8 +1286,20 @@ def test_evidence_ledger_guard_blocks_ambiguous_basename_aliases():
 
     ledger = {
         "evidence_items": [
-            {"id": "docs.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "docs/README.md"},
-            {"id": "pkg.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "packages/README.md"},
+            {
+                "id": "docs.readme",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "full",
+                "path": "docs/README.md",
+            },
+            {
+                "id": "pkg.readme",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "full",
+                "path": "packages/README.md",
+            },
         ]
     }
 
@@ -1172,8 +1339,7 @@ def test_evidence_ledger_alias_reconciliation_preserves_status_guards():
     assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["quote.failed"]
     assert any(item["code"] == "evidence_ledger.alias_resolved" for item in guard["diagnostics"])
     assert any(
-        item["code"] == "evidence_ledger.unavailable_item_used_as_positive_support"
-        and item.get("blocking") is True
+        item["code"] == "evidence_ledger.unavailable_item_used_as_positive_support" and item.get("blocking") is True
         for item in guard["diagnostics"]
     )
 
@@ -1307,6 +1473,195 @@ def test_evidence_binding_repair_leaves_missing_id_unresolved_when_claim_body_is
     assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == []
 
 
+def test_evidence_binding_repair_prunes_incompatible_auxiliary_ids_when_valid_support_remains():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "readback.final",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "final.md",
+                "body": "Canonical bounded readback content.",
+            },
+            {
+                "id": "locator.final",
+                "kind": "workspace_artifact.acceptance_locator",
+                "status": "ok",
+                "body_state": "ref_only",
+                "path": "final.md",
+            },
+            {
+                "id": "taskboard.failed",
+                "kind": "agent_task.taskboard.diagnostic",
+                "status": "failed",
+                "body_state": "bounded",
+                "body": "An earlier repair attempt failed.",
+            },
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The completed report is available for final verification.",
+                "evidence_ids": [
+                    "readback.final",
+                    "locator.final",
+                    "taskboard.failed",
+                ],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    repaired = AgentTask._deterministic_evidence_binding_repair(guard, ledger)
+
+    assert repaired == [
+        {
+            "claim_index": 0,
+            "claim": "The completed report is available for final verification.",
+            "evidence_ids": ["readback.final"],
+            "support_type": "content",
+        }
+    ]
+    merged = AgentTask._merge_repaired_evidence_use(
+        guard["normalized_evidence_use"],
+        repaired,
+    )
+    assert validate_evidence_use(merged, ledger)["valid"] is True
+
+
+def test_evidence_binding_repair_keeps_fail_closed_when_no_compatible_support_remains():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "locator.final",
+                "kind": "workspace_artifact.acceptance_locator",
+                "status": "ok",
+                "body_state": "ref_only",
+                "path": "final.md",
+            },
+            {
+                "id": "taskboard.failed",
+                "kind": "agent_task.taskboard.diagnostic",
+                "status": "failed",
+                "body_state": "bounded",
+                "body": "An earlier repair attempt failed.",
+            },
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The completed report is available for final verification.",
+                "evidence_ids": ["locator.final", "taskboard.failed"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == []
+
+
+def test_evidence_binding_repair_does_not_hide_unknown_id_while_pruning_incompatible_support():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "readback.final",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "final.md",
+                "body": "Canonical bounded readback content.",
+            },
+            {
+                "id": "taskboard.failed",
+                "kind": "agent_task.taskboard.diagnostic",
+                "status": "failed",
+                "body_state": "bounded",
+                "body": "An earlier repair attempt failed.",
+            },
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The completed report is available for final verification.",
+                "evidence_ids": [
+                    "readback.final",
+                    "missing.evidence",
+                    "taskboard.failed",
+                ],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert {item["code"] for item in guard["diagnostics"] if item.get("blocking") is True} == {
+        "evidence_ledger.invalid_evidence_id",
+        "evidence_ledger.unavailable_item_used_as_positive_support",
+    }
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == []
+
+
+def test_evidence_binding_repair_legacy_candidate_path_does_not_hide_mixed_blocker():
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    ledger = {
+        "evidence_items": [
+            {
+                "id": "action.good",
+                "kind": "agent_task.action.result",
+                "action_id": "required_probe_action",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "Canonical Action result content.",
+            },
+            {
+                "id": "action.failed",
+                "kind": "agent_task.action.result",
+                "action_id": "other_action",
+                "status": "failed",
+                "body_state": "bounded",
+                "body": "A different Action failed.",
+            },
+        ]
+    }
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The required Action produced usable evidence.",
+                "evidence_ids": [
+                    "action.good",
+                    "action_result_unknown",
+                    "action.failed",
+                ],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert guard["valid"] is False
+    assert AgentTask._deterministic_evidence_binding_repair(guard, ledger) == []
+
+
 def test_evidence_ledger_view_reassigns_unique_cite_as_on_remerge():
     # The cumulative ledger re-renders sub-ledger items that each carried their own
     # e1..eN handle. The view must own cite_as and reassign unique handles so a single
@@ -1355,9 +1710,32 @@ def test_cite_as_handle_resolves_unambiguously_after_remerge():
 
     merged = {
         "evidence_items": [
-            {"id": "iter1.read", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "report.md", "cite_as": "e1", "body": "a"},
-            {"id": "iter2.read", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "data.csv", "cite_as": "e1", "body": "b"},
-            {"id": "iter3.read", "kind": "action_evidence", "status": "ok", "body_state": "bounded", "cite_as": "e1", "body": "c"},
+            {
+                "id": "iter1.read",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "cite_as": "e1",
+                "body": "a",
+            },
+            {
+                "id": "iter2.read",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "data.csv",
+                "cite_as": "e1",
+                "body": "b",
+            },
+            {
+                "id": "iter3.read",
+                "kind": "action_evidence",
+                "status": "ok",
+                "body_state": "bounded",
+                "cite_as": "e1",
+                "body": "c",
+            },
         ]
     }
     view = evidence_ledger_view(merged)
@@ -1369,6 +1747,1358 @@ def test_cite_as_handle_resolves_unambiguously_after_remerge():
 
     assert guard["valid"] is True
     assert guard["normalized_evidence_use"][0]["evidence_ids"] == ["iter2.read"]
+
+
+def test_task_reference_identity_survives_ledger_reordering_and_normalizes_live_alias():
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view, validate_evidence_use
+    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+
+    catalog = TaskReferenceCatalog("agent_task_stable_refs")
+    report = {
+        "id": "iter1.read",
+        "kind": "workspace_artifact.readback",
+        "status": "ok",
+        "body_state": "bounded",
+        "path": "report.md",
+        "body": "report body",
+    }
+    data = {
+        "id": "iter2.read",
+        "kind": "workspace_artifact.readback",
+        "status": "ok",
+        "body_state": "bounded",
+        "path": "data.csv",
+        "body": "data body",
+    }
+
+    first = evidence_ledger_view({"evidence_items": [report, data]}, task_references=catalog)
+    reordered = evidence_ledger_view({"evidence_items": [data, report]}, task_references=catalog)
+    first_by_original = {item["id"]: item for item in first["items"]}
+    reordered_by_original = {item["id"]: item for item in reordered["items"]}
+
+    assert first_by_original["iter1.read"]["reference_id"] == reordered_by_original["iter1.read"]["reference_id"]
+    assert first_by_original["iter1.read"]["evidence_id"] == reordered_by_original["iter1.read"]["evidence_id"]
+    assert first_by_original["iter1.read"]["cite_as"] == "e1"
+    assert reordered_by_original["iter1.read"]["cite_as"] == "e2"
+
+    guard = validate_evidence_use(
+        [{"claim": "The report was read.", "evidence_ids": ["e1"], "support_type": "content"}],
+        first,
+    )
+    assert guard["valid"] is True
+    assert guard["normalized_evidence_use"][0]["evidence_ids"] == [first_by_original["iter1.read"]["reference_id"]]
+
+
+def test_task_reference_identity_rejoins_compact_projection_but_changes_for_new_snapshot():
+    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+
+    catalog = TaskReferenceCatalog("agent_task_projection_rejoin")
+    full = catalog.add_evidence(
+        {
+            "id": "workspace_artifact_readback:repair-2:final.md",
+            "kind": "workspace_artifact.readback",
+            "status": "ok",
+            "body_state": "full",
+            "path": "final.md",
+            "sha256": "a" * 64,
+            "body": "complete artifact body",
+            "provenance": {"source": "repair-2", "sha256": "a" * 64},
+        }
+    )
+    compact_projection = catalog.add_evidence(
+        {
+            "id": "workspace_artifact_readback:repair-2:final.md",
+            "kind": "workspace_artifact.readback",
+            "status": "ok",
+            "body_state": "full",
+            "path": "final.md",
+            "cite_as": "e8",
+            "body": "complete artifact body\n[truncated for verifier prompt]",
+        }
+    )
+    changed_snapshot = catalog.add_evidence(
+        {
+            "id": "workspace_artifact_readback:repair-2:final.md",
+            "kind": "workspace_artifact.readback",
+            "status": "ok",
+            "body_state": "full",
+            "path": "final.md",
+            "sha256": "b" * 64,
+            "body": "changed artifact body",
+            "provenance": {"source": "repair-2", "sha256": "b" * 64},
+        }
+    )
+
+    assert compact_projection["evidence_id"] == full["evidence_id"]
+    assert compact_projection["reference_id"] == full["reference_id"]
+    assert changed_snapshot["evidence_id"] != full["evidence_id"]
+    assert changed_snapshot["reference_id"] != full["reference_id"]
+
+
+def test_request_local_cite_as_is_not_guessed_from_a_new_ledger_render():
+    from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
+
+    guard = validate_evidence_use(
+        [{"claim": "The report was read.", "evidence_ids": ["e1"], "support_type": "content"}],
+        {
+            "evidence_items": [
+                {
+                    "id": "report.read",
+                    "kind": "workspace_artifact.readback",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "path": "report.md",
+                    "body": "report body",
+                }
+            ]
+        },
+    )
+
+    assert guard["valid"] is False
+    assert "evidence_ledger.expired_cite_as" in {
+        item["code"] for item in guard["diagnostics"] if item.get("blocking") is True
+    }
+
+
+def test_task_reference_tokens_and_host_joins_fail_closed():
+    from agently.core.application.AgentTask.TaskReferences import (
+        TaskReferenceCatalog,
+        validate_reference_tokens,
+    )
+
+    catalog = TaskReferenceCatalog("agent_task_host_join")
+    action = catalog.add_evidence(
+        {
+            "id": "action.result",
+            "kind": "agent_task.action.result",
+            "action_call_id": "call_opaque_1",
+            "action_id": "research.fetch",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "action result",
+        }
+    )
+    readback = catalog.add_evidence(
+        {
+            "id": "workspace.readback",
+            "kind": "workspace_artifact.readback",
+            "path": "report.md",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "report body",
+        }
+    )
+    action_offer = catalog.offer_reference(str(action["evidence_id"]), required_role="action")
+
+    assert set(action_offer) == {"reference_id", "kind", "status", "body_state", "source_role"}
+    assert catalog.resolve(str(action["reference_id"]))["target"]["action_call_id"] == "call_opaque_1"
+    assert catalog.bind("criterion:action_succeeded", [str(action["reference_id"])], required_role="action")[
+        "binding_id"
+    ].startswith("bnd_")
+    with pytest.raises(ValueError, match="role"):
+        catalog.bind("criterion:action_succeeded", [str(readback["reference_id"])], required_role="action")
+
+    offered = {str(action_offer["reference_id"]): action_offer}
+    token = f"[[ref:{action_offer['reference_id']}]]"
+    assert validate_reference_tokens(token, offered)["reference_ids"] == [action_offer["reference_id"]]
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_reference_tokens(f"{token} {token}", offered)
+    with pytest.raises(ValueError, match="offered"):
+        validate_reference_tokens("[[ref:ref_unknown]]", offered)
+    with pytest.raises(ValueError, match="malformed"):
+        validate_reference_tokens("[[ref:ref_!]]", offered)
+
+    other = TaskReferenceCatalog("agent_task_other")
+    other_action = other.add_evidence(
+        {
+            "id": "other.action",
+            "kind": "agent_task.action.result",
+            "action_call_id": "call_other",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "other task",
+        }
+    )
+    with pytest.raises(ValueError, match="task"):
+        catalog.resolve(str(other_action["reference_id"]), task_id="agent_task_other")
+    with pytest.raises(ValueError, match="canonical"):
+        catalog.bind("criterion:x", [str(action["evidence_id"])])
+
+
+def test_task_reference_catalog_is_shared_and_zero_state_until_persisted(tmp_path: Path):
+    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+
+    catalog = TaskReferenceCatalog("agent_task_siblings")
+    first = catalog.add_evidence(
+        {"id": "card.a", "kind": "action_evidence", "status": "ok", "body_state": "bounded", "body": "a"}
+    )
+    second = catalog.add_evidence(
+        {"id": "card.b", "kind": "action_evidence", "status": "ok", "body_state": "bounded", "body": "b"}
+    )
+
+    assert first["evidence_id"] != second["evidence_id"]
+    assert first["reference_id"] != second["reference_id"]
+    assert not (tmp_path / ".agently").exists()
+
+
+def test_task_reference_catalog_snapshot_preserves_tokens_and_rejects_stale_targets():
+    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+
+    catalog = TaskReferenceCatalog("agent_task_resume_refs")
+    evidence = catalog.add_evidence(
+        {"id": "source.one", "kind": "action_evidence", "status": "ok", "body_state": "bounded", "body": "one"}
+    )
+    snapshot = catalog.snapshot()
+    restored = TaskReferenceCatalog.from_snapshot("agent_task_resume_refs", snapshot)
+
+    assert restored.resolve(str(evidence["reference_id"]))["target"]["id"] == "source.one"
+
+    damaged = json.loads(json.dumps(snapshot))
+    damaged["references"][str(evidence["reference_id"])]["evidence_id"] = "evd_missing"
+    with pytest.raises(ValueError, match="stale"):
+        TaskReferenceCatalog.from_snapshot("agent_task_resume_refs", damaged)
+
+
+def test_terminal_convergence_uses_stable_issue_keys_and_structured_state_digest():
+    from agently.core.application.AgentTask.TerminalConvergence import (
+        TerminalIssue,
+        relevant_state_digest,
+    )
+
+    issue = TerminalIssue(
+        gate_kind="factual_grounding",
+        issue_code="unsupported_material_claim",
+        contract_subject="artifact:factual_integrity",
+    )
+    first = relevant_state_digest(
+        {
+            "candidate_content_version_ids": ["cv_2"],
+            "source_reference_targets": {"ref_4": "cv_3"},
+            "capability_facts": {"research.fetch": "succeeded"},
+            "criterion_subjects": ["criterion:1"],
+            "output_subjects": ["artifact:report.md"],
+            "repair_contract": {"subject": "artifact:factual_integrity", "claims": ["claim:1"]},
+            "request_id": "volatile-one",
+            "timestamp": 1,
+            "progress_message": "first wording",
+        }
+    )
+    equivalent = relevant_state_digest(
+        {
+            "candidate_content_version_ids": ["cv_2"],
+            "source_reference_targets": {"ref_4": "cv_3"},
+            "capability_facts": {"research.fetch": "succeeded"},
+            "criterion_subjects": ["criterion:1"],
+            "output_subjects": ["artifact:report.md"],
+            "repair_contract": {"subject": "artifact:factual_integrity", "claims": ["claim:1"]},
+            "request_id": "volatile-two",
+            "timestamp": 999,
+            "progress_message": "different wording",
+        }
+    )
+    changed = relevant_state_digest(
+        {
+            "candidate_content_version_ids": ["cv_5"],
+            "source_reference_targets": {"ref_4": "cv_3"},
+            "capability_facts": {"research.fetch": "succeeded"},
+            "criterion_subjects": ["criterion:1"],
+            "output_subjects": ["artifact:report.md"],
+            "repair_contract": {"subject": "artifact:factual_integrity", "claims": ["claim:1"]},
+        }
+    )
+
+    assert issue.key == (
+        "factual_grounding",
+        "unsupported_material_claim",
+        "artifact:factual_integrity",
+    )
+    assert first == equivalent
+    assert changed != first
+
+
+def test_terminal_convergence_stops_third_same_issue_without_a_fourth_repair():
+    from agently.core.application.AgentTask.TerminalConvergence import (
+        TerminalConvergenceState,
+        TerminalIssue,
+    )
+
+    state = TerminalConvergenceState("agent_task_convergence")
+    issue = TerminalIssue("factual_grounding", "unsupported_material_claim", "artifact:factual_integrity")
+
+    first = state.record_detection(issue, "a" * 64, repair_contract={"claim_keys": ["claim:1"]})
+    second = state.record_detection(
+        issue,
+        "a" * 64,
+        repair_contract={"claim_keys": ["claim:1"]},
+        verifier_called=False,
+    )
+    third = state.record_detection(
+        issue,
+        "b" * 64,
+        repair_contract={"claim_keys": ["claim:1"]},
+    )
+
+    assert first == {
+        "occurrence": 1,
+        "state_changed": True,
+        "verifier_called": True,
+        "should_repair": True,
+        "terminal": False,
+        "skip_verifier": False,
+        "repair_count": 1,
+    }
+    assert second["occurrence"] == 2
+    assert second["state_changed"] is False
+    assert second["skip_verifier"] is True
+    assert second["should_repair"] is True
+    assert second["repair_count"] == 2
+    assert third["occurrence"] == 3
+    assert third["terminal"] is True
+    assert third["should_repair"] is False
+    assert third["repair_count"] == 2
+    with pytest.raises(RuntimeError, match="terminal"):
+        state.record_detection(issue, "c" * 64, repair_contract={"claim_keys": ["claim:1"]})
+
+    snapshot = state.snapshot()
+    restored = TerminalConvergenceState.from_snapshot("agent_task_convergence", snapshot)
+    assert restored.snapshot() == snapshot
+
+
+def test_terminal_convergence_does_not_merge_different_issue_codes_for_the_same_gate_subject():
+    from agently.core.application.AgentTask.TerminalConvergence import (
+        TerminalConvergenceState,
+        TerminalIssue,
+    )
+
+    state = TerminalConvergenceState("agent_task_convergence_family")
+    unsupported = TerminalIssue(
+        "factual_grounding",
+        "unsupported_material_claim",
+        "artifact:factual_integrity",
+    )
+    contradicted = TerminalIssue(
+        "factual_grounding",
+        "contradicted_material_claim",
+        "artifact:factual_integrity",
+    )
+
+    first = state.record_detection(unsupported, "a" * 64, repair_contract={"claim_keys": ["claim:1"]})
+    second = state.record_detection(unsupported, "b" * 64, repair_contract={"claim_keys": ["claim:2"]})
+    independent = state.record_detection(contradicted, "c" * 64, repair_contract={"claim_keys": ["claim:3"]})
+
+    assert first["occurrence"] == 1
+    assert second["occurrence"] == 2
+    assert independent["occurrence"] == 1
+    assert independent["terminal"] is False
+    assert independent["should_repair"] is True
+    assert independent["repair_count"] == 1
+    assert len(state.active_records()) == 2
+
+
+def test_terminal_convergence_keeps_resolved_and_independent_issue_counts():
+    from agently.core.application.AgentTask.TerminalConvergence import (
+        TerminalConvergenceState,
+        TerminalIssue,
+    )
+
+    state = TerminalConvergenceState("agent_task_convergence_independent")
+    factual = TerminalIssue("factual_grounding", "unsupported", "artifact:factual_integrity")
+    capability = TerminalIssue("capability", "action_unavailable", "action:research.fetch")
+
+    state.record_detection(factual, "a" * 64, repair_contract={})
+    state.mark_resolved(factual)
+    reappeared = state.record_detection(factual, "b" * 64, repair_contract={})
+    immediate = state.record_detection(
+        capability,
+        "c" * 64,
+        repair_contract={},
+        unrecoverable=True,
+    )
+
+    assert reappeared["occurrence"] == 2
+    assert immediate["occurrence"] == 1
+    assert immediate["terminal"] is True
+    assert immediate["should_repair"] is False
+
+
+@pytest.mark.asyncio
+async def test_successful_terminal_gate_refreshes_resolved_convergence_diagnostics(
+    tmp_path,
+):
+    from agently.core.application.AgentTask.TerminalConvergence import TerminalIssue
+
+    agent = _create_agent("terminal-convergence-diagnostics").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="terminal-convergence-diagnostics",
+        goal="Return the completed result.",
+        success_criteria=["The result is complete."],
+    )
+    issue = TerminalIssue(
+        "output_contract",
+        "terminal_verifier_output_invalid",
+        "verification:response",
+    )
+    task._terminal_convergence_state.record_detection(
+        issue,
+        "a" * 64,
+        repair_contract={"requirements": ["Use offered ids."]},
+    )
+    task.diagnostics["terminal_convergence"] = (
+        task._terminal_convergence_state.snapshot()
+    )
+
+    result = await task._apply_strict_terminal_gates(
+        {"is_complete": True, "requires_block": False},
+        candidate={"text": "Completed result."},
+        execution_evidence_summary={},
+        verifier_called=True,
+    )
+
+    record = next(
+        iter(task.diagnostics["terminal_convergence"]["records"].values())
+    )
+    assert result["terminal_convergence"] == {
+        "resolved": True,
+        "verifier_called": True,
+    }
+    assert record["active"] is False
+    assert record["resolved"] is True
+
+
+def test_taskboard_required_card_setback_stops_on_third_cross_tick_occurrence(tmp_path):
+    agent = _create_agent("agent-taskboard-card-convergence").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-card-convergence",
+        goal="Produce the required evidence.",
+        success_criteria=["The required evidence is present."],
+        execution="taskboard",
+    )
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-card-convergence",
+        graph={
+            "graph_id": "taskboard-card-convergence-graph",
+            "cards": [
+                {
+                    "id": "final-verification-repair",
+                    "objective": "Repair the final evidence gap.",
+                    "failure_policy": "required",
+                    "allowed_execution_shape": "auto",
+                    "metadata": {
+                        "generated_by": "agent_task.taskboard.final_verification_repair",
+                    },
+                }
+            ],
+        },
+    )
+    revision = revision.next_revision(
+        revision.graph,
+        card_results={
+            "final-verification-repair": {
+                "card_id": "final-verification-repair",
+                "status": "setback",
+                "preview": {
+                    "next_board_action": "continue",
+                    "gaps": ["Evidence is still unavailable."],
+                },
+                "artifact_refs": [],
+                "file_refs": [],
+                "diagnostics": [],
+                "metadata": {},
+            }
+        },
+    )
+
+    first = task._taskboard_card_convergence_result(revision)
+    second = task._taskboard_card_convergence_result(revision)
+    third = task._taskboard_card_convergence_result(revision)
+
+    assert first is None
+    assert second is None
+    assert third is not None
+    assert third["status"] == "blocked"
+    assert third["accepted"] is False
+    assert third["artifact_status"] == "partial"
+    assert third["terminal_convergence"]["occurrence"] == 3
+    assert third["terminal_convergence"]["issue"] == {
+        "gate_kind": "taskboard_card",
+        "issue_code": "required_card_unsatisfied",
+        "contract_subject": "taskboard_card:final-verification-repair",
+    }
+    assert third["terminal_convergence"]["stopped_after_third_occurrence"] is True
+    assert task.status == "blocked"
+    assert task.result == third
+    assert task.diagnostics["terminal_convergence"]["records"]
+
+
+def test_taskboard_required_repair_converges_across_non_satisfying_statuses(tmp_path):
+    agent = _create_agent("agent-taskboard-repair-status-convergence").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-repair-status-convergence",
+        goal="Repair the terminal deliverable.",
+        success_criteria=["The terminal deliverable passes verification."],
+        execution="taskboard",
+    )
+    terminal = None
+    for index, status in enumerate(("setback", "failed", "blocked"), start=1):
+        card_id = "final-verification-repair" if index == 1 else f"final-verification-repair-{index}"
+        revision = TaskBoardRevision.create(
+            board_id=f"taskboard-repair-status-convergence-{index}",
+            graph={
+                "graph_id": f"taskboard-repair-status-convergence-graph-{index}",
+                "cards": [
+                    {
+                        "id": card_id,
+                        "objective": "Repair the same terminal verification gap.",
+                        "failure_policy": "required",
+                        "allowed_execution_shape": "auto",
+                        "metadata": {
+                            "generated_by": "agent_task.taskboard.final_verification_repair",
+                            "terminal_convergence_subject": "taskboard_final_verification",
+                        },
+                    }
+                ],
+            },
+        ).next_revision(
+            TaskBoardGraph.from_value(
+                {
+                    "graph_id": f"taskboard-repair-status-convergence-graph-{index}",
+                    "cards": [
+                        {
+                            "id": card_id,
+                            "objective": "Repair the same terminal verification gap.",
+                            "failure_policy": "required",
+                            "allowed_execution_shape": "auto",
+                            "metadata": {
+                                "generated_by": "agent_task.taskboard.final_verification_repair",
+                                "terminal_convergence_subject": "taskboard_final_verification",
+                            },
+                        }
+                    ],
+                }
+            ),
+            card_results={
+                card_id: TaskBoardCardResult(
+                    card_id=card_id,
+                    status=status,
+                    preview={"status": status, "remaining_work": ["The terminal gap remains."]},
+                )
+            },
+        )
+        terminal = task._taskboard_card_convergence_result(
+            revision,
+            executed_card_ids=(card_id,),
+        )
+        if index < 3:
+            assert terminal is None
+
+    assert terminal is not None
+    assert terminal["terminal_convergence"]["occurrence"] == 3
+    assert terminal["terminal_convergence"]["issue"] == {
+        "gate_kind": "taskboard_card",
+        "issue_code": "required_card_unsatisfied",
+        "contract_subject": "taskboard_final_verification",
+    }
+    assert terminal["terminal_convergence"]["stopped_after_third_occurrence"] is True
+
+
+@pytest.mark.parametrize("stale_status", ("setback", "failed", "blocked"))
+def test_taskboard_convergence_does_not_recount_stale_result_from_other_tick(
+    tmp_path,
+    stale_status,
+):
+    agent = _create_agent("agent-taskboard-stale-setback").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-stale-setback",
+        goal="Produce the required evidence.",
+        success_criteria=["The required evidence is present."],
+        execution="taskboard",
+    )
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-stale-setback",
+        graph={
+            "graph_id": "taskboard-stale-setback-graph",
+            "cards": [
+                {
+                    "id": "stale-repair",
+                    "objective": "Repair the old evidence gap.",
+                    "failure_policy": "required",
+                },
+                {
+                    "id": "current-work",
+                    "objective": "Perform independent current work.",
+                    "failure_policy": "required",
+                },
+            ],
+        },
+    ).next_revision(
+        TaskBoardGraph.from_value(
+            {
+                "graph_id": "taskboard-stale-setback-graph",
+                "cards": [
+                    {
+                        "id": "stale-repair",
+                        "objective": "Repair the old evidence gap.",
+                        "failure_policy": "required",
+                    },
+                    {
+                        "id": "current-work",
+                        "objective": "Perform independent current work.",
+                        "failure_policy": "required",
+                    },
+                ],
+            }
+        ),
+        card_results={
+            "stale-repair": TaskBoardCardResult(
+                card_id="stale-repair",
+                status=stale_status,
+            ),
+            "current-work": TaskBoardCardResult(
+                card_id="current-work",
+                status="completed",
+            ),
+        },
+    )
+
+    assert (
+        task._taskboard_card_convergence_result(
+            revision,
+            executed_card_ids=("current-work",),
+        )
+        is None
+    )
+    assert task._terminal_convergence_state.snapshot()["records"] == {}
+
+
+@pytest.mark.asyncio
+async def test_taskboard_lifecycle_does_not_schedule_fourth_repeated_setback_tick(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-lifecycle-convergence").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-lifecycle-convergence",
+        goal="Produce the required evidence.",
+        success_criteria=["The required evidence is present."],
+        execution="taskboard",
+    )
+    revision = TaskBoardRevision.create(
+        board_id="taskboard-lifecycle-convergence",
+        graph={
+            "graph_id": "taskboard-lifecycle-convergence-graph",
+            "cards": [
+                {
+                    "id": "required-repair",
+                    "objective": "Repair the required evidence gap.",
+                    "failure_policy": "required",
+                    "allowed_execution_shape": "auto",
+                }
+            ],
+        },
+    )
+    planning_policy = resolve_task_board_planning_policy(
+        task._taskboard_effort(),
+        metadata={"task_id": task.id},
+    )
+    card_attempts = 0
+    emitted_paths: list[str] = []
+    original_emit = task._emit
+
+    async def build_context():
+        return {}
+
+    async def request_plan(_context_pack):
+        return SimpleNamespace(
+            revision=revision,
+            planning_policy=planning_policy,
+        )
+
+    async def run_card(context, _context_pack):
+        nonlocal card_attempts
+        card_attempts += 1
+        return TaskBoardCardResult(
+            card_id=context.card.id,
+            status="setback",
+            preview={
+                "next_board_action": "continue",
+                "gaps": ["The same evidence remains unavailable."],
+            },
+        )
+
+    async def fail_finalize(*_args, **_kwargs):
+        raise AssertionError("terminal convergence must bypass finalization")
+
+    async def capture_emit(path, value, *args, **kwargs):
+        emitted_paths.append(path)
+        await original_emit(path, value, *args, **kwargs)
+
+    monkeypatch.setattr(task, "_build_context", build_context)
+    monkeypatch.setattr(task, "_request_taskboard_plan", request_plan)
+    monkeypatch.setattr(task, "_taskboard_should_fallback_to_flat", lambda _revision: False)
+    monkeypatch.setattr(task, "_run_taskboard_card", run_card)
+    monkeypatch.setattr(task, "_finalize_taskboard", fail_finalize)
+    monkeypatch.setattr(task, "_emit", capture_emit)
+
+    result = await task._run_taskboard()
+
+    assert result["status"] == "blocked"
+    assert result["accepted"] is False
+    assert result["terminal_convergence"]["occurrence"] == 3
+    assert card_attempts == 3
+    assert "agent_task.taskboard.tick.3.completed" in emitted_paths
+    assert "agent_task.taskboard.tick.4.scheduled" not in emitted_paths
+    assert emitted_paths.count("agent_task.terminal_convergence") == 1
+
+
+@pytest.mark.asyncio
+async def test_strict_grounding_overrides_broad_legacy_completion_and_stops_third_unchanged_issue(
+    tmp_path,
+):
+    agent = _create_agent("strict-grounding-terminal-convergence").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="strict-grounding-terminal-convergence",
+        goal="Return a grounded report.",
+        success_criteria=["Every material claim is grounded."],
+        execution="flat",
+    )
+
+    carrier_id = "inline:" + "a" * 64
+    candidate = {
+        "kind": "inline_final_result",
+        "carrier_id": carrier_id,
+        "text": "Unsupported external claim.",
+        "path": "",
+        "content_version_id": carrier_id,
+        "diagnostics": [],
+    }
+    candidate["carriers"] = [dict(candidate)]
+    semantic_verification = task._normalize_verification({
+        "is_complete": True,
+        "requires_block": False,
+            "reason": "All explicit criteria are satisfied.",
+            "missing_criteria": [],
+            "final_result": candidate["text"],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "The criterion is evaluated by the material-claim audit.",
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+        "material_claim_checks": [
+            {
+                "claim_key": "claim_1",
+                "claim_kind": "external_fact",
+                "state": "unsupported",
+                "evidence_ids": [],
+                "reason": "No offered evidence supports this external fact.",
+            }
+        ],
+    }, execution_evidence_summary={}, terminal_candidate=candidate)
+
+    first = await task._apply_strict_terminal_gates(
+        semantic_verification,
+        candidate=candidate,
+        execution_evidence_summary={},
+        verifier_called=True,
+    )
+    second = task._terminal_convergence_preflight(
+        candidate=candidate,
+        execution_evidence_summary={},
+    )
+    third = task._terminal_convergence_preflight(
+        candidate=candidate,
+        execution_evidence_summary={},
+    )
+
+    assert first["is_complete"] is False
+    assert first["material_claim_audit"]["valid"] is False
+    assert first["terminal_convergence"]["occurrence"] == 1
+    assert second is not None and second["terminal_convergence"]["occurrence"] == 2
+    assert second["requires_block"] is False
+    assert third is not None and third["terminal_convergence"]["occurrence"] == 3
+    assert third["requires_block"] is True
+    assert third["final_result"] == candidate["text"]
+    assert task._terminal_convergence_state.snapshot()["records"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_carrier_promotes_file_and_reuses_unchanged_identity(tmp_path):
+    agent = _create_agent("terminal-carrier-reused-identity").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="terminal-carrier-reused-identity",
+        goal="Return a grounded report file.",
+        success_criteria=["The report is grounded."],
+        execution="flat",
+    )
+    content = "Evidence-backed report body.\n"
+    write_result = await task.workspace.write_file("reports/final.md", content)
+    file_ref = {**write_result["file_refs"][0], "role": "workspace_artifact"}
+
+    await task._replace_terminal_carriers(
+        execution_result={"artifact_refs": [file_ref], "final_result": "reports/final.md"},
+        execution_evidence_summary={},
+        source_work_result_id="work:1",
+    )
+    first = await task._current_terminal_candidate()
+    await task._replace_terminal_carriers(
+        execution_result={"artifact_refs": [file_ref], "final_result": "reports/final.md"},
+        execution_evidence_summary={},
+        source_work_result_id="work:2",
+    )
+    second = await task._current_terminal_candidate()
+
+    assert first["text"] == content
+    assert str(first["content_version_id"]).startswith("cv_")
+    assert str(first["carrier_id"]).startswith("car_")
+    assert second["carrier_id"] == first["carrier_id"]
+    assert second["content_version_id"] == first["content_version_id"]
+
+
+@pytest.mark.asyncio
+async def test_strict_grounding_prefers_required_workspace_deliverable_over_inline_summary(tmp_path):
+    agent = _create_agent("strict-grounding-required-deliverable").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="strict-grounding-required-deliverable",
+        goal="Write the report to final.md and return a compact summary.",
+        success_criteria=["The report is grounded."],
+        execution="flat",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    report = "# Grounded Report\n\nEvidence-backed file body.\n"
+    summary = "Compact inline summary that is a separate return carrier."
+    await task.workspace.write_file("final.md", report)
+
+    await task._replace_terminal_carriers(
+        execution_result={"candidate_final_result": summary, "file_refs": []},
+        execution_evidence_summary={},
+        source_work_result_id="work:required-deliverable",
+    )
+    candidate = await task._current_terminal_candidate()
+
+    assert candidate["path"] == "final.md"
+    assert candidate["text"] == report
+    assert str(candidate["content_version_id"]).startswith("cv_")
+    assert [carrier["kind"] for carrier in candidate["carriers"]] == [
+        "workspace_artifact",
+        "inline_final_result",
+    ]
+    assert candidate["carriers"][1]["text"] == summary
+    assert str(candidate["carriers"][1]["content_version_id"]).startswith("inline:")
+
+
+@pytest.mark.asyncio
+async def test_strict_grounding_excludes_intermediate_workspace_carrier_when_required_path_exists(
+    tmp_path,
+):
+    agent = _create_agent("strict-grounding-single-required-file").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="strict-grounding-single-required-file",
+        goal="Write the report to final.md.",
+        success_criteria=["final.md is the terminal deliverable."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    working_write = await task.workspace.write_file(
+        "working/taskboard/synthesize/final.md",
+        "# Working draft\n\nIntermediate content.\n",
+    )
+    final_write = await task.workspace.write_file(
+        "final.md",
+        "# Final report\n\nDelivered content.\n",
+    )
+    working_ref = {
+        **working_write["file_refs"][0],
+        "role": "workspace_artifact",
+    }
+    final_ref = {
+        **final_write["file_refs"][0],
+        "role": "workspace_artifact",
+    }
+
+    await task._replace_terminal_carriers(
+        execution_result={
+            "final_result": "final.md",
+            "file_refs": [working_ref, final_ref],
+        },
+        execution_evidence_summary={"artifact_refs": [working_ref, final_ref]},
+        source_work_result_id="work:required-file",
+    )
+    candidate = await task._current_terminal_candidate()
+
+    assert [carrier["path"] for carrier in candidate["carriers"]] == ["final.md"]
+    assert candidate["carriers"][0]["required"] is True
+
+
+@pytest.mark.asyncio
+async def test_strict_grounding_reuses_cumulative_trusted_artifact_when_current_step_returns_inline(tmp_path):
+    agent = _create_agent("strict-grounding-cumulative-artifact").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="strict-grounding-cumulative-artifact",
+        goal="Write the report and return a compact summary.",
+        success_criteria=["The report is grounded."],
+        execution="flat",
+    )
+    report = "# Grounded Report\n\nEvidence-backed file body.\n"
+    summary = "Compact inline summary from a later readback step."
+    write_result = await task.workspace.write_file("final.md", report)
+    trusted_ref = {
+        **write_result["file_refs"][0],
+        "path": "final.md",
+        "role": "workspace_artifact",
+    }
+
+    await task._replace_terminal_carriers(
+        execution_result={"candidate_final_result": summary, "file_refs": []},
+        execution_evidence_summary={"artifact_refs": [trusted_ref]},
+        source_work_result_id="work:cumulative-artifact",
+    )
+    candidate = await task._current_terminal_candidate()
+
+    assert candidate["path"] == "final.md"
+    assert candidate["text"] == report
+    assert str(candidate["content_version_id"]).startswith("cv_")
+    assert [carrier["kind"] for carrier in candidate["carriers"]] == [
+        "workspace_artifact",
+        "inline_final_result",
+    ]
+    assert candidate["carriers"][1]["text"] == summary
+
+
+@pytest.mark.asyncio
+async def test_strict_grounding_validates_workspace_and_inline_terminal_carriers_separately(
+    tmp_path,
+):
+    agent = _create_agent("strict-grounding-multiple-terminal-carriers").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="strict-grounding-multiple-terminal-carriers",
+        goal="Write final.md and return a compact summary.",
+        success_criteria=["Both returned carriers are grounded."],
+        execution="flat",
+    )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "file:grounded",
+            "kind": "workspace_artifact.readback",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "Grounded file body.",
+        }
+    )
+    workspace_candidate = {
+        "kind": "workspace_artifact",
+        "carrier_id": "car_file",
+        "text": "Grounded file body.",
+        "path": "final.md",
+        "content_version_id": "cv_1",
+        "diagnostics": [],
+    }
+    inline_candidate = {
+        "kind": "inline_final_result",
+        "carrier_id": "car_inline",
+        "text": "Unsupported inline summary claim.",
+        "path": "",
+        "content_version_id": "inline:" + "c" * 64,
+        "diagnostics": [],
+    }
+    candidate = {**workspace_candidate, "carriers": [workspace_candidate, inline_candidate]}
+    normalized = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Both carriers look complete.",
+            "missing_criteria": [],
+            "acceptance_delta": [],
+            "final_result": inline_candidate["text"],
+            "material_claim_coverage_complete": True,
+                "material_claim_checks": [
+                    {
+                        "claim_key": "claim_1",
+                        "claim_kind": "external_fact",
+                    "state": "supported",
+                    "evidence_ids": [source["reference_id"]],
+                    "reason": "The file fact is directly supported.",
+                    },
+                    {
+                        "claim_key": "claim_2",
+                        "claim_kind": "external_fact",
+                    "state": "unsupported",
+                    "evidence_ids": [],
+                    "reason": "The inline claim has no offered support.",
+                },
+            ],
+        },
+        execution_evidence_summary={},
+        terminal_candidate=candidate,
+    )
+    result = await task._apply_strict_terminal_gates(
+        normalized,
+        candidate=candidate,
+        execution_evidence_summary={},
+        verifier_called=True,
+    )
+
+    assert result["is_complete"] is False
+    assert result["material_claim_audit"]["valid"] is False
+    assert [check["carrier_id"] for check in result["material_claim_checks"]] == [
+        "car_file",
+        "car_inline",
+    ]
+    assert result["material_claim_repair_contract"]["requirements"][0]["carrier_id"] == (
+        "car_inline"
+    )
+    assert result["material_claim_repair_contract"]["requirements"][0]["claim_key"] == "claim_2"
+    assert result["material_claim_repair_contract"]["requirements"][0]["path"] == ""
+    assert result["material_claim_repair_contract"]["requirements"][0]["content_version_id"] == (
+        inline_candidate["content_version_id"]
+    )
+    assert not hasattr(task, "_latest_grounding_candidate")
+
+
+@pytest.mark.asyncio
+async def test_taskboard_terminal_candidate_refs_follow_unique_leaf_deliverable_owner(tmp_path):
+    agent = _create_agent("taskboard-current-leaf-deliverable").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-current-leaf-deliverable",
+        goal="Write the report to final.md.",
+        success_criteria=["final.md is the terminal deliverable."],
+        execution="taskboard",
+    )
+    content = "# Report\n\nSame bytes in working and final paths.\n"
+    working_write = await task.workspace.write_file("working/taskboard/synthesize/final.md", content)
+    final_write = await task.workspace.write_file("final.md", content)
+    working_ref = {
+        **working_write["file_refs"][0],
+        "role": "workspace_artifact",
+        "source": "agent_task.taskboard.card.synthesize.workspace_artifact",
+    }
+    final_ref = {
+        **final_write["file_refs"][0],
+        "role": "workspace_artifact",
+        "source": "agent_task.taskboard.card.deliver.workspace_artifact",
+    }
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-2",
+            "status": "completed",
+            "graph": {
+                "graph_id": f"{task.id}.taskboard",
+                "cards": [
+                    {
+                        "id": "synthesize",
+                        "objective": "Create the working report.",
+                        "required_outputs": ["Working report"],
+                    },
+                    {
+                        "id": "deliver",
+                        "objective": "Deliver final.md.",
+                        "depends_on": ["synthesize"],
+                        "required_outputs": ["final.md"],
+                    },
+                ],
+            },
+            "card_results": {
+                "synthesize": TaskBoardCardResult(
+                    card_id="synthesize",
+                    status="completed",
+                    preview={"candidate_final_result": content},
+                    file_refs=(working_ref,),
+                    artifact_refs=(working_ref,),
+                ).to_dict(),
+                "deliver": TaskBoardCardResult(
+                    card_id="deliver",
+                    status="completed",
+                    preview={"final_result": "Delivered to final.md."},
+                    file_refs=(final_ref,),
+                    artifact_refs=(final_ref,),
+                ).to_dict(),
+            },
+        }
+    )
+
+    selected = task._taskboard_terminal_candidate_refs(
+        revision,
+        [working_ref, final_ref],
+    )
+
+    assert [item["path"] for item in selected] == [final_ref["path"]]
+    assert selected[0]["source"] == "agent_task.taskboard.card.deliver.workspace_artifact"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_terminal_candidate_refs_do_not_substitute_working_file_for_declared_leaf_path(tmp_path):
+    agent = _create_agent("taskboard-declared-leaf-path").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-declared-leaf-path",
+        goal="Write the report to final.md.",
+        success_criteria=["final.md is the terminal deliverable."],
+        execution="taskboard",
+    )
+    working_write = await task.workspace.write_file(
+        "working/taskboard/collect/final.md",
+        "# Upstream Evidence\n\nThis is not the terminal deliverable.\n",
+    )
+    working_ref = {
+        **working_write["file_refs"][0],
+        "role": "workspace_artifact",
+        "source": "agent_task.taskboard.card.collect.workspace_artifact",
+    }
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-declared-path",
+            "status": "completed",
+            "graph": {
+                "graph_id": f"{task.id}.taskboard",
+                "cards": [
+                    {
+                        "id": "collect",
+                        "objective": "Collect upstream evidence.",
+                        "required_outputs": ["Working evidence"],
+                    },
+                    {
+                        "id": "synthesize",
+                        "objective": "Deliver final.md.",
+                        "depends_on": ["collect"],
+                        "required_outputs": ["final.md"],
+                    },
+                ],
+            },
+            "card_results": {
+                "collect": TaskBoardCardResult(
+                    card_id="collect",
+                    status="completed",
+                    preview={"candidate_final_result": "Upstream evidence only."},
+                    file_refs=(working_ref,),
+                    artifact_refs=(working_ref,),
+                ).to_dict(),
+                "synthesize": TaskBoardCardResult(
+                    card_id="synthesize",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "sufficient": True,
+                        "candidate_final_result": "# Final Report\n\nComplete candidate body.\n",
+                        "artifact_manifest": {"path": "final.md"},
+                        "remaining_work": ["Materialize and read back final.md."],
+                    },
+                ).to_dict(),
+            },
+        }
+    )
+
+    selected = task._taskboard_terminal_candidate_refs(revision, [working_ref])
+
+    assert selected == []
+
+
+@pytest.mark.asyncio
+async def test_unavailable_required_action_fails_closed_even_with_workspace_readback(tmp_path):
+    agent = _create_agent("strict-capability-fail-closed").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="strict-capability-fail-closed",
+        goal="Use the specified research Action.",
+        success_criteria=["The research Action succeeds."],
+        execution="flat",
+        options={
+            "capability_evidence_requirements": [
+                {
+                    "capability_id": "research.fetch",
+                    "capability_kind": "action",
+                    "kind": "action_succeeded",
+                    "required": True,
+                    "criterion_id": "criterion:1",
+                }
+            ]
+        },
+    )
+    normalized = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "A report file was read back.",
+            "missing_criteria": [],
+            "final_result": "Readback-only report.",
+        },
+        execution_evidence_summary={
+            "status": "completed",
+            "capability_evidence_requirements": task.options["capability_evidence_requirements"],
+            "capability_evidence": {"actions": {"succeeded": []}, "artifacts": {"readback": ["report.md"]}},
+        },
+        candidate_final_result="Readback-only report.",
+    )
+    result = await task._apply_strict_terminal_gates(
+        normalized,
+        candidate={
+            "text": "Readback-only report.",
+            "path": "",
+            "content_version_id": "inline:" + "b" * 64,
+            "diagnostics": [],
+        },
+        execution_evidence_summary={
+            "status": "completed",
+            "capability_evidence_requirements": task.options["capability_evidence_requirements"],
+        },
+        verifier_called=True,
+    )
+
+    assert normalized["is_complete"] is False
+    assert normalized["missing_capability_evidence"] == ["research.fetch"]
+    assert result["requires_block"] is True
+    assert result["terminal_convergence"]["occurrence"] == 1
+    assert result["terminal_convergence"]["terminal"] is True
+    assert result["terminal_convergence"]["issue"]["contract_subject"] == "action:research.fetch"
+
+
+@pytest.mark.asyncio
+async def test_denied_action_policy_fails_on_first_detection(
+    tmp_path,
+):
+    agent = _create_agent("strict-unrecoverable-terminal-facts").use_workspace(tmp_path / "workspace")
+    denied_task = AgentTask(
+        agent,
+        task_id="strict-denied-action-policy",
+        goal="Complete the policy-bound action.",
+        success_criteria=["The action completes."],
+        execution="flat",
+    )
+    denied = await denied_task._apply_strict_terminal_gates(
+        {
+            "is_complete": False,
+            "requires_block": False,
+            "reason": "Structured execution did not complete.",
+            "missing_criteria": ["The action completes."],
+            "guard_reasons": ["execution_risk_actions_present"],
+            "final_result": "Partial result.",
+        },
+        candidate={
+            "text": "Partial result.",
+            "path": "",
+            "content_version_id": "inline:" + "d" * 64,
+            "diagnostics": [],
+        },
+        execution_evidence_summary={"blocked_actions": ["publish.report"]},
+        verifier_called=True,
+    )
+
+    assert denied["requires_block"] is True
+    assert denied["terminal_convergence"]["occurrence"] == 1
+    assert denied["terminal_convergence"]["issue"]["issue_code"] == "action_policy_blocked"
+
+
+@pytest.mark.asyncio
+async def test_flat_task_stops_third_unchanged_material_claim_issue_with_partial_artifact(
+    tmp_path,
+):
+    class CompleteLegacyVerifier(MockAgentTaskRequester):
+        name = "CompleteLegacyVerifierForConvergence"
+        verifier_calls = 0
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            request_payload = DataFormatter.sanitize(request_data.data)
+            text = json.dumps(request_payload, ensure_ascii=False)
+            if "Verify the task against every success criterion" in text:
+                self.__class__.verifier_calls += 1
+
+                payload = {
+                    "is_complete": True,
+                    "requires_block": False,
+                    "reason": "Legacy verification passed.",
+                    "missing_criteria": [],
+                    "final_result": "Unchanged unsupported report claim.",
+                    "criterion_checks": [
+                        {
+                            "criterion_id": "criterion:1",
+                            "satisfied": True,
+                            "summary": "The report was produced; factual support is audited separately.",
+                            "evidence_ids": [],
+                        }
+                    ],
+                    "material_claim_coverage_complete": True,
+                    "material_claim_checks": [
+                        {
+                            "claim_key": "claim_1",
+                            "claim_kind": "external_fact",
+                            "state": "unsupported",
+                            "evidence_ids": [],
+                            "reason": "No offered evidence supports this external fact.",
+                        }
+                    ],
+                }
+            elif "Plan the next bounded AgentExecution step" in text:
+                payload = {
+                    "step_instruction": "Repair the unchanged report.",
+                    "expected_evidence": "Grounded report evidence.",
+                    "rationale": "The terminal gate requires repair.",
+                }
+            else:
+                payload = {"answer": "ok"}
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+    settings = Settings(name="flat-third-convergence-settings", parent=Agently.settings)
+    plugins = PluginManager(settings, parent=Agently.plugin_manager, name="flat-third-convergence-plugins")
+    plugins.register("ModelRequester", CompleteLegacyVerifier, activate=True)
+    agent = Agently.AgentType(plugins, parent_settings=settings, name="flat-third-convergence")
+    task = agent.create_task(
+        task_id="flat-third-convergence",
+        goal="Return a grounded report.",
+        success_criteria=["Every material claim is grounded."],
+        workspace=tmp_path / "workspace",
+        execution="flat",
+        max_iterations=5,
+    )
+
+    async def unchanged_step(iteration_index, plan, context_pack):
+        _ = plan, context_pack
+        return (
+            {
+                "candidate_final_result": "Unchanged unsupported report claim.",
+                "remaining_work": [],
+            },
+            {
+                "execution_id": f"exec-{iteration_index}",
+                "status": "completed",
+                "route": {"selected_route": "model_request"},
+                "logs": {},
+            },
+        )
+
+    cast(Any, task)._agent_task_step_overrides = {"_execute_step": unchanged_step}
+    result = await task.async_run()
+    meta = await task.async_meta()
+
+    assert result["status"] == "blocked"
+    assert result["accepted"] is False
+    assert result["artifact_status"] == "partial"
+    assert "final.md" in result["final_result"]
+    assert result["artifact_refs"]
+    assert len(meta["iterations"]) == 3
+    assert CompleteLegacyVerifier.verifier_calls == 1
+    assert meta["iterations"][-1]["verification"]["terminal_convergence"]["occurrence"] == 3
+    assert meta["iterations"][-1]["verification"]["requires_block"] is True
 
 
 def test_evidence_guard_binds_composite_file_locator_to_matching_readback():
@@ -1459,8 +3189,22 @@ def test_resolve_evidence_reference_reports_tiers():
 
     ledger = {
         "evidence_items": [
-            {"id": "rb.report", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "report.md", "body": "x"},
-            {"id": "rb.data", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "bounded", "path": "data.csv", "body": "y"},
+            {
+                "id": "rb.report",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "report.md",
+                "body": "x",
+            },
+            {
+                "id": "rb.data",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "data.csv",
+                "body": "y",
+            },
         ]
     }
 
@@ -1476,8 +3220,20 @@ def test_resolve_evidence_reference_reports_ambiguous_basename():
 
     ledger = {
         "evidence_items": [
-            {"id": "docs.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "docs/README.md"},
-            {"id": "pkg.readme", "kind": "workspace_artifact.readback", "status": "ok", "body_state": "full", "path": "pkg/README.md"},
+            {
+                "id": "docs.readme",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "full",
+                "path": "docs/README.md",
+            },
+            {
+                "id": "pkg.readme",
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "full",
+                "path": "pkg/README.md",
+            },
         ]
     }
 
@@ -1515,8 +3271,7 @@ def test_execution_meta_action_results_enter_canonical_evidence_ledger():
     action_items = [
         item
         for item in ledger["items"]
-        if item.get("kind") == "agent_task.action.result"
-        and item.get("action_id") == "market_quotes"
+        if item.get("kind") == "agent_task.action.result" and item.get("action_id") == "market_quotes"
     ]
 
     assert len(action_items) == 1
@@ -1543,6 +3298,20 @@ def test_execution_meta_action_results_enter_canonical_evidence_ledger():
     assert guard["valid"] is True
     assert guard["normalized_evidence_use"][0]["evidence_ids"] == [item["id"]]
 
+    call_id_guard = validate_evidence_use(
+        [
+            {
+                "claim": "Price evidence",
+                "evidence_ids": ["call-quotes"],
+                "support_type": "content",
+            }
+        ],
+        ledger,
+    )
+
+    assert call_id_guard["valid"] is True
+    assert call_id_guard["normalized_evidence_use"][0]["evidence_ids"] == [item["id"]]
+
 
 def test_access_blocked_action_preview_is_unavailability_evidence_only():
     execution_meta = {
@@ -1553,10 +3322,7 @@ def test_access_blocked_action_preview_is_unavailability_evidence_only():
                     "action_id": "browse",
                     "status": "success",
                     "action_call_id": "call-waf",
-                    "result_preview": (
-                        "为了更好的访问体验，请进行验证。"
-                        "appkey: \"CF_APP_WAF\""
-                    ),
+                    "result_preview": ("为了更好的访问体验，请进行验证。" "appkey: \"CF_APP_WAF\""),
                 }
             ],
             "route_logs": {},
@@ -1564,11 +3330,7 @@ def test_access_blocked_action_preview_is_unavailability_evidence_only():
     }
 
     ledger = AgentTask._evidence_ledger_from_execution_meta(execution_meta)
-    item = next(
-        evidence
-        for evidence in ledger["items"]
-        if evidence.get("kind") == "agent_task.action.result"
-    )
+    item = next(evidence for evidence in ledger["items"] if evidence.get("kind") == "agent_task.action.result")
 
     assert item["status"] == "failed"
     assert item["body_state"] == "bounded"
@@ -1660,7 +3422,10 @@ def test_block_carrier_exposes_compact_scoped_retrieval_policy():
     assert policy["roles"]["locator_ref"] == "discovered target; content not read"
     assert policy["roles"]["evidence_snippet"] == "bounded readable excerpt"
     assert policy["query_owner"] == "planner_or_control_model"
-    assert policy["executor_owner"] == "Workspace.retrieve through Blocks workspace_operation, plus bounded readback when needed"
+    assert (
+        policy["executor_owner"]
+        == "Workspace.retrieve through Blocks workspace_operation, plus bounded readback when needed"
+    )
 
 
 def test_flat_step_plan_preserves_scoped_retrieval_query_groups(tmp_path):
@@ -2048,11 +3813,11 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
                 "candidate_final_result": "Alpha deadline found.",
                 "scoped_retrieval_results": scoped_results,
                 "evidence_use": [
-                    {
-                        "claim": "Alpha deadline found.",
-                        "evidence_ids": [evidence_ledger["items"][2]["id"]],
-                        "support_type": "content",
-                    }
+                        {
+                            "claim": "Alpha deadline found.",
+                            "evidence_ids": [evidence_ledger["items"][2]["reference_id"]],
+                            "support_type": "content",
+                        }
                 ],
             },
             "execution_meta": {
@@ -2092,18 +3857,113 @@ async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_p
     assert execution_result["scoped_retrieval_results"][0]["evidence_snippets"][0]["content"].startswith(
         "Alpha deadline"
     )
-    block_kinds = [
-        block["kind"]
-        for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]
-    ]
+    block_kinds = [block["kind"] for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]]
     assert block_kinds == ["workspace_operation", "agent_step"]
     block_evidence_items = execution_meta["blocks"]["evidence"]["evidence_items"]
-    assert evidence_ledger["items"][2]["id"] in {item["id"] for item in block_evidence_items}
+    assert evidence_ledger["items"][2]["reference_id"].startswith("ref_")
+    assert any(item["id"] for item in block_evidence_items)
     compact_search_output = execution_meta["blocks"]["evidence"]["execution_block_results"][0]["output"]
     assert compact_search_output["operation"] == "search"
     assert compact_search_output["query"] == "deadline"
     assert compact_search_output["bounded"]["returned_results"] == 1
     assert compact_search_output["evidence_snippet_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_flat_agent_step_receives_cumulative_and_current_block_reference_ids(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("flat-step-cumulative-reference-projection").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="flat-step-cumulative-reference-projection",
+        goal="Use earlier evidence in the current bounded step.",
+        success_criteria=["The final result cites canonical task references."],
+        execution="flat",
+    )
+    captured: dict[str, Any] = {}
+    prior_ledger = {
+        "items": [
+            {
+                "id": "agent_task_action_result:market:prior",
+                "reference_id": "ref_prior",
+                "kind": "action_result",
+                "status": "ok",
+                "body_state": "bounded",
+                "action_id": "market",
+                "body": "Prior bounded market evidence.",
+            }
+        ]
+    }
+    current_block_item = {
+        "id": "blocks:snippet:current",
+        "kind": "evidence_snippet",
+        "status": "ok",
+        "body_state": "bounded",
+        "path": "notes/current.md",
+        "body": "Current bounded Workspace evidence.",
+    }
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_cumulative_evidence_ledger",
+        lambda _meta: prior_ledger,
+    )
+
+    async def run_bounded_step(
+        _iteration_index,
+        _plan,
+        _context_pack,
+        *,
+        evidence_ledger,
+        **_kwargs,
+    ):
+        captured["evidence_ledger"] = evidence_ledger
+        return (
+            {"candidate_final_result": "Bounded result."},
+            {
+                "execution_id": "flat-step-cumulative-reference-projection:child",
+                "status": "completed",
+                "route": {"selected_route": "model_request", "status": "completed"},
+                "logs": {"action_logs": {}, "route_logs": {}, "errors": []},
+            },
+        )
+
+    async def run_work_unit(*, handler, **_kwargs):
+        output = await handler({"state": {"evidence_items": [current_block_item]}})
+        return output["execution_result"], output["execution_meta"], None
+
+    monkeypatch.setattr(cast(Any, task), "_run_bounded_agent_execution_step", run_bounded_step)
+    monkeypatch.setattr(cast(Any, task), "_run_work_unit_through_blocks", run_work_unit)
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+
+    await task._execute_step(
+        2,
+        {
+            "execution_shape": "direct",
+            "step_instruction": "Synthesize the final result from prior and current evidence.",
+        },
+        cast(Any, context_pack),
+    )
+
+    offered = captured["evidence_ledger"]["items"]
+    reference_ids = [item["reference_id"] for item in offered]
+    assert "ref_prior" in reference_ids
+    assert any(
+        item["kind"] == "evidence_snippet"
+        and item["path"] == "notes/current.md"
+        and item["reference_id"].startswith("ref_")
+        for item in offered
+    )
+    assert all(set(item).isdisjoint({"id", "evidence_id"}) for item in offered)
 
 
 @pytest.mark.asyncio
@@ -2223,6 +4083,8 @@ async def test_taskboard_card_scoped_retrieval_uses_block_carrier(tmp_path):
         },
     )
     plan = task._taskboard_card_carrier_plan(card)
+    assert plan["execution_shape"] == "taskboard_card"
+    assert plan["step_scope"]["allowed_capability_ids"] == []
     work_unit = WorkUnitIntent(
         id="taskboard:collect:attempt:1",
         origin="taskboard_card",
@@ -2282,10 +4144,7 @@ async def test_taskboard_card_scoped_retrieval_uses_block_carrier(tmp_path):
     assert scoped_results[0]["bounded"]["returned_results"] == 1
     assert scoped_results[0]["evidence_snippets"][0]["content"] == "Project Atlas owner is Priya Shah."
     assert execution_result["scoped_retrieval_results"][0]["bounded"]["returned_results"] == 1
-    block_kinds = [
-        block["kind"]
-        for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]
-    ]
+    block_kinds = [block["kind"] for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]]
     assert block_kinds == ["workspace_operation", "agent_step"]
     compact_operations = execution_meta["block_carrier"]["workspace_operations"]
     assert compact_operations[0]["kind"] == "workspace_operation"
@@ -2532,7 +4391,7 @@ def test_agent_task_explicit_resource_caps_remain_effective(tmp_path):
     assert frontier_taskboard_task._taskboard_scheduler() == "frontier"
 
 
-def test_flat_step_plan_infers_workspace_artifact_mode_from_required_deliverables():
+def test_flat_step_plan_preserves_explicit_inline_result_for_required_workspace_deliverable():
     task = AgentTask.__new__(AgentTask)
     task.options = {
         "execution_prompt_snapshot": {
@@ -2553,6 +4412,36 @@ def test_flat_step_plan_infers_workspace_artifact_mode_from_required_deliverable
             "expected_evidence": "final.md exists",
             "rationale": "caller requires a file deliverable",
             "deliverable_mode": "inline_final",
+        }
+    )
+
+    assert plan["deliverable_mode"] == "inline_final"
+    assert plan["deliverable_mode_source"] == "planner"
+    assert "required_workspace_deliverables" not in plan
+    assert "prefer_stream_draft" not in plan
+
+
+def test_flat_step_plan_infers_workspace_artifact_mode_when_planner_omits_carrier():
+    task = AgentTask.__new__(AgentTask)
+    task.options = {
+        "execution_prompt_snapshot": {
+            "input": {
+                "case": {
+                    "output_contract": {
+                        "required_deliverables": [{"path": "final.md"}],
+                    }
+                }
+            }
+        }
+    }
+
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "direct",
+            "step_instruction": "write the final file",
+            "expected_evidence": "final.md exists",
+            "rationale": "caller requires a file deliverable",
+            "deliverable_mode": "",
         }
     )
 
@@ -2601,6 +4490,9 @@ async def test_carrier_control_policy_reaches_child_execution_output_format():
         def input(self, payload: dict[str, Any]) -> None:
             self.input_payload = payload
 
+        def info(self, payload: dict[str, Any]) -> None:
+            self.info_payload = payload
+
         def language(self, language: str) -> None:
             self.language_value = language
 
@@ -2626,6 +4518,7 @@ async def test_carrier_control_policy_reaches_child_execution_output_format():
         execution=execution,
         language_policy={"language": "en"},
         input_payload={"task_id": "carrier-format"},
+        info_payload={"goal": "global orientation"},
         instruction="Return a bounded summary.",
         output_schema={"summary": (str, "bounded summary", True)},
         output_format=task._carrier_control_output_format(carrier_policy),
@@ -2636,6 +4529,8 @@ async def test_carrier_control_policy_reaches_child_execution_output_format():
 
     assert execution.output_format == "xml_field"
     assert execution.output_called is True
+    assert execution.input_payload["task_id"] == "carrier-format"
+    assert execution.info_payload == {"goal": "global orientation"}
     assert result == {"summary": "ok"}
     assert meta["status"] == "success"
     assert emitted[0][0] == "agent_task.test.execution.started"
@@ -2662,6 +4557,1483 @@ async def test_carrier_control_policy_reaches_child_execution_output_format():
     assert "return the natural-language body directly as plain text" in free_text_execution.instruction
     assert result == "natural-language body"
     assert meta["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_action_card_separates_work_unit_input_from_task_orientation(
+    tmp_path,
+    monkeypatch,
+):
+    requirement = {
+        "capability_id": "required_probe_action",
+        "capability_kind": "action",
+        "kind": "action_succeeded",
+        "required": True,
+        "source": "criterion",
+    }
+    agent = _create_agent("agent-taskboard-card-boundary").use_workspace(tmp_path / "workspace")
+
+    @agent.action_func
+    def required_probe_action() -> dict[str, bool]:
+        return {"ok": True}
+
+    task = AgentTask(
+        agent,
+        task_id="taskboard-card-boundary",
+        goal="Analyze a three-stock portfolio and write a final risk brief.",
+        success_criteria=["The final brief applies the portfolio mandate."],
+        execution="taskboard",
+        options={
+            "execution_prompt_snapshot": {"input": {"portfolio": ["NVDA", "AMD", "AVGO"]}},
+            "planner_capabilities": [
+                {
+                    "id": "required_probe_action",
+                    "kind": "action",
+                    "route": "model_request",
+                    "guidance_access": "none",
+                    "description": "Produce required probe evidence.",
+                }
+            ],
+            "capability_evidence_requirements": [requirement],
+        },
+    )
+    dependency = TaskBoardCard.from_value(
+        {
+            "id": "source-context",
+            "objective": "Provide the mandate source reference.",
+        }
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "portfolio-mandate",
+            "objective": "Read the portfolio mandate",
+            "depends_on": ["source-context"],
+            "input_refs": ["skills/portfolio-analysis/SKILL.md"],
+            "required_outputs": ["Mandate constraints are available as evidence"],
+            "allowed_execution_shape": "actions",
+            "evidence_contract": {
+                "done_when": "Mandate constraints are available as evidence",
+                "requires_skill_refs": ["skills/portfolio-analysis/SKILL.md"],
+                "capability_evidence_requirements": [requirement],
+                "requires_capability_ids": ["required_probe_action"],
+            },
+            "metadata": {
+                "done_when": "Mandate constraints are available as evidence",
+                "requires_capability_ids": ["required_probe_action"],
+            },
+        }
+    )
+    dependency_result = TaskBoardCardResult(
+        card_id="source-context",
+        status="completed",
+        output_digest="Mandate source is available.",
+        preview={
+            "status": "completed",
+            "answer": "Mandate source is available.",
+            "evidence": ["portfolio mandate source"],
+        },
+        metadata={
+            "evidence_ledger": {
+                "items": [
+                    {
+                        "id": "source-context:mandate",
+                        "kind": "taskboard_evidence",
+                        "status": "ok",
+                        "body_state": "bounded",
+                        "body": "Portfolio mandate source facts.",
+                    }
+                ]
+            }
+        },
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-boundary",
+            "graph": {
+                "graph_id": "taskboard-card-boundary-graph",
+                "cards": [dependency.to_dict(), card.to_dict()],
+            },
+            "card_results": {
+                dependency.id: dependency_result.to_dict(),
+            },
+        }
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={dependency.id: dependency_result},
+        planning_policy=None,
+    )
+    context_pack = {
+        "goal": task.goal,
+        "profile": "normal",
+        "items": [{"id": "global-orientation", "preview": "whole task context"}],
+        "omitted": [],
+        "diagnostics": {},
+        "skills_context_pack": {
+            "skills": [
+                {
+                    "skill_id": "portfolio-analysis",
+                    "guidance": {
+                        "path": "SKILL.md",
+                        "citation": "skills/portfolio-analysis/SKILL.md",
+                        "excerpt": "Read the mandate before analyzing portfolio risk.",
+                    },
+                    "selected_resources": [],
+                }
+            ]
+        },
+    }
+    captured: dict[str, Any] = {}
+
+    class FakeExecution:
+        id = "card-boundary-child"
+
+        def __init__(self) -> None:
+            self.used_action_ids: list[str] = []
+            self.required_action_ids: list[str] = []
+            self.route_policies: list[dict[str, Any]] = []
+            self.request = SimpleNamespace(settings=Settings(name="taskboard-action-card-settings"))
+
+        def use_actions(self, action_ids: list[str]) -> None:
+            self.used_action_ids.extend(action_ids)
+
+        def require_actions(self, action_ids: list[str]) -> None:
+            self.required_action_ids.extend(action_ids)
+
+        def route_policy(self, policy: dict[str, Any]) -> None:
+            self.route_policies.append(policy)
+
+    child_execution = FakeExecution()
+
+    async def capture_bounded_child(**kwargs):
+        captured.update(kwargs)
+        return (
+            {
+                "status": "completed",
+                "answer": "Mandate constraints are available.",
+                "evidence": ["portfolio mandate source"],
+                "remaining_work": [],
+            },
+            {
+                "execution_id": "card-boundary-child",
+                "status": "success",
+                "route": {"selected_route": "model_request", "status": "completed"},
+                "logs": {"action_logs": {}, "route_logs": {}, "errors": []},
+                "diagnostics": [],
+            },
+        )
+
+    async def pass_through_blocks(*_args, **kwargs):
+        captured["work_unit"] = kwargs["work_unit"]
+        captured["carrier_plan"] = kwargs["plan"]
+        handler_result = await kwargs["handler"]({"input": {}})
+        return (
+            handler_result["execution_result"],
+            handler_result["execution_meta"],
+            {},
+        )
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_create_bounded_child_execution",
+        lambda **_kwargs: child_execution,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_run_bounded_child_execution",
+        capture_bounded_child,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_run_work_unit_through_blocks",
+        pass_through_blocks,
+    )
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit_action_observation_events", noop)
+    # This test isolates the fallback child-carrier prompt boundary. Direct and
+    # one-request Action lowering have dedicated tests above.
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_try_taskboard_narrow_action_command_request",
+        noop,
+    )
+
+    result = await task._run_taskboard_agent_card(context, cast(Any, context_pack))
+
+    assert result.status == "completed"
+    assert "goal" not in captured["input_payload"]
+    assert "success_criteria" not in captured["input_payload"]
+    assert "context_pack" not in captured["input_payload"]
+    assert "execution_prompt" not in captured["input_payload"]
+    assert captured["input_payload"]["card"]["id"] == "portfolio-mandate"
+    assert captured["input_payload"]["work_unit_boundary"] == {
+        "card_id": "portfolio-mandate",
+        "objective": "Read the portfolio mandate",
+        "done_when": ["Mandate constraints are available as evidence"],
+        "whole_task_completion_out_of_scope": True,
+    }
+    assert captured["info_payload"]["goal"] == task.goal
+    assert captured["info_payload"]["success_criteria"] == task.success_criteria
+    assert "context_pack" in captured["info_payload"]
+    assert "execution_prompt" in captured["info_payload"]
+    assert captured["input_payload"]["dependency_results"]
+    assert captured["input_payload"]["evidence_ledger"]
+    assert captured["input_payload"]["evidence_ledger"]["items"]
+    for evidence_item in captured["input_payload"]["evidence_ledger"]["items"]:
+        assert evidence_item["reference_id"].startswith("ref_")
+        assert "id" not in evidence_item
+        assert "evidence_id" not in evidence_item
+        assert "cite_as" not in evidence_item
+        assert "aliases" not in evidence_item
+    assert captured["input_payload"]["skill_context_readbacks"][0]["skill_id"] == ("portfolio-analysis")
+    skill_evidence = [
+        item
+        for item in captured["input_payload"]["evidence_ledger"]["items"]
+        if item.get("kind") == "skill_context.readback"
+    ]
+    assert len(skill_evidence) == 1
+    assert skill_evidence[0]["reference_id"].startswith("ref_")
+    assert "Read the mandate" in skill_evidence[0]["body_preview"]
+    work_unit = cast(WorkUnitIntent, captured["work_unit"])
+    carrier_plan = cast(dict[str, Any], captured["carrier_plan"])
+    assert list(work_unit.evidence_requirements) == [
+        {
+            "required_output": "Mandate constraints are available as evidence",
+            "source": "taskboard_card",
+        },
+        requirement,
+    ]
+    assert list(work_unit.capability_scope) == [
+        {
+            "capability_id": "required_probe_action",
+            "capability_kind": "action",
+            "source": "taskboard_card",
+        }
+    ]
+    assert carrier_plan["execution_shape"] == "actions"
+    assert carrier_plan["effective_execution_shape"] == "actions"
+    assert carrier_plan["step_scope"]["allowed_capability_ids"] == ["required_probe_action"]
+    assert carrier_plan["required_action_ids"] == ["required_probe_action"]
+    assert child_execution.used_action_ids == ["required_probe_action"]
+    assert child_execution.required_action_ids == ["required_probe_action"]
+    assert child_execution.request.settings.get("action.loop.max_rounds") == 1
+    assert child_execution.request.settings.get("tool.loop.max_rounds") == 1
+    assert child_execution.route_policies[-1]["allowed_routes"] == ["model_request"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_workspace_artifact_action_card_dispatches_without_actionloop(tmp_path, monkeypatch):
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent("agent-taskboard-direct-artifact-action").use_workspace(
+        workspace_root,
+        mode="read_write",
+    )
+    agent.enable_workspace_file_actions(
+        root=workspace_root,
+        read=True,
+        write=True,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-direct-artifact-action",
+        goal="Write the completed report to final.md.",
+        success_criteria=["final.md contains the completed report."],
+        execution="taskboard",
+        options={
+            "agent_task": {"required_deliverables": [{"path": "final.md"}]},
+            "capability_evidence_requirements": [
+                {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"},
+                {"capability_id": "read_file", "capability_kind": "action", "kind": "action_succeeded"},
+            ],
+        },
+    )
+    source_path = "working/taskboard/synthesize/final.md"
+    source_body = "# Final report\n\nCanonical synthesized body.\n"
+    await task.workspace.write_file(source_path, source_body)
+    dependency = TaskBoardCard.from_value(
+        {"id": "synthesize", "objective": "Synthesize the final report."}
+    )
+    dependency_result = TaskBoardCardResult(
+        card_id=dependency.id,
+        status="completed",
+        file_refs=(
+            {
+                "path": source_path,
+                "role": "workspace_artifact",
+                "available": True,
+            },
+        ),
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "write_output",
+            "objective": "Materialize the synthesized report.",
+            "depends_on": [dependency.id],
+            "allowed_execution_shape": "actions",
+            "required_outputs": ["final.md is written and read back."],
+            "evidence_contract": {
+                "requires_capability_ids": ["write_file"],
+                "capability_evidence_requirements": [
+                    {
+                        "capability_id": "write_file",
+                        "capability_kind": "action",
+                        "kind": "action_succeeded",
+                    }
+                ],
+            },
+            "metadata": {"final_workspace_deliverables": ["final.md"]},
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [dependency.to_dict(), card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={dependency.id: dependency_result},
+        planning_policy=None,
+    )
+    assert task._set_taskboard_planned_workspace_deliverables(revision) == ["final.md"]
+    assert task._required_workspace_deliverables() == ["final.md"]
+    assert task._taskboard_card_action_requirements(card)[0]["capability_id"] == "write_file"
+    assert cast(Any, task.agent).action.action_registry.get_spec("write_file")["meta"]["write"] is True
+    assert task._task_contract_required_action_ids() >= {"write_file", "read_file"}
+
+    action_events: list[Any] = []
+
+    async def capture_action_event(event):
+        if event.event_type in {"action.started", "action.completed", "action.failed"}:
+            action_events.append(event)
+
+    hook_name = "test.taskboard.workspace_artifact_action_events"
+    Agently.event_center.register_hook(capture_action_event, hook_name=hook_name)
+    try:
+        direct = await task._try_taskboard_workspace_artifact_action_transfer(context)
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    assert direct is not None
+    card_output, execution_meta = direct
+    assert card_output["status"] == "completed"
+    assert card_output["artifact_manifest"]["path"] == "final.md"
+    assert task.workspace.inspect_file("final.md")["sha256"] == task.workspace.inspect_file(source_path)["sha256"]
+    action_logs = execution_meta["logs"]["action_logs"]
+    assert [record["action_id"] for record in action_logs] == ["write_file", "read_file"]
+    assert all(record["status"] in {"success", "succeeded"} for record in action_logs)
+    assert execution_meta["route"]["selected_route"] == "action_call"
+    assert execution_meta["diagnostics"][0]["action_planning_model_requests"] == 0
+    assert [event.event_type for event in action_events] == [
+        "action.started",
+        "action.completed",
+        "action.started",
+        "action.completed",
+    ]
+    assert [event.payload["action_name"] for event in action_events] == [
+        "write_file",
+        "write_file",
+        "read_file",
+        "read_file",
+    ]
+
+    async def fail_if_child_agent_runs(*_args, **_kwargs):
+        raise AssertionError("direct artifact transfer must not start a child AgentExecution")
+
+    monkeypatch.setattr(cast(Any, task), "_run_bounded_child_execution", fail_if_child_agent_runs)
+    result = await task._run_taskboard_agent_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    assert task.workspace.inspect_file("final.md")["sha256"] == task.workspace.inspect_file(source_path)["sha256"]
+    assert result.metadata["block_carrier"]["work_unit"]["runtime_preferences"]["plan_block_kind"] == (
+        "action_call"
+    )
+    assert result.metadata["block_carrier"]["block_graph"]["execution_block_kinds"] == [
+        "action_call"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_initial_plan_receives_capability_contract_and_normalizes_final_card(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-initial-capability-contract").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-initial-capability-contract",
+        goal="Write the completed report to final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="taskboard",
+        options={
+            "agent_task": {"required_deliverables": [{"path": "final.md"}]},
+            "capability_evidence_requirements": [
+                {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"},
+                {"capability_id": "read_file", "capability_kind": "action", "kind": "action_succeeded"},
+            ],
+        },
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output"] = value
+            captured["format"] = format
+            return self
+
+        async def async_get_data(self):
+            return {
+                "board_goal": task.goal,
+                "cards": [
+                    {
+                        "id": "finalize",
+                        "action_block": "Synthesize and deliver the report.",
+                        "objective": "Synthesize and deliver the report.",
+                        "depends_on": [],
+                        "done_when": "final.md is complete.",
+                        "allowed_execution_shape": "actions",
+                        "requires_capability_ids": ["write_file"],
+                        "final_workspace_deliverables": ["final.md"],
+                    }
+                ],
+                "completion_gate": "final.md is written and read back.",
+                "why_this_effort_shape": "One bounded finalization card is sufficient.",
+            }
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: FakeRequest())
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_apply_language_policy_to_request",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = await task._request_taskboard_plan(
+        {
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        }
+    )
+
+    requirements = captured["input"]["capability_evidence_requirements"]
+    assert {item["capability_id"] for item in requirements} == {"write_file", "read_file"}
+    assert "exhaustive command batch" in captured["instruct"]
+    assert "final_workspace_deliverables" in captured["instruct"]
+    final_card = result.revision.graph.cards[0]
+    assert final_card.allowed_execution_shape == "control"
+    assert final_card.metadata["final_workspace_deliverables"] == ["final.md"]
+
+
+def test_taskboard_initial_plan_splits_action_commands_from_final_delivery(tmp_path):
+    agent = _create_agent("agent-taskboard-split-initial-final").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+
+    @agent.action_func
+    def get_policy(topic: str) -> dict[str, str]:
+        return {"topic": topic, "policy": "observed"}
+
+    task = AgentTask(
+        agent,
+        task_id="taskboard-split-initial-final",
+        goal="Collect policy evidence and write final.md.",
+        success_criteria=["final.md uses the collected policy evidence."],
+        execution="taskboard",
+    )
+    raw_plan = {
+        "board_goal": task.goal,
+        "cards": [
+            {
+                "id": "gather-synthesize-write",
+                "action_block": "Gather evidence, synthesize it, and write the final report.",
+                "objective": "Gather evidence, synthesize it, and write the final report.",
+                "depends_on": [],
+                "done_when": "final.md is complete.",
+                "allowed_execution_shape": "actions",
+                "requires_capability_ids": ["get_policy", "write_file"],
+                "action_commands": [
+                    {
+                        "purpose": "Collect the required policy.",
+                        "action_id": "get_policy",
+                        "action_input": {"topic": "travel"},
+                    }
+                ],
+                "final_workspace_deliverables": ["final.md"],
+            }
+        ],
+        "completion_gate": "final.md is complete.",
+        "why_this_effort_shape": "One evidence branch feeds one final deliverable.",
+    }
+
+    normalized = task._normalize_taskboard_initial_plan(raw_plan)
+
+    assert [card["id"] for card in normalized["cards"]] == [
+        "gather-synthesize-write",
+        "gather-synthesize-write-finalize",
+    ]
+    action_card, final_card = normalized["cards"]
+    assert action_card["allowed_execution_shape"] == "actions"
+    assert [item["action_id"] for item in action_card["action_commands"]] == ["get_policy"]
+    assert action_card["requires_capability_ids"] == ["get_policy"]
+    assert "final_workspace_deliverables" not in action_card
+    assert final_card["allowed_execution_shape"] == "control"
+    assert final_card["depends_on"] == ["gather-synthesize-write"]
+    assert "action_commands" not in final_card
+    assert final_card["requires_capability_ids"] == ["write_file"]
+    assert final_card["final_workspace_deliverables"] == ["final.md"]
+
+
+def test_taskboard_initial_plan_rejects_undeclared_action_input_keys(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent("agent-taskboard-reject-invalid-action-input").use_workspace(
+        workspace_root,
+        mode="read_write",
+    )
+    agent.enable_workspace_file_actions(
+        root=workspace_root,
+        read=True,
+        write=False,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-reject-invalid-action-input",
+        goal="Read back final.md.",
+        success_criteria=["The read_file Action succeeds."],
+        execution="taskboard",
+    )
+    raw_plan = {
+        "board_goal": task.goal,
+        "cards": [
+            {
+                "id": "read_back_plan",
+                "objective": "Read back final.md.",
+                "allowed_execution_shape": "actions",
+                "requires_capability_ids": ["read_file"],
+                "action_commands": [
+                    {
+                        "purpose": "Read back the final plan.",
+                        "action_id": "read_file",
+                        "action_input": {"filepath": "final.md"},
+                    }
+                ],
+            }
+        ],
+        "completion_gate": "The file is read back.",
+        "why_this_effort_shape": "One bounded Action is sufficient.",
+    }
+
+    normalized = task._normalize_taskboard_initial_plan(raw_plan)
+
+    card = normalized["cards"][0]
+    assert card["allowed_execution_shape"] == "actions"
+    assert card["requires_capability_ids"] == ["read_file"]
+    assert "action_commands" not in card
+    assert normalized["diagnostics"][-1]["code"] == (
+        "taskboard.initial_plan.action_commands_rejected"
+    )
+    assert normalized["diagnostics"][-1]["validation_code"] == "invalid_input_keys"
+
+
+@pytest.mark.asyncio
+async def test_bounded_action_commands_reject_undeclared_input_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent("agent-task-bounded-action-invalid-input").use_workspace(
+        workspace_root,
+        mode="read_write",
+    )
+    agent.enable_workspace_file_actions(
+        root=workspace_root,
+        read=True,
+        write=False,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="bounded-action-invalid-input",
+        goal="Read back final.md.",
+        success_criteria=["The read_file Action succeeds."],
+        execution="taskboard",
+    )
+
+    async def fail_if_dispatched(*_args, **_kwargs):
+        raise AssertionError("invalid Action kwargs must fail before ActionRuntime dispatch")
+
+    monkeypatch.setattr(
+        cast(Any, agent.action),
+        "_async_execute_action_calls",
+        fail_if_dispatched,
+    )
+    result, execution_meta = await task._execute_bounded_action_commands(
+        raw_commands=[
+            {
+                "purpose": "Read back the final plan.",
+                "action_id": "read_file",
+                "action_input": {"filepath": "final.md"},
+            }
+        ],
+        required_action_ids=["read_file"],
+        execution_id="bounded-action-invalid-input:execution",
+        code_prefix="taskboard.action_commands",
+        execution_kind="taskboard_preplanned_action_calls",
+        command_source="taskboard_plan",
+        action_planning_model_requests=0,
+        unit_label="TaskBoard",
+        todo_suggestion="Read the file.",
+    )
+
+    assert result["status"] == "failed"
+    assert execution_meta["logs"]["action_logs"] == []
+    assert execution_meta["diagnostics"][0]["code"] == (
+        "taskboard.action_commands.invalid_input_keys"
+    )
+    assert "filepath" in execution_meta["diagnostics"][0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_control_delivery_uses_required_workspace_actions(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent("agent-taskboard-control-workspace-actions").use_workspace(
+        workspace_root,
+        mode="read_write",
+    )
+    agent.enable_workspace_file_actions(
+        root=workspace_root,
+        read=True,
+        write=True,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-control-workspace-actions",
+        goal="Write the completed report to final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="taskboard",
+        options={
+            "agent_task": {"required_deliverables": [{"path": "final.md"}]},
+            "capability_evidence_requirements": [
+                {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"},
+                {"capability_id": "read_file", "capability_kind": "action", "kind": "action_succeeded"},
+            ],
+        },
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "finalize",
+            "objective": "Synthesize and deliver the final report.",
+            "allowed_execution_shape": "control",
+            "metadata": {"final_workspace_deliverables": ["final.md"]},
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    assert task._set_taskboard_planned_workspace_deliverables(revision) == ["final.md"]
+    body = "# Final report\n\nGrounded synthesized body.\n"
+    card_output = {
+        "status": "completed",
+        "artifact_markdown": body,
+        "artifact_manifest": {"path": "final.md"},
+        "remaining_work": [],
+    }
+    execution_meta: dict[str, Any] = {
+        "status": "completed",
+        "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+    }
+
+    direct = await task._try_taskboard_control_workspace_artifact_actions(
+        context,
+        card_output,
+        execution_meta=execution_meta,
+    )
+
+    assert direct is not None
+    assert direct["status"] == "completed"
+    action_logs = execution_meta["logs"]["action_logs"]
+    assert [record["action_id"] for record in action_logs] == ["write_file", "read_file"]
+    assert all(task._taskboard_direct_action_succeeded(record) for record in action_logs)
+    assert task.workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == body.strip()
+
+    delivered = await task._deliver_workspace_artifact(
+        card_output,
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.taskboard.control.workspace_actions",
+    )
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_control_delivery_preserves_workspace_action_evidence_for_terminal_gate(
+    tmp_path,
+):
+    workspace_root = tmp_path / "workspace"
+    agent = _create_agent("agent-taskboard-control-terminal-action-evidence").use_workspace(
+        workspace_root,
+        mode="read_write",
+    )
+    agent.enable_workspace_file_actions(
+        root=workspace_root,
+        read=True,
+        write=True,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-control-terminal-action-evidence",
+        goal="Write the completed report to final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="taskboard",
+        options={
+            "agent_task": {"required_deliverables": [{"path": "final.md"}]},
+            "capability_evidence_requirements": [
+                {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"},
+                {"capability_id": "read_file", "capability_kind": "action", "kind": "action_succeeded"},
+            ],
+        },
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "synthesis",
+            "objective": "Synthesize and deliver the final report.",
+            "allowed_execution_shape": "control",
+            "metadata": {"final_workspace_deliverables": ["final.md"]},
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    assert task._set_taskboard_planned_workspace_deliverables(revision) == ["final.md"]
+    body = "# Final report\n\nGrounded synthesized body.\n"
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any):
+        work_unit = kwargs["work_unit"]
+        return (
+            {
+                "status": "completed",
+                "sufficient": True,
+                "next_board_action": "finalize",
+                "artifact_markdown": body,
+                "artifact_manifest": {"path": "final.md"},
+                "remaining_work": ["Write artifact_markdown content to final.md."],
+            },
+            {
+                "execution_id": f"{task.id}:taskboard:synthesis:control",
+                "status": "completed",
+                "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+            },
+            WorkUnitResult(id=str(work_unit.id), status="completed"),
+        )
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    result = await task._run_taskboard_control_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    summaries = [
+        diagnostic["evidence_summary"]
+        for diagnostic in result.diagnostics
+        if isinstance(diagnostic, Mapping) and isinstance(diagnostic.get("evidence_summary"), Mapping)
+    ]
+    assert len(summaries) == 1
+    assert [item["id"] for item in summaries[0]["actions"]] == ["write_file", "read_file"]
+    terminal_logs = task._taskboard_final_capability_logs(
+        TaskBoardValidator().apply_patch(
+            revision,
+            {
+                "base_revision": revision.revision_id,
+                "operations": [
+                    {"op": "record_card_result", "result": result.to_dict()}
+                ],
+            },
+        ),
+        context_pack=None,
+    )
+    assert [item["id"] for item in terminal_logs["action_logs"]] == ["write_file", "read_file"]
+    terminal_summary = task._execution_log_summary(
+        {
+            "status": "completed",
+            "effective_options": task._taskboard_verification_options(),
+            "logs": terminal_logs,
+        }
+    )
+    task._accumulate_capability_evidence(terminal_summary)
+    missing, _unenforced = task._evaluate_capability_evidence(terminal_summary)
+    assert missing == []
+
+
+def test_taskboard_planned_workspace_deliverables_reject_escape_paths(tmp_path):
+    task = AgentTask(
+        _create_agent("agent-taskboard-invalid-final-path").use_workspace(
+            tmp_path / "workspace",
+            mode="read_write",
+        ),
+        task_id="taskboard-invalid-final-path",
+        goal="Prepare the requested report.",
+        success_criteria=["The report is delivered."],
+        execution="taskboard",
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {
+                        "id": "write-output",
+                        "objective": "Write the final report.",
+                        "metadata": {
+                            "final_workspace_deliverables": ["../escape.md", "/tmp/escape.md"]
+                        },
+                    }
+                ],
+            }
+        ),
+    )
+
+    assert task._set_taskboard_planned_workspace_deliverables(revision) == []
+    assert task._required_workspace_deliverables() == []
+    assert len(task.diagnostics["taskboard_invalid_final_deliverables"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_taskboard_preplanned_action_commands_dispatch_without_actionloop(tmp_path, monkeypatch):
+    calls: list[str] = []
+    agent = _create_agent("agent-taskboard-preplanned-actions").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+
+    @agent.action_func
+    def market_snapshot(ticker: str) -> dict[str, str]:
+        calls.append(ticker)
+        return {"ticker": ticker, "status": "ok"}
+
+    task = AgentTask(
+        agent,
+        task_id="taskboard-preplanned-actions",
+        goal="Collect market snapshots.",
+        success_criteria=["Snapshots exist for NVDA and AVGO."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "market-data",
+            "objective": "Collect the two market snapshots.",
+            "allowed_execution_shape": "actions",
+            "evidence_contract": {"requires_capability_ids": ["market_snapshot"]},
+            "metadata": {
+                "action_commands": [
+                    {
+                        "purpose": "Collect NVDA snapshot.",
+                        "action_id": "market_snapshot",
+                        "action_input": {"ticker": "NVDA"},
+                    },
+                    {
+                        "purpose": "Collect AVGO snapshot.",
+                        "action_id": "market_snapshot",
+                        "action_input": {"ticker": "AVGO"},
+                    },
+                ]
+            },
+        }
+    )
+
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    action_events: list[Any] = []
+
+    async def capture_action_event(event):
+        if event.event_type in {"action.started", "action.completed", "action.failed"}:
+            action_events.append(event)
+
+    hook_name = "test.taskboard.preplanned_action_events"
+    Agently.event_center.register_hook(capture_action_event, hook_name=hook_name)
+    try:
+        direct = await task._try_taskboard_preplanned_action_calls(context)
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    assert direct is not None
+    card_output, execution_meta = direct
+    assert card_output["status"] == "completed"
+    assert calls == ["NVDA", "AVGO"]
+    assert [record["action_id"] for record in execution_meta["logs"]["action_logs"]] == [
+        "market_snapshot",
+        "market_snapshot",
+    ]
+    assert execution_meta["route"]["selected_route"] == "action_call"
+    assert execution_meta["diagnostics"][0]["action_planning_model_requests"] == 0
+    assert [event.event_type for event in action_events] == [
+        "action.started",
+        "action.started",
+        "action.completed",
+        "action.completed",
+    ]
+    assert [event.payload["action_name"] for event in action_events if event.event_type == "action.completed"] == [
+        "market_snapshot",
+        "market_snapshot",
+    ]
+
+    async def fail_if_child_agent_runs(*_args, **_kwargs):
+        raise AssertionError("preplanned Action commands must not start a child AgentExecution")
+
+    monkeypatch.setattr(cast(Any, task), "_run_bounded_child_execution", fail_if_child_agent_runs)
+    calls.clear()
+    result = await task._run_taskboard_agent_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    assert calls == ["NVDA", "AVGO"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_preplanned_action_commands_fail_closed_for_unknown_action(tmp_path):
+    task = AgentTask(
+        _create_agent("agent-taskboard-preplanned-action-unknown").use_workspace(
+            tmp_path / "workspace",
+            mode="read_write",
+        ),
+        task_id="taskboard-preplanned-action-unknown",
+        goal="Execute the planned Action.",
+        success_criteria=["The exact Action succeeds."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "unknown-action",
+            "objective": "Execute an unavailable Action.",
+            "allowed_execution_shape": "actions",
+            "metadata": {
+                "action_commands": [
+                    {
+                        "purpose": "Must fail closed.",
+                        "action_id": "missing_action",
+                        "action_input": {},
+                    }
+                ]
+            },
+        }
+    )
+
+    direct = await task._try_taskboard_preplanned_action_calls(
+        SimpleNamespace(card=card, dependency_results={})
+    )
+
+    assert direct is not None
+    card_output, execution_meta = direct
+    assert card_output["status"] == "failed"
+    assert execution_meta["status"] == "failed"
+    assert execution_meta["diagnostics"][0]["code"] == "taskboard.action_commands.unknown_action"
+    assert execution_meta["logs"]["action_logs"] == []
+
+
+@pytest.mark.asyncio
+async def test_taskboard_known_action_unknown_args_uses_one_narrow_command_request(
+    tmp_path,
+    monkeypatch,
+):
+    calls: list[str] = []
+    agent = _create_agent("agent-taskboard-narrow-action-command").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+
+    @agent.action_func
+    def market_snapshot(ticker: str) -> dict[str, str]:
+        calls.append(ticker)
+        return {"ticker": ticker, "status": "ok"}
+
+    task = AgentTask(
+        agent,
+        task_id="taskboard-narrow-action-command",
+        goal="Collect the ticker supplied by the upstream card.",
+        success_criteria=["The market snapshot is collected."],
+        execution="taskboard",
+    )
+    dependency = TaskBoardCard.from_value(
+        {"id": "select-ticker", "objective": "Select the ticker."}
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "market-data",
+            "objective": "Collect the selected ticker's market snapshot.",
+            "depends_on": [dependency.id],
+            "allowed_execution_shape": "actions",
+            "evidence_contract": {"requires_capability_ids": ["market_snapshot"]},
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": f"{task.id}.graph",
+                "cards": [dependency.to_dict(), card.to_dict()],
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={
+            dependency.id: TaskBoardCardResult(
+                card_id=dependency.id,
+                status="completed",
+                preview={"ticker": "AVGO"},
+            )
+        },
+        planning_policy=None,
+    )
+
+    class FakeNarrowRequest:
+        def __init__(self):
+            self.prompts: dict[str, Any] = {}
+
+        def input(self, value):
+            self.prompts["input"] = value
+            return self
+
+        def info(self, value):
+            self.prompts["info"] = value
+            return self
+
+        def instruct(self, value):
+            self.prompts["instruct"] = value
+            return self
+
+        def output(self, value, *, format=None):
+            self.prompts["output"] = value
+            self.prompts["output_format"] = format
+            return self
+
+        async def async_get_data(self):
+            return {
+                "action_commands": [
+                    {
+                        "purpose": "Collect the selected market snapshot.",
+                        "action_id": "market_snapshot",
+                        "action_input": {"ticker": "AVGO"},
+                    }
+                ]
+            }
+
+    requests: list[FakeNarrowRequest] = []
+
+    def create_fake_request():
+        request = FakeNarrowRequest()
+        requests.append(request)
+        return request
+
+    monkeypatch.setattr(agent, "create_temp_request", create_fake_request)
+    monkeypatch.setattr(cast(Any, task), "_apply_language_policy_to_request", lambda *_args, **_kwargs: None)
+
+    async def fail_if_child_agent_runs(*_args, **_kwargs):
+        raise AssertionError("known TaskBoard Actions must not start a child AgentExecution")
+
+    monkeypatch.setattr(cast(Any, task), "_run_bounded_child_execution", fail_if_child_agent_runs)
+    result = await task._run_taskboard_agent_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    assert calls == ["AVGO"]
+    assert len(requests) == 1
+    assert requests[0].prompts["info"]["required_action_ids"] == ["market_snapshot"]
+    assert requests[0].prompts["info"]["available_actions"][0]["kwargs"]["ticker"]
+    assert requests[0].prompts["output_format"] == "json"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_required_action_unavailable_fails_before_model_request(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-missing-required-action").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-missing-required-action",
+        goal="Collect a required market snapshot.",
+        success_criteria=["The required Action succeeds."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "market-data",
+            "objective": "Use the required market Action.",
+            "allowed_execution_shape": "actions",
+            "evidence_contract": {"requires_capability_ids": ["missing_market_snapshot"]},
+        }
+    )
+    context = SimpleNamespace(card=card, dependency_results={}, planning_policy=None)
+
+    def unexpected_request():
+        raise AssertionError("Unavailable required Actions must fail before a ModelRequest.")
+
+    monkeypatch.setattr(agent, "create_temp_request", unexpected_request)
+
+    direct = await task._try_taskboard_narrow_action_command_request(
+        context,
+        card_input_payload={"dependency_results": {}},
+    )
+
+    assert direct is not None
+    card_output, execution_meta = direct
+    assert card_output["status"] == "failed"
+    assert execution_meta["status"] == "failed"
+    assert execution_meta["diagnostics"][0]["code"] == (
+        "taskboard.action_commands.required_action_unavailable"
+    )
+    assert execution_meta["diagnostics"][0]["action_planning_model_requests"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flat_preplanned_action_commands_dispatch_without_actionloop(tmp_path, monkeypatch):
+    calls: list[str] = []
+    prepared: dict[str, str] = {}
+    agent = _create_agent("agent-flat-preplanned-actions").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+
+    @agent.action_func
+    async def prepare_policy(path: str) -> dict[str, str]:
+        await asyncio.sleep(0.02)
+        prepared[path] = "bounded policy"
+        calls.append(f"prepare:{path}")
+        return {"path": path, "status": "prepared"}
+
+    @agent.action_func
+    def read_policy(path: str) -> dict[str, str]:
+        calls.append(f"read:{path}")
+        return {"path": path, "content": prepared[path]}
+
+    task = AgentTask(
+        agent,
+        task_id="flat-preplanned-actions",
+        goal="Read the required policy file.",
+        success_criteria=["The prepare_policy and read_policy Actions succeed in order."],
+        execution="flat",
+    )
+
+    async def fail_if_child_agent_runs(*_args, **_kwargs):
+        raise AssertionError("preplanned Flat Action commands must not start a child AgentExecution")
+
+    monkeypatch.setattr(cast(Any, task), "_run_bounded_child_execution", fail_if_child_agent_runs)
+    result, execution_meta = await task._execute_step(
+        1,
+        {
+            "execution_shape": "actions",
+            "effective_execution_shape": "actions",
+            "step_instruction": "Read the required policy file.",
+            "required_action_ids": ["prepare_policy", "read_policy"],
+            "action_commands": [
+                {
+                    "purpose": "Prepare the bounded policy file.",
+                    "action_id": "prepare_policy",
+                    "action_input": {"path": "policy.md"},
+                },
+                {
+                    "purpose": "Read the bounded policy file.",
+                    "action_id": "read_policy",
+                    "action_input": {"path": "policy.md"},
+                }
+            ],
+        },
+        cast(
+            Any,
+            {
+                "goal": task.goal,
+                "items": [],
+                "omitted": [],
+                "profile": "none",
+                "diagnostics": {},
+            },
+        ),
+    )
+
+    assert calls == ["prepare:policy.md", "read:policy.md"]
+    assert result["status"] == "completed"
+    assert execution_meta["route"]["selected_route"] == "action_call"
+    assert execution_meta["diagnostics"][0]["action_planning_model_requests"] == 0
+    assert execution_meta["diagnostics"][0]["command_source"] == "flat_plan"
+    assert execution_meta["diagnostics"][0]["command_concurrency"] == 1
+    assert execution_meta["block_carrier"]["work_unit"]["runtime_preferences"][
+        "plan_block_kind"
+    ] == "action_call"
+    assert [
+        block["kind"]
+        for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]
+    ] == ["action_call"]
+
+
+@pytest.mark.asyncio
+async def test_flat_known_action_unknown_args_uses_one_narrow_command_request(
+    tmp_path,
+    monkeypatch,
+):
+    calls: list[str] = []
+    agent = _create_agent("agent-flat-narrow-action-command").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+
+    @agent.action_func
+    def read_policy(path: str) -> dict[str, str]:
+        calls.append(path)
+        return {"path": path, "content": "bounded policy"}
+
+    task = AgentTask(
+        agent,
+        task_id="flat-narrow-action-command",
+        goal="Read the policy path selected by the planner.",
+        success_criteria=["The read_policy Action succeeds."],
+        execution="flat",
+    )
+
+    class FakeNarrowRequest:
+        def __init__(self):
+            self.prompts: dict[str, Any] = {}
+
+        def input(self, value):
+            self.prompts["input"] = value
+            return self
+
+        def info(self, value):
+            self.prompts["info"] = value
+            return self
+
+        def instruct(self, value):
+            self.prompts["instruct"] = value
+            return self
+
+        def output(self, value, *, format=None):
+            self.prompts["output"] = value
+            self.prompts["output_format"] = format
+            return self
+
+        async def async_get_data(self):
+            return {
+                "action_commands": [
+                    {
+                        "purpose": "Read the selected policy file.",
+                        "action_id": "read_policy",
+                        "action_input": {"path": "policy.md"},
+                    }
+                ]
+            }
+
+    requests: list[FakeNarrowRequest] = []
+
+    def create_fake_request():
+        request = FakeNarrowRequest()
+        requests.append(request)
+        return request
+
+    monkeypatch.setattr(agent, "create_temp_request", create_fake_request)
+    monkeypatch.setattr(cast(Any, task), "_apply_language_policy_to_request", lambda *_args, **_kwargs: None)
+
+    async def fail_if_child_agent_runs(*_args, **_kwargs):
+        raise AssertionError("known Flat Actions must not start a child AgentExecution")
+
+    monkeypatch.setattr(cast(Any, task), "_run_bounded_child_execution", fail_if_child_agent_runs)
+    result, execution_meta = await task._execute_step(
+        2,
+        {
+            "execution_shape": "actions",
+            "effective_execution_shape": "actions",
+            "step_instruction": "Call read_policy with path='policy.md'.",
+            "required_action_ids": ["read_policy"],
+        },
+        cast(
+            Any,
+            {
+                "goal": task.goal,
+                "items": [],
+                "omitted": [],
+                "profile": "none",
+                "diagnostics": {},
+            },
+        ),
+    )
+
+    assert calls == ["policy.md"]
+    assert result["status"] == "completed"
+    assert len(requests) == 1
+    assert requests[0].prompts["info"]["required_action_ids"] == ["read_policy"]
+    assert [item["name"] for item in requests[0].prompts["info"]["available_actions"]] == [
+        "read_policy"
+    ]
+    assert requests[0].prompts["output_format"] == "json"
+    assert execution_meta["route"]["selected_route"] == "action_call"
+    assert execution_meta["diagnostics"][0]["action_planning_model_requests"] == 1
+
+
+@pytest.mark.asyncio
+async def test_flat_required_action_unavailable_fails_before_model_request(tmp_path, monkeypatch):
+    agent = _create_agent("agent-flat-missing-required-action").use_workspace(
+        tmp_path / "workspace",
+        mode="read_write",
+    )
+    task = AgentTask(
+        agent,
+        task_id="flat-missing-required-action",
+        goal="Run the required Action.",
+        success_criteria=["The required Action succeeds."],
+        execution="flat",
+    )
+
+    def unexpected_request():
+        raise AssertionError("Unavailable Flat Actions must fail before a ModelRequest")
+
+    monkeypatch.setattr(agent, "create_temp_request", unexpected_request)
+    result, execution_meta = await task._execute_step(
+        1,
+        {
+            "execution_shape": "actions",
+            "effective_execution_shape": "actions",
+            "step_instruction": "Run the unavailable Action.",
+            "required_action_ids": ["missing_action"],
+        },
+        cast(
+            Any,
+            {
+                "goal": task.goal,
+                "items": [],
+                "omitted": [],
+                "profile": "none",
+                "diagnostics": {},
+            },
+        ),
+    )
+
+    assert result["status"] == "failed"
+    assert execution_meta["status"] == "failed"
+    assert execution_meta["diagnostics"][0]["code"] == (
+        "agent_task.flat.action_commands.required_action_unavailable"
+    )
+    assert execution_meta["diagnostics"][0]["action_planning_model_requests"] == 0
+
+
+def test_blocks_carrier_preserves_work_unit_capability_contract(tmp_path):
+    requirement = {
+        "capability_id": "required_probe_action",
+        "capability_kind": "action",
+        "kind": "action_succeeded",
+        "required": True,
+        "source": "criterion",
+    }
+    task = AgentTask(
+        _create_agent("agent-blocks-work-unit-capability").use_workspace(tmp_path / "workspace"),
+        task_id="blocks-work-unit-capability",
+        goal="Produce exact Action evidence.",
+        success_criteria=["The required Action succeeds."],
+    )
+    work_unit = WorkUnitIntent(
+        id="work-unit-capability",
+        origin="taskboard_card",
+        objective="Call the required Action.",
+        evidence_requirements=(requirement,),
+        capability_scope=(
+            {
+                "capability_id": "required_probe_action",
+                "capability_kind": "action",
+                "source": "taskboard_card",
+            },
+        ),
+        runtime_preferences={"preferred_execution_shape": "actions"},
+    )
+    plan = {
+        "execution_shape": "actions",
+        "effective_execution_shape": "actions",
+        "step_scope": {},
+    }
+
+    execution_plan = task._build_blocks_execution_plan(
+        work_unit,
+        plan,
+        cast(Any, {"items": [], "profile": "normal"}),
+    )
+    resolution = task._blocks_capability_resolution(plan, work_unit=work_unit)
+
+    assert list(execution_plan.evidence_requirements) == [requirement]
+    assert list(resolution.allowed_capabilities) == ["required_probe_action"]
+    assert list(resolution.scoped_action_candidates) == [
+        {
+            "action_id": "required_probe_action",
+            "capability_id": "required_probe_action",
+            "source": "AgentTask.work_unit",
+        }
+    ]
 
 
 def test_taskboard_prompt_compaction_drops_recursive_block_carrier_payload():
@@ -2960,9 +6332,9 @@ def test_agent_task_compacts_grounding_guard_for_verifier_prompt():
 
     assert compact_valid["valid"] is True
     assert compact_valid["available_evidence_count"] == 30
-    assert len(compact_valid["available_evidence_id_sample"]) == 16
+    assert "available_evidence_id_sample" not in compact_valid
     assert "available_evidence_refs" not in compact_valid
-    assert compact_valid["normalized_evidence_use"][0]["claim"] == "supported"
+    assert "normalized_evidence_use" not in compact_valid
 
     blocking_guard = dict(valid_guard)
     blocking_guard.update(
@@ -2975,8 +6347,40 @@ def test_agent_task_compacts_grounding_guard_for_verifier_prompt():
     compact_blocking = AgentTask._compact_grounding_guard_for_verifier(blocking_guard)
 
     assert compact_blocking["valid"] is False
-    assert len(compact_blocking["available_evidence_refs"]) == 25
-    assert compact_blocking["available_evidence_refs"][0]["aliases"][-1] == "... omitted 4 aliases"
+    assert compact_blocking["available_evidence_count"] == 30
+    assert compact_blocking["diagnostics"] == [
+        {"code": "evidence_ledger.invalid_evidence_id", "blocking": True}
+    ]
+    assert "available_evidence_refs" not in compact_blocking
+
+
+def test_agent_task_verifier_evidence_summary_strips_source_selection_ids():
+    compact = AgentTask._compact_verifier_evidence_summary(
+        {
+            "source_refs": [
+                {
+                    "reference_id": "ref_A",
+                    "id": "source-A",
+                    "evidence_id": "evidence-A",
+                    "cite_as": "e1",
+                    "selection_key": "candidate-1",
+                    "path": "sources/a.md",
+                    "status": "ok",
+                    "body_state": "bounded",
+                }
+            ]
+        }
+    )
+
+    assert compact == {
+        "source_refs": [
+            {
+                "path": "sources/a.md",
+                "status": "ok",
+                "body_state": "bounded",
+            }
+        ]
+    }
 
 
 class MockAgentTaskRequester:
@@ -2984,6 +6388,32 @@ class MockAgentTaskRequester:
     DEFAULT_SETTINGS: dict[str, object] = {}
     calls: list[str] = []
     verification_calls = 0
+
+    def __init_subclass__(cls, **kwargs: Any):
+        super().__init_subclass__(**kwargs)
+        original = cls.__dict__.get("request_model")
+        if original is None:
+            return
+
+        async def request_model_with_semantic_contract(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" not in text:
+                async for event in original(self, request_data):
+                    yield event
+                return
+            events = [event async for event in original(self, request_data)]
+            response_text = "".join(str(data) for event, data in events if event == "message")
+            try:
+                payload = json.loads(response_text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                for event in events:
+                    yield event
+                return
+            if isinstance(payload, Mapping):
+                payload = self._complete_semantic_verifier_fixture(text, dict(payload))
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+        cls.request_model = request_model_with_semantic_contract
 
     def __init__(self, prompt, settings):
         self.prompt = prompt
@@ -3010,6 +6440,48 @@ class MockAgentTaskRequester:
             request_options={"stream": True},
             request_url="mock://agent-task",
         )
+
+    @staticmethod
+    def _complete_semantic_verifier_fixture(
+        text: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Complete old mock verdicts with the current structural contract.
+
+        This is a deterministic test transport fixture, not semantic proof. The
+        dedicated verifier tests provide explicit supported/derived/failed
+        claim judgments; lifecycle tests use an empty material-claim audit.
+        """
+
+        criterion_ids = list(
+            dict.fromkeys(re.findall(r"criterion:\d+", text))
+        )
+        satisfied = payload.get("is_complete") is True and not payload.get("missing_criteria")
+        raw_checks = payload.get("criterion_checks")
+        if not isinstance(raw_checks, list) or len(raw_checks) != len(criterion_ids):
+            payload["criterion_checks"] = [
+                {
+                    "criterion_id": criterion_id,
+                    "satisfied": satisfied,
+                    "summary": str(payload.get("reason") or "Synthetic lifecycle verifier fixture."),
+                    "gaps": list(payload.get("missing_criteria") or []) if not satisfied else [],
+                    "evidence_ids": [],
+                }
+                for criterion_id in criterion_ids
+            ]
+        else:
+            normalized_checks: list[dict[str, Any]] = []
+            for index, raw_check in enumerate(raw_checks):
+                check = dict(raw_check) if isinstance(raw_check, Mapping) else {}
+                check["criterion_id"] = criterion_ids[index]
+                check.setdefault("satisfied", satisfied)
+                check.setdefault("summary", str(payload.get("reason") or "Synthetic lifecycle verifier fixture."))
+                check.setdefault("evidence_ids", [])
+                normalized_checks.append(check)
+            payload["criterion_checks"] = normalized_checks
+        payload.setdefault("material_claim_coverage_complete", True)
+        payload.setdefault("material_claim_checks", [])
+        return payload
 
     async def request_model(self, request_data: AgentlyRequestData):
         text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
@@ -3075,6 +6547,8 @@ class MockAgentTaskRequester:
             }
         else:
             payload = {"answer": "ok"}
+        if "Verify the task against every success criterion" in text:
+            payload = self._complete_semantic_verifier_fixture(text, payload)
         yield "message", json.dumps(payload, ensure_ascii=False)
 
     async def broadcast_response(
@@ -3094,6 +6568,7 @@ def _create_agent(name: str = "agent-task-loop-test"):
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{name}-plugins")
     plugin_manager.register("ModelRequester", MockAgentTaskRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
+
 
 def test_agent_task_terminal_final_result_is_bounded_and_file_body_free(tmp_path):
     agent = _create_agent("agent-task-terminal-result-bounds").use_workspace(tmp_path / "workspace")
@@ -3117,11 +6592,17 @@ def test_agent_task_terminal_final_result_is_bounded_and_file_body_free(tmp_path
     assert callable(compact), "AgentTask must own one bounded terminal final_result compactor."
 
     file_result = cast(Any, compact)(body, trusted_file_refs=[file_ref])
+    summary_result = cast(Any, compact)(
+        "Compact summary returned separately from the file body.",
+        trusted_file_refs=[file_ref],
+        preserve_value=True,
+    )
     natural_result = cast(Any, compact)("BUSINESS_RESULT_START\n" + ("useful detail\n" * 800))
 
     assert isinstance(file_result, str)
     assert file_result.startswith("Workspace artifact delivered at reports/final.md")
     assert "FILE_BODY_MUST_NOT_REACH_TERMINAL_RESULT" not in file_result
+    assert summary_result == "Compact summary returned separately from the file body."
     assert isinstance(natural_result, Mapping)
     assert natural_result["truncated"] is True
     assert str(natural_result["preview"]).startswith("BUSINESS_RESULT_START")
@@ -3182,7 +6663,10 @@ async def test_agent_task_terminal_retention_accepts_verified_zero_byte_file(tmp
     promoted = await task._register_terminal_deliverables(selected)
 
     assert len(promoted) == 1
-    assert promoted[0] == file_ref
+    assert promoted[0]["path"] == file_ref["path"]
+    assert promoted[0]["sha256"] == file_ref["sha256"]
+    assert str(promoted[0].get("locator_id") or "").startswith("loc_")
+    assert str(promoted[0].get("content_version_id") or "").startswith("cv_")
     assert not (task.workspace.root / ".agently" / "workspace.db").exists()
 
 
@@ -3304,12 +6788,13 @@ async def test_agent_task_workspace_artifact_delivery_writes_and_readbacks(tmp_p
     assert delivered["artifact_markdown"].startswith("Workspace artifact delivered at reports/final.md")
     assert delivered["artifact_preview"].startswith("# Actual Report")
     assert delivered["workspace_artifact_content_omitted"][0]["field"] == "artifact_markdown"
-    assert task._workspace_artifact_display_path(
-        execution_meta["logs"]["artifact_refs"][0]["path"]
-    ) == "reports/final.md"
-    assert task._workspace_artifact_display_path(
-        execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"]
-    ) == "reports/final.md"
+    assert (
+        task._workspace_artifact_display_path(execution_meta["logs"]["artifact_refs"][0]["path"]) == "reports/final.md"
+    )
+    assert (
+        task._workspace_artifact_display_path(execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"])
+        == "reports/final.md"
+    )
     ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
     artifact_item = next(item for item in ledger_items if item["kind"] == "workspace_artifact.readback")
     assert artifact_item["status"] == "ok"
@@ -3578,9 +7063,8 @@ async def test_taskboard_required_final_deliverable_promotion_replaces_stale_tar
     )
     await task.workspace.write_file("final.md", "Summary only.")
     await task.workspace.write_file("working/taskboard/design-questions/final.md", "# Draft\n\nShorter draft.")
-    full_body = (
-        "# Complete Deliverable\n\n"
-        + "\n".join(f"Section {index}: " + ("complete body " * 20) for index in range(80))
+    full_body = "# Complete Deliverable\n\n" + "\n".join(
+        f"Section {index}: " + ("complete body " * 20) for index in range(80)
     )
     await task.workspace.write_file("working/taskboard/coverage-and-finalize/final.md", full_body)
 
@@ -3617,9 +7101,7 @@ async def test_taskboard_required_final_deliverable_promotion_replaces_stale_tar
 
 @pytest.mark.asyncio
 async def test_taskboard_required_final_deliverable_promotion_uses_unique_trusted_source(tmp_path):
-    agent = _create_agent("agent-taskboard-final-deliverable-unique-source").use_workspace(
-        tmp_path / "workspace"
-    )
+    agent = _create_agent("agent-taskboard-final-deliverable-unique-source").use_workspace(tmp_path / "workspace")
     task = AgentTask(
         agent,
         task_id="taskboard-final-deliverable-unique-source",
@@ -3658,9 +7140,7 @@ async def test_taskboard_required_final_deliverable_promotion_uses_unique_truste
 
 @pytest.mark.asyncio
 async def test_taskboard_required_final_deliverable_promotion_uses_repair_source_over_existing_target(tmp_path):
-    agent = _create_agent("agent-taskboard-final-deliverable-repair-source").use_workspace(
-        tmp_path / "workspace"
-    )
+    agent = _create_agent("agent-taskboard-final-deliverable-repair-source").use_workspace(tmp_path / "workspace")
     task = AgentTask(
         agent,
         task_id="taskboard-final-deliverable-repair-source",
@@ -3743,12 +7223,14 @@ async def test_workspace_intermediate_artifact_stays_ref_backed_without_satisfyi
     bounded_read = await workspace.read_file("working/search-notes.md", max_bytes=80)
 
     assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "working/search-notes.md"
-    assert task._workspace_artifact_display_path(
-        execution_meta["logs"]["artifact_refs"][0]["path"]
-    ) == "working/search-notes.md"
-    assert task._workspace_artifact_display_path(
-        execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"]
-    ) == "working/search-notes.md"
+    assert (
+        task._workspace_artifact_display_path(execution_meta["logs"]["artifact_refs"][0]["path"])
+        == "working/search-notes.md"
+    )
+    assert (
+        task._workspace_artifact_display_path(execution_meta["workspace_refs"]["agent_task_artifacts"][0]["path"])
+        == "working/search-notes.md"
+    )
     assert bounded_read["ok"] is True
     assert bounded_read["truncated"] is True
     assert bounded_read["content"].startswith("# Search Notes")
@@ -3905,6 +7387,158 @@ async def test_agent_task_workspace_artifact_delivery_waits_for_remaining_work(t
 
 
 @pytest.mark.asyncio
+async def test_taskboard_completed_sufficient_leaf_materializes_declared_path_before_verifier_handoff(tmp_path):
+    agent = _create_agent("taskboard-leaf-delivery-handoff").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-leaf-delivery-handoff",
+        goal="Write the final report.",
+        success_criteria=["The report is available through trusted Workspace readback."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "synthesize",
+            "objective": "Synthesize and deliver the final report.",
+            "required_outputs": ["final.md"],
+            "allowed_execution_shape": "control",
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    body = "# Final Report\n\nComplete candidate body ready for delivery.\n"
+    output = {
+        "status": "completed",
+        "sufficient": True,
+        "next_board_action": "finalize",
+        "candidate_final_result": body,
+        "artifact_manifest": {"path": "final.md"},
+        "remaining_work": ["Materialize and read back final.md before terminal verification."],
+        "ready_for_final_verification": False,
+    }
+
+    assert task._taskboard_control_output_allows_workspace_delivery(output) is True
+    prepared, plan = task._prepare_taskboard_workspace_artifact_delivery(
+        output,
+        context,
+        deliverable_mode="workspace_artifact",
+    )
+    assert prepared["artifact_manifest"]["path"] == "final.md"
+
+    delivered = await task._deliver_workspace_artifact(
+        prepared,
+        plan=plan,
+        execution_meta={"logs": {}},
+        source="test.taskboard.completed_leaf",
+        card_context=context,
+    )
+
+    assert task.workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == body.strip()
+    assert not task.workspace.resolve_file_path("working/taskboard/synthesize/final.md").exists()
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
+    assert delivered["remaining_work"] == []
+    assert delivered["ready_for_final_verification"] is True
+    assert delivered["workspace_artifact_delivery"]["remaining_work_handoff"]["status"] == (
+        "handed_to_terminal_verification"
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_leaf_adopts_trusted_dependency_artifact_without_redrafting(tmp_path):
+    agent = _create_agent("taskboard-leaf-adopt-dependency-artifact").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-leaf-adopt-dependency-artifact",
+        goal="Verify the already delivered report.",
+        success_criteria=["The existing final.md remains the authoritative deliverable."],
+        execution="taskboard",
+    )
+    original_body = "# Final Report\n\nTrusted dependency-owned body.\n"
+    written = await task.workspace.write_file("final.md", original_body, append=False)
+    trusted_ref = {
+        "path": "final.md",
+        "role": "workspace_artifact",
+        "source": "agent_task.taskboard.card.write_plan.workspace_artifact",
+        "bytes": written["bytes"],
+        "sha256": written["sha256"],
+        "available": True,
+    }
+    dependency_result = TaskBoardCardResult(
+        card_id="write_plan",
+        status="completed",
+        artifact_refs=(trusted_ref,),
+        file_refs=(trusted_ref,),
+    )
+    verify_card = TaskBoardCard.from_value(
+        {
+            "id": "verify_plan",
+            "objective": "Verify final.md through its trusted dependency readback.",
+            "depends_on": ["write_plan"],
+            "allowed_execution_shape": "actions",
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {
+                        "id": "write_plan",
+                        "objective": "Write final.md.",
+                        "allowed_execution_shape": "control",
+                    },
+                    verify_card.to_dict(),
+                ],
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        card=verify_card,
+        revision=revision,
+        dependency_results={"write_plan": dependency_result},
+        planning_policy=None,
+    )
+
+    async def fail_if_redrafted(**_kwargs):
+        raise AssertionError("A trusted dependency artifact must not be model-redrafted.")
+
+    task._stream_workspace_artifact_draft = fail_if_redrafted
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "status": "completed",
+            "answer": "The dependency artifact is readable.",
+            "artifact_manifest": {
+                "path": "final.md",
+                "sections": [{"id": "report", "title": "Final report"}],
+            },
+            "file_refs": [{"path": "final.md", "role": "workspace_artifact"}],
+        },
+        plan={"deliverable_mode": "sectioned_workspace_artifact"},
+        execution_meta={"logs": {}},
+        source="agent_task.taskboard.card.verify_plan.workspace_artifact",
+        card_context=context,
+    )
+
+    assert task.workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == original_body
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+    assert delivered["workspace_artifact_delivery"]["candidate_source"] == (
+        "taskboard_context.dependency_results"
+    )
+    assert delivered["file_refs"][0]["sha256"] == written["sha256"]
+
+
+@pytest.mark.asyncio
 async def test_agent_task_workspace_artifact_delivery_adopts_successful_action_written_file(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-action-adopt")
     task = AgentTask.__new__(AgentTask)
@@ -3958,9 +7592,10 @@ async def test_agent_task_workspace_artifact_delivery_adopts_successful_action_w
 
     assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
     assert delivered["workspace_artifact_delivery"]["content_key"] == "action_file_ref"
-    assert task._workspace_artifact_display_path(
-        delivered["workspace_artifact_delivery"]["readback"]["path"]
-    ) == "final.md"
+    assert (
+        task._workspace_artifact_display_path(delivered["workspace_artifact_delivery"]["readback"]["path"])
+        == "final.md"
+    )
     assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
     assert delivered["file_refs"][0]["sha256"]
     assert delivered["artifact_preview"].startswith("# Existing Action Report")
@@ -3968,15 +7603,113 @@ async def test_agent_task_workspace_artifact_delivery_adopts_successful_action_w
     assert delivered["ready_for_final_verification"] is True
     assert delivered["workspace_artifact_remaining_work_handoff"]["status"] == "handed_to_terminal_verification"
     assert delivered["diagnostics"][-1]["code"] == "agent_task.workspace_artifact.action_file_adopted"
-    assert task._workspace_artifact_display_path(
-        execution_meta["logs"]["artifact_refs"][0]["path"]
-    ) == "final.md"
+    assert task._workspace_artifact_display_path(execution_meta["logs"]["artifact_refs"][0]["path"]) == "final.md"
     ledger_items = execution_meta["blocks"]["evidence"]["evidence_items"]
     assert any(
         item["kind"] == "workspace_artifact.readback"
         and task._workspace_artifact_display_path(item["path"]) == "final.md"
         for item in ledger_items
     )
+
+
+@pytest.mark.asyncio
+async def test_workspace_artifact_action_write_owns_target_over_model_returned_body(
+    tmp_path,
+):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-action-owner")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-action-owner"
+    task.workspace = workspace
+    task.diagnostics = {}
+    task.success_criteria = ["The Action-written final artifact is preserved."]
+    task.options = {}
+
+    action_body = "# Action-owned report\n\nThe write_file Action produced this body.\n"
+    model_body = "# Conflicting model body\n\nThis must not silently overwrite the Action result.\n"
+    write_result = await workspace.write_file("final.md", action_body, append=False)
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_file",
+                    "status": "success",
+                    "result_preview": write_result,
+                    "file_refs": write_result["file_refs"],
+                }
+            ]
+        },
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "status": "completed",
+            "candidate_final_result": model_body,
+            "artifact_manifest": {"path": "final.md"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.workspace_artifact.action_owner",
+    )
+
+    assert workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == action_body
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+    assert delivered["file_refs"][0]["sha256"] == write_result["sha256"]
+    assert any(
+        item.get("code")
+        == "agent_task.workspace_artifact.action_file_preferred_over_model_body"
+        for item in delivered["diagnostics"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_task_inline_result_adopts_explicit_action_written_artifact_without_overwrite(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-inline-action-adopt")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-inline-action-adopt"
+    task.workspace = workspace
+    task.diagnostics = {}
+    task.success_criteria = ["The final artifact is available through trusted Workspace readback."]
+    task.options = {}
+
+    body = "# Existing Action Report\n\nFile-backed body written by the Action.\n"
+    summary = "Compact inline summary returned separately."
+    await workspace.write_file("final.md", body, append=False)
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_file",
+                    "status": "success",
+                    "result_preview": {
+                        "ok": True,
+                        "mode": "write",
+                        "path": "final.md",
+                        "file_refs": [{"path": "final.md", "role": "output"}],
+                    },
+                    "file_refs": [{"path": "final.md", "role": "output"}],
+                }
+            ]
+        },
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "candidate_final_result": summary,
+            "artifact_manifest": {"path": "final.md"},
+        },
+        plan={"deliverable_mode": "inline_final"},
+        execution_meta=execution_meta,
+        source="agent_task.iteration.1.workspace_artifact",
+    )
+
+    written = workspace.resolve_file_path("final.md").read_text(encoding="utf-8")
+    assert written == body
+    assert delivered["candidate_final_result"] == summary
+    assert delivered["workspace_artifact_delivery"]["status"] == "adopted_existing"
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
+    assert delivered["file_refs"][0]["sha256"]
 
 
 @pytest.mark.asyncio
@@ -4018,10 +7751,71 @@ async def test_agent_task_workspace_artifact_delivery_does_not_adopt_missing_act
 
     assert delivered.get("file_refs") == []
     assert delivered["remaining_work"] == ["Retry or replan after execution failure."]
-    assert "workspace_artifact_delivery" not in delivered
+    assert delivered["status"] == "blocked"
+    assert delivered["workspace_artifact_delivery"]["status"] == "failed"
     diagnostic_codes = [item["code"] for item in delivered["diagnostics"]]
     assert "agent_task.workspace_artifact.action_file_readback_failed" in diagnostic_codes
-    assert "agent_task.workspace_artifact.awaiting_body" in diagnostic_codes
+    assert (
+        "agent_task.workspace_artifact.action_file_owner_readback_failed"
+        in diagnostic_codes
+    )
+
+
+@pytest.mark.asyncio
+async def test_action_owned_manifest_path_does_not_fall_back_to_another_action_file(
+    tmp_path,
+):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-exact-owner")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-exact-owner"
+    task.workspace = workspace
+    task.diagnostics = {}
+    task.success_criteria = ["Deliver final.md from its owning file Action."]
+    task.options = {}
+
+    other_result = await workspace.write_file(
+        "notes.md",
+        "# Notes\n\nThis is not the declared deliverable.\n",
+        append=False,
+    )
+    execution_meta = {
+        "status": "completed",
+        "logs": {
+            "action_logs": [
+                {
+                    "action_id": "write_file",
+                    "status": "success",
+                    "result_preview": {
+                        "path": "final.md",
+                        "bytes": 100,
+                        "sha256": "f" * 64,
+                    },
+                },
+                {
+                    "action_id": "write_file",
+                    "status": "success",
+                    "result_preview": other_result,
+                    "file_refs": other_result["file_refs"],
+                },
+            ]
+        },
+    }
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "status": "completed",
+            "candidate_final_result": "# Model fallback\n\nMust not be used.\n",
+            "artifact_manifest": {"path": "final.md"},
+        },
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_meta=execution_meta,
+        source="test.workspace_artifact.exact_action_owner",
+    )
+
+    assert delivered["status"] == "blocked"
+    assert delivered["file_refs"] == []
+    assert delivered["workspace_artifact_delivery"]["status"] == "failed"
+    assert delivered["artifact_manifest"]["path"] == "final.md"
 
 
 @pytest.mark.asyncio
@@ -4061,9 +7855,7 @@ async def test_agent_task_workspace_artifact_delivery_uses_full_markdown_body_fr
     assert delivered["ready_for_final_verification"] is True
     assert delivered["evidence"][1].startswith("Workspace artifact delivered at reports/final.md")
     assert delivered["workspace_artifact_content_omitted"][0]["field"] == "evidence[1]"
-    assert delivered["diagnostics"][-1]["code"] == (
-        "agent_task.workspace_artifact.remaining_work_handed_to_verifier"
-    )
+    assert delivered["diagnostics"][-1]["code"] == ("agent_task.workspace_artifact.remaining_work_handed_to_verifier")
 
 
 @pytest.mark.asyncio
@@ -4133,6 +7925,63 @@ async def test_agent_task_workspace_artifact_delivery_preserves_existing_full_bo
 
 
 @pytest.mark.asyncio
+async def test_agent_task_inline_final_does_not_overwrite_workspace_artifact(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-inline-result")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-inline-result"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    report = "# Complete Report\n\nThis is the file-backed deliverable."
+    summary = "Compact returned summary; this is not the file-backed report body."
+    await workspace.write_file("final.md", report)
+
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "candidate_final_result": summary,
+            "artifact_manifest": {"path": "final.md"},
+        },
+        plan={"deliverable_mode": "inline_final"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact.inline_result",
+    )
+
+    written = workspace.resolve_file_path("final.md").read_text(encoding="utf-8")
+    assert written == report
+    assert delivered["candidate_final_result"] == summary
+    assert delivered["file_refs"] == []
+    assert "workspace_artifact_delivery" not in delivered
+
+
+@pytest.mark.asyncio
+async def test_agent_task_inline_final_preserves_summary_when_explicit_artifact_body_is_written(tmp_path):
+    workspace = Agently.create_workspace(tmp_path / "workspace-artifact-inline-body")
+    task = AgentTask.__new__(AgentTask)
+    task.id = "workspace-artifact-inline-body"
+    task.workspace = workspace
+    task.diagnostics = {}
+
+    report = "# Complete Report\n\nThis is the explicit file-backed deliverable body."
+    summary = "Compact returned summary for the completed report."
+    delivered = await task._deliver_workspace_artifact(
+        {
+            "candidate_final_result": summary,
+            "artifact_markdown": report,
+            "artifact_manifest": {"path": "final.md"},
+        },
+        plan={"deliverable_mode": "inline_final"},
+        execution_meta={"logs": {}},
+        source="test.workspace_artifact.inline_body",
+    )
+
+    written = workspace.resolve_file_path("final.md").read_text(encoding="utf-8")
+    assert written == report
+    assert delivered["candidate_final_result"] == summary
+    assert delivered["workspace_artifact_delivery"]["status"] == "delivered"
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
+
+
+@pytest.mark.asyncio
 async def test_agent_task_workspace_artifact_outline_sections_trigger_stream_draft(tmp_path):
     workspace = Agently.create_workspace(tmp_path / "workspace-artifact-outline-sections")
     task = AgentTask.__new__(AgentTask)
@@ -4143,9 +7992,7 @@ async def test_agent_task_workspace_artifact_outline_sections_trigger_stream_dra
     task.workspace = workspace
     task.diagnostics = {}
 
-    old_body = "# Complete Report\n\nUnsupported source: https://example.test/old\n" + (
-        "Existing body.\n" * 200
-    )
+    old_body = "# Complete Report\n\nUnsupported source: https://example.test/old\n" + ("Existing body.\n" * 200)
     replacement_body = "# Complete Report\n\nSupported source: https://example.test/source\n"
     await workspace.write_file("reports/final.md", old_body)
 
@@ -4390,7 +8237,8 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
                 self.__class__.verify_text = text
                 assert "trusted_workspace_artifacts" in text
                 assert "source-grounded Workspace artifacts" in text
-                assert "trusted_workspace_artifacts.readback.content" in text
+                assert "body-light Workspace location/status index" in text
+                assert "trusted_workspace_artifacts.readback.content" not in text
                 assert "acceptance-point evidence review" in text
                 assert "whole-document editorial review" in text
                 assert "evidence_ledger" in text
@@ -4404,6 +8252,22 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
                     "replan_instruction": "",
                     "final_result_required": True,
                     "final_result": "",
+                    "criterion_checks": [
+                        {
+                            "criterion_id": "criterion:1",
+                            "satisfied": True,
+                            "summary": "The report file was written and read back.",
+                            "evidence_ids": [],
+                        },
+                        {
+                            "criterion_id": "criterion:2",
+                            "satisfied": True,
+                            "summary": "The artifact includes its concrete source URL.",
+                            "evidence_ids": [],
+                        },
+                    ],
+                    "material_claim_coverage_complete": True,
+                    "material_claim_checks": [],
                 }
             elif "Plan the next bounded AgentExecution step" in text:
                 payload = {
@@ -4461,9 +8325,7 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
     assert result["final_result"].startswith("Workspace artifact delivered at reports/final.md")
     assert len(result["artifact_refs"]) == 1
     assert result["artifact_refs"][0]["type"] == "file"
-    assert AgentTask._workspace_artifact_display_path(
-        result["artifact_refs"][0]["path"]
-    ) == "reports/final.md"
+    assert AgentTask._workspace_artifact_display_path(result["artifact_refs"][0]["path"]) == "reports/final.md"
     assert not (tmp_path / "task-workspace" / ".agently" / "workspace.db").exists()
     assert "verification" not in result
     assert "iterations" not in result
@@ -4476,7 +8338,8 @@ async def test_verification_accepts_trusted_workspace_artifact_without_inline_fi
     assert verification["is_complete"] is True
     assert verification["final_result_via_workspace_artifact"] is True
     assert "final_result_missing" not in verification.get("guard_reasons", [])
-    assert WorkspaceArtifactPointerRequester.tail_marker not in WorkspaceArtifactPointerRequester.verify_text
+    assert WorkspaceArtifactPointerRequester.tail_marker in WorkspaceArtifactPointerRequester.verify_text
+    assert "material_claim_candidates" in WorkspaceArtifactPointerRequester.verify_text
 
 
 @pytest.mark.asyncio
@@ -4560,9 +8423,7 @@ async def test_agent_task_workspace_artifact_refs_survive_incomplete_verificatio
     assert await task.async_get_text() == result["final_response"]
     delivery = meta["diagnostics"]["workspace_artifact_delivery"][0]
     assert delivery["status"] == "delivered"
-    assert AgentTask._workspace_artifact_display_path(
-        delivery["file_refs"][0]["path"]
-    ) == "reports/partial.md"
+    assert AgentTask._workspace_artifact_display_path(delivery["file_refs"][0]["path"]) == "reports/partial.md"
     assert (
         meta["iterations"][0]["verification"]["reason"]
         == "real Workspace artifact exists but source coverage is incomplete"
@@ -4739,7 +8600,89 @@ async def test_workspace_artifact_stream_draft_consumes_public_retry_marker_with
 
 
 @pytest.mark.asyncio
-async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anchors(tmp_path):
+async def test_workspace_artifact_stream_draft_uses_bounded_dependency_projection(tmp_path):
+    class WorkspaceArtifactDraftBoundedDependencyRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactDraftBoundedDependencyRequester"
+        draft_request_chars = 0
+        draft_request_text = ""
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Write only the final Markdown artifact body." in text:
+                self.__class__.draft_request_chars = len(text)
+                self.__class__.draft_request_text = text
+                yield "message", "# Bounded Draft\n\nThe current report uses compact dependency evidence.\n"
+                return
+            yield "message", json.dumps({"answer": "unused"}, ensure_ascii=False)
+
+    settings = Settings(name="agent-task-workspace-artifact-bounded-dependency-settings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="agent-task-workspace-artifact-bounded-dependency-plugins",
+    )
+    plugin_manager.register(
+        "ModelRequester",
+        WorkspaceArtifactDraftBoundedDependencyRequester,
+        activate=True,
+    )
+    agent = Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="agent-task-workspace-artifact-bounded-dependency",
+    )
+    task = AgentTask(
+        agent,
+        task_id="workspace-artifact-bounded-dependency",
+        goal="Write the final report from bounded dependency evidence.",
+        success_criteria=["The final report is written."],
+        workspace=tmp_path / "task-workspace",
+    )
+    huge = "recursive-dependency-payload-" * 4000
+    dependency_result = TaskBoardCardResult(
+        card_id="collect",
+        status="completed",
+        output_digest="Collected bounded evidence.",
+        preview={
+            "status": "completed",
+            "answer": "Collected bounded evidence.",
+            "short_summary": "Use the stable source refs.",
+            "evidence_ledger": {f"item-{index}": huge for index in range(20)},
+            "execution_meta": {f"record-{index}": huge for index in range(20)},
+        },
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "final",
+            "objective": "Write final.md.",
+            "depends_on": ["collect"],
+            "required_outputs": ["final.md"],
+        }
+    )
+
+    delivery = await task._stream_workspace_artifact_draft(
+        path="final.md",
+        plan={"deliverable_mode": "workspace_artifact"},
+        execution_result={"artifact_manifest": {"path": "final.md"}},
+        execution_meta={"status": "completed", "logs": {"action_logs": [], "route_logs": {}}},
+        source="test.workspace_artifact_draft.bounded_dependency",
+        context_pack=None,
+        iteration_index=1,
+        card_context=SimpleNamespace(
+            card=card,
+            dependency_results={"collect": dependency_result},
+        ),
+    )
+
+    assert delivery is not None
+    assert delivery["status"] == "delivered"
+    assert WorkspaceArtifactDraftBoundedDependencyRequester.draft_request_chars < 50_000
+    assert huge not in WorkspaceArtifactDraftBoundedDependencyRequester.draft_request_text
+    assert "Collected bounded evidence." in WorkspaceArtifactDraftBoundedDependencyRequester.draft_request_text
+
+
+@pytest.mark.asyncio
+async def test_workspace_artifact_stream_draft_receives_stable_source_references(tmp_path):
     class WorkspaceArtifactDraftEvidenceRequester(MockAgentTaskRequester):
         name = "WorkspaceArtifactDraftEvidenceRequester"
         draft_text = ""
@@ -4748,10 +8691,11 @@ async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anch
             text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
             if "Write only the final Markdown artifact body." in text:
                 self.__class__.draft_text = text
-                assert "cumulative_evidence_anchors" in text
+                assert "offered_source_references" in text
+                match = re.search(r"reference_id:\s*(ref_[0-9A-Za-z]+)", text)
                 assert "https://example.test/exact-source" in text
-                assert "Evidence-backed source snippet" in text
-                yield "message", "# Evidence Draft\n\nSource: https://example.test/exact-source\n"
+                reference_id = match.group(1) if match is not None else "ref_missing"
+                yield "message", f"# Evidence Draft\n\nSource: [[ref:{reference_id}]]\n"
                 return
             yield "message", json.dumps({"answer": "unused"}, ensure_ascii=False)
 
@@ -4802,6 +8746,12 @@ async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anch
             },
         }
     )
+    preflight_ledger = task._cumulative_evidence_ledger(
+        {"status": "completed", "logs": {"action_logs": [], "route_logs": {}}}
+    )
+    assert preflight_ledger["items"]
+    assert preflight_ledger["items"][0]["reference_id"].startswith("ref_")
+    assert preflight_ledger["source_refs"][0]["reference_id"].startswith("ref_")
 
     delivery = await task._stream_workspace_artifact_draft(
         path="final.md",
@@ -4815,9 +8765,10 @@ async def test_workspace_artifact_stream_draft_receives_cumulative_evidence_anch
 
     assert delivery is not None
     assert delivery["status"] == "delivered"
+    assert "reference_id: ref_" in WorkspaceArtifactDraftEvidenceRequester.draft_text
     assert "https://example.test/exact-source" in WorkspaceArtifactDraftEvidenceRequester.draft_text
     readback = await task.workspace.read_file("final.md")
-    assert "https://example.test/exact-source" in readback["content"]
+    assert "[[ref:ref_" in readback["content"]
 
 
 @pytest.mark.asyncio
@@ -5236,6 +9187,56 @@ async def test_public_task_strategy_spellings_share_agent_task_lifecycle(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_task_shape_analysis_uses_exact_taskboard_initial_plan_schema(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-task-shape-exact-schema").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="task-shape-exact-schema",
+        goal="Collect independent evidence and synthesize a report.",
+        success_criteria=["The report is supported by collected evidence."],
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output"] = value
+            captured["format"] = format
+            return self
+
+        async def async_get_data(self):
+            return {
+                "analysis": "The work has independent evidence branches.",
+                "execution_hint": {
+                    "recommended_shape": "taskboard",
+                    "confidence": "high",
+                },
+            }
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: FakeRequest())
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_apply_language_policy_to_request",
+        lambda *_args, **_kwargs: None,
+    )
+
+    await task._request_task_shape_analysis()
+
+    assert captured["output"]["initial_taskboard_plan"][0] == (task_board_planning_output_schema())
+    assert captured["format"] == "json"
+
+
+@pytest.mark.asyncio
 async def test_strategy_shape_analysis_is_hint_not_hard_route(tmp_path):
     agent = _create_agent("agent-task-shape-analysis").use_workspace(tmp_path / "workspace")
     task = AgentTask(
@@ -5458,19 +9459,36 @@ async def test_effort_reflection_density_records_expected_points(tmp_path):
                 "final_result": "done",
             }
 
+        terminal_calls: list[str] = []
+        original_terminal_verification = task._run_terminal_verification
+
+        async def run_terminal_verification(iteration_index, **kwargs):
+            terminal_calls.append(str(kwargs["plan"].get("execution_shape") or ""))
+            return await original_terminal_verification(iteration_index, **kwargs)
+
         cast(Any, task)._request_plan = request_plan
         cast(Any, task)._execute_step = execute_step
         cast(Any, task)._request_verification = request_verification
+        cast(Any, task)._run_terminal_verification = run_terminal_verification
         await task.async_run()
-        return [item["phase"] for item in task.reflections]
+        return [item["phase"] for item in task.reflections], terminal_calls
 
-    low = await run_with_effort("low", {"name": "low", "reflection_density": "final"})
-    medium = await run_with_effort("medium", {"name": "medium", "reflection_density": "major_node"})
-    high = await run_with_effort("high", {"name": "high", "reflection_density": "action"})
+    low, low_terminal_calls = await run_with_effort(
+        "low", {"name": "low", "reflection_density": "final"}
+    )
+    medium, medium_terminal_calls = await run_with_effort(
+        "medium", {"name": "medium", "reflection_density": "major_node"}
+    )
+    high, high_terminal_calls = await run_with_effort(
+        "high", {"name": "high", "reflection_density": "action"}
+    )
 
     assert low == ["final"]
     assert "major_node" in medium and "bounded_step" not in medium and "final" in medium
     assert {"bounded_step", "major_node", "final"}.issubset(set(high))
+    assert low_terminal_calls == medium_terminal_calls == high_terminal_calls == [
+        "direct"
+    ]
 
 
 @pytest.mark.asyncio
@@ -5747,15 +9765,683 @@ async def test_taskboard_workspace_file_copy_patch_materializes_target_ref(tmp_p
     assert "patch_proposal" not in patched
     assert patched["workspace_patch_delivery"]["status"] == "completed"
     assert patched["workspace_patch_delivery"]["source_path"] == source_path
-    assert task._workspace_artifact_display_path(
-        patched["workspace_patch_delivery"]["file_refs"][0]["path"]
-    ) == "final.md"
+    assert (
+        task._workspace_artifact_display_path(patched["workspace_patch_delivery"]["file_refs"][0]["path"]) == "final.md"
+    )
     assert task._workspace_artifact_display_path(patched["file_refs"][0]["path"]) == "final.md"
     assert patched["diagnostics"][0]["code"] == "taskboard.control.workspace_patch_applied"
 
 
 @pytest.mark.asyncio
-async def test_taskboard_action_card_retries_blocking_evidence_use_guard(tmp_path, monkeypatch):
+async def test_taskboard_grounding_workspace_patch_is_claim_scoped_and_rejects_full_rewrite(tmp_path):
+    agent = _create_agent("agent-taskboard-grounding-workspace-patch").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-grounding-workspace-patch",
+        goal="Repair only the unsupported claim.",
+        success_criteria=["The final artifact remains otherwise unchanged."],
+        execution="taskboard",
+    )
+    original = "# Report\n\nSupported paragraph.\n\nUpside is already priced.\n"
+    await task.workspace.write_file("final.md", original)
+    promoted = await task.workspace._promote_file_identity("final.md", role="grounding_candidate")
+    grounding_contract = {
+        "gate_kind": "factual_grounding",
+        "issue_code": "unsupported_material_claim",
+        "contract_subject": "artifact:factual_integrity",
+        "requirements": [
+            {
+                "claim_key": "candidate_segment:1:claim:1",
+                "claim": "Upside is already priced.",
+                "artifact_quote": "Upside is already priced.",
+                "segment_id": "seg_upside_claim",
+                "carrier_id": promoted.get("content_version_id"),
+                "content_version_id": promoted.get("content_version_id"),
+                "state": "unsupported",
+            }
+        ],
+    }
+    context = SimpleNamespace(
+        card=SimpleNamespace(
+            id="final-verification-repair",
+            evidence_contract={
+                "material_claim_repair_contract": grounding_contract,
+                "material_claim_patch_paths": ["final.md"],
+            },
+        )
+    )
+
+    rejected = await task._materialize_taskboard_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "patch",
+            "patch_proposal": {
+                "path": "final.md",
+                "operations": [{"op": "write", "content": "# Rewritten report"}],
+            },
+        },
+    )
+    unchanged = await task.workspace.read_file("final.md")
+
+    assert rejected["status"] == "blocked"
+    assert rejected["sufficient"] is False
+    assert rejected["workspace_patch_delivery"]["status"] == "failed"
+    assert rejected["diagnostics"][-1]["code"] == "taskboard.control.grounding_patch_out_of_scope"
+    assert unchanged["content"] == original
+
+    patched = await task._materialize_taskboard_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "patch",
+            "patch_proposal": {
+                "path": "final.md",
+                "operations": [
+                    {
+                        "claim_key": "candidate_segment:1:claim:1",
+                        "op": "replace",
+                        "old_string": "Upside is already priced.",
+                        "new_string": "Data-center demand remains the primary growth driver.",
+                    }
+                ],
+            },
+        },
+    )
+    readback = await task.workspace.read_file("final.md")
+
+    assert patched["status"] == "completed"
+    assert patched["workspace_patch_delivery"]["status"] == "completed"
+    assert readback["content"] == (
+        "# Report\n\nSupported paragraph.\n\nData-center demand remains the primary growth driver.\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_grounding_workspace_patch_scope_ignores_markdown_emphasis(tmp_path):
+    agent = _create_agent("agent-taskboard-grounding-markdown-patch").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-grounding-markdown-patch",
+        goal="Repair only the unsupported claim.",
+        success_criteria=["The final artifact remains otherwise unchanged."],
+        execution="taskboard",
+    )
+    original = (
+        "# Report\n\n"
+        "**Valuation multiples:** AVGO's multiple expansion is a specific watchpoint; "
+        "NVDA and AMD trade at elevated multiples relative to history.\n"
+    )
+    await task.workspace.write_file("final.md", original)
+    promoted = await task.workspace._promote_file_identity("final.md", role="grounding_candidate")
+    quote = (
+        "Valuation multiples: AVGO's multiple expansion is a specific watchpoint; "
+        "NVDA and AMD trade at elevated multiples relative to history."
+    )
+    context = SimpleNamespace(
+        card=SimpleNamespace(
+            id="final-verification-repair",
+            evidence_contract={
+                "material_claim_repair_contract": {
+                    "requirements": [
+                        {
+                            "claim_key": "candidate_segment:1:claim:1",
+                            "claim": quote,
+                            "artifact_quote": quote,
+                            "segment_id": "seg_valuation_claim",
+                            "carrier_id": promoted.get("content_version_id"),
+                            "content_version_id": promoted.get("content_version_id"),
+                            "state": "unsupported",
+                        }
+                    ]
+                },
+                "material_claim_patch_paths": ["final.md"],
+            },
+        )
+    )
+
+    patched = await task._materialize_taskboard_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "patch",
+            "patch_proposal": {
+                "path": "final.md",
+                "operations": [
+                    {
+                        "claim_key": "candidate_segment:1:claim:1",
+                        "op": "replace",
+                        "old_string": (
+                            "**Valuation multiples:** AVGO's multiple expansion is a specific watchpoint; "
+                            "NVDA and AMD trade at elevated multiples relative to history."
+                        ),
+                        "new_string": "**Valuation multiples:** AVGO's multiple expansion is a specific watchpoint.",
+                    }
+                ],
+            },
+        },
+    )
+    readback = await task.workspace.read_file("final.md")
+
+    assert patched["status"] == "completed"
+    assert patched["workspace_patch_delivery"]["status"] == "completed"
+    assert readback["content"] == (
+        "# Report\n\n**Valuation multiples:** AVGO's multiple expansion is a specific watchpoint.\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_grounding_workspace_patch_uses_host_validated_artifact_quote(tmp_path):
+    agent = _create_agent("agent-taskboard-grounding-artifact-quote").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-grounding-artifact-quote",
+        goal="Repair only the unsupported claim.",
+        success_criteria=["The final artifact remains otherwise unchanged."],
+        execution="taskboard",
+    )
+    quote = "Integration complexity and elevated valuation multiples could amplify drawdowns."
+    original = f"# Report\n\n- **Downside risks:** {quote}\n"
+    await task.workspace.write_file("final.md", original)
+    promoted = await task.workspace._promote_file_identity("final.md", role="grounding_candidate")
+    context = SimpleNamespace(
+        card=SimpleNamespace(
+            id="final-verification-repair",
+            evidence_contract={
+                "material_claim_repair_contract": {
+                    "requirements": [
+                        {
+                            "claim_key": "candidate_segment:1:claim:1",
+                            "claim": "AVGO downside risks overstate drawdown amplification.",
+                            "artifact_quote": quote,
+                            "segment_id": "seg_claim_1",
+                            "carrier_id": promoted.get("content_version_id"),
+                            "content_version_id": promoted.get("content_version_id"),
+                            "state": "unsupported",
+                        }
+                    ]
+                },
+                "material_claim_patch_paths": ["final.md"],
+            },
+        )
+    )
+
+    patched = await task._materialize_taskboard_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "patch",
+            "patch_proposal": {
+                "path": "final.md",
+                "operations": [
+                    {
+                        "claim_key": "candidate_segment:1:claim:1",
+                        "op": "replace",
+                        "old_string": quote,
+                        "new_string": "Integration workload and valuation multiple expansion require monitoring.",
+                    }
+                ],
+            },
+        },
+    )
+    readback = await task.workspace.read_file("final.md")
+
+    assert patched["status"] == "completed"
+    assert patched["workspace_patch_delivery"]["status"] == "completed"
+    assert readback["content"] == (
+        "# Report\n\n- **Downside risks:** Integration workload and valuation multiple expansion require monitoring.\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_grounding_workspace_patch_requires_exact_claim_coverage_and_current_version(tmp_path):
+    agent = _create_agent("agent-taskboard-grounding-exact-coverage").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-grounding-exact-coverage",
+        goal="Repair every rejected claim without rewriting unrelated content.",
+        success_criteria=["Every rejected claim is repaired against the current artifact version."],
+        execution="taskboard",
+    )
+    first_quote = "Margin gaps add downside watchpoints."
+    second_quote = "Execution ramp is already de-risked."
+    original = f"# Report\n\n{first_quote}\n\n{second_quote}\n"
+    await task.workspace.write_file("final.md", original)
+    promoted = await task.workspace._promote_file_identity("final.md", role="grounding_candidate")
+    requirements = [
+        {
+            "claim_key": "candidate_segment:1:claim:1",
+            "claim": first_quote,
+            "artifact_quote": first_quote,
+            "segment_id": "seg_margin_claim",
+            "carrier_id": promoted.get("content_version_id"),
+            "content_version_id": promoted.get("content_version_id"),
+            "state": "unsupported",
+        },
+        {
+            "claim_key": "candidate_segment:1:claim:2",
+            "claim": second_quote,
+            "artifact_quote": second_quote,
+            "segment_id": "seg_ramp_claim",
+            "carrier_id": promoted.get("content_version_id"),
+            "content_version_id": promoted.get("content_version_id"),
+            "state": "unsupported",
+        },
+    ]
+    context = SimpleNamespace(
+        card=SimpleNamespace(
+            id="final-verification-repair",
+            evidence_contract={
+                "material_claim_repair_contract": {"requirements": requirements},
+                "material_claim_patch_paths": ["final.md"],
+            },
+        )
+    )
+
+    partial = await task._materialize_taskboard_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "patch",
+            "patch_proposal": {
+                "path": "final.md",
+                "operations": [
+                    {
+                        "claim_key": "candidate_segment:1:claim:2",
+                        "op": "replace",
+                        "old_string": second_quote,
+                        "new_string": "Execution remains a monitored risk.",
+                    }
+                ],
+            },
+        },
+    )
+    unchanged = await task.workspace.read_file("final.md")
+
+    assert partial["status"] == "blocked"
+    assert partial["workspace_patch_delivery"]["status"] == "failed"
+    assert "exactly one" in partial["workspace_patch_delivery"]["reason"]
+    assert unchanged["content"] == original
+
+    exact = await task._materialize_taskboard_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "patch",
+            "patch_proposal": {
+                "path": "final.md",
+                "operations": [
+                    {
+                        "claim_key": "candidate_segment:1:claim:1",
+                        "op": "replace",
+                        "old_string": first_quote,
+                        "new_string": "Margin gaps remain investor watchpoints.",
+                    },
+                    {
+                        "claim_key": "candidate_segment:1:claim:2",
+                        "op": "replace",
+                        "old_string": second_quote,
+                        "new_string": "Execution remains a monitored risk.",
+                    },
+                ],
+            },
+        },
+    )
+    exact_readback = await task.workspace.read_file("final.md")
+
+    assert exact["status"] == "completed"
+    assert exact["workspace_patch_delivery"]["status"] == "completed"
+    assert exact["workspace_patch_delivery"]["base_content_version_id"] == promoted.get("content_version_id")
+    assert exact["workspace_patch_delivery"]["content_version_id"] != promoted.get("content_version_id")
+    assert exact_readback["content"] == (
+        "# Report\n\nMargin gaps remain investor watchpoints.\n\nExecution remains a monitored risk.\n"
+    )
+
+    externally_changed = original.replace("# Report", "# Updated Report")
+    await task.workspace.write_file("final.md", externally_changed)
+    stale = await task._materialize_taskboard_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "patch",
+            "patch_proposal": {
+                "path": "final.md",
+                "operations": [
+                    {
+                        "claim_key": "candidate_segment:1:claim:1",
+                        "op": "replace",
+                        "old_string": first_quote,
+                        "new_string": "Margin gaps remain investor watchpoints.",
+                    },
+                    {
+                        "claim_key": "candidate_segment:1:claim:2",
+                        "op": "replace",
+                        "old_string": second_quote,
+                        "new_string": "Execution remains a monitored risk.",
+                    },
+                ],
+            },
+        },
+    )
+    stale_readback = await task.workspace.read_file("final.md")
+
+    assert stale["status"] == "blocked"
+    assert stale["workspace_patch_delivery"]["status"] == "failed"
+    assert "changed since the repair contract" in stale["workspace_patch_delivery"]["reason"]
+    assert stale_readback["content"] == externally_changed
+
+
+@pytest.mark.asyncio
+async def test_flat_grounding_file_repair_uses_host_patch_without_action_full_rewrite(tmp_path, monkeypatch):
+    agent = _create_agent("agent-flat-grounding-host-patch").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="flat-grounding-host-patch",
+        goal="Repair only the unsupported claim.",
+        success_criteria=["The final artifact remains otherwise unchanged."],
+        execution="flat",
+        options={"required_deliverables": ["final.md"]},
+    )
+    original = (
+        "# Portfolio brief\n\n"
+        "Supported allocation paragraph.\n\n"
+        "NVDA's dominance in data-center drives growth.\n"
+    )
+    write_result = await task.workspace.write_file("final.md", original)
+    await task._replace_terminal_carriers(
+        execution_result={"file_refs": write_result["file_refs"], "final_result": "final.md"},
+        execution_evidence_summary={},
+        source_work_result_id="work:grounding-host-patch",
+    )
+    inventory = task._lifecycle_state.carrier_inventory
+    assert inventory is not None
+    current_carrier = inventory.carriers[0]
+    quote = "NVDA's dominance in data-center drives growth."
+    repair_context = {
+        "source_iteration": 1,
+        "material_claim_repair_contract": {
+            "gate_kind": "factual_grounding",
+            "issue_code": "unsupported_material_claim",
+            "contract_subject": "artifact:factual_integrity",
+            "requirements": [
+                {
+                    "claim_key": "candidate_segment:2:claim:1",
+                    "claim": quote,
+                    "artifact_quote": quote,
+                    "segment_id": "seg_nvda_claim",
+                    "carrier_id": current_carrier.carrier_id,
+                    "content_version_id": current_carrier.content_version_id,
+                    "state": "unsupported",
+                    "reason": "The sources support data-center demand as a growth driver, not dominance.",
+                }
+            ],
+        },
+        "available_evidence_anchors": {
+            "source_refs": [
+                {
+                    "reference_id": "ref_nvda_market",
+                    "body_preview": "Data-center demand remains the primary growth driver.",
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(cast(Any, task), "_active_repair_context", lambda: repair_context)
+
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def info(self, value):
+            captured["info"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output"] = value
+            captured["format"] = format
+            return self
+
+        async def async_get_data(self):
+            return {
+                "step_result": "Replaced only the unsupported NVDA wording.",
+                "patch_proposal": {
+                    "path": "final.md",
+                    "operations": [
+                        {
+                            "claim_key": "candidate_segment:2:claim:1",
+                            "op": "replace",
+                            "old_string": quote,
+                            "new_string": "Data-center demand remains the primary growth driver.",
+                        }
+                    ],
+                },
+                "remaining_work": [],
+                "ready_for_final_verification": True,
+            }
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: FakeRequest())
+    monkeypatch.setattr(cast(Any, task), "_apply_language_policy_to_request", lambda *_args, **_kwargs: None)
+
+    def forbid_action_execution(*_args, **_kwargs):
+        raise AssertionError("Grounding-only file repair must not open AgentExecution/ActionRuntime.")
+
+    monkeypatch.setattr(agent, "create_execution", forbid_action_execution)
+
+    async def run_work_unit(*, work_unit, plan, context_pack, execution_id, handler, start_payload):
+        _ = plan, context_pack, execution_id
+        captured["work_unit"] = work_unit.to_dict()
+        captured["start_payload"] = start_payload
+        block_output = await handler({"carrier_output_policy": {"control_format": "json"}})
+        return block_output["execution_result"], block_output["execution_meta"], None
+
+    monkeypatch.setattr(cast(Any, task), "_run_work_unit_through_blocks", run_work_unit)
+
+    result, meta = await task._execute_step(
+        2,
+        {
+            "execution_shape": "actions",
+            "effective_execution_shape": "actions",
+            "step_instruction": "Repair the final report and write it back.",
+            "expected_evidence": "A corrected final.md readback.",
+            "rationale": "The grounding gate rejected one claim.",
+            "deliverable_mode": "workspace_artifact",
+        },
+        cast(
+            Any,
+            {
+                "goal": task.goal,
+                "items": [],
+                "omitted": [],
+                "profile": "balanced",
+                "diagnostics": {},
+            },
+        ),
+    )
+    readback = await task.workspace.read_file("final.md")
+
+    assert readback["content"] == (
+        "# Portfolio brief\n\n"
+        "Supported allocation paragraph.\n\n"
+        "Data-center demand remains the primary growth driver.\n"
+    )
+    assert result["workspace_patch_delivery"]["status"] == "completed"
+    assert result["workspace_patch_delivery"]["operation_count"] == 1
+    assert result["file_refs"][0]["content_version_id"] != current_carrier.content_version_id
+    assert meta["status"] == "completed"
+    assert meta["logs"]["action_logs"] == {}
+    assert captured["work_unit"]["runtime_preferences"]["handler"] == "agent_task_material_claim_patch"
+    assert captured["work_unit"]["capability_scope"] == []
+    assert "plan" not in captured["work_unit"]["input_payload"]
+    assert "repair_context" not in captured["work_unit"]["input_payload"]
+    assert "plan" not in captured["start_payload"]
+    assert "context_pack" not in captured["start_payload"]
+    assert "plan" not in captured["input"]
+    assert "repair_context" not in captured["input"]
+    assert captured["info"]["material_claim_repair_contract"] == repair_context[
+        "material_claim_repair_contract"
+    ]
+    assert "candidate_final_result" not in captured["output"]
+    patch_schema = captured["output"]["patch_proposal"][0]
+    assert patch_schema["operations"][0][0]["claim_key"][2] is True
+    assert "full-file" in captured["instruct"]
+
+
+@pytest.mark.asyncio
+async def test_flat_grounding_host_patch_fails_closed_for_rewrite_scope_and_stale_version(tmp_path):
+    agent = _create_agent("agent-flat-grounding-patch-fail-closed").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="flat-grounding-patch-fail-closed",
+        goal="Repair only one unsupported claim.",
+        success_criteria=["Unrelated artifact content remains unchanged."],
+        execution="flat",
+        options={"required_deliverables": ["final.md"]},
+    )
+    quote = "Unsupported dominance claim."
+    original = f"# Report\n\nSupported paragraph.\n\n{quote}\n"
+    await task.workspace.write_file("final.md", original)
+    promoted = await task.workspace._promote_file_identity("final.md", role="grounding_candidate")
+    contract = {
+        "requirements": [
+            {
+                "claim_key": "claim:dominance",
+                "claim": quote,
+                "artifact_quote": quote,
+                "segment_id": "seg_dominance",
+                "carrier_id": promoted.get("content_version_id"),
+                "content_version_id": promoted.get("content_version_id"),
+                "state": "unsupported",
+            }
+        ]
+    }
+
+    rewrite = await task._apply_grounding_workspace_patch(
+        {
+            "path": "final.md",
+            "operations": [{"op": "write", "content": "# Rewritten"}],
+        },
+        contract,
+        allowed_patch_paths=["final.md"],
+        source="test.flat.grounding_patch",
+    )
+    unauthorized = await task._apply_grounding_workspace_patch(
+        {
+            "path": "other.md",
+            "operations": [
+                {
+                    "claim_key": "claim:dominance",
+                    "op": "replace",
+                    "old_string": quote,
+                    "new_string": "Supported narrower claim.",
+                }
+            ],
+        },
+        contract,
+        allowed_patch_paths=["final.md"],
+        source="test.flat.grounding_patch",
+    )
+    unchanged = await task.workspace.read_file("final.md")
+
+    assert rewrite["status"] == "failed"
+    assert "forbids full writes" in rewrite["reason"]
+    assert unauthorized["status"] == "failed"
+    assert "authorized" in unauthorized["reason"]
+    assert unchanged["content"] == original
+
+    externally_changed = original.replace("Supported paragraph.", "Updated supported paragraph.")
+    await task.workspace.write_file("final.md", externally_changed)
+    stale = await task._apply_grounding_workspace_patch(
+        {
+            "path": "final.md",
+            "operations": [
+                {
+                    "claim_key": "claim:dominance",
+                    "op": "replace",
+                    "old_string": quote,
+                    "new_string": "Supported narrower claim.",
+                }
+            ],
+        },
+        contract,
+        allowed_patch_paths=["final.md"],
+        source="test.flat.grounding_patch",
+    )
+    stale_readback = await task.workspace.read_file("final.md")
+
+    assert stale["status"] == "failed"
+    assert "changed since the repair contract" in stale["reason"]
+    assert stale_readback["content"] == externally_changed
+
+
+def test_taskboard_control_continue_preserves_current_card_status():
+    agent = _create_agent("agent-taskboard-control-continue-status")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-control-continue-status",
+        goal="Complete synthesis before downstream delivery.",
+        success_criteria=["The synthesis card completes once."],
+        execution="taskboard",
+    )
+
+    completed = task._taskboard_control_card_status(
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "continue",
+            "remaining_work": ["A downstream delivery card will write final.md."],
+        }
+    )
+    setback = task._taskboard_control_card_status(
+        {
+            "status": "setback",
+            "sufficient": False,
+            "next_board_action": "continue",
+            "gaps": ["Current-card evidence is incomplete."],
+        }
+    )
+
+    assert completed == "completed"
+    assert setback == "setback"
+
+
+def test_taskboard_control_stop_preserves_completed_card_status():
+    agent = _create_agent("agent-taskboard-control-stop-status")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-control-stop-status",
+        goal="Return the completed compact summary and stop the board.",
+        success_criteria=["The summary card completes without a repair card."],
+        execution="taskboard",
+    )
+
+    status = task._taskboard_control_card_status(
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "stop",
+            "gaps": [],
+            "remaining_work": [],
+        }
+    )
+
+    assert status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_taskboard_action_card_repairs_binding_without_repeating_business_actions(tmp_path, monkeypatch):
     agent = _create_agent("agent-taskboard-card-evidence-use-retry").use_workspace(tmp_path / "workspace")
     task = AgentTask(
         agent,
@@ -5786,6 +10472,7 @@ async def test_taskboard_action_card_retries_blocking_evidence_use_guard(tmp_pat
         planning_policy=None,
     )
     attempts: list[int] = []
+    binding_requests: list[list[dict[str, Any]]] = []
 
     async def fake_run_work_unit_through_blocks(*_args, **kwargs):
         attempt_index = kwargs["start_payload"]["attempt_index"]
@@ -5794,41 +10481,72 @@ async def test_taskboard_action_card_retries_blocking_evidence_use_guard(tmp_pat
             "execution_id": f"exec-{attempt_index}",
             "status": "success",
             "route": {"selected_route": "model_request", "status": "completed"},
-            "logs": {"action_logs": {}, "route_logs": {}, "errors": []},
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "market_news",
+                        "status": "success",
+                        "action_call_id": "act_call_nvda",
+                        "input": {"ticker": "NVDA", "limit": 5},
+                        "model_digest": {
+                            "result_preview": {"count": 5, "summary": "Recent company coverage collected."}
+                        },
+                    },
+                    {
+                        "action_id": "market_news",
+                        "status": "success",
+                        "action_call_id": "act_call_avgo",
+                        "input": {"ticker": "AVGO", "limit": 5},
+                        "model_digest": {
+                            "result_preview": {"count": 5, "summary": "Recent company coverage collected."}
+                        },
+                    },
+                ],
+                "route_logs": {},
+                "errors": [],
+            },
             "diagnostics": [],
         }
-        if attempt_index == 1:
-            return (
-                {
-                    "status": "completed",
-                    "answer": "Collected source evidence.",
-                    "evidence_use": [
-                        {
-                            "claim": "Collected source evidence.",
-                            "evidence_ids": ["missing-evidence-id"],
-                            "support_type": "content",
-                        }
-                    ],
-                    "remaining_work": [],
-                },
-                meta,
-                {},
-            )
         return (
             {
                 "status": "completed",
-                "answer": "Collected source evidence; no unsupported evidence binding remains.",
-                "evidence_use": [],
+                "answer": "The requested NVDA news retrieval completed.",
+                "evidence_use": [
+                    {
+                        "claim": "The requested NVDA news retrieval completed.",
+                        "evidence_ids": ["agent_task_action_result:market_news:act_call_nvd4"],
+                        "support_type": "content",
+                    }
+                ],
                 "remaining_work": [],
             },
             meta,
             {},
         )
 
+    async def fake_request_evidence_binding_repair(grounding_guard, evidence_ledger, *, language_policy):
+        candidates = task._evidence_binding_repair_candidate_refs(evidence_ledger)
+        binding_requests.append(candidates)
+        nvda = next(item for item in candidates if item.get("input_preview", {}).get("ticker") == "NVDA")
+        current = grounding_guard["normalized_evidence_use"][0]
+        return [
+            {
+                "claim_index": 0,
+                "claim": current["claim"],
+                "evidence_ids": [nvda["reference_id"]],
+                "support_type": current["support_type"],
+            }
+        ]
+
     async def noop(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(cast(Any, task), "_run_work_unit_through_blocks", fake_run_work_unit_through_blocks)
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_request_evidence_binding_repair",
+        fake_request_evidence_binding_repair,
+    )
     monkeypatch.setattr(cast(Any, task), "_emit", noop)
     monkeypatch.setattr(cast(Any, task), "_emit_action_observation_events", noop)
 
@@ -5843,12 +10561,112 @@ async def test_taskboard_action_card_retries_blocking_evidence_use_guard(tmp_pat
         },
     )
 
-    assert attempts == [1, 2]
+    assert attempts == [1]
+    assert len(binding_requests) == 1
+    assert {
+        item["input_preview"]["ticker"]
+        for item in binding_requests[0]
+        if item.get("action_id") == "market_news" and isinstance(item.get("input_preview"), Mapping)
+    } == {"NVDA", "AVGO"}
     assert result.status == "completed"
-    retry_diagnostics = task.diagnostics["taskboard_card_retries"]
-    assert retry_diagnostics[0]["code"] == "taskboard.card.result_protocol_retry"
-    assert "taskboard.card.evidence_use_guard_blocking" in retry_diagnostics[0]["retryable_codes"]
-    assert result.metadata["attempt_index"] == 2
+    assert "taskboard_card_retries" not in task.diagnostics
+    assert result.metadata["attempt_index"] == 1
+    assert result.metadata["evidence_use_guard"]["valid"] is True
+    assert any(
+        item.get("code") == "taskboard.card.model_evidence_binding_repair"
+        for item in result.diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalizer_repairs_binding_before_terminal_verifier(tmp_path, monkeypatch):
+    from agently.core.application.AgentTask.EvidenceLedger import collect_evidence_use, validate_evidence_use
+
+    task = AgentTask(
+        _create_agent("taskboard-finalizer-binding-repair").use_workspace(tmp_path / "workspace"),
+        task_id="taskboard-finalizer-binding-repair",
+        goal="Produce an NVDA evidence-backed result.",
+        success_criteria=["The NVDA claim uses the matching stable evidence ref."],
+        execution="taskboard",
+    )
+    ledger = task._stable_evidence_ledger_view(
+        {
+            "evidence_items": [
+                {
+                    "id": "agent_task_action_result:market_news:act_call_nvda",
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "market_news",
+                    "action_call_id": "act_call_nvda",
+                    "input_preview": {"ticker": "NVDA"},
+                    "body": "Recent NVDA company coverage was collected.",
+                },
+                {
+                    "id": "agent_task_action_result:market_news:act_call_avgo",
+                    "kind": "agent_task.action.result",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "action_id": "market_news",
+                    "action_call_id": "act_call_avgo",
+                    "input_preview": {"ticker": "AVGO"},
+                    "body": "Recent AVGO company coverage was collected.",
+                },
+            ]
+        },
+        max_items=16,
+        body_chars=1200,
+    )
+    final = {
+        "accepted": True,
+        "final_result": "NVDA company coverage was collected.",
+        "evidence_use": [
+            {
+                "claim": "NVDA company coverage was collected.",
+                "evidence_ids": ["agent_task_action_result:market_news:act_call_nvd4"],
+                "support_type": "content",
+            }
+        ],
+    }
+    guard = validate_evidence_use(collect_evidence_use(final), ledger)
+    model_calls = 0
+
+    async def fake_request_evidence_binding_repair(grounding_guard, evidence_ledger, *, language_policy):
+        nonlocal model_calls
+        model_calls += 1
+        candidates = task._evidence_binding_repair_candidate_refs(evidence_ledger)
+        nvda = next(item for item in candidates if item.get("input_preview", {}).get("ticker") == "NVDA")
+        current = grounding_guard["normalized_evidence_use"][0]
+        return [
+            {
+                "claim_index": 0,
+                "claim": current["claim"],
+                "evidence_ids": [nvda["reference_id"]],
+                "support_type": current["support_type"],
+            }
+        ]
+
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_request_evidence_binding_repair",
+        fake_request_evidence_binding_repair,
+    )
+
+    repaired_final, repaired_guard = await task._repair_taskboard_final_evidence_use(
+        final,
+        guard,
+        ledger,
+        language_policy=task._language_policy(),
+    )
+
+    nvda_ref = next(
+        item["reference_id"]
+        for item in ledger["items"]
+        if item.get("input_preview", {}).get("ticker") == "NVDA"
+    )
+    assert model_calls == 1
+    assert repaired_guard["valid"] is True
+    assert repaired_final["evidence_use"][0]["evidence_ids"] == [nvda_ref]
 
 
 def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
@@ -5895,7 +10713,18 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
 
     repaired = task._taskboard_final_verification_repair_revision(
         revision,
-        final={"accepted": False, "reason": "unsupported labels remain", "final_result": "draft"},
+        final={
+            "accepted": False,
+            "reason": "unsupported labels remain",
+            "final_result": "draft",
+            "evidence_use": [
+                {
+                    "claim": "The official source supports the draft.",
+                    "evidence_ids": ["ref_source"],
+                    "support_type": "content",
+                }
+            ],
+        },
         final_verification={
             "is_complete": False,
             "requires_block": False,
@@ -5915,15 +10744,441 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
     ]
     assert len(repair_ids) == 1
     repair = cards[repair_ids[0]]
-    assert repair.allowed_execution_shape == "control"
+    assert repair.allowed_execution_shape == "auto"
     assert set(repair.depends_on) == {"collect", "draft"}
     assert "Remove unsupported sub-section labels." in repair.evidence_contract["missing_criteria"]
+    assert repair.evidence_contract["prior_final_evidence_use"] == [
+        {
+            "claim": "The official source supports the draft.",
+            "evidence_ids": ["ref_source"],
+            "support_type": "content",
+        }
+    ]
     assert repair.metadata["final_workspace_deliverables"] == ["final.md"]
+    assert repair.metadata["terminal_convergence_subject"] == "taskboard_final_verification"
     assert any("final.md" in item for item in repair.required_outputs)
     assert any(item.get("code") == "taskboard.final_verification.repair_patch" for item in repaired.diagnostics)
     schedule = TaskBoard(repaired, handler=lambda _context: None).schedule()
     assert schedule.runnable_card_ids == (repair.id,)
     assert task.diagnostics["taskboard_final_repair_patches"][0]["repair_card_id"] == repair.id
+
+
+def _completed_taskboard_revision_for_final_repair(board_id: str) -> TaskBoardRevision:
+    card = TaskBoardCard.from_value(
+        {
+            "id": "draft",
+            "objective": "Draft the final deliverable.",
+            "required_outputs": ["Final deliverable"],
+            "allowed_execution_shape": "control",
+        }
+    )
+    return TaskBoardRevision.from_value(
+        {
+            "board_id": board_id,
+            "revision_id": "rev-1",
+            "graph": {
+                "graph_id": f"{board_id}-graph",
+                "cards": [card.to_dict()],
+            },
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                ).to_dict()
+            },
+        }
+    )
+
+
+def test_taskboard_final_verification_capability_repair_uses_exact_action_requirement(
+    tmp_path,
+):
+    requirement = {
+        "capability_id": "required_probe_action",
+        "capability_kind": "action",
+        "kind": "action_succeeded",
+        "required": True,
+        "source": "criterion",
+    }
+    agent = _create_agent("agent-taskboard-capability-repair").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-capability-repair",
+        goal="Produce the final deliverable with required capability evidence.",
+        success_criteria=["The required capability succeeds."],
+        execution="taskboard",
+        options={
+            "planner_capabilities": [
+                {
+                    "id": "required_probe_action",
+                    "kind": "action",
+                    "route": "model_request",
+                    "guidance_access": "none",
+                    "description": "Produce required probe evidence.",
+                }
+            ],
+            "capability_evidence_requirements": [requirement, dict(requirement)],
+        },
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "draft"},
+        final_verification={
+            "is_complete": False,
+            "requires_block": False,
+            "missing_capability_evidence": [
+                "required_probe_action",
+                "required_probe_action",
+            ],
+            "missing_criteria": ["Missing required capability evidence."],
+        },
+    )
+
+    assert repaired is not None
+    repairs = [
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by") == "agent_task.taskboard.final_verification_repair"
+    ]
+    assert len(repairs) == 1
+    repair = repairs[0]
+    assert repair.allowed_execution_shape == "actions"
+    assert repair.evidence_contract["capability_evidence_requirements"] == [requirement]
+    assert repair.evidence_contract["requires_capability_ids"] == ["required_probe_action"]
+    assert repair.metadata["requires_capability_ids"] == ["required_probe_action"]
+    assert repair.depends_on == ("draft",)
+    assert any(item.get("code") == "taskboard.final_verification.repair_patch" for item in repaired.diagnostics)
+    assert TaskBoard(repaired, handler=lambda _context: None).schedule().runnable_card_ids == (repair.id,)
+
+
+def test_taskboard_material_claim_repair_uses_structured_claim_contract(tmp_path):
+    agent = _create_agent("agent-taskboard-grounding-repair").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-grounding-repair",
+        goal="Produce a grounded deliverable.",
+        success_criteria=["Every material claim is grounded."],
+        execution="taskboard",
+    )
+    task._lifecycle_state.replace_carriers(
+        [
+            {
+                "carrier_id": "car_grounded_candidate",
+                "kind": "workspace_artifact",
+                "required": True,
+                "path": "final.md",
+                "content_version_id": "cv_grounded_candidate",
+                "content_digest": hashlib.sha256(
+                    b"Unsupported factual claim."
+                ).hexdigest(),
+                "source_work_result_id": "work:taskboard-repair",
+                "status": "materialized",
+            }
+        ],
+        expected_version=task._lifecycle_state.state_version,
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+    repair_contract = {
+        "gate_kind": "factual_integrity",
+        "issue_code": "unsupported_material_claim",
+        "contract_subject": "carrier:car_grounded_candidate",
+        "requirements": [
+            {
+                "claim_key": "claim:1",
+                "carrier_id": "car_grounded_candidate",
+                "path": "final.md",
+                "content_version_id": "cv_grounded_candidate",
+                "artifact_quote": "Unsupported factual claim.",
+                "state": "unsupported",
+                "reason": "No eligible source supports it.",
+            }
+        ],
+    }
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "draft"},
+        final_verification={
+            "is_complete": False,
+            "requires_block": False,
+            "reason": "Free-form verifier prose is not the repair contract.",
+            "missing_criteria": ["Unrelated prose gap."],
+            "material_claim_repair_contract": repair_contract,
+        },
+    )
+
+    assert repaired is not None
+    repair = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by") == "agent_task.taskboard.final_verification_repair"
+    )
+    assert repair.metadata["repair_source"] == "material_claim_audit"
+    assert repair.metadata["terminal_convergence_subject"] == "carrier:car_grounded_candidate"
+    assert repair.evidence_contract["material_claim_repair_contract"] == repair_contract
+    assert repair.evidence_contract["material_claim_patch_paths"] == ["final.md"]
+    assert repair.metadata["final_workspace_deliverables"] == ["final.md"]
+    assert "Unsupported factual claim." in repair.objective
+    assert "Unrelated prose gap." not in repair.objective
+    assert "Change only the implicated claims" in repair.objective
+    assert "preserve all unrelated artifact text" in repair.objective
+    assert "Workspace replace patch" in repair.objective
+    assert "Do not return or rewrite the complete artifact body" in repair.objective
+    assert "Produce a complete corrected deliverable" not in repair.objective
+    assert repair.allowed_execution_shape == "control"
+
+
+@pytest.mark.parametrize(
+    ("requirement", "final_verification"),
+    [
+        (
+            {
+                "capability_id": "required_probe_action",
+                "capability_kind": "action",
+                "kind": "action_succeeded",
+                "required": True,
+                "source": "criterion",
+            },
+            {
+                "reason": "Verifier prose mentions required_probe_action.",
+                "missing_capability_evidence": [],
+                "missing_criteria": ["Repair the final deliverable."],
+            },
+        ),
+        (
+            {
+                "capability_id": "required_probe_action",
+                "capability_kind": "action",
+                "kind": "capability_used",
+                "required": True,
+                "source": "criterion",
+            },
+            {
+                "missing_capability_evidence": ["required_probe_action"],
+                "missing_criteria": ["Missing general capability evidence."],
+            },
+        ),
+    ],
+)
+def test_taskboard_final_verification_non_action_repair_keeps_capabilities_available_without_inference(
+    tmp_path,
+    requirement,
+    final_verification,
+):
+    agent = _create_agent("agent-taskboard-control-repair").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-control-repair",
+        goal="Repair the final deliverable.",
+        success_criteria=["The deliverable is complete."],
+        execution="taskboard",
+        options={
+            "planner_capabilities": [{"id": "required_probe_action", "kind": "action"}],
+            "capability_evidence_requirements": [requirement],
+        },
+    )
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        _completed_taskboard_revision_for_final_repair(task.id),
+        final={"accepted": False, "final_result": "draft"},
+        final_verification=final_verification,
+    )
+
+    assert repaired is not None
+    repair = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by") == "agent_task.taskboard.final_verification_repair"
+    )
+    assert repair.allowed_execution_shape == "auto"
+    assert "capability_evidence_requirements" not in repair.evidence_contract
+    assert "requires_capability_ids" not in repair.metadata
+
+
+def test_taskboard_final_verification_action_repair_fails_closed_when_unavailable(
+    tmp_path,
+):
+    agent = _create_agent("agent-taskboard-unavailable-capability-repair").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-unavailable-capability-repair",
+        goal="Produce required Action evidence.",
+        success_criteria=["The required Action succeeds."],
+        execution="taskboard",
+        options={
+            "planner_capabilities": [{"id": "different_available_action", "kind": "action"}],
+            "capability_evidence_requirements": [
+                {
+                    "capability_id": "required_probe_action",
+                    "capability_kind": "action",
+                    "kind": "action_succeeded",
+                    "required": True,
+                    "source": "criterion",
+                }
+            ],
+        },
+    )
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        _completed_taskboard_revision_for_final_repair(task.id),
+        final={"accepted": False, "final_result": "draft"},
+        final_verification={
+            "missing_capability_evidence": ["required_probe_action"],
+            "missing_criteria": ["Missing required capability evidence."],
+        },
+    )
+
+    assert repaired is None
+    diagnostics = task.diagnostics["taskboard_final_repair_unavailable_capabilities"]
+    assert diagnostics == [
+        {
+            "code": "taskboard.final_verification.repair_capability_unavailable",
+            "unavailable_capability_ids": ["required_probe_action"],
+            "revision_id": "rev-1",
+        }
+    ]
+
+
+def test_workspace_readback_does_not_satisfy_required_action_evidence(tmp_path):
+    agent = _create_agent("agent-workspace-readback-action-gate").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="workspace-readback-action-gate",
+        goal="Produce evidence through the specified Action.",
+        success_criteria=["The specified Action succeeds."],
+        execution="taskboard",
+        options={
+            "planner_capabilities": [{"id": "required_probe_action", "kind": "action"}],
+            "capability_evidence_requirements": [
+                {
+                    "capability_id": "required_probe_action",
+                    "capability_kind": "action",
+                    "kind": "action_succeeded",
+                    "required": True,
+                    "source": "criterion",
+                }
+            ],
+        },
+    )
+    verifier_claim = {
+        "is_complete": True,
+        "requires_block": False,
+        "reason": "The file was read back from Workspace.",
+        "missing_criteria": [],
+        "final_result": "final.md",
+    }
+    workspace_only_evidence = {
+        "status": "completed",
+        "action_ids": [],
+        "capabilities_used": [],
+        "capability_evidence": {
+            "actions": {"succeeded": [], "failed": []},
+            "artifacts": {"readback": ["workspace_artifact_readback:required_probe_action:final.md"]},
+        },
+    }
+
+    blocked = task._normalize_verification(
+        verifier_claim,
+        execution_evidence_summary=workspace_only_evidence,
+    )
+
+    assert blocked["is_complete"] is False
+    assert blocked["missing_capability_evidence"] == ["required_probe_action"]
+    assert "capability_evidence_missing" in blocked["guard_reasons"]
+
+    satisfied = task._normalize_verification(
+        verifier_claim,
+        execution_evidence_summary={
+            **workspace_only_evidence,
+            "action_ids": ["required_probe_action"],
+            "capabilities_used": ["required_probe_action"],
+            "capability_evidence": {
+                "actions": {
+                    "succeeded": ["required_probe_action"],
+                    "failed": [],
+                },
+                "artifacts": workspace_only_evidence["capability_evidence"]["artifacts"],
+            },
+        },
+    )
+
+    assert satisfied["is_complete"] is True
+    assert satisfied["missing_capability_evidence"] == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_capability_preflight_skips_semantic_verifier_for_missing_action(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-terminal-capability-preflight").use_workspace(
+        tmp_path / "workspace"
+    )
+    requirement = {
+        "capability_id": "write_file",
+        "capability_kind": "action",
+        "kind": "action_succeeded",
+        "required": True,
+    }
+    task = AgentTask(
+        agent,
+        task_id="terminal-capability-preflight",
+        goal="Write final.md through the required Action.",
+        success_criteria=["The write_file Action succeeds."],
+        execution="taskboard",
+        options={
+            "planner_capabilities": [{"id": "write_file", "kind": "action"}],
+            "capability_evidence_requirements": [requirement],
+        },
+    )
+    request_calls = 0
+
+    def forbidden_request():
+        nonlocal request_calls
+        request_calls += 1
+        raise AssertionError("semantic verifier must not run before deterministic capability evidence is complete")
+
+    async def noop_async(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(agent, "create_temp_request", forbidden_request)
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_ensure_workspace_artifact_targeted_readback_evidence",
+        noop_async,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_emit_process_progress_from_output",
+        noop_async,
+    )
+
+    verification = await task._request_verification(
+        1,
+        plan={"execution_shape": "control"},
+        execution_result={"candidate_final_result": "Draft body."},
+        execution_meta={
+            "status": "completed",
+            "logs": {
+                "action_logs": [],
+                "capability_evidence_requirements": [requirement],
+            },
+        },
+        context_pack=cast(Any, {}),
+    )
+
+    assert request_calls == 0
+    assert verification["is_complete"] is False
+    assert verification["requires_block"] is False
+    assert verification["missing_capability_evidence"] == ["write_file"]
+    assert verification["terminal_convergence"]["issue"] == {
+        "gate_kind": "capability",
+        "issue_code": "action_succeeded_missing",
+        "contract_subject": "action:write_file",
+    }
+    assert verification["terminal_convergence"]["verifier_called"] is False
 
 
 @pytest.mark.asyncio
@@ -5985,8 +11240,16 @@ async def test_taskboard_finalization_repairs_structured_continuation_verdict(tm
     async def noop(*_args, **_kwargs):
         return None
 
+    terminal_calls: list[str] = []
+    original_terminal_verification = task._run_terminal_verification
+
+    async def run_terminal_verification(iteration_index, **kwargs):
+        terminal_calls.append(str(kwargs["plan"].get("execution_shape") or ""))
+        return await original_terminal_verification(iteration_index, **kwargs)
+
     monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
     monkeypatch.setattr(cast(Any, task), "_request_verification", verifier_requests_continuation_for_repairable_gap)
+    monkeypatch.setattr(cast(Any, task), "_run_terminal_verification", run_terminal_verification)
     monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
     monkeypatch.setattr(cast(Any, task), "_emit", noop)
 
@@ -6011,6 +11274,7 @@ async def test_taskboard_finalization_repairs_structured_continuation_verdict(tm
     ]
     assert len(repair_cards) == 1
     assert "Missing required section." in repair_cards[0].evidence_contract["missing_criteria"]
+    assert terminal_calls == ["taskboard"]
 
 
 @pytest.mark.asyncio
@@ -6059,7 +11323,10 @@ async def test_taskboard_early_noncompleted_terminal_preserves_verified_partial_
 
     assert terminal == {"terminal": True, "status": "error"}
     assert len(task.result["artifact_refs"]) == 1
-    assert task.result["artifact_refs"][0] == partial_ref
+    assert task.result["artifact_refs"][0]["path"] == partial_ref["path"]
+    assert task.result["artifact_refs"][0]["sha256"] == partial_ref["sha256"]
+    assert str(task.result["artifact_refs"][0].get("locator_id") or "").startswith("loc_")
+    assert str(task.result["artifact_refs"][0].get("content_version_id") or "").startswith("cv_")
     assert not (task.workspace.root / ".agently" / "workspace.db").exists()
     assert retention is not None
     assert retention["status"] in {"applied", "noop"}
@@ -6267,7 +11534,614 @@ async def test_taskboard_finalization_promotes_single_terminal_candidate_without
 
 
 @pytest.mark.asyncio
-async def test_taskboard_finalization_skips_verifier_when_acceptance_cache_is_clean(tmp_path, monkeypatch):
+async def test_taskboard_verifier_protocol_retry_reuses_prepared_finalizer_result(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("taskboard-verifier-retry-reuses-final").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-verifier-retry-reuses-final",
+        goal="Combine two completed parts into one report.",
+        success_criteria=["The combined report is returned."],
+        execution="taskboard",
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-1",
+            "status": "completed",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {"id": "part_a", "objective": "Produce part A."},
+                    {"id": "part_b", "objective": "Produce part B."},
+                ],
+            },
+            "card_results": {
+                "part_a": TaskBoardCardResult(
+                    card_id="part_a",
+                    status="completed",
+                    preview={"status": "completed", "answer": "Part A."},
+                ).to_dict(),
+                "part_b": TaskBoardCardResult(
+                    card_id="part_b",
+                    status="completed",
+                    preview={"status": "completed", "answer": "Part B."},
+                ).to_dict(),
+            },
+        }
+    )
+    calls = {"finalizer": 0, "verifier": 0}
+
+    async def finalizer(*_args, **_kwargs):
+        calls["finalizer"] += 1
+        return {
+            "accepted": True,
+            "reason": "Both parts were combined.",
+            "final_result": "Combined report from Part A and Part B.",
+            "missing_criteria": [],
+            "evidence_use": [],
+        }
+
+    async def verifier(*_args, **kwargs):
+        calls["verifier"] += 1
+        execution_result = kwargs["execution_result"]
+        assert "evidence_use" not in execution_result
+        assert execution_result["final_result"] == (
+            "Combined report from Part A and Part B."
+        )
+        if calls["verifier"] == 1:
+            repair_contract = {
+                "gate_kind": "output_contract",
+                "issue_code": "terminal_verifier_output_invalid",
+                "contract_subject": "verification:response",
+                "protocol_section": "criterion_checks",
+                "requirements": [
+                    {
+                        "code": "criterion_check_untrusted",
+                        "reason": "evidence_ids contains a reference outside the offered set",
+                    }
+                ],
+            }
+            return {
+                "is_complete": False,
+                "requires_block": False,
+                "reason": "Verifier response violated its output contract.",
+                "missing_criteria": ["Correct the verifier response structure."],
+                "final_result_required": True,
+                "final_result": "Combined report from Part A and Part B.",
+                "criterion_repair_contract": repair_contract,
+                "strict_terminal_gates_applied": True,
+            }
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The current combined report is complete.",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": "Combined report from Part A and Part B.",
+            "strict_terminal_gates_applied": True,
+        }
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", verifier)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    first = await task._finalize_taskboard(
+        revision,
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+    assert first["status"] == "verification_retry"
+    assert first["prepared_final"]["final_result"] == (
+        "Combined report from Part A and Part B."
+    )
+
+    second = await task._finalize_taskboard(
+        revision,
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+        prepared_outputs={"final_candidate": first["prepared_final"]},
+    )
+
+    assert second == {"terminal": True, "status": "completed"}
+    assert calls == {"finalizer": 1, "verifier": 2}
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_repairs_missing_declared_leaf_artifact_instead_of_accepting_working_ref(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-missing-declared-leaf-artifact").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-missing-declared-leaf-artifact",
+        goal="Write the final report to final.md.",
+        success_criteria=["The final report is delivered at final.md."],
+        execution="taskboard",
+    )
+    working_write = await task.workspace.write_file(
+        "working/taskboard/collect/final.md",
+        "# Upstream Evidence\n\nNot the terminal artifact.\n",
+    )
+    working_ref = {
+        **working_write["file_refs"][0],
+        "role": "workspace_artifact",
+        "source": "agent_task.taskboard.card.collect.workspace_artifact",
+    }
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-missing-declared",
+            "status": "completed",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {
+                        "id": "collect",
+                        "objective": "Collect evidence.",
+                        "required_outputs": ["Working evidence"],
+                    },
+                    {
+                        "id": "synthesize",
+                        "objective": "Deliver final.md.",
+                        "depends_on": ["collect"],
+                        "required_outputs": ["final.md"],
+                    },
+                ],
+            },
+            "card_results": {
+                "collect": TaskBoardCardResult(
+                    card_id="collect",
+                    status="completed",
+                    preview={"status": "completed", "candidate_final_result": "Upstream evidence."},
+                    file_refs=(working_ref,),
+                    artifact_refs=(working_ref,),
+                ).to_dict(),
+                "synthesize": TaskBoardCardResult(
+                    card_id="synthesize",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "sufficient": True,
+                        "candidate_final_result": "# Final Report\n\nComplete candidate body.\n",
+                        "artifact_manifest": {"path": "final.md"},
+                        "remaining_work": ["Materialize and read back final.md."],
+                    },
+                ).to_dict(),
+            },
+        }
+    )
+
+    async def fail_finalizer(*_args, **_kwargs):
+        raise AssertionError("The unique leaf candidate should skip redundant final synthesis.")
+
+    async def accepting_verifier(*_args, **kwargs):
+        execution_result = kwargs["execution_result"]
+        assert execution_result["file_refs"] == []
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Semantic content appears complete.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": execution_result["final_result"],
+        }
+
+    async def preserve_verifier_result(verification, **_kwargs):
+        return dict(verification)
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", accepting_verifier)
+    monkeypatch.setattr(cast(Any, task), "_apply_strict_terminal_gates", preserve_verifier_result)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result["terminal"] is False
+    assert result["status"] == "repair_requested"
+    assert not task.workspace.resolve_file_path("final.md").exists()
+    repair_revision = TaskBoardRevision.from_value(result["revision"])
+    repair = next(
+        card
+        for card in repair_revision.graph.cards
+        if card.metadata.get("generated_by") == "agent_task.taskboard.final_verification_repair"
+    )
+    assert repair.metadata["final_workspace_deliverables"] == ["final.md"]
+    assert any("final.md" in item for item in repair.required_outputs)
+    assert "Missing required Workspace deliverable(s): final.md" in result["final_verification"][
+        "missing_criteria"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_fails_closed_for_model_declared_internal_working_artifact(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-internal-working-terminal").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-internal-working-terminal",
+        goal="Deliver the final report.",
+        success_criteria=["The final report is delivered."],
+        execution="taskboard",
+    )
+    working_path = "working/portfolio_risk_brief/final.md"
+    write_result = await task.workspace.write_file(
+        working_path,
+        "# Working Report\n\nComplete content at an internal evidence path.\n",
+    )
+    working_ref = {
+        **write_result["file_refs"][0],
+        "role": "workspace_artifact",
+        "source": "agent_task.taskboard.card.synthesize.workspace_artifact",
+    }
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-working-terminal",
+            "status": "completed",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {
+                        "id": "synthesize",
+                        "objective": "Deliver the final report.",
+                        "required_outputs": ["Final report"],
+                    }
+                ],
+            },
+            "card_results": {
+                "synthesize": TaskBoardCardResult(
+                    card_id="synthesize",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "sufficient": True,
+                        "candidate_final_result": "Workspace artifact delivered.",
+                        "artifact_manifest": {"path": working_path},
+                        "file_refs": [working_ref],
+                        "remaining_work": [],
+                    },
+                    file_refs=(working_ref,),
+                    artifact_refs=(working_ref,),
+                ).to_dict()
+            },
+        }
+    )
+
+    async def fail_finalizer(*_args, **_kwargs):
+        raise AssertionError("The unique leaf candidate should skip redundant final synthesis.")
+
+    async def accepting_verifier(*_args, **kwargs):
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Semantic content appears complete.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": kwargs["execution_result"]["final_result"],
+        }
+
+    async def preserve_verifier_result(verification, **_kwargs):
+        return dict(verification)
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", accepting_verifier)
+    monkeypatch.setattr(cast(Any, task), "_apply_strict_terminal_gates", preserve_verifier_result)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result == {"terminal": True, "status": "blocked"}
+    assert task.result["accepted"] is False
+    assert task.result["artifact_status"] == "partial"
+    assert task.result["artifact_refs"] == []
+    assert "framework-internal working path" in task.result["reason"]
+    terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
+    assert "taskboard_terminal_workspace_delivery_invalid" in terminal_state["final_verification"][
+        "guard_reasons"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_file_terminal_uses_current_content_version_over_stale_candidate(tmp_path, monkeypatch):
+    agent = _create_agent("agent-taskboard-current-file-terminal").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="taskboard-current-file-terminal",
+        goal="Write the verified report to final.md.",
+        success_criteria=["final.md contains the grounded current report."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    stale_body = (
+        "# Historical Report\n\n"
+        "AVGO price $1,208.50 from unsupported historical output.\n\n"
+        + "Unsupported historical analysis must not remain authoritative.\n" * 40
+    )
+    corrected_body = "# Report\n\nAVGO price 238.4 from the canonical current Action evidence."
+    await task.workspace.write_file("final.md", stale_body)
+    stale_ref = {
+        **await task.workspace._promote_file_identity("final.md", role="workspace_artifact"),
+        "source": "agent_task.taskboard.card.synthesize.workspace_artifact",
+        "preview": stale_body,
+        "truncated": False,
+        "read_bytes": len(stale_body.encode("utf-8")),
+    }
+    await task.workspace.write_file("final.md", corrected_body)
+    current_ref = {
+        **await task.workspace._promote_file_identity("final.md", role="workspace_artifact"),
+        "source": "agent_task.taskboard.card.final-verification-repair.workspace_artifact",
+        "preview": corrected_body,
+        "truncated": False,
+        "read_bytes": len(corrected_body.encode("utf-8")),
+    }
+    assert stale_ref["content_version_id"] != current_ref["content_version_id"]
+
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-current-file",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {
+                        "id": "synthesize",
+                        "objective": "Produce the historical report body.",
+                        "required_outputs": ["Report body"],
+                    },
+                    {
+                        "id": "final-verification-repair",
+                        "objective": "Repair final.md from canonical evidence.",
+                        "depends_on": ["synthesize"],
+                        "required_outputs": ["Corrected final.md"],
+                    },
+                ],
+            },
+            "card_results": {
+                "synthesize": TaskBoardCardResult(
+                    card_id="synthesize",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "candidate_final_result": stale_body,
+                        "file_refs": [stale_ref],
+                        "remaining_work": [],
+                    },
+                    file_refs=(stale_ref,),
+                    artifact_refs=(stale_ref,),
+                ).to_dict(),
+                "final-verification-repair": TaskBoardCardResult(
+                    card_id="final-verification-repair",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "candidate_final_result": (
+                            "Workspace artifact delivered at final.md; full content is available through "
+                            "file_refs/readback."
+                        ),
+                        "file_refs": [current_ref],
+                        "remaining_work": [],
+                    },
+                    file_refs=(current_ref,),
+                    artifact_refs=(current_ref,),
+                ).to_dict(),
+            },
+        }
+    )
+
+    async def fail_finalizer(*_args, **_kwargs):
+        raise AssertionError("The current trusted file should be promoted without a model finalizer.")
+
+    async def complete_verifier(*_args, **kwargs):
+        execution_result = kwargs["execution_result"]
+        assert execution_result["final_result"] == (
+            "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+        )
+        final_refs = execution_result["file_refs"]
+        assert final_refs
+        assert {ref.get("content_version_id") for ref in final_refs} == {current_ref["content_version_id"]}
+        assert all(ref.get("sha256") == current_ref["sha256"] for ref in final_refs)
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The current physical content version is grounded.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": execution_result["final_result"],
+            "strict_terminal_gates_applied": True,
+        }
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    async def preserve_verifier_result(verification, **_kwargs):
+        return dict(verification)
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", complete_verifier)
+    monkeypatch.setattr(cast(Any, task), "_apply_strict_terminal_gates", preserve_verifier_result)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result == {"terminal": True, "status": "completed"}
+    assert task.result["accepted"] is True
+    assert task.result["artifact_refs"]
+    assert {ref.get("content_version_id") for ref in task.result["artifact_refs"]} == {
+        current_ref["content_version_id"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_taskboard_file_terminal_preserves_explicit_leaf_final_result_summary(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-file-summary-terminal").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-file-summary-terminal",
+        goal="Write final.md and return a compact final summary.",
+        success_criteria=["final.md is complete.", "A compact final summary is returned."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    await task.workspace.write_file("final.md", "# Complete report\n\nGrounded artifact body.")
+    final_ref = {
+        **await task.workspace._promote_file_identity("final.md", role="workspace_artifact"),
+        "source": "agent_task.taskboard.card.final-verification-repair.workspace_artifact",
+        "preview": "# Complete report\n\nGrounded artifact body.",
+        "truncated": False,
+    }
+    summary = "Compact grounded summary returned by the completed terminal repair card."
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-file-summary",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {
+                        "id": "final-verification-repair",
+                        "objective": "Return the missing compact summary without rewriting final.md.",
+                        "required_outputs": ["Compact final summary"],
+                        "metadata": {
+                            "generated_by": "agent_task.taskboard.final_verification_repair"
+                        },
+                    }
+                ],
+            },
+            "card_results": {
+                "final-verification-repair": TaskBoardCardResult(
+                    card_id="final-verification-repair",
+                    status="completed",
+                    preview={
+                        "status": "completed",
+                        "final_result": summary,
+                        "file_refs": [final_ref],
+                        "remaining_work": [],
+                    },
+                    file_refs=(final_ref,),
+                    artifact_refs=(final_ref,),
+                ).to_dict()
+            },
+        }
+    )
+
+    async def fail_finalizer(*_args, **_kwargs):
+        raise AssertionError("The completed terminal card should be promoted without a model finalizer.")
+
+    async def complete_verifier(*_args, **kwargs):
+        execution_result = kwargs["execution_result"]
+        assert execution_result["final_result"] == summary
+        assert execution_result["file_refs"][0]["content_version_id"] == final_ref[
+            "content_version_id"
+        ]
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The file and compact summary are both complete.",
+            "failure_analysis": "",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
+            "final_result_required": True,
+            "final_result": execution_result["final_result"],
+            "strict_terminal_gates_applied": True,
+        }
+
+    async def preserve_verifier_result(verification, **_kwargs):
+        return dict(verification)
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", complete_verifier)
+    monkeypatch.setattr(cast(Any, task), "_apply_strict_terminal_gates", preserve_verifier_result)
+    monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._finalize_taskboard(
+        revision,
+        context_pack={"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result == {"terminal": True, "status": "completed"}
+    assert task.result["accepted"] is True
+    assert task.result["final_result"] == summary
+    assert task.result["artifact_refs"][0]["content_version_id"] == final_ref[
+        "content_version_id"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_finalization_does_not_use_acceptance_cache_as_terminal_semantic_gate(
+    tmp_path,
+    monkeypatch,
+):
     agent = _create_agent("agent-taskboard-final-clean-acceptance-cache").use_workspace(tmp_path / "workspace")
     task = AgentTask(
         agent,
@@ -6326,15 +12200,42 @@ async def test_taskboard_finalization_skips_verifier_when_acceptance_cache_is_cl
         calls["finalizer"] += 1
         raise AssertionError("TaskBoard finalizer should be skipped for promotable terminal candidate.")
 
-    async def fail_verifier(*_args, **_kwargs):
+    async def terminal_verifier(*_args, **_kwargs):
         calls["verifier"] += 1
-        raise AssertionError("Clean acceptance cache should skip terminal model verification.")
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The current terminal candidate passed semantic verification.",
+            "acceptance_delta": [],
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": "Final report body from the completed terminal card.",
+            "criterion_checks": [
+                {
+                    "criterion": "The completed card result is returned.",
+                    "satisfied": True,
+                    "summary": "The current candidate satisfies the criterion.",
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [],
+            "material_claim_audit": {
+                "valid": True,
+                "coverage_complete": True,
+                "checks": [],
+                "failed_checks": [],
+                "structural_errors": [],
+                "repair_contract": {},
+            },
+            "strict_terminal_gates_applied": True,
+        }
 
     async def noop(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(cast(Any, task), "_request_taskboard_final", fail_finalizer)
-    monkeypatch.setattr(cast(Any, task), "_request_verification", fail_verifier)
+    monkeypatch.setattr(cast(Any, task), "_request_verification", terminal_verifier)
     monkeypatch.setattr(cast(Any, task), "_record_phase", noop)
     monkeypatch.setattr(cast(Any, task), "_emit", noop)
 
@@ -6350,13 +12251,11 @@ async def test_taskboard_finalization_skips_verifier_when_acceptance_cache_is_cl
     )
 
     assert result == {"terminal": True, "status": "completed"}
-    assert calls == {"finalizer": 0, "verifier": 0}
+    assert calls == {"finalizer": 0, "verifier": 1}
     assert task.result["accepted"] is True
     terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
     assert terminal_state["acceptance_verification_plan"]["all_satisfied"] is True
-    assert terminal_state["final_verification"]["verification_source"] == (
-        "taskboard_acceptance_cache"
-    )
+    assert terminal_state["final_verification"]["material_claim_audit"]["valid"] is True
 
 
 @pytest.mark.asyncio
@@ -6638,96 +12537,974 @@ def test_verification_accepts_file_backed_result_despite_soft_liveness_failure(t
 
 
 def test_verification_criterion_checks_require_structured_satisfied_boolean():
-    assert AgentTask._verification_criteria_are_satisfied(
-        [
-            {
-                "criterion": "grounding",
-                "status": "satisfied",
-                "summary": "Display-only model status text is not enough.",
-            }
-        ]
-    ) is False
-    assert AgentTask._verification_criteria_are_satisfied(
-        [
-            {
-                "criterion": "grounding",
-                "satisfied": True,
-                "status": "satisfied",
-                "summary": "Structured boolean is the completion signal.",
-            }
-        ]
-    ) is True
+    assert (
+        AgentTask._verification_criteria_are_satisfied(
+            [
+                {
+                    "criterion": "grounding",
+                    "status": "satisfied",
+                    "summary": "Display-only model status text is not enough.",
+                }
+            ]
+        )
+        is False
+    )
+    assert (
+        AgentTask._verification_criteria_are_satisfied(
+            [
+                {
+                    "criterion": "grounding",
+                    "satisfied": True,
+                    "status": "satisfied",
+                    "summary": "Structured boolean is the completion signal.",
+                }
+            ]
+        )
+        is True
+    )
 
 
-def test_verification_factual_integrity_check_blocks_completion(tmp_path):
-    agent = _create_agent("agent-factual-integrity-check").use_workspace(tmp_path / "workspace")
+def test_terminal_verification_rejects_missing_or_unknown_criterion_joins(tmp_path):
+    agent = _create_agent("agent-criterion-join-validation").use_workspace(tmp_path / "workspace")
     task = AgentTask(
         agent,
-        task_id="factual-integrity-check",
-        goal="Produce a support reply.",
-        success_criteria=["The support reply preserves stated uncertainty."],
+        task_id="criterion-join-validation",
+        goal="Return a concise reformatted result.",
+        success_criteria=["The result is concise.", "The result is reformatted."],
     )
+    carrier_id = "inline:" + "f" * 64
+    candidate: dict[str, Any] = {
+        "carrier_id": carrier_id,
+        "text": "Concise reformatted result.",
+        "content_version_id": carrier_id,
+    }
+    candidate["carriers"] = [dict(candidate)]
 
     verification = task._normalize_verification(
         {
             "is_complete": True,
             "requires_block": False,
-            "reason": "Explicit criteria are satisfied.",
-            "failure_analysis": "",
-            "acceptance_delta": [],
+            "reason": "Complete.",
             "missing_criteria": [],
-            "replan_instruction": "",
-            "final_result_required": False,
-            "final_result": "",
-            "factual_integrity_check": {
-                "satisfied": False,
-                "unsupported_additions": ["Added unsupported mitigation time 13:45 UTC."],
-                "certainty_inflation": ["Changed no known data loss into confirmed no data loss."],
-                "summary": "The artifact contains unsupported concrete details.",
-            },
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:unknown",
+                    "satisfied": True,
+                    "summary": "Copied an untrusted criterion id.",
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [],
         },
         execution_evidence_summary={},
+        terminal_candidate=candidate,
     )
 
     assert verification["is_complete"] is False
-    assert "factual_integrity_failed" in verification["guard_reasons"]
-    assert "Added unsupported mitigation time 13:45 UTC." in verification["missing_criteria"]
-    assert "Changed no known data loss into confirmed no data loss." in verification["acceptance_delta"]
+    assert "criterion_audit_invalid" in verification["guard_reasons"]
+    assert verification["criterion_audit"]["valid"] is False
+    assert {error["code"] for error in verification["criterion_audit"]["structural_errors"]} == {
+        "criterion_id_unknown",
+        "criterion_checks_missing",
+    }
 
 
-def test_verification_factual_integrity_check_allows_clean_completion(tmp_path):
-    agent = _create_agent("agent-factual-integrity-clean").use_workspace(tmp_path / "workspace")
+def test_terminal_verifier_validates_the_exact_model_visible_reference_snapshot(tmp_path):
+    agent = _create_agent("agent-verifier-reference-snapshot").use_workspace(
+        tmp_path / "workspace"
+    )
     task = AgentTask(
         agent,
-        task_id="factual-integrity-clean",
-        goal="Produce a support reply.",
-        success_criteria=["The support reply preserves stated uncertainty."],
+        task_id="verifier-reference-snapshot",
+        goal="Return one grounded fact.",
+        success_criteria=["The fact is grounded in Action evidence."],
     )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "market:avgo",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "AVGO closed at 238.4, up 0.9%.",
+        }
+    )
+    carrier_readback = task._task_reference_catalog.add_evidence(
+        {
+            "id": "artifact:final",
+            "kind": "workspace_artifact.targeted_readback",
+            "status": "ok",
+            "body_state": "bounded",
+            "path": "final.md",
+            "body": "AVGO closed at 238.4, up 0.9%.",
+        }
+    )
+    eligible_reference_ids = set(task._task_reference_catalog.offered_references())
+    projection = task._model_evidence_ledger_projection(
+        {"items": [source, carrier_readback]},
+        offered_reference_ids=eligible_reference_ids,
+    )
+    offered_snapshot = {
+        str(item["reference_id"])
+        for item in projection["items"]
+    }
+
+    assert offered_snapshot == {source["reference_id"]}
+    assert carrier_readback["reference_id"] not in offered_snapshot
+    assert projection["omitted_count"] == 0
+
+    carrier_id = "inline:" + "9" * 64
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": "AVGO closed at 238.4, up 0.9%.",
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "carrier_id": carrier_id,
+                "kind": "inline_final_result",
+                "text": "AVGO closed at 238.4, up 0.9%.",
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+    raw_verification = {
+        "is_complete": True,
+        "requires_block": False,
+        "reason": "Complete.",
+        "missing_criteria": [],
+        "criterion_checks": [
+            {
+                "criterion_id": "criterion:1",
+                "satisfied": True,
+                "summary": "The Action result grounds the fact.",
+                "evidence_ids": [source["reference_id"]],
+            }
+        ],
+        "material_claim_coverage_complete": True,
+        "material_claim_checks": [
+            {
+                "claim_key": "claim_1",
+                "claim_kind": "external_fact",
+                "state": "supported",
+                "evidence_ids": [source["reference_id"]],
+                "reason": "The offered Action evidence contains the exact fact.",
+            }
+        ],
+    }
+    accepted = task._normalize_verification(
+        raw_verification,
+        execution_evidence_summary={},
+        terminal_candidate=candidate,
+        offered_reference_ids=offered_snapshot,
+    )
+    invalid_transport_join = {
+        **raw_verification,
+        "criterion_checks": [
+            {
+                **raw_verification["criterion_checks"][0],
+                "evidence_ids": [carrier_readback["reference_id"]],
+            }
+        ],
+    }
+    rejected = task._normalize_verification(
+        invalid_transport_join,
+        execution_evidence_summary={},
+        terminal_candidate=candidate,
+        offered_reference_ids=offered_snapshot,
+    )
+
+    assert accepted["is_complete"] is True
+    assert rejected["criterion_audit"]["valid"] is False
+    assert {
+        error["code"]
+        for error in rejected["criterion_audit"]["structural_errors"]
+    } == {"criterion_evidence_unknown"}
+
+
+def test_terminal_verifier_material_claim_keys_reconstruct_host_owned_identity(tmp_path):
+    agent = _create_agent("agent-verifier-claim-selection").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-claim-selection",
+        goal="Return a grounded two-part brief.",
+        success_criteria=["Every material claim is grounded."],
+    )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "market:avgo",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "AVGO closed at 238.4, up 0.9%.",
+        }
+    )
+    carrier_id = "car_current"
+    candidate: dict[str, Any] = {
+        "carrier_id": carrier_id,
+        "kind": "workspace_artifact",
+        "path": "final.md",
+        "text": "# Brief\n\nAVGO closed at 238.4, up 0.9%.\n\nPortfolio conclusion.",
+        "content_version_id": "cv_current",
+    }
+    candidate["carriers"] = [dict(candidate)]
+
+    offered_candidates = task._material_claim_candidates_for_verifier(candidate)
+
+    assert [item["claim_key"] for item in offered_candidates] == [
+        "claim_1",
+        "claim_2",
+        "claim_3",
+    ]
+    assert all(
+        not {"carrier_id", "content_version_id", "artifact_quote"}.intersection(item)
+        for item in offered_candidates
+    )
+    selected = offered_candidates[1]
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Complete.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "The material claim is supported.",
+                    "evidence_ids": [source["reference_id"]],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": selected["claim_key"],
+                    "claim_kind": "external_fact",
+                    "state": "supported",
+                    "evidence_ids": [source["reference_id"]],
+                    "reason": "The Action result directly supports the selected claim.",
+                }
+            ],
+        },
+        execution_evidence_summary={},
+        terminal_candidate=candidate,
+        offered_reference_ids={source["reference_id"]},
+    )
+
+    assert verification["is_complete"] is True
+    assert verification["material_claim_checks"] == [
+        {
+            "claim_key": selected["claim_key"],
+            "carrier_id": carrier_id,
+            "path": "final.md",
+            "content_version_id": "cv_current",
+            "artifact_quote": selected["text"],
+            "claim_kind": "external_fact",
+            "state": "supported",
+            "evidence_ids": [source["reference_id"]],
+            "reason": "The Action result directly supports the selected claim.",
+        }
+    ]
+
+
+def test_terminal_verifier_claim_candidates_keep_adjacent_markdown_lines_separate(
+    tmp_path,
+):
+    agent = _create_agent("agent-verifier-line-claim-selection").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-line-claim-selection",
+        goal="Return a grounded portfolio brief.",
+        success_criteria=["Every ticker fact is grounded."],
+    )
+    candidate: dict[str, Any] = {
+        "carrier_id": "car_current",
+        "kind": "workspace_artifact",
+        "path": "final.md",
+        "text": (
+            "## Market facts\n"
+            "- NVDA closed at 170.2.\n"
+            "- AVGO closed at 238.4.\n"
+        ),
+        "content_version_id": "cv_current",
+    }
+    candidate["carriers"] = [dict(candidate)]
+
+    offered = task._material_claim_candidates_for_verifier(candidate)
+
+    assert [(item["claim_key"], item["text"]) for item in offered] == [
+        ("claim_1", "## Market facts"),
+        ("claim_2", "- NVDA closed at 170.2."),
+        ("claim_3", "- AVGO closed at 238.4."),
+    ]
+
+
+def test_terminal_verifier_rejects_unknown_material_claim_key(tmp_path):
+    agent = _create_agent("agent-verifier-unknown-claim").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-unknown-claim",
+        goal="Return a grounded fact.",
+        success_criteria=["The fact is grounded."],
+    )
+    candidate: dict[str, Any] = {
+        "carrier_id": "car_current",
+        "kind": "inline_final_result",
+        "text": "Grounded fact.",
+        "content_version_id": "cv_current",
+    }
+    candidate["carriers"] = [dict(candidate)]
 
     verification = task._normalize_verification(
         {
             "is_complete": True,
             "requires_block": False,
-            "reason": "All checks passed.",
-            "failure_analysis": "",
-            "acceptance_delta": [],
+            "reason": "Complete.",
             "missing_criteria": [],
-            "replan_instruction": "",
-            "final_result_required": False,
-            "final_result": "",
-            "factual_integrity_check": {
-                "satisfied": True,
-                "unsupported_additions": [],
-                "certainty_inflation": [],
-                "summary": "No unsupported concrete additions.",
-            },
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "Checked.",
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_unknown",
+                    "claim_kind": "external_fact",
+                    "state": "unsupported",
+                    "evidence_ids": [],
+                    "reason": "Unknown selection key.",
+                }
+            ],
         },
         execution_evidence_summary={},
+        terminal_candidate=candidate,
+        offered_reference_ids=set(),
+    )
+
+    assert verification["is_complete"] is False
+    assert verification["material_claim_audit"]["valid"] is False
+    assert any(
+        "claim_key is not one of the current offered material claim candidates"
+        in message
+        for error in verification["material_claim_audit"]["structural_errors"]
+        for message in error.get("messages", [])
+    )
+
+
+def test_terminal_verifier_rejects_duplicate_material_claim_key(tmp_path):
+    agent = _create_agent("agent-verifier-duplicate-claim").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-duplicate-claim",
+        goal="Return a grounded fact.",
+        success_criteria=["The fact is grounded."],
+    )
+    candidate: dict[str, Any] = {
+        "carrier_id": "car_current",
+        "kind": "inline_final_result",
+        "text": "Grounded fact.",
+        "content_version_id": "cv_current",
+    }
+    candidate["carriers"] = [dict(candidate)]
+    duplicate_check = {
+        "claim_key": "claim_1",
+        "claim_kind": "external_fact",
+        "state": "unsupported",
+        "evidence_ids": [],
+        "reason": "No offered evidence supports the claim.",
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": False,
+            "requires_block": False,
+            "reason": "Repair is required.",
+            "missing_criteria": ["The fact is grounded."],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": False,
+                    "summary": "Unsupported.",
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [duplicate_check, dict(duplicate_check)],
+        },
+        execution_evidence_summary={},
+        terminal_candidate=candidate,
+        offered_reference_ids=set(),
+    )
+
+    assert verification["is_complete"] is False
+    assert verification["material_claim_audit"]["valid"] is False
+    assert any(
+        "claim_key is duplicated" in message
+        for error in verification["material_claim_audit"]["structural_errors"]
+        for message in error.get("messages", [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_verifier_join_errors_share_one_protocol_owner_and_stop_on_third(
+    tmp_path,
+):
+    agent = _create_agent("agent-verifier-protocol-convergence").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-protocol-convergence",
+        goal="Return one grounded fact.",
+        success_criteria=["The fact is grounded."],
+    )
+    carrier_id = "inline:" + "8" * 64
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": "Grounded fact.",
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "carrier_id": carrier_id,
+                "kind": "inline_final_result",
+                "text": "Grounded fact.",
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+    base = {
+        "is_complete": True,
+        "requires_block": False,
+        "reason": "Complete.",
+        "missing_criteria": [],
+        "criterion_checks": [
+            {
+                "criterion_id": "criterion:1",
+                "satisfied": True,
+                "summary": "Grounded.",
+                "evidence_ids": [],
+            }
+        ],
+        "material_claim_coverage_complete": True,
+        "material_claim_checks": [],
+    }
+    criterion_join_error = {
+        **base,
+        "criterion_checks": [
+            {
+                **base["criterion_checks"][0],
+                "evidence_ids": ["ref_not_offered"],
+            }
+        ],
+    }
+    material_join_error = {
+        **base,
+        "material_claim_checks": [
+            {
+                "claim_key": "claim_1",
+                "claim_kind": "external_fact",
+                "state": "supported",
+                "evidence_ids": ["ref_not_offered"],
+                "reason": "Copied an unavailable reference.",
+            }
+        ],
+    }
+
+    normalized = [
+        task._normalize_verification(
+            raw,
+            execution_evidence_summary={},
+            terminal_candidate=candidate,
+            offered_reference_ids=set(),
+        )
+        for raw in (criterion_join_error, material_join_error, criterion_join_error)
+    ]
+    decisions = [
+        await task._apply_strict_terminal_gates(
+            item,
+            candidate=candidate,
+            execution_evidence_summary={},
+            verifier_called=True,
+        )
+        for item in normalized
+    ]
+
+    assert {
+        tuple(
+            decision["terminal_convergence"]["issue"][field]
+            for field in ("gate_kind", "issue_code", "contract_subject")
+        )
+        for decision in decisions
+    } == {
+        (
+            "output_contract",
+            "terminal_verifier_output_invalid",
+            "verification:response",
+        )
+    }
+    assert [
+        decision["terminal_convergence"]["occurrence"] for decision in decisions
+    ] == [1, 2, 3]
+    assert decisions[-1]["requires_block"] is True
+    assert (
+        AgentTask._taskboard_final_verification_allows_repair(
+            decisions[0],
+            blocking_state_facts=[],
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_verifier_merges_all_response_contract_failures_into_retry_contract(
+    tmp_path,
+):
+    agent = _create_agent("agent-verifier-merged-protocol-repair").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-merged-protocol-repair",
+        goal="Return one grounded fact.",
+        success_criteria=["The fact is grounded."],
+    )
+    carrier_id = "inline:" + "9" * 64
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": "Grounded fact.",
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "carrier_id": carrier_id,
+                "kind": "inline_final_result",
+                "text": "Grounded fact.",
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+    normalized = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Complete.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "Grounded.",
+                    "evidence_ids": ["ref_stale_criterion"],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_1",
+                    "claim_kind": "external_fact",
+                    "state": "supported",
+                    "evidence_ids": ["ref_stale_material"],
+                    "reason": "Copied stale response-local values.",
+                }
+            ],
+        },
+        execution_evidence_summary={},
+        terminal_candidate=candidate,
+        offered_reference_ids=set(),
+    )
+
+    decision = await task._apply_strict_terminal_gates(
+        normalized,
+        candidate=candidate,
+        execution_evidence_summary={},
+        verifier_called=True,
+    )
+    repair_contract = decision["terminal_convergence"]["repair_contract"]
+
+    assert repair_contract["protocol_sections"] == [
+        "criterion_checks",
+        "material_claim_checks",
+    ]
+    assert {
+        requirement["protocol_section"]
+        for requirement in repair_contract["requirements"]
+    } == {"criterion_checks", "material_claim_checks"}
+    assert {
+        invalid_id
+        for requirement in repair_contract["requirements"]
+        for invalid_id in requirement.get("invalid_reference_ids", [])
+    } == {"ref_stale_criterion", "ref_stale_material"}
+
+
+def test_verification_material_claim_audit_blocks_unsupported_external_fact(tmp_path):
+    agent = _create_agent("agent-material-claim-unsupported").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="material-claim-unsupported",
+        goal="Produce a source-grounded portfolio brief.",
+        success_criteria=["Material external facts are supported."],
+    )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "market:avgo",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "AVGO closed at 238.4, up 0.9%.",
+        }
+    )
+    carrier_id = "inline:" + "a" * 64
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": "AVGO revenue rose 99%.",
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "kind": "inline_final_result",
+                "carrier_id": carrier_id,
+                "text": "AVGO revenue rose 99%.",
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "All criteria passed.",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": candidate["text"],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "The external-fact support criterion is checked by the material claim audit.",
+                    "evidence_ids": [source["reference_id"]],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_1",
+                    "claim_kind": "external_fact",
+                    "state": "unsupported",
+                    "evidence_ids": [source["reference_id"]],
+                    "reason": "The offered market source contains price movement, not revenue growth.",
+                }
+            ],
+        },
+        execution_evidence_summary={},
+        candidate_final_result=candidate["text"],
+        terminal_candidate=candidate,
+    )
+
+    assert verification["is_complete"] is False
+    assert "material_claim_audit_failed" in verification["guard_reasons"]
+    assert verification["material_claim_audit"]["valid"] is False
+    assert verification["material_claim_repair_contract"]["issue_code"] == (
+        "unsupported_material_claim"
+    )
+
+
+def test_verification_material_claim_audit_allows_reasonable_derived_analysis(tmp_path):
+    agent = _create_agent("agent-material-claim-derived").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="material-claim-derived",
+        goal="Produce a source-grounded portfolio brief.",
+        success_criteria=["Material facts and analysis are clearly distinguished."],
+    )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "mandate:diversification",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "AVGO diversifies exposure across custom silicon and infrastructure software.",
+        }
+    )
+    carrier_id = "inline:" + "b" * 64
+    text = "In this portfolio, AVGO can reduce ticker-specific concentration risk."
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": text,
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "kind": "inline_final_result",
+                "carrier_id": carrier_id,
+                "text": text,
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "All criteria passed.",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": text,
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "Facts and bounded analysis are distinguished.",
+                    "evidence_ids": [source["reference_id"]],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_1",
+                    "claim_kind": "derived_analysis",
+                    "state": "reasonable_derived",
+                    "evidence_ids": [source["reference_id"]],
+                    "reason": "This is a bounded portfolio inference from the offered diversification fact.",
+                }
+            ],
+        },
+        execution_evidence_summary={},
+        candidate_final_result=text,
+        terminal_candidate=candidate,
     )
 
     assert verification["is_complete"] is True
+    assert verification["material_claim_audit"]["valid"] is True
     assert verification.get("guard_reasons") in (None, [])
-    assert verification["factual_integrity_check"]["satisfied"] is True
+
+
+@pytest.mark.parametrize(
+    "claim_check",
+    [
+        {
+            "claim_key": "claim_unknown",
+            "claim_kind": "external_fact",
+            "state": "supported",
+            "evidence_ids": [],
+            "reason": "Unknown claim selection.",
+        },
+        {
+            "claim_key": "claim_1",
+            "claim_kind": "external_fact",
+            "state": "supported",
+            "evidence_ids": ["ref_unknown"],
+            "reason": "Unknown evidence ref.",
+        },
+    ],
+)
+def test_verification_material_claim_audit_rejects_untrusted_model_joins(tmp_path, claim_check):
+    agent = _create_agent("agent-material-claim-invalid-join").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="material-claim-invalid-join",
+        goal="Reformat the supplied output.",
+        success_criteria=["The supplied output is reformatted."],
+    )
+    carrier_id = "inline:" + "c" * 64
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": "Reformatted output.",
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "kind": "inline_final_result",
+                "carrier_id": carrier_id,
+                "text": "Reformatted output.",
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Complete.",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": candidate["text"],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "The output was reformatted.",
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [claim_check],
+        },
+        execution_evidence_summary={},
+        candidate_final_result=candidate["text"],
+        terminal_candidate=candidate,
+    )
+
+    assert verification["is_complete"] is False
+    assert "material_claim_audit_invalid" in verification["guard_reasons"]
+    assert verification["material_claim_audit"]["structural_errors"]
+
+
+def test_verification_material_claim_audit_allows_empty_complete_audit_for_non_factual_output(tmp_path):
+    agent = _create_agent("agent-material-claim-empty").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="material-claim-empty",
+        goal="Reformat the supplied output.",
+        success_criteria=["The supplied output is reformatted."],
+    )
+    carrier_id = "inline:" + "e" * 64
+    text = "Reformatted output."
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": text,
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "kind": "inline_final_result",
+                "carrier_id": carrier_id,
+                "text": text,
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Complete.",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": text,
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "The output was reformatted.",
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [],
+        },
+        execution_evidence_summary={},
+        candidate_final_result=text,
+        terminal_candidate=candidate,
+    )
+
+    assert verification["is_complete"] is True
+    assert verification["material_claim_audit"]["valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_verification_uses_one_semantic_request_without_grounding_subflow(
+    tmp_path,
+    monkeypatch,
+):
+    verification_module = importlib.import_module("agently.core.application.AgentTask.Verification")
+    agent = _create_agent("agent-single-terminal-verifier").use_workspace(tmp_path / "workspace")
+    task = AgentTask(
+        agent,
+        task_id="single-terminal-verifier",
+        goal="Reformat the supplied output.",
+        success_criteria=["The supplied output is reformatted."],
+        execution="flat",
+    )
+    calls = {"requests": 0}
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output"] = value
+            captured["format"] = format
+            return self
+
+        async def async_get_data(self):
+            return {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "Complete.",
+                "failure_analysis": "",
+                "acceptance_delta": [],
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "repair_constraints": [],
+                "next_step_requirements": [],
+                "final_result_required": True,
+                "final_result": "Reformatted output.",
+                "criterion_checks": [
+                    {
+                        "criterion_id": "criterion:1",
+                        "satisfied": True,
+                        "summary": "The output is reformatted.",
+                        "evidence_ids": [],
+                    }
+                ],
+                "material_claim_coverage_complete": True,
+                "material_claim_checks": [],
+            }
+
+    def create_request():
+        calls["requests"] += 1
+        return FakeRequest()
+
+    async def noop_async(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(agent, "create_temp_request", create_request)
+    monkeypatch.setattr(cast(Any, task), "_apply_language_policy_to_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cast(Any, task), "_ensure_workspace_artifact_targeted_readback_evidence", noop_async)
+    monkeypatch.setattr(cast(Any, task), "_emit_process_progress_from_output", noop_async)
+    assert not hasattr(verification_module, "run_grounding_subflow")
+
+    verification = await task._request_verification(
+        1,
+        plan={"deliverable_mode": "inline_final"},
+        execution_result={
+            "candidate_final_result": "Reformatted output.",
+            "remaining_work": [],
+        },
+        execution_meta={"status": "completed", "logs": {}},
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert verification["is_complete"] is True
+    assert calls == {"requests": 1}
+    assert "material_claim_checks" in captured["output"]
+    assert "material_claim_candidates" in captured["input"]
+    material_check_schema = captured["output"]["material_claim_checks"][0][0]
+    assert "claim_key" in material_check_schema
+    assert "carrier_id" not in material_check_schema
+    assert "artifact_quote" not in material_check_schema
 
 
 def test_verification_keeps_liveness_failure_blocking_without_criterion_checks(tmp_path):
@@ -7834,9 +14611,7 @@ def test_required_failed_read_action_still_blocks_execution_risk_guard(tmp_path)
                     "replay_safe": True,
                 }
             ],
-            "capability_evidence_requirements": [
-                {"capability_id": "read_skill_guidance", "kind": "action_succeeded"}
-            ],
+            "capability_evidence_requirements": [{"capability_id": "read_skill_guidance", "kind": "action_succeeded"}],
         },
     )
 
@@ -8484,9 +15259,19 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
         max_iterations=3,
         options={"agent_task": {"workspace_recovery": True}},
     )
+
     async def crash_on_second_iteration(iteration_index, plan, context_pack):
         if iteration_index >= 2:
             raise RuntimeError("simulated process crash")
+        cast(Any, task).task_record._task_reference_catalog.add_evidence(
+            {
+                "id": "resume.seed",
+                "kind": "action_evidence",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "stable before checkpoint",
+            }
+        )
         return (
             {"step_result": "iteration 1 partial", "evidence": ["progress"], "remaining_work": ["finish"]},
             {"execution_id": "exec-1", "status": "completed", "route": {"selected_route": "model_request"}, "logs": {}},
@@ -8502,6 +15287,11 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
     assert snapshot is not None
     assert snapshot["iteration"] == 1
     assert snapshot["manifest"]["goal"].startswith("Repair a legacy")
+    assert snapshot["task_reference_catalog"]["task_id"] == "resumable-task"
+    assert snapshot["task_reference_catalog"]["references"]
+    assert snapshot["terminal_convergence"]["task_id"] == "resumable-task"
+    seeded_reference = next(iter(snapshot["task_reference_catalog"]["references"]))
+    seeded_target = snapshot["task_reference_catalog"]["references"][seeded_reference]["evidence_id"]
     # Failed-run cleanup discards ordinary process checkpoints while the
     # explicitly anchored compact resume snapshot remains available.
     assert await agent.workspace.checkpoint_history("resumable-task") == []
@@ -8518,12 +15308,24 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
                 "execution_id": f"exec-{iteration_index}",
                 "status": "completed",
                 "route": {"selected_route": "model_request"},
-                "logs": {},
+                "logs": {
+                    "action_logs": [
+                        {
+                            "action_id": "repair_step",
+                            "action_call_id": f"repair-call-{iteration_index}",
+                            "status": "success",
+                            "result": f"repair evidence version {iteration_index}",
+                        }
+                    ]
+                },
             },
         )
 
     cast(Any, resumed)._agent_task_step_overrides = {"_execute_step": finish_step}
     result = await resumed.async_start()
+    assert (
+        cast(Any, resumed).task_record._task_reference_catalog.resolve(seeded_reference)["evidence_id"] == seeded_target
+    )
     execution_meta = await resumed.async_get_meta()
     meta = execution_meta["logs"]["route_logs"]["agent_task"]
 
@@ -8532,6 +15334,7 @@ async def test_agent_task_resumes_from_checkpoint_after_crash(tmp_path):
     assert meta["resumed_from_iteration"] == 1
     # Continued from iteration 2 (did not re-run iteration 1).
     assert meta["iterations"][0]["iteration"] == 2
+    assert cast(Any, resumed).task_record._terminal_convergence_state.snapshot()["task_id"] == "resumable-task"
     assert result["status"] == "completed"
 
 
@@ -9032,8 +15835,7 @@ async def test_execution_exception_compacts_provider_request_payload_for_hot_pat
     )
     provider_error = (
         "Status Code: 403\n"
-        "Response: {'code': 'AllocationQuota.FreeTierOnly', 'message': 'quota exhausted'}\n"
-        + huge_request_payload
+        "Response: {'code': 'AllocationQuota.FreeTierOnly', 'message': 'quota exhausted'}\n" + huge_request_payload
     )
 
     class FailingExecution:
@@ -9504,6 +16306,53 @@ def test_execution_log_summary_infers_action_success_from_route_history():
     assert summary["capability_evidence"]["actions"]["failed"] == ["read_file"]
 
 
+def test_action_succeeded_evidence_survives_an_independent_failed_call(tmp_path):
+    from agently.core.application import AgentTask
+
+    task = AgentTask(
+        _create_agent("agent-task-action-succeeded-any-call"),
+        goal="Read the required artifact.",
+        success_criteria=["The read Action succeeds."],
+        workspace=tmp_path / "workspace",
+        options={
+            "capability_evidence_requirements": [
+                {
+                    "capability_id": "read_file",
+                    "capability_kind": "action",
+                    "kind": "action_succeeded",
+                }
+            ]
+        },
+    )
+    summary = task._execution_log_summary(
+        {
+            "status": "completed",
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "read_file",
+                        "action_call_id": "read-success",
+                        "status": "success",
+                    },
+                    {
+                        "action_id": "read_file",
+                        "action_call_id": "read-failed",
+                        "status": "error",
+                    },
+                ],
+                "route_logs": {},
+            },
+        }
+    )
+
+    assert summary["action_statuses"]["read_file"] == "error"
+    assert summary["failed_actions"] == ["read_file"]
+    assert summary["capability_evidence"]["actions"]["succeeded"] == ["read_file"]
+    task._accumulate_capability_evidence(summary)
+    missing, _unenforced = task._evaluate_capability_evidence(summary)
+    assert missing == []
+
+
 def test_execution_log_summary_treats_partial_success_search_as_succeeded_action():
     from agently.core.application import AgentTask
 
@@ -9651,7 +16500,10 @@ def test_execution_log_summary_includes_nested_action_result_previews():
     assert "Official syllabus sections" in action["result_preview"]["content"]
     assert action["result_preview_meta"]["truncated"] is False
 
-    verifier_summary = AgentTask._compact_verifier_evidence_summary(summary)
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(
+        summary,
+        include_body_previews=True,
+    )
     verifier_action = verifier_summary["actions"][0]
     assert verifier_action["result_preview"]["selected_url"] == "https://example.test/syllabus"
     assert "Official syllabus sections" in verifier_action["result_preview"]["content"]
@@ -9724,7 +16576,10 @@ def test_cumulative_verifier_evidence_keeps_previous_iteration_action_previews(t
             },
         }
     )
-    verifier_summary = AgentTask._compact_verifier_evidence_summary(cumulative)
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(
+        cumulative,
+        include_body_previews=True,
+    )
 
     actions = verifier_summary["actions"]
     assert [action["id"] for action in actions] == ["browse", "write_file"]
@@ -9806,6 +16661,142 @@ def test_cumulative_evidence_ledger_keeps_current_action_result_when_old_items_o
     assert guard["valid"] is True
 
 
+def test_cumulative_evidence_ledger_excludes_stale_workspace_artifact_snapshots(tmp_path):
+    agent = _create_agent("agent-task-current-artifact-version").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        goal="Repair and verify a mutable Workspace report.",
+        success_criteria=["Only the current report version is verifier-visible."],
+        execution="flat",
+    )
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "execution_meta": {
+                "status": "completed",
+                "logs": {},
+                "blocks": {
+                    "evidence": {
+                        "evidence_items": [
+                            {
+                                "id": "artifact-old",
+                                "kind": "artifact_ref",
+                                "status": "ok",
+                                "body_state": "bounded",
+                                "path": "final.md",
+                                "role": "workspace_artifact",
+                                "source": "agent_task.iteration.1.workspace_artifact",
+                                "content_version_id": "cv_1",
+                                "sha256": "old-sha",
+                                "body": "Old report body.",
+                            },
+                            {
+                                "id": "locator-old",
+                                "kind": "workspace_artifact.acceptance_locator",
+                                "status": "ok",
+                                "body_state": "ref_only",
+                                "path": "final.md",
+                                "content_version_id": "cv_1",
+                                "criterion_id": "artifact:heading:risks",
+                            },
+                            {
+                                "id": "targeted-old",
+                                "kind": "workspace_artifact.targeted_readback",
+                                "status": "ok",
+                                "body_state": "bounded",
+                                "path": "final.md",
+                                "content_version_id": "cv_1",
+                                "body": "Old unsupported report sentence.",
+                            },
+                            {
+                                "id": "targeted-old-unversioned",
+                                "kind": "workspace_artifact.targeted_readback",
+                                "status": "ok",
+                                "body_state": "bounded",
+                                "path": "final.md",
+                                "body": "Legacy targeted readback without snapshot identity.",
+                            },
+                            {
+                                "id": "independent-source",
+                                "kind": "agent_task.action.result",
+                                "status": "ok",
+                                "body_state": "bounded",
+                                "action_id": "market_snapshot",
+                                "action_call_id": "call-source",
+                                "body": "Independent market fact.",
+                            },
+                        ]
+                    }
+                },
+            },
+        }
+    )
+    current_meta = {
+        "status": "completed",
+        "logs": {},
+        "blocks": {
+            "evidence": {
+                "evidence_items": [
+                    {
+                        "id": "artifact-current",
+                        "kind": "artifact_ref",
+                        "status": "ok",
+                        "body_state": "bounded",
+                        "path": "final.md",
+                        "role": "workspace_artifact",
+                        "source": "agent_task.iteration.2.grounding_workspace_patch",
+                        "content_version_id": "cv_2",
+                        "sha256": "current-sha",
+                        "body": "Current corrected report body.",
+                    }
+                ]
+            }
+        },
+    }
+
+    ledger = task._cumulative_evidence_ledger(current_meta)
+    items = {str(item.get("id")): item for item in ledger.get("items", [])}
+
+    assert "artifact-current" in items
+    assert items["artifact-current"]["content_version_id"] == "cv_2"
+    assert "artifact-old" not in items
+    assert "locator-old" not in items
+    assert "targeted-old" not in items
+    assert "targeted-old-unversioned" not in items
+    assert "independent-source" in items
+
+
+def test_workspace_artifact_readback_evidence_carries_content_identity():
+    ref = {
+        "path": "final.md",
+        "source": "agent_task.iteration.2.grounding_workspace_patch",
+        "locator_id": "loc_1",
+        "content_version_id": "cv_2",
+        "sha256": "current-sha",
+        "bytes": 128,
+        "preview": "Current corrected report body.",
+    }
+
+    readback = AgentTask._workspace_artifact_readback_evidence_item(ref)
+    targeted = AgentTask._workspace_artifact_targeted_readback_evidence_item(
+        readback,
+        {
+            "kind": "section_search",
+            "path": "final.md",
+            "status": "read",
+            "query": "risk",
+            "content": "Current risk section.",
+        },
+    )
+
+    assert readback["locator_id"] == "loc_1"
+    assert readback["content_version_id"] == "cv_2"
+    assert readback["provenance"]["content_version_id"] == "cv_2"
+    assert targeted["locator_id"] == "loc_1"
+    assert targeted["content_version_id"] == "cv_2"
+    assert targeted["provenance"]["content_version_id"] == "cv_2"
+
+
 def test_verifier_ledger_preserves_pinned_finalizer_action_result_after_block_compaction():
     target_id = "agent_task_action_result:write_xlsx_file:act_call_target"
     evidence_items: list[dict[str, Any]] = []
@@ -9850,6 +16841,310 @@ def test_verifier_ledger_preserves_pinned_finalizer_action_result_after_block_co
     assert target_id in ids
 
 
+@pytest.mark.asyncio
+async def test_verifier_input_has_one_bounded_body_ledger_and_body_light_indexes(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-task-bounded-verifier-input").use_workspace(tmp_path / "task-workspace")
+    task = AgentTask(
+        agent,
+        task_id="bounded-verifier-input",
+        goal="Verify a complex source-grounded report without duplicating evidence bodies.",
+        success_criteria=["The report is supported by the required Action evidence."],
+        execution="taskboard",
+        options={
+            "capability_evidence_requirements": [
+                {
+                    "capability_id": "deep_research",
+                    "capability_kind": "action",
+                    "kind": "action_succeeded",
+                    "required": True,
+                    "criterion_id": "criterion:research",
+                }
+            ]
+        },
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output"] = value
+            captured["format"] = format
+            return self
+
+        async def async_get_data(self):
+            return {
+                "is_complete": False,
+                "requires_block": False,
+                "reason": "More evidence is required.",
+                "failure_analysis": "The required Action evidence is not yet sufficient.",
+                "acceptance_delta": ["Collect sufficient Action evidence."],
+                "missing_criteria": ["The report is supported by the required Action evidence."],
+                "replan_instruction": "Collect another bounded Action result.",
+                "repair_constraints": [],
+                "next_step_requirements": ["Return bounded Action evidence."],
+                "final_result_required": True,
+                "final_result": "",
+                "material_claim_coverage_complete": True,
+                "material_claim_checks": [],
+            }
+
+    async def noop_async(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: FakeRequest())
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_apply_language_policy_to_request",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_ensure_workspace_artifact_targeted_readback_evidence",
+        noop_async,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_emit_process_progress_from_output",
+        noop_async,
+    )
+
+    long_body = "bounded evidence body " * 240
+    pinned_id = "agent_task_action_result:deep_research:call-pinned"
+    evidence_items: list[dict[str, Any]] = [
+        {
+            "id": "workspace_targeted:report:risks",
+            "kind": "workspace_artifact.targeted_readback",
+            "status": "ok",
+            "body_state": "bounded",
+            "path": "reports/final.md",
+            "body": f"Risk section. {long_body}",
+        },
+        {
+            "id": "workspace_locator:report:risks",
+            "kind": "workspace_artifact.acceptance_locator",
+            "status": "ok",
+            "body_state": "ref_only",
+            "path": "reports/final.md",
+            "criterion_id": "criterion:risks",
+            "criterion": "Risk section",
+            "locator": {"start_line": 40, "end_line": 55},
+        },
+        {
+            "id": "source:failed",
+            "kind": "agent_task.action.result",
+            "status": "failed",
+            "body_state": "ref_only",
+            "action_id": "browse",
+            "action_call_id": "call-failed",
+            "source_url": "https://example.test/failed",
+        },
+        {
+            "id": "source:empty",
+            "kind": "agent_task.action.result",
+            "status": "empty",
+            "body_state": "ref_only",
+            "action_id": "browse",
+            "action_call_id": "call-empty",
+            "source_url": "https://example.test/empty",
+        },
+        {
+            "id": "source:ref-only",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "ref_only",
+            "action_id": "browse",
+            "action_call_id": "call-ref-only",
+            "source_url": "https://example.test/ref-only",
+        },
+    ]
+    evidence_items.extend(
+        {
+            "id": f"source:bounded:{index}",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "browse",
+            "action_call_id": f"call-bounded-{index}",
+            "source_url": f"https://example.test/source/{index}",
+            "aliases": [f"source-{index}", f"call-bounded-{index}"],
+            "body": f"Source {index}. {long_body}",
+        }
+        for index in range(74)
+    )
+    evidence_items.append(
+        {
+            "id": pinned_id,
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "deep_research",
+            "action_call_id": "call-pinned",
+            "path": "reports/research.json",
+            "aliases": ["deep_research", "call-pinned"],
+            "body": f"Pinned finalizer evidence. {long_body}",
+        }
+    )
+    action_logs = [
+        {
+            "action_id": "browse",
+            "status": "success",
+            "action_call_id": f"call-log-{index}",
+            "model_digest": {
+                "result_preview": {
+                    "selected_url": f"https://example.test/log/{index}",
+                    "content": f"Action log {index}. {long_body}",
+                },
+                "result_preview_meta": {"truncated": False},
+            },
+        }
+        for index in range(24)
+    ]
+    action_logs.append(
+        {
+            "action_id": "deep_research",
+            "status": "success",
+            "action_call_id": "call-pinned",
+            "model_digest": {
+                "result_preview": {"path": "reports/research.json"},
+                "result_preview_meta": {"truncated": False},
+            },
+        }
+    )
+    execution_meta = {
+        "status": "completed",
+        "route": {"selected_route": "agent_task"},
+        "diagnostics": [{"code": "diagnostic.example", "message": "bounded"}],
+        "logs": {
+            "action_logs": action_logs,
+            "route_logs": {},
+            "capability_evidence_requirements": [
+                {
+                    "capability_id": "deep_research",
+                    "capability_kind": "action",
+                    "kind": "action_succeeded",
+                    "required": True,
+                    "criterion_id": "criterion:research",
+                }
+            ],
+        },
+        "blocks": {
+            "evidence": {
+                "evidence_items": evidence_items,
+                "pinned_evidence_ids": [pinned_id],
+            }
+        },
+    }
+    embedded_ledger = {
+        "items": [{"id": "embedded", "body": long_body}],
+        "acceptance_locator_view": {"items": [{"id": "embedded-locator"}]},
+    }
+
+    await task._request_verification(
+        1,
+        plan={"execution_shape": "actions", "step_instruction": "Collect evidence."},
+        execution_result={
+            "status": "completed",
+            "evidence_ledger": embedded_ledger,
+            "taskboard_evidence_view": embedded_ledger,
+            "taskboard_scoped_evidence_view": embedded_ledger,
+            "evidence_use": [
+                {
+                    "claim": "Copied from an earlier selection domain.",
+                    "evidence_ids": ["ref_not_offered_in_terminal_ledger"],
+                    "support_type": "content",
+                }
+            ],
+            "nested": {"taskboard_evidence_view": embedded_ledger},
+            "final_result": "reports/final.md",
+        },
+        execution_meta=execution_meta,
+        context_pack=cast(Any, {}),
+    )
+
+    verifier_input = captured["input"]
+    assert "current_evidence_ledger" not in verifier_input
+    assert "acceptance_locator_view" not in verifier_input["evidence_ledger"]
+    assert "evidence_summary" not in verifier_input["execution_meta"]
+    assert not {
+        "evidence_ledger",
+        "taskboard_evidence_view",
+        "taskboard_scoped_evidence_view",
+        "evidence_use",
+    }.intersection(verifier_input["execution_result"])
+    assert "embedded-locator" not in json.dumps(
+        verifier_input["execution_result"],
+        ensure_ascii=False,
+    )
+
+    ledger = verifier_input["evidence_ledger"]
+    assert ledger["omitted_count"] > 0
+    assert all(
+        "reference_id" in item
+        and not {"id", "evidence_id", "cite_as", "aliases"}.intersection(item)
+        for item in ledger["items"]
+    )
+    pinned_item = next(item for item in ledger["items"] if item.get("action_id") == "deep_research")
+    assert pinned_item["reference_id"].startswith("ref_")
+    non_ledger_input = dict(verifier_input)
+    non_ledger_input.pop("evidence_ledger")
+    assert '"reference_id"' not in json.dumps(
+        non_ledger_input,
+        ensure_ascii=False,
+    )
+    assert "carrier_context" not in verifier_input
+    assert "terminal_carriers" not in verifier_input
+    assert all(
+        not {
+            "reference_id",
+            "id",
+            "evidence_id",
+            "cite_as",
+            "criterion_id",
+            "content_fingerprint",
+            "source_evidence_ids",
+        }.intersection(item)
+        for item in verifier_input["acceptance_locator_view"]["items"]
+    )
+    assert all(
+        set(item).intersection({"claim_key", "text", "delivery_kind", "path"})
+        == set(item)
+        and item["claim_key"].startswith("claim_")
+        for item in verifier_input["material_claim_candidates"]
+    )
+
+    for summary_key in (
+        "execution_evidence_summary",
+        "cumulative_execution_evidence_summary",
+    ):
+        for action in verifier_input[summary_key]["actions"]:
+            assert "result_preview" not in action
+            assert "input_preview" not in action
+    for artifact in verifier_input["trusted_workspace_artifacts"]:
+        assert "evidence_id" not in artifact
+        assert "content" not in artifact.get("readback", {})
+        assert isinstance(artifact["readback"]["available"], bool)
+    assert {requirement["capability_id"] for requirement in verifier_input["capability_evidence_requirements"]} == {
+        "deep_research"
+    }
+    serialized_input_characters = len(json.dumps(verifier_input, ensure_ascii=False))
+    assert serialized_input_characters <= 160_000
+    assert task.diagnostics["verifier_prompt_projection"][-1] == {
+        "serialized_input_characters": serialized_input_characters,
+        "target_characters": 160_000,
+        "over_target": False,
+    }
+
+
 def test_path_only_host_file_action_result_remains_evidence_ref():
     host_path = "/tmp/agently-host-artifacts/report.xlsx"
     ledger = AgentTask._evidence_ledger_from_execution_meta(
@@ -9876,8 +17171,7 @@ def test_path_only_host_file_action_result_remains_evidence_ref():
     action_item = next(
         item
         for item in ledger["items"]
-        if item.get("kind") == "agent_task.action.result"
-        and item.get("action_id") == "write_xlsx_file"
+        if item.get("kind") == "agent_task.action.result" and item.get("action_id") == "write_xlsx_file"
     )
     assert action_item["id"] == "agent_task_action_result:write_xlsx_file:act_call_xlsx"
     assert action_item["path"] == host_path
@@ -9971,11 +17265,7 @@ async def test_path_only_host_file_action_outside_workspace_stays_external_diagn
         source="test.host_file.external_pointer",
     )
 
-    diagnostic_codes = {
-        item.get("code")
-        for item in delivered.get("diagnostics", [])
-        if isinstance(item, Mapping)
-    }
+    diagnostic_codes = {item.get("code") for item in delivered.get("diagnostics", []) if isinstance(item, Mapping)}
     assert delivered.get("file_refs") == []
     assert "agent_task.workspace_artifact.action_file_outside_workspace" in diagnostic_codes
     assert delivered["status"] == "blocked"
@@ -10023,7 +17313,10 @@ def test_cumulative_verifier_evidence_uses_raw_action_data_when_digest_missing(t
     cumulative = task._cumulative_execution_evidence_summary(
         {"status": "completed", "logs": {"action_logs": [], "route_logs": {}}}
     )
-    verifier_summary = AgentTask._compact_verifier_evidence_summary(cumulative)
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(
+        cumulative,
+        include_body_previews=True,
+    )
 
     action = verifier_summary["actions"][0]
     assert action["id"] == "read_repo_file"
@@ -10065,11 +17358,7 @@ def test_source_refs_treat_excerpt_and_snippet_as_bounded_readback():
             }
         ]
     )
-    action_ref_states = {
-        ref["value"]: ref["content_state"]
-        for ref in action_refs
-        if ref.get("field") == "path"
-    }
+    action_ref_states = {ref["value"]: ref["content_state"] for ref in action_refs if ref.get("field") == "path"}
     assert action_ref_states["docs/guide/configuration.md"] == "bounded_readback_available"
     assert action_ref_states["docs/guide/dl-analogy.md"] == "bounded_readback_available"
 
@@ -10122,7 +17411,10 @@ def test_taskboard_final_source_refs_are_visible_to_verifier_summary(tmp_path):
             },
         }
     )
-    verifier_summary = AgentTask._compact_verifier_evidence_summary(summary)
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(
+        summary,
+        include_body_previews=True,
+    )
     planner_anchors = AgentTask._planner_evidence_anchors_from_summary(summary)
 
     verifier_states = {ref["path"]: ref["content_state"] for ref in verifier_summary["source_refs"]}
@@ -10187,7 +17479,10 @@ def test_flat_source_refs_distinguish_ref_only_repo_manifest_paths(tmp_path):
     cumulative = task._cumulative_execution_evidence_summary(
         {"status": "completed", "logs": {"action_logs": [], "route_logs": {}}}
     )
-    verifier_summary = AgentTask._compact_verifier_evidence_summary(cumulative)
+    verifier_summary = AgentTask._compact_verifier_evidence_summary(
+        cumulative,
+        include_body_previews=True,
+    )
     planner_anchors = task._iteration_prompt_summaries()[0]["evidence_anchors"]
 
     ref_states = {
@@ -10203,8 +17498,7 @@ def test_flat_source_refs_distinguish_ref_only_repo_manifest_paths(tmp_path):
         for ref in planner_anchors["source_refs"]
     )
     assert any(
-        ref["value"] == "docs/guide.md" and ref["content_state"] == "ref_only"
-        for ref in planner_anchors["source_refs"]
+        ref["value"] == "docs/guide.md" and ref["content_state"] == "ref_only" for ref in planner_anchors["source_refs"]
     )
 
 
@@ -10287,6 +17581,38 @@ def test_planner_repair_context_keeps_previous_exact_evidence_anchors(tmp_path):
         for ref in available["source_refs"]
     )
     assert available["action_result_previews"][0]["result_preview"][0]["href"] == "https://www.cnbc.com/quotes/NVDA"
+
+
+def test_planner_repair_context_carries_structured_material_claim_contract_without_prose_parsing():
+    repair_contract = {
+        "gate_kind": "factual_integrity",
+        "issue_code": "unsupported_material_claim",
+        "contract_subject": "carrier:cv_1",
+        "requirements": [
+            {
+                "claim_key": "claim:1",
+                "carrier_id": "cv_1",
+                "artifact_quote": "Unsupported claim.",
+                "state": "unsupported",
+            }
+        ],
+    }
+    context = AgentTask._planner_repair_context(
+        [
+            {
+                "iteration": 1,
+                "verification_ref": "verification:1",
+                "verification": {
+                    "is_complete": False,
+                    "reason": "Free-form reason must not own the repair contract.",
+                    "material_claim_repair_contract": repair_contract,
+                },
+            }
+        ]
+    )
+
+    assert context["material_claim_repair_contract"] == repair_contract
+    assert context["material_claim_repair_contract"]["requirements"][0]["claim_key"] == "claim:1"
 
 
 @pytest.mark.asyncio

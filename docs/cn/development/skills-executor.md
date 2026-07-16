@@ -116,6 +116,12 @@ agent.use_skills([{"source": "anthropics/skills", "subpath": "skills/docx"}], mo
 需要检查将会使用哪些 Skills 时，调用 `resolve_skills_plan(...)`。Required
 Skills 保持调用方顺序；多个可选候选由模型排序。
 
+对 AgentTask execution 来说，`mode="required"` 同时也是可用性契约。Agently
+会在业务规划开始前解析远程 source selector，并 materialize 已选择的 Skill；任务
+上下文包和能力约束使用安装后的规范 `skill_id`。如果发现、安装或安装后检查失败，
+execution 会在任何业务模型工作或产物生成之前进入 blocked。`auto_allow=True` 只
+授权匹配 Skill 请求的能力；它不代表 Skill 已可用，也不会豁免安装失败。
+
 ```python
 plan = await agent.async_resolve_skills_plan(
     "Should this release be blocked?",

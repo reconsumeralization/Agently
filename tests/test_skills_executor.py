@@ -11,6 +11,7 @@ import pytest
 from agently import Agently
 from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import create_agent_skills_runtime_context
 from agently.core.application.AgentExecution import AgentExecutionStream
+from agently.core.application import AgentTask
 from agently.builtins.plugins.SkillsExecutor import SkillInstallError, SkillNormalizationError
 from agently.core import PluginManager, TaskDAGExecutor
 from agently.types.data import AgentlyRequestData
@@ -369,6 +370,261 @@ def test_use_skills_source_selector_dedupes_installed_and_discovered(tmp_path):
 
     assert [item.get("skill_id") for item in first.get("selected_skills", [])] == ["docx-skill"]
     assert [item.get("skill_id") for item in second.get("selected_skills", [])] == ["docx-skill"]
+
+
+def test_required_source_install_failure_blocks_plan_without_discovered_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    pack = tmp_path / "pack"
+    _skill(pack / "skills" / "deep-research", name="Deep Research")
+    agent = _create_agent().use_skills(
+        {
+            "source": str(pack),
+            "subpath": "skills/deep-research",
+            "trust_level": "local",
+        },
+        mode="required",
+        auto_allow=True,
+    )
+
+    def fail_install(*args: Any, **kwargs: Any):
+        raise RuntimeError("simulated install failure")
+
+    monkeypatch.setattr(Agently.skills_executor.registry, "install_skills_pack", fail_install)
+
+    plan = agent.resolve_skills_plan("Research two concepts.", mode="required")
+
+    assert plan.get("status") == "blocked"
+    assert plan.get("selected_skills") == []
+    assert plan.get("rejected_skills") == [
+        {
+            "skill_id": "deep-research",
+            "reason_code": "source_install_failed",
+            "reason": "Required skill 'deep-research' could not be installed: simulated install failure",
+        }
+    ]
+    assert any(
+        item.get("code") == "source_install_failed"
+        and item.get("source_subpath") == "skills/deep-research"
+        for item in plan.get("diagnostics", [])
+    )
+    assert Agently.skills_executor.list_skills() == []
+
+
+def test_required_source_with_unreadable_installed_skill_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    pack = tmp_path / "pack"
+    _skill(pack / "skills" / "deep-research", name="Deep Research")
+    Agently.skills_executor.install_skills_pack(
+        pack,
+        subpath="skills/deep-research",
+        trust_level="local",
+    )
+    registry = Agently.skills_executor.registry
+    real_inspect = registry.inspect_skills
+
+    def fail_deep_research_inspection(skill_id: str):
+        if skill_id == "deep-research":
+            raise RuntimeError("installed Skill is unreadable")
+        return real_inspect(skill_id)
+
+    monkeypatch.setattr(registry, "inspect_skills", fail_deep_research_inspection)
+    agent = _create_agent().use_skills(
+        {
+            "source": str(pack),
+            "subpath": "skills/deep-research",
+            "trust_level": "local",
+        },
+        mode="required",
+    )
+
+    plan = agent.resolve_skills_plan("Research two concepts.", mode="required")
+
+    assert plan.get("status") == "blocked"
+    assert plan.get("selected_skills") == []
+    assert any(
+        item.get("reason_code") == "source_install_failed"
+        and item.get("skill_id") == "deep-research"
+        for item in plan.get("rejected_skills", [])
+    )
+    assert any(
+        item.get("code") == "source_install_failed"
+        and item.get("message") == "installed Skill is unreadable"
+        for item in plan.get("diagnostics", [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_task_required_remote_skill_failure_blocks_before_business_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    selector = {
+        "source": "bytedance/deer-flow",
+        "subpath": "skills/public/deep-research",
+        "auto_allow": True,
+    }
+    discovered_contract = cast(
+        Any,
+        {
+            "skill_id": "deep-research",
+            "trust_level": "remote",
+            "source": {
+                "source_package": "bytedance/deer-flow",
+                "source_url": "https://github.com/bytedance/deer-flow.git",
+                "source_subpath": "skills/public/deep-research",
+                "skills_pack_id": "deer-flow",
+            },
+            "card": {
+                "skill_id": "deep-research",
+                "display_name": "Deep Research",
+                "description": "Research complex topics with source evidence.",
+            },
+            "guidance": {
+                "path": "SKILL.md",
+                "content": "Research the topic and preserve source evidence.",
+            },
+            "resource_index": {"resources": []},
+            "decision_card": {"skill_id": "deep-research"},
+        },
+    )
+    discovery_calls: list[dict[str, Any]] = []
+    install_calls: list[dict[str, Any]] = []
+    business_model_calls: list[str] = []
+
+    def discover(source: str, **kwargs: Any):
+        discovery_calls.append({"source": source, **kwargs})
+        return {
+            "status": "success",
+            "skills_pack_id": "deer-flow",
+            "contracts": [discovered_contract],
+        }
+
+    def fail_install(source: str, **kwargs: Any):
+        install_calls.append({"source": source, **kwargs})
+        raise RuntimeError("remote skill install unavailable")
+
+    async def fail_if_business_model_is_requested(self, request_data):
+        business_model_calls.append(str(request_data.request_url))
+        raise AssertionError("required Skill failure must block before business model work")
+        yield "message", "unreachable"
+
+    monkeypatch.setattr(Agently.skills_executor.registry, "discover_skills_pack", discover)
+    monkeypatch.setattr(Agently.skills_executor.registry, "install_skills_pack", fail_install)
+    monkeypatch.setattr(MockSkillsRequester, "request_model", fail_if_business_model_is_requested)
+
+    agent = _create_agent()
+    execution = (
+        agent.use_skills(selector, mode="required", auto_allow=True, always=True)
+        .goal(
+            "研究Loop Engineering和FDE这两个概念",
+            success_criteria=["全面详尽", "有实际落地案例或佐证信息", "落地一个md的文档报告"],
+        )
+        .output({"reply": (str, "概要介绍"), "path": (str, "md文档绝对地址")})
+    )
+
+    result = await execution.async_get_full_data()
+
+    assert result["status"] == "blocked"
+    assert result["accepted"] is False
+    assert result["artifact_status"] == "blocked"
+    assert result["required_capabilities"]["skills_plan"]["status"] == "blocked"
+    assert any(
+        item.get("code") == "source_install_failed"
+        for item in result["required_capabilities"]["skills_plan"]["diagnostics"]
+    )
+    assert execution.task_record is None
+    assert execution.route_info["selected_route"] == "agent_task"
+    assert business_model_calls == []
+    assert discovery_calls[0]["source"] == "bytedance/deer-flow"
+    assert discovery_calls[0]["subpath"] == "skills/public/deep-research"
+    assert install_calls[0]["source"] == "bytedance/deer-flow"
+    assert install_calls[0]["subpath"] == "skills/public/deep-research"
+
+
+@pytest.mark.asyncio
+async def test_agent_task_required_source_success_transfers_canonical_installed_skill_id(
+    tmp_path: Path,
+):
+    pack = tmp_path / "pack"
+    _skill(
+        pack / "skills" / "deep-research",
+        name="Deep Research",
+        body="Research complex topics with source evidence.",
+    )
+    agent = _create_agent()
+    execution = (
+        agent.use_skills(
+            {
+                "source": str(pack),
+                "subpath": "skills/deep-research",
+                "trust_level": "local",
+            },
+            mode="required",
+            auto_allow=True,
+            always=True,
+        )
+        .goal("Research two concepts.", success_criteria=["A grounded report is returned."])
+        .strategy("flat", max_iterations=1)
+    )
+
+    async def request_plan(_iteration_index: int, _context_pack: Any):
+        return {
+            "execution_shape": "direct",
+            "step_instruction": "Return the grounded report.",
+            "expected_evidence": "The required Skill guidance was loaded.",
+            "rationale": "One bounded step is sufficient.",
+        }
+
+    async def execute_step(_iteration_index: int, _plan: Any, context_pack: Any):
+        assert context_pack["diagnostics"]["skills_context_pack"]["loaded_skill_ids"] == [
+            "deep-research"
+        ]
+        return (
+            {
+                "step_result": "Grounded report completed.",
+                "evidence": ["Required Skill context loaded."],
+                "remaining_work": [],
+                "ready_for_final_verification": True,
+            },
+            {"status": "completed", "route": {"selected_route": "model_request"}, "logs": {}},
+        )
+
+    async def request_verification(_iteration_index: int, **_kwargs: Any):
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The grounded report is complete.",
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result": "Grounded report completed.",
+        }
+
+    cast(Any, execution)._agent_task_step_overrides = {
+        "_request_plan": request_plan,
+        "_execute_step": execute_step,
+        "_request_verification": request_verification,
+    }
+
+    result = await execution.async_get_full_data()
+    task = cast(AgentTask, execution.task_record)
+
+    assert result["status"] == "completed"
+    assert [item["skill_id"] for item in Agently.skills_executor.list_skills()] == [
+        "deep-research"
+    ]
+    assert task.options["capability_constraints"]["skills"]["required"] == [
+        "deep-research"
+    ]
+    required_planner_skills = [
+        item["id"]
+        for item in task.options["planner_capabilities"]
+        if item.get("kind") == "skill" and item.get("mode") == "required"
+    ]
+    assert required_planner_skills == ["deep-research"]
 
 
 def test_discover_skills_pack_does_not_install_full_skill(tmp_path):

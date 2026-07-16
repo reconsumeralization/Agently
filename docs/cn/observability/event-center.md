@@ -31,6 +31,11 @@ run 与 retry 命名：
 - telemetry payload 只用于观察，可包含 `response_id`、`attempt_index`、run ids、provider/model、request URL、duration、raw usage、归一化 usage summary、输入/输出字符长度估算、side-channel 和规范化 error 事实。
 - telemetry 去重只移除同一 `response_id + attempt_index + event kind` 的重复 telemetry 子 payload；不会抑制原始 RuntimeEvent。
 - 不要把这些 telemetry 事实反馈给 route 选择、retry policy、verifier 判断、quality scoring、planner context 或 prompt 内容。它们只用于日志、DevTools 展示和诊断。
+- 每个 attempt 结果最多发布一个 `model.status` 事实。终态 provider 错误还会发布一个
+  `model.requester.error`；发布这条观察事实不会重新抛回 attempt loop，也不会再创建一份结果。
+- 内置 requester 的异常消息保留 provider status/detail，但不再附加序列化 request body。
+  结构化的 `model.requester.error.payload["request_data"]` 仍作为冷诊断证据保留，其中可能
+  含有敏感 prompt 数据，因此 event sink 必须采用与 request log 相同的访问与保留控制。
 
 模型请求状态：
 

@@ -267,8 +267,7 @@ class AnthropicCompatibleTransportMixin:
                         if response.status_code >= 400:
                             error = RequestError(
                                 f"Status Code: { response.status_code }\n"
-                                f"Detail: { response.text }\n"
-                                f"Request Data: { full_request_data }"
+                                f"Detail: { response.text }"
                             )
                             failover_headers = self._build_failover_headers(
                                 request_data,
@@ -352,8 +351,7 @@ class AnthropicCompatibleTransportMixin:
                     if response.status_code >= 400:
                         error = RequestError(
                             f"Status Code: { response.status_code }\n"
-                            f"Detail: { response.text }\n"
-                            f"Request Data: { full_request_data }"
+                            f"Detail: { response.text }"
                         )
                         failover_headers = self._build_failover_headers(
                             request_data,

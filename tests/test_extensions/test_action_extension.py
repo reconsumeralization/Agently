@@ -15,7 +15,6 @@ from typing import Any, cast
 from agently import Agently
 from agently.core import PluginManager, RuntimeStageStallError
 from agently.types.data import AgentlyRequestData
-from agently.types.data import StreamingData
 from agently.utils import Settings
 
 
@@ -56,6 +55,12 @@ class MockActionExtensionRequester:
             result_value = action_results.get("Use add")
             if result_value is None:
                 result_value = action_results.get("Use add (2)")
+            if (
+                isinstance(result_value, dict)
+                and "action_call_id" in result_value
+                and "result" in result_value
+            ):
+                result_value = result_value.get("result")
         else:
             result_value = None
         yield "message", json.dumps({"result": result_value}, ensure_ascii=False)
@@ -1031,45 +1036,26 @@ async def test_action_extension_broadcast_prefix_keeps_action_and_tool_logs():
 
 
 @pytest.mark.asyncio
-async def test_action_extension_plan_handler_instant_response_short_circuit(monkeypatch):
+async def test_action_extension_plan_handler_waits_for_final_response_data(monkeypatch):
     agent = Agently.create_agent()
     request = agent.create_request()
     prompt = request.prompt
     prompt.set("input", "hello")
     prompt.set("instruct", "just answer directly")
 
-    closed = False
-
-    async def fake_close():
-        nonlocal closed
-        closed = True
-
     async def fake_async_get_data():
-        raise AssertionError("async_get_data should not be called when next_action is response")
+        return {
+            "next_action": "response",
+            "execution_commands": [],
+            "completion_marker": "final parser data",
+        }
 
     class FakeResponse:
         def __init__(self):
-            self.result = SimpleNamespace(
-                async_get_data=fake_async_get_data,
-                _response_parser=SimpleNamespace(
-                    _response_consumer=SimpleNamespace(
-                        close=fake_close,
-                    )
-                ),
-            )
+            self.result = SimpleNamespace(async_get_data=fake_async_get_data)
 
         def get_async_generator(self, type=None, **kwargs):
-            _ = kwargs
-            assert type == "instant"
-
-            async def gen():
-                yield StreamingData(
-                    path="$.next_action",
-                    value="response",
-                    is_complete=True,
-                )
-
-            return gen()
+            raise AssertionError(f"discard-only stream consumption is forbidden: {type}, {kwargs}")
 
     class FakeModelRequest:
         def __init__(self, *args, **kwargs):
@@ -1117,9 +1103,11 @@ async def test_action_extension_plan_handler_instant_response_short_circuit(monk
         },
     )
 
-    assert decision.get("next_action") == "response"
-    assert decision.get("execution_commands") == []
-    assert closed is True
+    assert decision == {
+        "next_action": "response",
+        "execution_commands": [],
+        "completion_marker": "final parser data",
+    }
 
 
 @pytest.mark.asyncio
@@ -1195,9 +1183,10 @@ async def test_action_extension_get_action_result_runs_action_loop_without_reply
         return [
             {
                 "ok": True,
-                "status": "success",
-                "purpose": "normalize",
-                "action_id": "normalize_title",
+                    "status": "success",
+                    "purpose": "normalize",
+                    "action_call_id": "call-normalize",
+                    "action_id": "normalize_title",
                 "kwargs": {"text": "  Hello  "},
                 "result": "hello",
                 "data": "hello",
@@ -1218,7 +1207,12 @@ async def test_action_extension_get_action_result_runs_action_loop_without_reply
     assert len(records) == 1
     assert records[0].get("action_id") == "normalize_title"
     assert records[0].get("result") == "hello"
-    assert agent.request.prompt.get("action_results") == {"normalize": "hello"}
+    assert agent.request.prompt.get("action_results") == {
+        "normalize": {
+            "action_call_id": "call-normalize",
+            "result": "hello",
+        }
+    }
 
 
 @pytest.mark.asyncio

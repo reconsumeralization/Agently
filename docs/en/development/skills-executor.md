@@ -131,6 +131,15 @@ Use `resolve_skills_plan(...)` when you need to inspect which Skills would be
 used. Required Skills keep the caller-provided order. Multiple optional
 candidates are ordered by the model.
 
+For an AgentTask execution, `mode="required"` is also an availability
+contract. Agently resolves remote source selectors and materializes the
+selected Skill before business planning starts. The task uses the canonical
+installed `skill_id` for its context pack and capability constraints. If
+discovery, installation, or post-install inspection fails, the execution is
+blocked before any business model work or artifact production. `auto_allow=True`
+authorizes capabilities requested by the matching Skill; it does not declare
+the Skill available and does not waive installation failures.
+
 ```python
 plan = await agent.async_resolve_skills_plan(
     "Should this release be blocked?",

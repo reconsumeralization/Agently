@@ -902,7 +902,7 @@ async def test_standalone_agent_task_releases_exact_action_artifact_scope_at_ter
                 raise asyncio.CancelledError()
             raise TimeoutError("standalone AgentTask timed out")
 
-        async def async_close(self) -> None:
+        async def async_close(self, **_kwargs: Any) -> None:
             return None
 
     monkeypatch.setattr(task._flow, "create_execution", lambda **_kwargs: _TerminalExecution())

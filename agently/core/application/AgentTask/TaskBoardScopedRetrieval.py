@@ -31,18 +31,64 @@ class AgentTaskTaskBoardScopedRetrievalMixin(AgentTaskMixinBase):
         return {}
 
     def _taskboard_card_carrier_plan(self, card: Any) -> dict[str, Any]:
+        action_requirements = self._taskboard_card_action_requirements(card)
+        required_action_ids = self._taskboard_card_required_action_ids(card)
+        execution_shape = "actions" if required_action_ids else "taskboard_card"
+        expected_evidence: list[Any] = [
+            *list(getattr(card, "required_outputs", ()) or ()),
+            *action_requirements,
+        ]
         plan = {
-            "execution_shape": "taskboard_card",
-            "effective_execution_shape": "taskboard_card",
+            "execution_shape": execution_shape,
+            "effective_execution_shape": execution_shape,
             "step_instruction": str(getattr(card, "objective", "") or ""),
-            "expected_evidence": list(getattr(card, "required_outputs", ()) or ()),
+            "expected_evidence": expected_evidence,
             "rationale": "Execute one TaskBoard card through the shared Block carrier.",
-            "step_scope": {},
+            "step_scope": {
+                "allowed_capability_ids": required_action_ids,
+            },
         }
+        if required_action_ids:
+            plan["required_action_ids"] = required_action_ids
         scoped_retrieval = self._taskboard_card_scoped_retrieval(card)
         if scoped_retrieval:
             plan["scoped_retrieval"] = scoped_retrieval
         return plan
+
+    def _taskboard_card_required_action_ids(self, card: Any) -> list[str]:
+        candidates = self._normalize_string_list(
+            [
+                requirement.get("capability_id")
+                for requirement in self._taskboard_card_action_requirements(card)
+            ]
+        )
+        for container in (
+            getattr(card, "metadata", None),
+            getattr(card, "evidence_contract", None),
+        ):
+            if isinstance(container, Mapping):
+                candidates.extend(self._normalize_string_list(container.get("requires_capability_ids")))
+        # Preserve the declared identity even when the capability is missing.
+        # The execution owner must see that missing requirement and fail closed
+        # instead of silently degrading the card to a generic carrier.
+        return self._merge_string_lists(candidates)
+
+    @classmethod
+    def _taskboard_card_action_requirements(cls, card: Any) -> list[dict[str, Any]]:
+        evidence_contract = getattr(card, "evidence_contract", None)
+        requirements = cls._capability_evidence_requirements_from_mapping(
+            evidence_contract if isinstance(evidence_contract, Mapping) else None
+        )
+        return cls._merge_capability_evidence_requirements(
+            [
+                requirement
+                for requirement in requirements
+                if requirement.get("required", True) is not False
+                and str(requirement.get("kind") or "capability_used")
+                == "action_succeeded"
+                and str(requirement.get("capability_kind") or "action") == "action"
+            ]
+        )
 
     def _taskboard_card_payload_with_scoped_retrieval_results(
         self,

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import warnings
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -445,6 +446,81 @@ async def test_openai_compatible_first_event_timeout_is_typed_stall():
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_first_event_timeout_ignores_empty_sse_heartbeats():
+    async def heartbeat_generator():
+        while True:
+            await asyncio.sleep(0.005)
+            yield SimpleNamespace(event="message", data="  \n")
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    requester.plugin_settings = SettingsNamespace(
+        Settings({"plugins": {"ModelRequester": {"OpenAICompatible": {"model": "deepseek-chat"}}}}),
+        "plugins.ModelRequester.OpenAICompatible",
+    )
+
+    async def consume():
+        async for _ in requester._aiter_with_first_token_timeout(
+            heartbeat_generator(),
+            timeout_seconds=0.05,
+        ):
+            pass
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        await asyncio.wait_for(consume(), timeout=0.5)
+
+    assert raised.value.stage == "response_first_event"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_first_event_timeout_does_not_wait_for_slow_cancellation_cleanup():
+    async def cancellation_resistant_generator():
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)
+            raise
+        yield SimpleNamespace(event="message", data="late")
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    requester.plugin_settings = SettingsNamespace(
+        Settings({"plugins": {"ModelRequester": {"OpenAICompatible": {"model": "deepseek-chat"}}}}),
+        "plugins.ModelRequester.OpenAICompatible",
+    )
+    started_at = asyncio.get_running_loop().time()
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        async for _ in requester._aiter_with_first_token_timeout(
+            cancellation_resistant_generator(),
+            timeout_seconds=0.05,
+        ):
+            pass
+
+    elapsed_seconds = asyncio.get_running_loop().time() - started_at
+    assert elapsed_seconds < 0.15
+    assert raised.value.stage == "response_first_event"
+    await asyncio.sleep(0.2)
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_first_event_timeout_yields_first_meaningful_sse_frame():
+    async def heartbeat_then_data_generator():
+        yield SimpleNamespace(event="message", data="")
+        await asyncio.sleep(0.005)
+        yield SimpleNamespace(event="message", data='{"choices": [{"delta": {"content": "ready"}}]}')
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    items = [
+        item
+        async for item in requester._aiter_with_first_token_timeout(
+            heartbeat_then_data_generator(),
+            timeout_seconds=0.05,
+        )
+    ]
+
+    assert [item.data for item in items] == ['{"choices": [{"delta": {"content": "ready"}}]}']
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_stream_idle_timeout_is_typed_stall():
     async def idle_generator():
         yield {"delta": "first"}
@@ -464,6 +540,36 @@ async def test_openai_compatible_stream_idle_timeout_is_typed_stall():
     assert raised.value.stage == "response_stream"
     assert raised.value.status == "stalled"
     assert raised.value.provider == "OpenAICompatible"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_stream_idle_timeout_ignores_empty_sse_heartbeats():
+    async def heartbeat_generator():
+        yield SimpleNamespace(event="message", data='{"choices": [{"delta": {"content": "ready"}}]}')
+        while True:
+            await asyncio.sleep(0.005)
+            yield SimpleNamespace(event="message", data="\t")
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    requester.plugin_settings = SettingsNamespace(
+        Settings({"plugins": {"ModelRequester": {"OpenAICompatible": {"model": "deepseek-chat"}}}}),
+        "plugins.ModelRequester.OpenAICompatible",
+    )
+
+    yielded = []
+
+    async def consume():
+        async for item in requester._aiter_with_stream_idle_timeout(
+            heartbeat_generator(),
+            timeout_seconds=0.05,
+        ):
+            yielded.append(item.data)
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        await asyncio.wait_for(consume(), timeout=0.5)
+
+    assert yielded == ['{"choices": [{"delta": {"content": "ready"}}]}']
+    assert raised.value.stage == "response_stream"
 
 
 @pytest.mark.asyncio

@@ -734,8 +734,12 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         missing_required_actions = [action_id for action_id in required_actions if action_id not in action_ids]
         selected_skill_ids = cls._selected_skill_ids(logs)
         missing_required_skills = [skill_id for skill_id in required_skills if skill_id not in selected_skill_ids]
-        succeeded_actions = cls._action_ids_by_final_status(
-            action_statuses, {"success", "succeeded", "partial_success"}
+        succeeded_actions = list(
+            dict.fromkeys(
+                cls._action_ids_by_status(
+                    action_records, {"success", "succeeded", "partial_success"}
+                )
+            )
         )
         route = execution_meta.get("route", {})
         artifact_refs = logs.get("artifact_refs", [])

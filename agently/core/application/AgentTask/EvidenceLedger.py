@@ -24,6 +24,8 @@ from .AcceptanceLocator import ACCEPTANCE_LOCATOR_KIND, acceptance_locator_view_
 from agently.types.data import EvidenceEnvelope
 from agently.utils import DataFormatter
 
+from .TaskReferences import TaskReferenceCatalog
+
 
 EVIDENCE_LEDGER_VIEW_SCHEMA_VERSION = "evidence_ledger_view/v1"
 EVIDENCE_SUPPORT_TYPES = frozenset({"content", "unavailability", "ref_pointer"})
@@ -45,6 +47,7 @@ _REF_FIELDS = (
 _ALIAS_FIELDS = (
     "id",
     "cite_as",
+    "reference_id",
     "path",
     "record_id",
     "selection_key",
@@ -154,6 +157,9 @@ def _overflow_item_ref(item: Mapping[str, Any], *, cite_as: str) -> dict[str, An
         "body_state": str(item.get("body_state") or "ref_only"),
         "body_not_rendered": True,
     }
+    for field in ("evidence_id", "reference_id"):
+        if str(item.get(field) or "").strip():
+            ref[field] = str(item.get(field))
     for field in _ALIAS_FIELDS:
         if field in {"id", "cite_as"}:
             continue
@@ -176,14 +182,19 @@ def evidence_ledger_view(
     include_body: bool = True,
     budget_selection: str = "ordered",
     max_overflow_refs: int = 240,
+    task_references: TaskReferenceCatalog | None = None,
 ) -> dict[str, Any]:
     envelope = evidence_envelope_from_value(value)
+    raw_evidence_items = [
+        task_references.add_evidence(item) if task_references is not None and isinstance(item, Mapping) else item
+        for item in envelope.evidence_items
+    ]
     items: list[dict[str, Any]] = []
     source_refs: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {"ok": 0, "failed": 0, "empty": 0}
     body_state_counts: dict[str, int] = {"full": 0, "bounded": 0, "truncated": 0, "ref_only": 0}
     selected_items = _select_ledger_items_for_budget(
-        envelope.evidence_items,
+        raw_evidence_items,
         max_items,
         budget_selection=budget_selection,
     )
@@ -208,10 +219,10 @@ def evidence_ledger_view(
         if len(items) >= max_items:
             break
     overflow_item_refs: list[dict[str, Any]] = []
-    if len(envelope.evidence_items) > len(items) and max_overflow_refs > 0:
+    if len(raw_evidence_items) > len(items) and max_overflow_refs > 0:
         remainder = [
             raw_item
-            for raw_item in envelope.evidence_items
+            for raw_item in raw_evidence_items
             if isinstance(raw_item, Mapping) and id(raw_item) not in selected_keys
         ]
         for raw_item in _select_ledger_items_for_budget(
@@ -228,8 +239,8 @@ def evidence_ledger_view(
         "schema_version": EVIDENCE_LEDGER_VIEW_SCHEMA_VERSION,
         "source_schema_version": envelope.schema_version,
         "items": items,
-        "item_count": len(envelope.evidence_items),
-        "items_omitted": max(0, len(envelope.evidence_items) - len(items)),
+        "item_count": len(raw_evidence_items),
+        "items_omitted": max(0, len(raw_evidence_items) - len(items)),
         "status_counts": status_counts,
         "body_state_counts": body_state_counts,
         "source_refs": _dedupe_refs(source_refs),
@@ -241,9 +252,9 @@ def evidence_ledger_view(
             "truncated": "body_state=truncated cannot by itself support whole-document or exhaustive claims.",
         },
         "reference_rule": (
-            "Cite evidence by its cite_as (eN) or canonical id from this ledger. For a file or "
-            "section claim, cite the bounded readback evidence id whose path/heading matches; do not "
-            "invent free-text locator labels and do not reuse a verification or record id as evidence."
+            "Select only the offered reference_id. A cite_as (eN) is a request-local display alias "
+            "that is valid only for the response to this exact ledger view and is normalized immediately. "
+            "For a file or section claim, select the bounded readback reference whose path/heading matches."
         ),
     }
     if overflow_item_refs:
@@ -329,6 +340,10 @@ def value_with_normalized_evidence_use(value: Any, normalized_evidence_use: Any)
 
 
 def validate_evidence_use(evidence_use: Any, ledger_value: Any) -> dict[str, Any]:
+    exact_live_view = bool(
+        isinstance(ledger_value, Mapping)
+        and ledger_value.get("schema_version") == EVIDENCE_LEDGER_VIEW_SCHEMA_VERSION
+    )
     ledger = (
         ledger_value
         if isinstance(ledger_value, Mapping) and ledger_value.get("schema_version") == EVIDENCE_LEDGER_VIEW_SCHEMA_VERSION
@@ -386,6 +401,19 @@ def validate_evidence_use(evidence_use: Any, ledger_value: Any) -> dict[str, Any
             normalized_uses.append(DataFormatter.sanitize(normalized_use))
             continue
         for evidence_id in ids:
+            if re.fullmatch(r"e[1-9][0-9]*", evidence_id) and not exact_live_view:
+                diagnostics.append(
+                    _guard_diagnostic(
+                        "evidence_ledger.expired_cite_as",
+                        "cite_as is valid only for the response to the exact live evidence ledger view.",
+                        evidence_id=evidence_id,
+                        claim=claim,
+                        support_type=support_type,
+                        index=index,
+                        blocking=True,
+                    )
+                )
+                continue
             resolution = _resolve_evidence_alias(evidence_id, alias_index)
             canonical_id = str(resolution.get("id") or evidence_id).strip()
             if resolution.get("ambiguous"):
@@ -475,6 +503,11 @@ def validate_evidence_use(evidence_use: Any, ledger_value: Any) -> dict[str, Any
                 )
                 canonical_id = anchor_id
                 item = anchor_item
+            normalized_target_id = str(item.get("reference_id") or canonical_id).strip()
+            if canonical_id in normalized_ids and normalized_target_id != canonical_id:
+                normalized_ids.remove(canonical_id)
+            if normalized_target_id and normalized_target_id not in normalized_ids:
+                normalized_ids.append(normalized_target_id)
             status = str(item.get("status") or "")
             body_state = str(item.get("body_state") or "")
             if status in {"failed", "empty"} and support_type != "unavailability":
@@ -557,7 +590,10 @@ def validate_evidence_use(evidence_use: Any, ledger_value: Any) -> dict[str, Any
             "blocking_count": blocking_count,
             "diagnostics": diagnostics,
             "checked_claims": len(uses),
-            "available_evidence_ids": list(items_by_id.keys()),
+            "available_evidence_ids": [
+                str(item.get("reference_id") or evidence_id)
+                for evidence_id, item in items_by_id.items()
+            ],
             "available_evidence_refs": _available_evidence_refs(raw_item_sequence),
             "normalized_evidence_use": normalized_uses,
         }
@@ -598,6 +634,16 @@ def workspace_artifacts_from_ledger(ledger_value: Any, *, max_artifacts: int = 4
                 "truncated": item.get("body_state") == "truncated",
             },
         }
+        for field in (
+            "locator_id",
+            "content_version_id",
+            "snapshot_id",
+            "sha256",
+            "bytes",
+            "read_bytes",
+        ):
+            if item.get(field) not in (None, "", [], {}):
+                artifact[field] = DataFormatter.sanitize(item.get(field))
         body = item.get("body")
         if isinstance(body, str) and body:
             artifact["readback"]["content"] = body
@@ -628,6 +674,12 @@ def _compact_ledger_item(
         else {},
         "supports": dict(item.get("supports") or {}) if isinstance(item.get("supports"), Mapping) else {},
     }
+    for field in ("evidence_id", "reference_id"):
+        if str(item.get(field) or "").strip():
+            compact[field] = str(item.get(field))
+    for field in ("locator_id", "content_version_id", "snapshot_id", "sha256"):
+        if str(item.get(field) or "").strip():
+            compact[field] = str(item.get(field))
     # The rendered view owns cite_as: a freshly assigned, position-based handle is
     # authoritative so a single view never exposes duplicate handles. Inherited
     # cite_as from a sub-render is only a fallback when the view does not assign one
@@ -658,6 +710,9 @@ def _compact_ledger_item(
             continue
         if field in item and item.get(field) not in (None, "", [], {}):
             compact[field] = DataFormatter.sanitize(item.get(field))
+    input_preview = item.get("input_preview")
+    if input_preview not in (None, "", [], {}):
+        compact["input_preview"] = _drop_integrity_metadata_value(input_preview)
     kind = str(item.get("kind") or "")
     if kind == ACCEPTANCE_LOCATOR_KIND:
         for field in (
@@ -749,9 +804,8 @@ def _source_ref_from_ledger_item(item: Mapping[str, Any]) -> dict[str, Any]:
         return {}
     body_state = str(item.get("body_state") or "ref_only")
     content_state = "ref_only" if body_state == "ref_only" else "bounded_readback_available"
+    stable_reference_id = str(item.get("reference_id") or "").strip()
     ref = {
-        "evidence_id": str(item.get("id") or ""),
-        "cite_as": str(item.get("cite_as") or ""),
         "field": field,
         "value": value,
         "content_state": content_state,
@@ -759,6 +813,11 @@ def _source_ref_from_ledger_item(item: Mapping[str, Any]) -> dict[str, Any]:
         "status": str(item.get("status") or ""),
         "kind": str(item.get("kind") or ""),
     }
+    if stable_reference_id:
+        ref["reference_id"] = stable_reference_id
+    else:
+        ref["evidence_id"] = str(item.get("id") or "")
+        ref["cite_as"] = str(item.get("cite_as") or "")
     for key in ("path", "record_id", "source_url", "selected_url", "requested_url", "canonical_url", "url", "href"):
         candidate = _first_ref_value(item, (key,))
         if candidate:
@@ -1096,13 +1155,17 @@ def _available_evidence_refs(raw_items: Sequence[Any], *, max_items: int = 80) -
     for item in raw_items:
         if not isinstance(item, Mapping):
             continue
+        stable_reference_id = str(item.get("reference_id") or "").strip()
         ref: dict[str, Any] = {
-            "id": str(item.get("id") or ""),
-            "cite_as": str(item.get("cite_as") or ""),
             "kind": str(item.get("kind") or ""),
             "status": str(item.get("status") or ""),
             "body_state": str(item.get("body_state") or ""),
         }
+        if stable_reference_id:
+            ref["reference_id"] = stable_reference_id
+        else:
+            ref["id"] = str(item.get("id") or "")
+            ref["cite_as"] = str(item.get("cite_as") or "")
         if str(item.get("kind") or "") == ACCEPTANCE_LOCATOR_KIND:
             for field in (
                 "criterion_id",
@@ -1184,7 +1247,7 @@ def _dedupe_refs(refs: Any) -> list[dict[str, Any]]:
         if not isinstance(ref, Mapping):
             continue
         key = (
-            str(ref.get("evidence_id") or ""),
+            str(ref.get("reference_id") or ref.get("evidence_id") or ""),
             str(ref.get("field") or ""),
             str(ref.get("value") or ""),
         )

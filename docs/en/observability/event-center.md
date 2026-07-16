@@ -31,6 +31,14 @@ Model request telemetry:
 - The telemetry payload is observation-only. It can contain `response_id`, `attempt_index`, run ids, provider/model, request URL, duration, raw usage, normalized usage summary, estimated input/output character lengths, side-channel, and normalized error facts.
 - Telemetry dedupe only removes duplicate telemetry sub-payloads for the same `response_id + attempt_index + event kind`; it does not suppress the original RuntimeEvent.
 - Do not feed these telemetry facts back into route selection, retry policy, verifier judgment, quality scoring, planner context, or prompt content. Use them for logs, DevTools display, and diagnostics.
+- Each attempt outcome publishes at most one `model.status` fact. A terminal
+  provider error also publishes one `model.requester.error`; publishing that
+  observation does not rethrow into the attempt loop or create another outcome.
+- Built-in requester exception messages retain provider status/detail but do
+  not append the serialized request body. The structured
+  `model.requester.error.payload["request_data"]` field remains available as
+  cold diagnostic evidence and may contain sensitive prompt data, so event
+  sinks must apply the same access and retention controls as request logs.
 
 Model request status:
 

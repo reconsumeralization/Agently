@@ -32,21 +32,306 @@ from .TaskShared import *
 
 _WORKSPACE_ARTIFACT_LOCATOR_SCAN_BYTES = 5_000_000
 _AGENT_TASK_TERMINAL_FINAL_RESULT_CHARS = 1600
+_GROUNDING_WORKSPACE_REPLACE_OLD_KEYS = (
+    "old_string",
+    "old",
+    "from",
+    "search",
+    "old_text",
+    "from_text",
+    "search_text",
+    "find",
+    "find_text",
+)
+_GROUNDING_WORKSPACE_REPLACE_NEW_KEYS = (
+    "new_string",
+    "new",
+    "to",
+    "replacement",
+    "new_text",
+    "to_text",
+    "replacement_text",
+)
 
 
 _PUBLIC_DELTA_RETRY_MARKER_RE = re.compile(r"\A<\$retry(?::(?P<label>[^>]*)?)?>(?P<body>.*?)</\$retry>\Z", re.DOTALL)
 
 
 class AgentTaskArtifactMixin(AgentTaskMixinBase):
+    @staticmethod
+    def _grounding_workspace_patch_scope_text(value: Any) -> str:
+        text = " ".join(str(value or "").split())
+        # Grounding claims are plain text, while exact Workspace spans may wrap
+        # a label in Markdown emphasis. Scope comparison ignores only paired
+        # emphasis delimiters; the actual edit still requires an exact match.
+        return text.replace("**", "").replace("__", "").casefold()
+
+    @staticmethod
+    def _grounding_patch_mapping_sequence(value: Any) -> list[Mapping[str, Any]]:
+        if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+            return []
+        return [item for item in value if isinstance(item, Mapping)]
+
+    @staticmethod
+    def _grounding_patch_first_string(
+        value: Mapping[str, Any],
+        keys: Sequence[str],
+    ) -> str:
+        for key in keys:
+            if key in value:
+                return str(value.get(key) or "")
+        return ""
+
+    @staticmethod
+    def _grounding_workspace_patch_path(value: Mapping[str, Any]) -> str:
+        for key in ("path", "file", "target_path", "target_file", "workspace_path"):
+            path = str(value.get(key) or "").strip()
+            if path:
+                return path
+        return ""
+
+    @staticmethod
+    def _grounding_workspace_patch_operations(value: Mapping[str, Any]) -> Any:
+        for key in ("operations", "edits", "patches"):
+            if key in value:
+                return value.get(key)
+        return None
+
+    def _grounding_workspace_patch_scope(
+        self,
+        patch_proposal: Mapping[str, Any],
+        grounding_contract: Mapping[str, Any],
+        *,
+        allowed_patch_paths: Sequence[Any],
+        require_exact_claim_coverage: bool = False,
+        require_versioned_requirements: bool = False,
+    ) -> tuple[bool, str]:
+        path = self._workspace_artifact_display_path(
+            self._grounding_workspace_patch_path(patch_proposal)
+        )
+        allowed_paths = {
+            self._workspace_artifact_display_path(item)
+            for item in allowed_patch_paths
+            if self._workspace_artifact_display_path(item)
+        }
+        if not path or path not in allowed_paths:
+            return False, "Grounding patch must target an authorized final Workspace deliverable."
+
+        requirements = [
+            item
+            for item in self._grounding_patch_mapping_sequence(grounding_contract.get("requirements"))
+            if str(item.get("artifact_quote") or item.get("claim") or "").strip()
+        ]
+        operations = self._grounding_patch_mapping_sequence(
+            self._grounding_workspace_patch_operations(patch_proposal)
+        )
+        if not requirements or not operations or len(operations) > len(requirements):
+            return False, "Grounding patch requires at most one bounded replace operation per implicated claim."
+
+        requirements_by_key = {
+            str(item.get("claim_key") or "").strip(): item
+            for item in requirements
+            if str(item.get("claim_key") or "").strip()
+        }
+        if require_versioned_requirements and any(
+            not str(item.get("claim_key") or "").strip()
+            or not str(item.get("carrier_id") or "").strip()
+            or not str(item.get("content_version_id") or "").strip()
+            or not str(item.get("artifact_quote") or "").strip()
+            for item in requirements
+        ):
+            return False, "Material-claim patch requires host-issued claim, carrier, and content-version identities."
+        if require_versioned_requirements and len(requirements_by_key) != len(requirements):
+            return False, "Grounding patch requirements must contain unique host-issued claim_key values."
+
+        operation_claim_keys: list[str] = []
+        normalized_claims = [
+            self._grounding_workspace_patch_scope_text(item.get("artifact_quote") or item.get("claim"))
+            for item in requirements
+        ]
+        for operation in operations:
+            has_old_field = any(
+                key in operation for key in _GROUNDING_WORKSPACE_REPLACE_OLD_KEYS
+            )
+            has_new_field = any(
+                key in operation for key in _GROUNDING_WORKSPACE_REPLACE_NEW_KEYS
+            )
+            op = str(
+                operation.get("type")
+                or operation.get("op")
+                or operation.get("operation")
+                or ""
+            ).strip().lower()
+            if not op and has_old_field and has_new_field:
+                op = "replace"
+            if op != "replace" or self._normalize_bool(operation.get("replace_all"), default=False):
+                return False, "Grounding patch forbids full writes, inserts, appends, and replace-all operations."
+            if not has_old_field or not has_new_field:
+                return False, "Grounding patch operations require explicit old_string and new_string fields."
+
+            old = self._grounding_patch_first_string(operation, _GROUNDING_WORKSPACE_REPLACE_OLD_KEYS)
+            normalized_old = self._grounding_workspace_patch_scope_text(old)
+            claim_key = str(operation.get("claim_key") or "").strip()
+            scoped_claims = normalized_claims
+            if claim_key:
+                requirement = requirements_by_key.get(claim_key)
+                if requirement is None:
+                    return False, "Grounding patch operation references an unknown claim_key."
+                scoped_claims = [
+                    self._grounding_workspace_patch_scope_text(
+                        requirement.get("artifact_quote") or requirement.get("claim")
+                    )
+                ]
+                operation_claim_keys.append(claim_key)
+            elif require_exact_claim_coverage:
+                return False, "Every grounding patch operation must reference its host-issued claim_key."
+            if len(normalized_old) < 8 or not any(
+                normalized_old in claim or claim in normalized_old
+                for claim in scoped_claims
+                if claim
+            ):
+                return False, "Grounding patch old text must stay within its implicated artifact quote."
+
+        if require_exact_claim_coverage:
+            expected_keys = list(requirements_by_key)
+            if (
+                len(operation_claim_keys) != len(set(operation_claim_keys))
+                or set(operation_claim_keys) != set(expected_keys)
+            ):
+                return False, "Grounding patch requires exactly one bounded replace operation per claim_key."
+        return True, ""
+
+    async def _apply_grounding_workspace_patch(
+        self,
+        patch_proposal: Mapping[str, Any],
+        grounding_contract: Mapping[str, Any],
+        *,
+        allowed_patch_paths: Sequence[Any],
+        source: str,
+    ) -> dict[str, Any]:
+        scoped, reason = self._grounding_workspace_patch_scope(
+            patch_proposal,
+            grounding_contract,
+            allowed_patch_paths=allowed_patch_paths,
+            require_exact_claim_coverage=True,
+            require_versioned_requirements=True,
+        )
+        path = self._workspace_artifact_display_path(
+            self._grounding_workspace_patch_path(patch_proposal)
+        )
+        if not scoped:
+            return {"status": "failed", "path": path, "reason": reason}
+
+        requirements = self._grounding_patch_mapping_sequence(grounding_contract.get("requirements"))
+        expected_versions = {
+            str(item.get("content_version_id") or "").strip()
+            for item in requirements
+            if str(item.get("content_version_id") or "").strip()
+        }
+        operations = self._grounding_patch_mapping_sequence(
+            self._grounding_workspace_patch_operations(patch_proposal)
+        )
+        try:
+            current_ref = await self.workspace._promote_file_identity(path, role="grounding_patch_base")
+            current_version = str(current_ref.get("content_version_id") or "").strip()
+            if expected_versions != {current_version}:
+                raise ValueError("Workspace grounding candidate changed since the repair contract was created.")
+            size = int(current_ref.get("bytes") or current_ref.get("size") or 0)
+            current_readback = await self.workspace.read_file(path, max_bytes=max(1, size + 1))
+            if bool(current_readback.get("truncated")) or not isinstance(current_readback.get("content"), str):
+                raise ValueError("Grounding patch requires complete text readback before editing.")
+
+            simulated = str(current_readback.get("content") or "")
+            prepared: list[tuple[str, str, str]] = []
+            for operation in operations:
+                claim_key = str(operation.get("claim_key") or "").strip()
+                old = self._grounding_patch_first_string(operation, _GROUNDING_WORKSPACE_REPLACE_OLD_KEYS)
+                new = self._grounding_patch_first_string(operation, _GROUNDING_WORKSPACE_REPLACE_NEW_KEYS)
+                if old == new:
+                    raise ValueError(f"Grounding patch for {claim_key} does not change the artifact.")
+                if simulated.count(old) != 1:
+                    raise ValueError(
+                        f"Grounding patch old text for {claim_key} must match exactly one current artifact span."
+                    )
+                simulated = simulated.replace(old, new, 1)
+                prepared.append((claim_key, old, new))
+
+            expected_sha256 = str(current_ref.get("sha256") or "")
+            operation_records: list[dict[str, Any]] = []
+            for index, (claim_key, old, new) in enumerate(prepared):
+                write_result = await self.workspace.edit_file(
+                    path,
+                    old,
+                    new,
+                    replace_all=False,
+                    expected_sha256=expected_sha256,
+                )
+                expected_sha256 = str(write_result.get("sha256") or "")
+                operation_records.append(
+                    {
+                        "index": index,
+                        "type": "replace",
+                        "claim_key": claim_key,
+                        "replacement_count": int(write_result.get("replacements") or 0),
+                    }
+                )
+
+            promoted = await self.workspace._promote_file_identity(path, role="grounding_candidate")
+            final_size = int(promoted.get("bytes") or promoted.get("size") or 0)
+            readback = await self.workspace.read_file(
+                path,
+                max_bytes=min(max(1, final_size + 1), _WORKSPACE_ARTIFACT_LOCATOR_SCAN_BYTES),
+            )
+        except Exception as error:
+            return {
+                "status": "failed",
+                "path": path,
+                "reason": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
+                "error": {"type": error.__class__.__name__},
+            }
+
+        ref = {
+            **dict(promoted),
+            "role": "workspace_artifact",
+            "source": source,
+            "read_bytes": int(readback.get("read_bytes") or 0),
+            "truncated": bool(readback.get("truncated")),
+            "preview": self._truncate_prompt_text(
+                str(readback.get("content") or ""),
+                _WORKSPACE_ARTIFACT_PREVIEW_BYTES,
+            ),
+        }
+        return {
+            "status": "completed",
+            "path": path,
+            "operation_count": len(operation_records),
+            "replacement_count": sum(
+                int(item.get("replacement_count") or 0) for item in operation_records
+            ),
+            "operations": operation_records,
+            "base_content_version_id": next(iter(expected_versions)),
+            "content_version_id": promoted.get("content_version_id"),
+            "readback": {
+                "path": ref.get("path"),
+                "bytes": ref.get("bytes"),
+                "sha256": ref.get("sha256"),
+                "content_version_id": ref.get("content_version_id"),
+                "read_bytes": ref.get("read_bytes"),
+                "truncated": ref.get("truncated"),
+            },
+            "file_refs": [DataFormatter.sanitize(ref)],
+        }
+
     def _compact_terminal_final_result(
         self,
         value: Any,
         *,
         trusted_file_refs: Sequence[Mapping[str, Any]] = (),
+        preserve_value: bool = False,
     ) -> Any:
         """Keep one useful bounded result, or a pointer for file-backed output."""
 
-        if trusted_file_refs:
+        if trusted_file_refs and not preserve_value:
             return self._workspace_artifact_final_result_from_refs(trusted_file_refs)
         return self._compact_value_for_meta(
             DataFormatter.sanitize(value),
@@ -135,6 +420,70 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 )
                 retention_candidates.append(candidate_ref)
                 continue
+            reference_validation = await self._validate_terminal_artifact_reference_tokens(
+                path,
+                content_kind=str(raw_ref.get("content_kind") or readback.get("content_kind") or "unknown"),
+            )
+            if not reference_validation.get("valid"):
+                self._terminal_retention_deferred = True
+                self.diagnostics.setdefault("workspace_retention", {}).setdefault("diagnostics", []).append(
+                    {
+                        "code": "agent_task.retention.reference_token_invalid",
+                        "message": str(reference_validation.get("reason") or "Terminal reference token validation failed."),
+                        "path": path,
+                    }
+                )
+                retention_candidates.append(candidate_ref)
+                continue
+            if reference_validation.get("legacy_reference_unverified"):
+                self.diagnostics.setdefault("reference_tokens", {})[path] = {
+                    "status": "legacy_reference_unverified",
+                    "reference_ids": [],
+                    "source_cards": [],
+                }
+            elif reference_validation.get("reference_ids"):
+                self.diagnostics.setdefault("reference_tokens", {})[path] = {
+                    "status": "validated",
+                    "reference_ids": list(reference_validation.get("reference_ids") or []),
+                    "source_cards": list(reference_validation.get("source_cards") or []),
+                }
+            try:
+                promoted_ref = await self.workspace._promote_file_identity(
+                    path,
+                    role=str(raw_ref.get("role") or "workspace_artifact"),
+                )
+            except Exception as error:
+                self._terminal_retention_deferred = True
+                self.diagnostics.setdefault("workspace_retention", {}).setdefault("diagnostics", []).append(
+                    {
+                        "code": "agent_task.retention.identity_promotion_failed",
+                        "message": _compact_agent_task_error_message(
+                            error,
+                            fallback=error.__class__.__name__,
+                        ),
+                        "path": path,
+                    }
+                )
+                retention_candidates.append(candidate_ref)
+                continue
+            promoted_size = promoted_ref.get("size")
+            if (
+                str(promoted_ref.get("sha256") or "") != expected_digest
+                or isinstance(promoted_size, bool)
+                or not isinstance(promoted_size, int)
+                or promoted_size != expected_size
+            ):
+                self._terminal_retention_deferred = True
+                self.diagnostics.setdefault("workspace_retention", {}).setdefault("diagnostics", []).append(
+                    {
+                        "code": "agent_task.retention.identity_promotion_mismatch",
+                        "message": "Promoted content identity does not match terminal readback.",
+                        "path": path,
+                    }
+                )
+                retention_candidates.append(candidate_ref)
+                continue
+            candidate_ref = dict(DataFormatter.sanitize(promoted_ref))
             key = (path, expected_digest, expected_size)
             if key in retained_keys:
                 continue
@@ -146,6 +495,53 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         self._terminal_deliverable_refs = cast(Any, retained)
         return cast(list[WorkspaceFileRef], retained)
 
+    async def _validate_terminal_artifact_reference_tokens(
+        self,
+        path: str,
+        *,
+        content_kind: str,
+    ) -> dict[str, Any]:
+        if content_kind != "text":
+            return {
+                "valid": True,
+                "legacy_reference_unverified": False,
+                "reference_ids": [],
+                "source_cards": [],
+            }
+        target = self.workspace.resolve_file_path(path)
+
+        def scan() -> tuple[list[str], bool]:
+            reference_ids: list[str] = []
+            legacy_reference = False
+            with target.open("r", encoding="utf-8", errors="ignore") as file:
+                for line in file:
+                    reference_ids.extend(parse_reference_tokens(line))
+                    if re.search(r"(?<![A-Za-z0-9_])\(e[1-9][0-9]*\)(?![A-Za-z0-9_])", line):
+                        legacy_reference = True
+            return reference_ids, legacy_reference
+
+        reference_ids, legacy_reference = await asyncio.to_thread(scan)
+        if legacy_reference:
+            return {
+                "valid": True,
+                "legacy_reference_unverified": True,
+                "reference_ids": [],
+                "source_cards": [],
+            }
+        offered = self._task_reference_catalog.offered_references()
+        synthetic_text = " ".join(f"[[ref:{reference_id}]]" for reference_id in reference_ids)
+        try:
+            validated = validate_reference_tokens(synthetic_text, offered)
+            source_cards = self._task_reference_catalog.source_cards(validated.get("reference_ids", []))
+        except ValueError as error:
+            return {"valid": False, "reason": str(error), "reference_ids": []}
+        return {
+            "valid": True,
+            "legacy_reference_unverified": False,
+            "reference_ids": list(validated.get("reference_ids", [])),
+            "source_cards": source_cards,
+        }
+
     async def _apply_terminal_workspace_retention(
         self,
         *,
@@ -154,6 +550,20 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         """Close task-owned fallback files without touching the external root."""
 
         retained = list(getattr(self, "_terminal_retained_refs", []) or [])
+        retained_content_version_ids = [
+            str(ref.get("content_version_id") or "")
+            for ref in retained
+            if isinstance(ref, Mapping) and str(ref.get("content_version_id") or "")
+        ]
+        identity_catalog = getattr(self.workspace.backend, "_identity_catalog", None)
+        if retained_content_version_ids and identity_catalog is not None:
+            await self._task_reference_catalog.activate_persistence(self.workspace)
+            await identity_catalog.retain_task_manifest(
+                self.id,
+                root_ids=retained_content_version_ids,
+                state="accepted" if status == "completed" else "recovery",
+                task_reference_catalog=self._task_reference_catalog.snapshot(),
+            )
         close_status = "completed" if status == "completed" else "cancelled" if status == "cancelled" else "failed"
         closed = await self.workspace._close_execution_files(
             retained_refs=cast(Any, retained),
@@ -166,6 +576,17 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             "deleted_bytes": result["deleted_bytes"],
             "diagnostics": DataFormatter.sanitize(result["diagnostics"]),
         }
+        if result["status"] != "deferred" and identity_catalog is not None:
+            identity_retention = await identity_catalog.collect_unreachable()
+            self.diagnostics["workspace_retention"]["identity"] = DataFormatter.sanitize(
+                {
+                    "roots": identity_retention.roots,
+                    "retained_entity_ids": identity_retention.retained_entity_ids,
+                    "deleted_entity_ids": identity_retention.deleted_entity_ids,
+                    "deleted_payloads": identity_retention.deleted_payloads,
+                    "high_water": identity_retention.high_water,
+                }
+            )
         return result
 
     @classmethod
@@ -194,9 +615,8 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             seen.add(identity)
 
         def is_artifact_record_ref(value: Mapping[str, Any]) -> bool:
-            return (
-                bool(str(value.get("id") or ""))
-                and all(key in value for key in ("collection", "path", "sha256", "size", "source", "meta"))
+            return bool(str(value.get("id") or "")) and all(
+                key in value for key in ("collection", "path", "sha256", "size", "source", "meta")
             )
 
         def is_artifact_reference_envelope(value: Mapping[str, Any]) -> bool:
@@ -213,10 +633,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 ):
                     append_ref(
                         value,
-                        identity=(
-                            f"file:{value.get('path')}:{int(value.get('bytes') or 0)}:"
-                            f"{value.get('sha256')}"
-                        ),
+                        identity=(f"file:{value.get('path')}:{int(value.get('bytes') or 0)}:" f"{value.get('sha256')}"),
                     )
                     return
                 if is_artifact_record_ref(value):
@@ -469,6 +886,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         content_key: str,
         content: str,
         trusted_refs: list[dict[str, Any]],
+        preserve_fields: Sequence[str] = (),
     ) -> dict[str, Any]:
         if not trusted_refs:
             return result
@@ -476,7 +894,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         path = cls._workspace_artifact_display_path(ref.get("path"))
         replacement = f"Workspace artifact delivered at {path}; full content is available through file_refs/readback."
         omitted: list[dict[str, Any]] = []
+        preserved = {str(field) for field in preserve_fields}
         for key in _WORKSPACE_ARTIFACT_RESULT_BODY_KEYS:
+            if key in preserved:
+                continue
             value = result.get(key)
             if isinstance(value, str) and value:
                 result[key] = replacement
@@ -675,7 +1096,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         if not isinstance(result, Mapping):
             return ""
         manifest = result.get("artifact_manifest")
-        if isinstance(manifest, Mapping):
+        if isinstance(manifest, Mapping) and manifest:
             return "sectioned_workspace_artifact"
         for key in ("artifact_markdown", "artifact_html", "candidate_final_result", "final_result"):
             value = result.get(key)
@@ -714,7 +1135,9 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             return card_output, plan
         required_paths = {str(path or "").strip() for path in self._required_workspace_deliverables()}
         final_card_paths = [
-            path for path in self._taskboard_context_final_workspace_deliverables(context) if path in required_paths
+            path
+            for path in self._taskboard_context_final_workspace_deliverables(context)
+            if not required_paths or path in required_paths
         ]
         if final_card_paths:
             manifest = card_output.get("artifact_manifest")
@@ -744,14 +1167,21 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         has_remaining_work = self._has_remaining_work(card_output.get("remaining_work")) or self._has_remaining_work(
             card_output.get("gaps")
         )
-        if not required_paths or (self._taskboard_context_card_is_leaf(context) and not has_remaining_work):
+        status = str(card_output.get("status") or "").strip().lower()
+        next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
+        completed_leaf_delivery_handoff = bool(
+            status == "completed"
+            and card_output.get("sufficient") is True
+            and next_action not in {"readback", "needs_readback", "repair", "patch", "block", "stop"}
+        )
+        if self._taskboard_context_card_is_leaf(context) and (
+            not has_remaining_work or completed_leaf_delivery_handoff
+        ):
             return card_output, plan
 
         manifest = card_output.get("artifact_manifest")
         manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
         requested_path = self._workspace_artifact_manifest_path(manifest_dict)
-        if requested_path not in required_paths:
-            return card_output, plan
 
         card = getattr(context, "card", None)
         card_id = str(getattr(card, "id", "") or "card").strip() or "card"
@@ -794,7 +1224,9 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         final_card_paths = [
             path for path in self._taskboard_context_final_workspace_deliverables(context) if path in required_paths
         ]
-        can_write_required = bool(required_paths and (final_card_paths or self._taskboard_context_card_is_leaf(context)))
+        can_write_required = bool(
+            required_paths and (final_card_paths or self._taskboard_context_card_is_leaf(context))
+        )
         return {
             "schema_version": "agent_task_taskboard_workspace_delivery/v1",
             "required_deliverables": required_paths,
@@ -806,8 +1238,11 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             ),
         }
 
-    @staticmethod
-    def _append_workspace_artifact_meta(execution_meta: Mapping[str, Any] | None, refs: list[dict[str, Any]]) -> None:
+    def _append_workspace_artifact_meta(
+        self,
+        execution_meta: Mapping[str, Any] | None,
+        refs: list[dict[str, Any]],
+    ) -> None:
         if not refs or not isinstance(execution_meta, dict):
             return
         logs = execution_meta.setdefault("logs", {})
@@ -826,14 +1261,14 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         workspace_refs.setdefault("agent_task_artifacts", []).extend(DataFormatter.sanitize(refs))
         logs["workspace_refs"] = workspace_refs
         evidence_items = [
-            AgentTaskArtifactMixin._workspace_artifact_readback_evidence_item(ref)
+            self._workspace_artifact_readback_evidence_item(ref)
             for ref in refs
             if isinstance(ref, Mapping)
         ]
-        AgentTaskArtifactMixin._append_execution_meta_evidence_items(execution_meta, evidence_items)
+        self._append_execution_meta_evidence_items(execution_meta, evidence_items)
 
-    @staticmethod
     def _append_execution_meta_evidence_items(
+        self,
         execution_meta: Mapping[str, Any] | None,
         evidence_items: Sequence[Mapping[str, Any]],
     ) -> None:
@@ -851,14 +1286,19 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         if not isinstance(ledger_items, list):
             ledger_items = []
             evidence["evidence_items"] = ledger_items
-        seen = {str(item.get("id") or "") for item in ledger_items if isinstance(item, Mapping)}
+        seen = {
+            str(item.get("evidence_id") or item.get("id") or "")
+            for item in ledger_items
+            if isinstance(item, Mapping)
+        }
         for item in evidence_items:
-            evidence_id = str(item.get("id") or "").strip()
+            canonical_item = self._task_references().add_evidence(item)
+            evidence_id = str(canonical_item.get("evidence_id") or canonical_item.get("id") or "").strip()
             if evidence_id and evidence_id in seen:
                 continue
             if evidence_id:
                 seen.add(evidence_id)
-            ledger_items.append(DataFormatter.sanitize(dict(item)))
+            ledger_items.append(DataFormatter.sanitize(canonical_item))
 
     async def _workspace_artifact_acceptance_locator_evidence_items(
         self,
@@ -893,7 +1333,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             *self._workspace_artifact_acceptance_points_from_output_contracts(path),
         ]
         artifact_evidence_id = self._workspace_artifact_readback_evidence_item(ref).get("id", "")
-        return build_workspace_artifact_acceptance_locator_items(
+        locator_items = build_workspace_artifact_acceptance_locator_items(
             path=path,
             source=source,
             text=text,
@@ -903,6 +1343,19 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             source_evidence_ids=self._artifact_readback_evidence_ids([ref]),
             artifact_evidence_id=str(artifact_evidence_id or ""),
         )
+        identity = {
+            field: ref.get(field)
+            for field in ("locator_id", "content_version_id", "snapshot_id", "sha256")
+            if ref.get(field) not in (None, "", [], {})
+        }
+        for item in locator_items:
+            item.update(DataFormatter.sanitize(identity))
+            provenance = item.get("provenance")
+            if not isinstance(provenance, dict):
+                provenance = {}
+                item["provenance"] = provenance
+            provenance.update(DataFormatter.sanitize(identity))
+        return DataFormatter.sanitize(locator_items)
 
     @staticmethod
     def _workspace_artifact_acceptance_points_from_taskboard_context(card_context: Any | None) -> list[dict[str, Any]]:
@@ -1025,7 +1478,16 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         source = str(ref.get("source") or "agent_task.workspace_artifact").strip()
         truncated = bool(ref.get("truncated"))
         preview = str(ref.get("preview") or "")
-        evidence_id = cls._workspace_artifact_evidence_id("workspace_artifact_readback", path, source)
+        snapshot_key = str(
+            ref.get("content_version_id")
+            or ref.get("snapshot_id")
+            or "unversioned"
+        ).strip()
+        evidence_id = cls._workspace_artifact_evidence_id(
+            "workspace_artifact_readback",
+            path,
+            f"{source}:{snapshot_key}",
+        )
         item: dict[str, Any] = {
             "id": evidence_id,
             "kind": "workspace_artifact.readback",
@@ -1051,6 +1513,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 "ref_pointer": False,
             },
         }
+        for field in ("locator_id", "content_version_id", "snapshot_id"):
+            if ref.get(field) not in (None, "", [], {}):
+                item[field] = DataFormatter.sanitize(ref.get(field))
+                item["provenance"][field] = DataFormatter.sanitize(ref.get(field))
         if preview:
             item["body"] = preview
         return DataFormatter.sanitize(item)
@@ -1078,9 +1544,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             if isinstance(item, Mapping) and str(item.get("requirement_level") or "").strip() == "required"
         ]
         effective_locators = required_locators or [item for item in locator_items if isinstance(item, Mapping)]
-        ok_locators = [
-            item for item in effective_locators if str(item.get("status") or "").strip().lower() == "ok"
-        ]
+        ok_locators = [item for item in effective_locators if str(item.get("status") or "").strip().lower() == "ok"]
         missing_locators = [
             item for item in effective_locators if str(item.get("status") or "").strip().lower() != "ok"
         ]
@@ -1123,7 +1587,9 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     f"readback_evidence_id={readback_id or 'missing'}"
                 )
         basename = artifact_path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-        evidence_id = cls._workspace_artifact_evidence_id("workspace_artifact_acceptance_coverage", artifact_path, source)
+        evidence_id = cls._workspace_artifact_evidence_id(
+            "workspace_artifact_acceptance_coverage", artifact_path, source
+        )
         item = {
             "id": evidence_id,
             "kind": "workspace_artifact.acceptance_coverage",
@@ -1224,11 +1690,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         path = str(ref.get("path") or "").strip()
         sha256 = str(ref.get("sha256") or "").strip()
         raw_byte_count = ref.get("bytes") if "bytes" in ref else None
-        byte_count = (
-            raw_byte_count
-            if isinstance(raw_byte_count, int) and not isinstance(raw_byte_count, bool)
-            else -1
-        )
+        byte_count = raw_byte_count if isinstance(raw_byte_count, int) and not isinstance(raw_byte_count, bool) else -1
         return bool(path and sha256 and byte_count >= 0)
 
     @classmethod
@@ -1347,6 +1809,31 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         return paths
 
     @classmethod
+    def _taskboard_dependency_trusted_artifact_paths(cls, card_context: Any | None) -> list[str]:
+        dependency_results = getattr(card_context, "dependency_results", None)
+        if not isinstance(dependency_results, Mapping):
+            return []
+        paths: list[str] = []
+        for raw_result in dependency_results.values():
+            try:
+                result = TaskBoardCardResult.from_value(raw_result)
+            except (TypeError, ValueError):
+                continue
+            for ref in (*result.artifact_refs, *result.file_refs):
+                if not isinstance(ref, Mapping):
+                    continue
+                if not cls._is_trusted_workspace_artifact_ref(ref):
+                    continue
+                if not cls._workspace_artifact_ref_has_trusted_readback(ref):
+                    continue
+                path = str(ref.get("path") or "").strip()
+                if not cls._workspace_artifact_candidate_path_is_local(path):
+                    continue
+                if path not in paths:
+                    paths.append(path)
+        return paths
+
+    @classmethod
     def _workspace_artifact_ordered_action_candidate_paths(
         cls,
         action_paths: Sequence[str],
@@ -1417,22 +1904,39 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         execution_meta: Mapping[str, Any] | None,
         source: str,
         card_context: Any | None = None,
+        exact_manifest_path: bool = False,
+        trusted_candidate_paths: Sequence[str] | None = None,
+        candidate_source: str = "execution_meta.action_logs",
     ) -> dict[str, Any] | None:
-        if deliverable_mode not in {"workspace_artifact", "sectioned_workspace_artifact"}:
+        if (
+            deliverable_mode not in {"workspace_artifact", "sectioned_workspace_artifact"}
+            and not str(path or "").strip()
+        ):
             return None
-        action_paths = self._workspace_artifact_successful_action_file_paths(execution_meta)
+        action_paths = (
+            [
+                str(candidate_path).strip()
+                for candidate_path in trusted_candidate_paths
+                if self._workspace_artifact_candidate_path_is_local(candidate_path)
+            ]
+            if trusted_candidate_paths is not None
+            else self._workspace_artifact_successful_action_file_paths(execution_meta)
+        )
         if not action_paths:
             return None
         try:
             required_paths = self._required_workspace_deliverables()
         except Exception:
             required_paths = []
-        candidate_paths = self._workspace_artifact_ordered_action_candidate_paths(
-            action_paths,
-            manifest=manifest_dict,
-            manifest_path=path,
-            required_paths=required_paths,
-        )
+        if exact_manifest_path:
+            candidate_paths = [str(path or "").strip()]
+        else:
+            candidate_paths = self._workspace_artifact_ordered_action_candidate_paths(
+                action_paths,
+                manifest=manifest_dict,
+                manifest_path=path,
+                required_paths=required_paths,
+            )
         for candidate_path in candidate_paths:
             try:
                 read_result = await self.workspace.read_file(
@@ -1502,6 +2006,11 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 content_key=content_key,
                 content="",
                 trusted_refs=trusted_refs,
+                preserve_fields=(
+                    ("candidate_final_result", "final_result")
+                    if deliverable_mode == "inline_final"
+                    else ()
+                ),
             )
             delivery_record: dict[str, Any] = {
                 "source": source,
@@ -1509,7 +2018,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 "status": "adopted_existing",
                 "mode": deliverable_mode,
                 "content_key": content_key or "action_file_ref",
-                "candidate_source": "execution_meta.action_logs",
+                "candidate_source": candidate_source,
                 "readback": {
                     "path": ref["path"],
                     "bytes": ref["bytes"],
@@ -1543,12 +2052,22 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             )
             if locator_items:
                 delivery_record["acceptance_locator_count"] = len(locator_items)
+            dependency_owned = candidate_source == "taskboard_context.dependency_results"
             diagnostics.append(
                 {
-                    "code": "agent_task.workspace_artifact.action_file_adopted",
+                    "code": (
+                        "agent_task.workspace_artifact.dependency_file_adopted"
+                        if dependency_owned
+                        else "agent_task.workspace_artifact.action_file_adopted"
+                    ),
                     "message": (
-                        "A successful Workspace file action produced the artifact path; AgentTask read it back "
-                        "and adopted the readback as trusted Workspace artifact evidence."
+                        "A trusted TaskBoard dependency already owns this Workspace artifact path; AgentTask "
+                        "read it back and adopted the current content without model redrafting."
+                        if dependency_owned
+                        else (
+                            "A successful Workspace file action produced the artifact path; AgentTask read it back "
+                            "and adopted the readback as trusted Workspace artifact evidence."
+                        )
                     ),
                     "path": ref["path"],
                     "source": source,
@@ -1599,9 +2118,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         result["status"] = "blocked"
         result["diagnostics"] = DataFormatter.sanitize(diagnostics)
         result["workspace_artifact_delivery"] = DataFormatter.sanitize(delivery_record)
-        self.diagnostics.setdefault("workspace_artifact_delivery", []).append(
-            DataFormatter.sanitize(delivery_record)
-        )
+        self.diagnostics.setdefault("workspace_artifact_delivery", []).append(DataFormatter.sanitize(delivery_record))
         self._append_execution_meta_evidence_items(
             execution_meta,
             [
@@ -1656,6 +2173,11 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             result["artifact_manifest"] = DataFormatter.sanitize(manifest_dict)
 
         deliverable_mode = str((plan or {}).get("deliverable_mode") or "").strip()
+        preserve_result_fields: tuple[str, ...] = (
+            ("candidate_final_result", "final_result")
+            if deliverable_mode == "inline_final"
+            else ()
+        )
         path = self._workspace_artifact_manifest_path(manifest_dict)
         content, content_key = self._select_workspace_artifact_content(
             result,
@@ -1680,6 +2202,100 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             if diagnostics:
                 result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             return DataFormatter.sanitize(result)
+
+        action_paths = self._workspace_artifact_successful_action_file_paths(
+            execution_meta
+        )
+        dependency_paths = self._taskboard_dependency_trusted_artifact_paths(card_context)
+        trusted_owner_paths = [*action_paths]
+        for dependency_path in dependency_paths:
+            if dependency_path not in trusted_owner_paths:
+                trusted_owner_paths.append(dependency_path)
+        trusted_candidate_source = (
+            "execution_meta.action_logs"
+            if action_paths
+            else "taskboard_context.dependency_results"
+        )
+        action_owns_target = False
+        target_owner_source = ""
+        if path and trusted_owner_paths:
+            try:
+                target_path = self.workspace.resolve_file_path(path)
+            except (TypeError, ValueError):
+                target_path = None
+            for action_path in trusted_owner_paths:
+                try:
+                    action_target = self.workspace.resolve_file_path(action_path)
+                except (TypeError, ValueError):
+                    continue
+                if target_path is not None and action_target == target_path:
+                    action_owns_target = True
+                    target_owner_source = (
+                        "execution_meta.action_logs"
+                        if action_path in action_paths
+                        else "taskboard_context.dependency_results"
+                    )
+                    break
+        if action_owns_target:
+            if content:
+                dependency_owned = target_owner_source == "taskboard_context.dependency_results"
+                diagnostics.append(
+                    {
+                        "code": (
+                            "agent_task.workspace_artifact.dependency_file_preferred_over_model_body"
+                            if dependency_owned
+                            else "agent_task.workspace_artifact.action_file_preferred_over_model_body"
+                        ),
+                        "message": (
+                            "A trusted TaskBoard dependency already owns this Workspace artifact path; its "
+                            "current readback is authoritative and the model-returned body was not written again."
+                            if dependency_owned
+                            else (
+                                "A successful file Action already owns this Workspace artifact path; its current "
+                                "readback is authoritative and the model-returned body was not written again."
+                            )
+                        ),
+                        "path": path,
+                        "source": source,
+                        "ignored_content_key": content_key,
+                    }
+                )
+            adopted = await self._adopt_workspace_artifact_from_action_readback(
+                result,
+                manifest_dict=manifest_dict,
+                path=path,
+                deliverable_mode=deliverable_mode,
+                content_key=content_key or "action_file_ref",
+                diagnostics=diagnostics,
+                execution_meta=execution_meta,
+                source=source,
+                card_context=card_context,
+                exact_manifest_path=True,
+                trusted_candidate_paths=trusted_owner_paths,
+                candidate_source=target_owner_source or trusted_candidate_source,
+            )
+            if adopted is not None:
+                return adopted
+            return self._workspace_artifact_delivery_failure_result(
+                result,
+                execution_meta,
+                diagnostics,
+                path=path,
+                source=source,
+                deliverable_mode=deliverable_mode,
+                content_key=content_key,
+                code=(
+                    "agent_task.workspace_artifact.dependency_file_owner_readback_failed"
+                    if target_owner_source == "taskboard_context.dependency_results"
+                    else "agent_task.workspace_artifact.action_file_owner_readback_failed"
+                ),
+                message=(
+                    "A trusted existing owner produced the requested Workspace artifact path, but its current "
+                    "readback could not be adopted; the model-returned body was not allowed to mask the failed "
+                    "readback."
+                ),
+                error_type="ActionFileOwnerReadbackError",
+            )
         if not content:
             adopted = await self._adopt_workspace_artifact_from_action_readback(
                 result,
@@ -1691,6 +2307,8 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 execution_meta=execution_meta,
                 source=source,
                 card_context=card_context,
+                trusted_candidate_paths=(trusted_owner_paths or None),
+                candidate_source=trusted_candidate_source,
             )
             if adopted is not None:
                 return adopted
@@ -1729,6 +2347,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     content_key="streamed_workspace_artifact",
                     content="",
                     trusted_refs=trusted_refs,
+                    preserve_fields=preserve_result_fields,
                 )
                 handoff = self._handoff_workspace_artifact_remaining_work_to_verifier(
                     result,
@@ -1784,11 +2403,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                             latest_delivery = delivery
                             break
                 error = latest_delivery.get("error") if isinstance(latest_delivery, Mapping) else None
-                message = (
-                    str(error.get("message") or "")
-                    if isinstance(error, Mapping)
-                    else ""
-                ).strip() or (
+                message = (str(error.get("message") or "") if isinstance(error, Mapping) else "").strip() or (
                     "Workspace artifact streamed draft failed or produced no content; trusted file_refs were not produced."
                 )
                 diagnostics.append(
@@ -1848,10 +2463,10 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             if diagnostics:
                 result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             return DataFormatter.sanitize(result)
-        if (
-            deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}
-            and self._workspace_artifact_draft_is_structured_wrapper(content)
-        ):
+        if deliverable_mode in {
+            "workspace_artifact",
+            "sectioned_workspace_artifact",
+        } and self._workspace_artifact_draft_is_structured_wrapper(content):
             return self._workspace_artifact_delivery_failure_result(
                 result,
                 execution_meta,
@@ -1921,6 +2536,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 content_key=content_key,
                 content=content,
                 trusted_refs=trusted_refs,
+                preserve_fields=preserve_result_fields,
             )
             handoff = self._handoff_workspace_artifact_remaining_work_to_verifier(
                 result,
@@ -2116,6 +2732,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             content_key=content_key,
             content=content,
             trusted_refs=trusted_refs,
+            preserve_fields=preserve_result_fields,
         )
         handoff = self._handoff_workspace_artifact_remaining_work_to_verifier(
             result,
@@ -2196,14 +2813,17 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         candidates: list[tuple[str, str]] = []
         if manifest_content.strip():
             candidates.append(("artifact_manifest", manifest_content.strip()))
-        for key in ("artifact_markdown", "artifact_html", "candidate_final_result", "final_result", "answer"):
+        body_keys = (
+            ("artifact_markdown", "artifact_html")
+            if deliverable_mode == "inline_final"
+            else ("artifact_markdown", "artifact_html", "candidate_final_result", "final_result", "answer")
+        )
+        for key in body_keys:
             value = result.get(key)
             if isinstance(value, str) and value.strip():
                 candidates.append((key, value.strip()))
         if deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
-            candidates.extend(
-                cls._workspace_artifact_evidence_content_candidates(result, manifest_path=manifest_path)
-            )
+            candidates.extend(cls._workspace_artifact_evidence_content_candidates(result, manifest_path=manifest_path))
         if not candidates:
             return "", ""
         if deliverable_mode in {"workspace_artifact", "sectioned_workspace_artifact"}:
@@ -2273,8 +2893,8 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         )
         language_policy = self._language_policy()
         draft_execution.language(language_policy.get("language", "auto"))
-        cumulative_execution_evidence_summary = self._cumulative_execution_evidence_summary(dict(execution_meta or {}))
-        cumulative_evidence_anchors = self._planner_evidence_anchors_from_summary(cumulative_execution_evidence_summary)
+        cumulative_evidence_ledger = self._cumulative_evidence_ledger(dict(execution_meta or {}))
+        offered_source_references = source_refs_from_ledger(cumulative_evidence_ledger, max_refs=64)
         active_repair_context = (
             dict(repair_context) if isinstance(repair_context, Mapping) else self._active_repair_context()
         )
@@ -2287,7 +2907,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             "plan": DataFormatter.sanitize(plan or {}),
             "execution_result": DataFormatter.sanitize(execution_result),
             "execution_meta_summary": self._execution_log_summary(dict(execution_meta or {})),
-            "cumulative_evidence_anchors": DataFormatter.sanitize(cumulative_evidence_anchors),
+            "offered_source_references": DataFormatter.sanitize(offered_source_references),
             "context_pack": DataFormatter.sanitize(context_pack or {}),
             "card": DataFormatter.sanitize(
                 card_context.card.to_dict()
@@ -2297,11 +2917,8 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 else {}
             ),
             "dependency_results": (
-                DataFormatter.sanitize(
-                    {
-                        key: value.to_dict() if hasattr(value, "to_dict") else value
-                        for key, value in dict(getattr(card_context, "dependency_results", {}) or {}).items()
-                    }
+                self._compact_taskboard_dependency_results(
+                    dict(getattr(card_context, "dependency_results", {}) or {})
                 )
                 if card_context is not None
                 else {}
@@ -2316,8 +2933,9 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 "Write only the final Markdown artifact body. "
                 "Do not output JSON, YAML, XML, code fences, file_refs, or a wrapper object. "
                 "Use only the provided task context, execution result, dependency results, and evidence summaries. "
-                "For source-grounded artifacts, cite exact URLs, file paths, or refs from cumulative_evidence_anchors; "
-                "do not shorten URLs, use ellipses, infer paths from titles, or cite sources that are not visible there. "
+                "For source-grounded artifacts, cite only an offered_source_references.reference_id using the exact "
+                "token [[ref:<reference_id>]]. Do not copy or invent URLs, paths, Action ids, Workspace ids, or other "
+                "canonical identities into the citation token. "
                 "When repair_context contains fields, this artifact draft is a repair pass: use its acceptance_delta, "
                 "advisory_repair_constraints, advisory_next_step_requirements, and available_evidence_anchors as the "
                 "active correction contract for the Markdown body. Rewrite affected artifact sections instead of only "

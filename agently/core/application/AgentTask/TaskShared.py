@@ -74,6 +74,16 @@ from .EvidenceLedger import (
     value_with_normalized_evidence_use,
     workspace_artifacts_from_ledger,
 )
+from .TaskReferences import (
+    TaskReferenceCatalog,
+    parse_reference_tokens,
+    validate_reference_tokens,
+)
+from .TerminalConvergence import (
+    TerminalConvergenceState,
+    TerminalIssue,
+    relevant_state_digest,
+)
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
@@ -164,6 +174,13 @@ _WORKSPACE_ARTIFACT_RESULT_BODY_KEYS = (
 _STREAM_REPLAY_LIMIT = 5000
 _VERIFIER_PROMPT_VALUE_CHARS = 12000
 _VERIFIER_PROMPT_ITEM_CHARS = 2400
+# The verifier receives one bounded, body-bearing evidence projection. Other
+# indexes and summaries stay body-light so the same readback is not multiplied
+# across the prompt as task history grows.
+_VERIFIER_PROMPT_TARGET_CHARS = 160_000
+_VERIFIER_LEDGER_MAX_ITEMS = 72
+_VERIFIER_LEDGER_BODY_CHARS = 900
+_VERIFIER_LEDGER_MAX_OVERFLOW_REFS = 80
 _AGENT_TASK_ERROR_MESSAGE_CHARS = 2000
 _AGENT_TASK_ERROR_PAYLOAD_MARKERS = (
     "\nrequest data:",
@@ -242,6 +259,16 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
+
+    def _task_references(self) -> TaskReferenceCatalog:
+        catalog = cast(TaskReferenceCatalog | None, getattr(self, "_task_reference_catalog", None))
+        if catalog is None:
+            catalog = TaskReferenceCatalog(str(getattr(self, "id", "")))
+            setattr(self, "_task_reference_catalog", catalog)
+        return catalog
+
+    def _stable_evidence_ledger_view(self, value: Any, **kwargs: Any) -> dict[str, Any]:
+        return evidence_ledger_view(value, task_references=self._task_references(), **kwargs)
 
     @classmethod
     def _process_summary_from_value(
@@ -852,7 +879,11 @@ __all__ = [
     "_TASKBOARD_RECOVERABLE_CARD_STATUSES",
     "_TASKBOARD_SOURCE_REFS_MAX",
     "_TASKBOARD_STREAM_SUMMARY_CHARS",
+    "_VERIFIER_LEDGER_BODY_CHARS",
+    "_VERIFIER_LEDGER_MAX_ITEMS",
+    "_VERIFIER_LEDGER_MAX_OVERFLOW_REFS",
     "_VERIFIER_PROMPT_ITEM_CHARS",
+    "_VERIFIER_PROMPT_TARGET_CHARS",
     "_VERIFIER_PROMPT_VALUE_CHARS",
     "_WORKSPACE_ARTIFACT_CONTENT_KEYS",
     "_WORKSPACE_ARTIFACT_PREVIEW_BYTES",
@@ -891,4 +922,10 @@ __all__ = [
     "validate_evidence_use",
     "value_with_normalized_evidence_use",
     "workspace_artifacts_from_ledger",
+    "TaskReferenceCatalog",
+    "parse_reference_tokens",
+    "validate_reference_tokens",
+    "TerminalConvergenceState",
+    "TerminalIssue",
+    "relevant_state_digest",
 ]

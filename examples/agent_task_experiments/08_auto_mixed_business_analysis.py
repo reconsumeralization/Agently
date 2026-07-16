@@ -79,7 +79,7 @@ async def main() -> None:
                 "The final report is written to final.md and clearly labels example MCP data boundaries.",
             ],
         )
-        .create_execution(options=options)
+        .strategy("auto", options=options)
     )
     await async_run_and_print(execution, provider=provider, workspace=workspace)
 

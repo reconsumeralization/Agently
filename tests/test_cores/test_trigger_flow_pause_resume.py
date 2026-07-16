@@ -47,7 +47,15 @@ async def test_trigger_flow_dynamic_pause_persists_waiting_snapshot_without_back
         assert runtime_events == []
     finally:
         await execution.async_close(pending_interrupts="cancel")
-    assert not (tmp_path / ".agently").exists()
+    private_files = {
+        path.relative_to(tmp_path).as_posix()
+        for path in (tmp_path / ".agently").rglob("*")
+        if path.is_file()
+    }
+    assert private_files == {
+        ".agently/identity/state.json",
+        ".agently/identity/state.lock",
+    }
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,26 @@ second public task runtime. The outer task lifecycle still belongs to
 `AgentExecution` and the AgentTask strategy, while TriggerFlow remains the
 execution substrate.
 
-The lifecycle is:
+The outer AgentTask lifecycle is one TriggerFlow graph:
+
+```text
+lifecycle.start
+-> context.prepare
+-> work.plan
+-> work.execute
+-> outputs.materialize
+-> evidence.ingest
+-> terminal.verify
+-> transition.decide
+```
+
+Its stage events carry only task/frame/version ids and phase-specific plan,
+work-result, or evidence ids. Full values remain in their owning request,
+Workspace object, or host frame. TaskBoard is the nested work-producer subflow
+inside `work.execute`; when it returns an iteration result, the outer graph
+enters the shared transition without replaying Flat terminal responsibilities.
+
+The Blocks lowering path inside a bounded work stage is:
 
 ```text
 TaskFrame
@@ -20,7 +39,8 @@ TaskFrame
 -> ExecutionBlockGraph
 -> TriggerFlow execution
 -> EvidenceEnvelope and ResultAdapter output
--> AgentTask verification and host guards
+-> AgentTask carrier inventory
+-> one semantic terminal verifier and host guards
 ```
 
 ## Ownership
@@ -70,6 +90,21 @@ the ledger; it does not create a private readback view that synthesis could not
 also use. TaskBoard may skip redundant final synthesis when a terminal card has
 already produced a trusted candidate, but the promoted result still passes
 through the same ledger guard and terminal verifier.
+
+A successful file Action bound to the declared deliverable path owns that
+path's value edge. Output materialization adopts its physical Workspace
+readback and cannot copy a conflicting model-returned body onto the same path.
+An unreadable Action-owned target blocks delivery; changing it requires a new
+file Action and therefore a new canonical Action event and content version.
+
+The terminal verifier receives only the current versioned carrier inventory.
+It returns one structured `criterion_checks` list plus
+`material_claim_coverage_complete` and `material_claim_checks`; AgentTask host
+code validates exact criterion ids, request-local claim keys, and evidence
+reference ids, then reconstructs carrier ids, artifact quotes, paths, and
+content versions host-side. Blocks and TaskBoard do not run a second claim-inventory,
+source-selection, or support-judgment loop and do not own accepted-result
+composition.
 
 ## Skill Activation
 

@@ -75,7 +75,7 @@ async def main() -> None:
                 "The final report is written to final.md and includes a non-investment-advice boundary.",
             ],
         )
-        .create_execution(options=options)
+        .strategy("auto", options=options)
     )
     await async_run_and_print(execution, provider=provider, workspace=workspace)
 

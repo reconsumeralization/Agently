@@ -151,7 +151,15 @@ async def test_trigger_flow_pending_interrupt_rejects_close_before_recovery_clea
         assert execution.get_status() == "waiting"
     finally:
         await execution.async_close(pending_interrupts="cancel")
-    assert not (tmp_path / ".agently").exists()
+    private_files = {
+        path.relative_to(tmp_path).as_posix()
+        for path in (tmp_path / ".agently").rglob("*")
+        if path.is_file()
+    }
+    assert private_files == {
+        ".agently/identity/state.json",
+        ".agently/identity/state.lock",
+    }
 
 
 @pytest.mark.asyncio
@@ -192,7 +200,15 @@ async def test_trigger_flow_resumed_execution_discards_recovery_state_at_termina
     assert await workspace.latest_snapshot(execution.run_context.run_id) is None
     assert await workspace.query_runtime_events(execution.id) == []
     assert await workspace.search(None) == []
-    assert not (tmp_path / ".agently").exists()
+    private_files = {
+        path.relative_to(tmp_path).as_posix()
+        for path in (tmp_path / ".agently").rglob("*")
+        if path.is_file()
+    }
+    assert private_files == {
+        ".agently/identity/state.json",
+        ".agently/identity/state.lock",
+    }
 
 
 @pytest.mark.asyncio

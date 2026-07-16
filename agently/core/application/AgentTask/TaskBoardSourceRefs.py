@@ -108,6 +108,7 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
     ) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []
         seen: set[str] = set()
+        stable_locator_keys: set[str] = set()
         url_keys = {
             "source_url",
             "selected_url",
@@ -118,6 +119,7 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
         }
         metadata_keys = {
             "evidence_id",
+            "reference_id",
             "role",
             "source",
             "record_id",
@@ -139,6 +141,9 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
             if len(refs) >= max_refs:
                 return
             record: dict[str, Any] = {}
+            reference_id = str(candidate.get("reference_id") or "").strip()
+            if reference_id:
+                record["reference_id"] = reference_id
             for key in url_keys:
                 url = normalize_url(candidate.get(key))
                 if url:
@@ -146,7 +151,15 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
             path = str(candidate.get("path") or "").strip()
             if path and len(path) <= 500:
                 record["path"] = path
-            for key in metadata_keys:
+            allowed_metadata_keys = metadata_keys
+            if reference_id:
+                allowed_metadata_keys = metadata_keys - {
+                    "evidence_id",
+                    "record_id",
+                    "artifact_id",
+                    "action_call_id",
+                }
+            for key in allowed_metadata_keys:
                 if key in record or key == "path":
                     continue
                 item = candidate.get(key)
@@ -161,9 +174,26 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
             if not any(key in record for key in url_keys) and not record.get("path"):
                 return
             record["content_state"] = cls._taskboard_source_ref_content_state(candidate)
+            locator_key = "|".join(
+                str(record.get(field) or "")
+                for field in (
+                    "source_url",
+                    "selected_url",
+                    "requested_url",
+                    "canonical_url",
+                    "url",
+                    "href",
+                    "path",
+                )
+            )
+            if reference_id:
+                stable_locator_keys.add(locator_key)
+            elif locator_key in stable_locator_keys:
+                return
             dedupe_key = "|".join(
                 str(record.get(field) or "")
                 for field in (
+                    "reference_id",
                     "source_url",
                     "selected_url",
                     "requested_url",

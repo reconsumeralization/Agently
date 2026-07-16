@@ -22,6 +22,7 @@ pattern where domain logic lives in focused companion modules.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any, cast
 
 from agently.types.data import ActionCall, ActionDecision, ActionResult
@@ -34,16 +35,6 @@ def is_execution_error_result(result: Any) -> bool:
         return False
     stripped = result.strip()
     return stripped.startswith("Error:") or stripped.startswith("Can not find tool named")
-
-
-def is_next_action_path(path: Any) -> bool:
-    if not isinstance(path, str):
-        return False
-    normalized = path.strip()
-    if normalized.startswith("$"):
-        normalized = normalized[1:]
-    normalized = normalized.lstrip("./")
-    return normalized == "next_action"
 
 
 def parse_native_arguments(raw_arguments: Any) -> dict[str, Any]:
@@ -393,10 +384,21 @@ def to_action_results(records: list[ActionResult]) -> dict[str, Any]:
             if isinstance(model_digest, dict) and model_digest.get("same_as") != "result"
             else record.get("result", record.get("data"))
         )
+        action_call_id = str(record.get("action_call_id") or "").strip()
         if record.get("success"):
-            action_results[key] = result_value
+            if isinstance(result_value, Mapping):
+                visible_result = dict(result_value)
+                if action_call_id:
+                    visible_result.setdefault("action_call_id", action_call_id)
+                action_results[key] = visible_result
+            else:
+                action_results[key] = {
+                    "action_call_id": action_call_id,
+                    "result": result_value,
+                }
         else:
             action_results[key] = {
+                "action_call_id": action_call_id,
                 "error": record.get("error", "Action execution failed."),
                 "result": result_value,
                 "status": record.get("status", "error"),

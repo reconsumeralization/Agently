@@ -3,6 +3,7 @@ import asyncio
 
 import os
 from httpx import RemoteProtocolError
+from httpx_sse import SSEError
 from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv())
@@ -73,6 +74,55 @@ async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict,
     async for _event, _payload in plugin.request_model(request_data):
         pass
     return captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_http_error_message_excludes_request_body(monkeypatch: pytest.MonkeyPatch, stream: bool):
+    class FakeResponse:
+        status_code = 500
+        content = b'{"error":{"message":"upstream failed"}}'
+        text = content.decode()
+        headers = {"Content-Type": "application/json"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            return FakeResponse()
+
+    async def fail_sse(*args, **kwargs):
+        raise SSEError("provider returned non-SSE response")
+
+    monkeypatch.setattr(openai_module, "AsyncClient", FakeAsyncClient)
+    if stream:
+        monkeypatch.setattr(OpenAICompatible, "_aiter_sse_with_retry", fail_sse)
+    request_marker = f"private-openai-{'stream-' if stream else ''}request-marker"
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": stream,
+            "request_retry": {"max_attempts": 1},
+        },
+        {"input": request_marker},
+    )
+
+    events = [item async for item in plugin.request_model(plugin.generate_request_data())]
+    error = next(payload for event, payload in events if event == "error")
+    message = str(error)
+
+    assert "Status Code: 500" in message
+    assert "upstream failed" in message
+    assert "Request Data:" not in message
+    assert request_marker not in message
 
 
 @pytest.mark.asyncio
@@ -670,11 +720,19 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
         async def aclose(self):
             return None
 
+    calls = 0
+
     async def fake_aiter_sse_with_retry(self, client, method, url, *, headers, json):
+        nonlocal calls
         del self, client, method, url, headers, json
+        calls += 1
 
         async def generator():
-            await asyncio.sleep(0.05)
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.1)
+                raise
             yield SimpleNamespace(event="message", data='{"choices":[{"delta":{"content":"hello"}}]}')
 
         return generator()
@@ -694,16 +752,49 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
     request_data = plugin.generate_request_data()
 
     events = []
+    started_at = asyncio.get_running_loop().time()
     async for event, payload in plugin.request_model(request_data):
         events.append((event, payload))
+    elapsed_seconds = asyncio.get_running_loop().time() - started_at
+    cleanup_tasks = tuple(getattr(plugin, "_stream_cleanup_tasks", ()))
+    if cleanup_tasks:
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
     statuses = [payload for event, payload in events if event == "status"]
+    assert calls == 2
+    assert elapsed_seconds < 0.15
     assert len(statuses) == 2
     assert statuses[0]["status"] == "failed"
+    assert statuses[0]["attempt_index"] == 1
     assert statuses[0]["retry"] is True
+    assert statuses[0]["next_attempt_index"] == 2
     assert statuses[0]["reason"] == "First token timeout after 0.01 seconds."
+    assert statuses[0]["error_diagnostic"] == {
+        "error_type": "RuntimeStageStallError",
+        "stage": "response_first_event",
+        "status": "stalled",
+        "message": "First token timeout after 0.01 seconds.",
+        "response_id": None,
+        "run_id": None,
+        "agent_name": None,
+        "elapsed_seconds": None,
+        "idle_seconds": 0.01,
+        "timeout_seconds": 0.01,
+        "last_progress_event": None,
+        "provider": "OpenAICompatible",
+        "model": "m1",
+        "planning_protocol": None,
+        "diagnostic_context": {
+            "owner": "model_request",
+            "progress_basis": "meaningful_provider_response_data",
+            "transport_cleanup": "asynchronous",
+        },
+    }
     assert statuses[-1]["status"] == "failed"
+    assert statuses[-1]["attempt_index"] == 2
     assert statuses[-1]["retry"] is False
+    assert statuses[-1]["error_diagnostic"]["stage"] == "response_first_event"
+    assert statuses[-1]["error_diagnostic"]["diagnostic_context"]["owner"] == "model_request"
     assert events[-1][0] == "error"
     assert isinstance(events[-1][1], TimeoutError)
     assert "First token timeout after 0.01 seconds." in str(events[-1][1])

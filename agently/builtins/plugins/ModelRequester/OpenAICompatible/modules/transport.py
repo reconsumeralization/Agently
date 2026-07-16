@@ -34,6 +34,7 @@ class OpenAICompatibleTransportMixin:
     name: str
     model_type: str
     plugin_settings: Any
+    _stream_cleanup_tasks: set[asyncio.Task[None]]
 
     if TYPE_CHECKING:
         def _build_headers_with_auth(self, request_data: "AgentlyRequestData") -> dict[str, Any]: ...
@@ -142,6 +143,7 @@ class OpenAICompatibleTransportMixin:
         stage: str,
         timeout_seconds: float,
         message: str,
+        diagnostic_context: dict[str, Any] | None = None,
     ) -> RuntimeStageStallError:
         return RuntimeStageStallError(
             message,
@@ -151,7 +153,93 @@ class OpenAICompatibleTransportMixin:
             timeout_seconds=timeout_seconds,
             provider=self.name,
             model=cast(str | None, self.plugin_settings.get("model", None)),
+            diagnostic_context=diagnostic_context,
         )
+
+    @staticmethod
+    def _provider_stream_timeout_context() -> dict[str, str]:
+        return {
+            "owner": "model_request",
+            "progress_basis": "meaningful_provider_response_data",
+            "transport_cleanup": "asynchronous",
+        }
+
+    @staticmethod
+    def _stream_item_has_meaningful_data(item: Any) -> bool:
+        """Return whether a transport item can advance model-response parsing.
+
+        ``httpx-sse`` can expose heartbeat traffic as SSE objects whose ``data``
+        is empty. Those frames prove that the socket is alive, but they
+        cannot produce a model delta and therefore must not refresh response
+        liveness deadlines. Non-SSE iterators remain meaningful by default so
+        the timeout helpers retain their generic test and extension contract.
+        """
+
+        missing = object()
+        data = getattr(item, "data", missing)
+        if data is missing:
+            return True
+        if data is None:
+            return False
+        if isinstance(data, (bytes, bytearray)):
+            return bool(bytes(data).strip())
+        if isinstance(data, str):
+            return bool(data.strip())
+        return True
+
+    def _schedule_stream_generator_cleanup(
+        self,
+        generator: AsyncGenerator[Any, None],
+        *,
+        pending_anext: asyncio.Task[Any] | None = None,
+    ) -> None:
+        """Close a timed-out stream without delaying the caller's deadline."""
+
+        async def cleanup() -> None:
+            if pending_anext is not None:
+                try:
+                    await pending_anext
+                except BaseException:
+                    pass
+            try:
+                await generator.aclose()
+            except BaseException:
+                pass
+
+        cleanup_task = asyncio.create_task(cleanup())
+        cleanup_tasks = getattr(self, "_stream_cleanup_tasks", None)
+        if cleanup_tasks is None:
+            cleanup_tasks = set()
+            self._stream_cleanup_tasks = cleanup_tasks
+        cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(cleanup_tasks.discard)
+
+    async def _anext_with_strict_timeout(
+        self,
+        generator: AsyncGenerator[Any, None],
+        *,
+        timeout_seconds: float,
+    ) -> Any:
+        """Await one stream item without waiting for slow cancellation cleanup."""
+
+        pending_anext = asyncio.create_task(anext(generator))
+        try:
+            done, _ = await asyncio.wait({pending_anext}, timeout=timeout_seconds)
+        except BaseException:
+            pending_anext.cancel()
+            self._schedule_stream_generator_cleanup(
+                generator,
+                pending_anext=pending_anext,
+            )
+            raise
+        if not done:
+            pending_anext.cancel()
+            self._schedule_stream_generator_cleanup(
+                generator,
+                pending_anext=pending_anext,
+            )
+            raise asyncio.TimeoutError
+        return pending_anext.result()
 
     async def _aiter_with_first_token_timeout(
         self,
@@ -164,15 +252,34 @@ class OpenAICompatibleTransportMixin:
                 yield item
             return
 
-        try:
-            first_item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)
-        except asyncio.TimeoutError as e:
-            await generator.aclose()
-            raise self._build_stream_stall_error(
-                stage="response_first_event",
-                timeout_seconds=timeout_seconds,
-                message=f"First token timeout after { timeout_seconds } seconds.",
-            ) from e
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            remaining_seconds = deadline - loop.time()
+            if remaining_seconds <= 0:
+                self._schedule_stream_generator_cleanup(generator)
+                raise self._build_stream_stall_error(
+                    stage="response_first_event",
+                    timeout_seconds=timeout_seconds,
+                    message=f"First token timeout after { timeout_seconds } seconds.",
+                    diagnostic_context=self._provider_stream_timeout_context(),
+                )
+            try:
+                first_item = await self._anext_with_strict_timeout(
+                    generator,
+                    timeout_seconds=remaining_seconds,
+                )
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError as e:
+                raise self._build_stream_stall_error(
+                    stage="response_first_event",
+                    timeout_seconds=timeout_seconds,
+                    message=f"First token timeout after { timeout_seconds } seconds.",
+                    diagnostic_context=self._provider_stream_timeout_context(),
+                ) from e
+            if self._stream_item_has_meaningful_data(first_item):
+                break
 
         yield first_item
         async for item in generator:
@@ -189,25 +296,45 @@ class OpenAICompatibleTransportMixin:
                 yield item
             return
 
-        try:
-            first_item = await anext(generator)
-        except StopAsyncIteration:
-            return
-
-        yield first_item
         while True:
             try:
-                item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)
+                first_item = await anext(generator)
             except StopAsyncIteration:
                 return
-            except asyncio.TimeoutError as e:
-                await generator.aclose()
+            if self._stream_item_has_meaningful_data(first_item):
+                break
+        yield first_item
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            remaining_seconds = deadline - loop.time()
+            if remaining_seconds <= 0:
+                self._schedule_stream_generator_cleanup(generator)
                 raise self._build_stream_stall_error(
                     stage="response_stream",
                     timeout_seconds=timeout_seconds,
                     message=f"Stream idle timeout after { timeout_seconds } seconds.",
+                    diagnostic_context=self._provider_stream_timeout_context(),
+                )
+            try:
+                item = await self._anext_with_strict_timeout(
+                    generator,
+                    timeout_seconds=remaining_seconds,
+                )
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError as e:
+                raise self._build_stream_stall_error(
+                    stage="response_stream",
+                    timeout_seconds=timeout_seconds,
+                    message=f"Stream idle timeout after { timeout_seconds } seconds.",
+                    diagnostic_context=self._provider_stream_timeout_context(),
                 ) from e
+            if not self._stream_item_has_meaningful_data(item):
+                continue
             yield item
+            deadline = loop.time() + timeout_seconds
 
     async def _aiter_sse_with_retry(
         self,
@@ -287,21 +414,20 @@ class OpenAICompatibleTransportMixin:
                         if not has_done:
                             yield "message", "[DONE]"
                         break
-                    except SSEError as e:
+                    except SSEError as sse_error:
                         response = await client.post(
                             request_data.request_url,
                             json=full_request_data,
                             headers=headers_with_auth,
                         )
                         if response.status_code >= 400:
-                            e = RequestError(
+                            request_error = RequestError(
                                 f"Status Code: { response.status_code }\n"
-                                f"Detail: { response.text }\n"
-                                f"Request Data: {full_request_data}"
+                                f"Detail: { response.text }"
                             )
                             failover_headers = self._build_failover_headers(
                                 request_data,
-                                error=e,
+                                error=request_error,
                                 status_code=response.status_code,
                                 response_text=response.text,
                                 full_request_data=full_request_data,
@@ -311,7 +437,7 @@ class OpenAICompatibleTransportMixin:
                                 headers_with_auth = failover_headers
                                 client.headers.update(headers_with_auth)
                                 continue
-                            yield "error", e
+                            yield "error", request_error
                         else:
                             content_type = response.headers.get("Content-Type", "")
                             if content_type.startswith("application/json"):
@@ -321,11 +447,10 @@ class OpenAICompatibleTransportMixin:
                                     error_json = await response.aread()
                                     error_json = json.loads(error_json.decode())
                                 error = error_json["error"]
-                                error_title = f"{ error['code'] if 'code' in error else 'unknown_code' } - { error['type'] if 'type' in error else 'unknown_type' }"
                                 error_detail = error["message"] if "message" in error else ""
                                 yield "error", error_detail
                             else:
-                                yield "error", e
+                                yield "error", sse_error
                         break
                     except HTTPStatusError as e:
                         failover_headers = self._build_failover_headers(
@@ -400,8 +525,7 @@ class OpenAICompatibleTransportMixin:
                         if response.status_code >= 400:
                             e = RequestError(
                                 f"Status Code: { response.status_code }\n"
-                                f"Detail: { response.text }\n"
-                                f"Request Data: {full_request_data}"
+                                f"Detail: { response.text }"
                             )
                             failover_headers = self._build_failover_headers(
                                 request_data,

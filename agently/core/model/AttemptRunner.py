@@ -80,6 +80,14 @@ class AttemptRunner:
         }
         if next_attempt_index is not None:
             payload["next_attempt_index"] = next_attempt_index
+        to_diagnostic = getattr(error, "to_diagnostic", None)
+        if callable(to_diagnostic):
+            try:
+                error_diagnostic = to_diagnostic()
+            except Exception:
+                error_diagnostic = None
+            if isinstance(error_diagnostic, dict):
+                payload["error_diagnostic"] = dict(error_diagnostic)
         return payload
 
     def _cancelled_status(self, error: BaseException) -> dict[str, Any]:

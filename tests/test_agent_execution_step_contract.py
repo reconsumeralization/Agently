@@ -27,10 +27,51 @@ from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules
 )
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "examples/agent_task_experiments/06_auto_mixed_travel_planning.py",
+        "examples/agent_task_experiments/07_auto_mixed_equity_analysis.py",
+        "examples/agent_task_experiments/08_auto_mixed_business_analysis.py",
+    ],
+)
+def test_auto_mixed_examples_forward_task_options_through_auto_strategy(relative_path: str) -> None:
+    source = (Path(__file__).parents[1] / relative_path).read_text(encoding="utf-8")
+
+    assert '.strategy("auto", options=options)' in source
+    assert ".create_execution(options=options)" not in source
+
+
 class MockAgentExecutionRequester:
     name = "MockAgentExecutionRequester"
     DEFAULT_SETTINGS: dict[str, object] = {}
     requests: list[str] = []
+
+    def __init_subclass__(cls, **kwargs: Any):
+        super().__init_subclass__(**kwargs)
+        original = cls.__dict__.get("request_model")
+        if original is None:
+            return
+
+        async def request_model_with_semantic_contract(self, request_data: AgentlyRequestData):
+            text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+            if "Verify the task against every success criterion" not in text:
+                async for event in original(self, request_data):
+                    yield event
+                return
+            events = [event async for event in original(self, request_data)]
+            response_text = "".join(str(data) for event, data in events if event == "message")
+            try:
+                payload = json.loads(response_text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                for event in events:
+                    yield event
+                return
+            if isinstance(payload, dict):
+                payload = self._complete_semantic_verifier_fixture(text, payload)
+            yield "message", json.dumps(payload, ensure_ascii=False)
+
+        cls.request_model = request_model_with_semantic_contract
 
     def __init__(self, prompt, settings):
         self.prompt = prompt
@@ -53,17 +94,46 @@ class MockAgentExecutionRequester:
             request_url="mock://agent-execution",
         )
 
-    async def request_model(self, request_data: AgentlyRequestData):
-        MockAgentExecutionRequester.requests.append(
-            json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
-        )
-        yield "message", json.dumps(
+    @staticmethod
+    def _complete_semantic_verifier_fixture(
+        text: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        criterion_ids = list(dict.fromkeys(re.findall(r"criterion:\d+", text)))
+        satisfied = payload.get("is_complete") is True and not payload.get("missing_criteria")
+        payload["criterion_checks"] = [
             {
+                "criterion_id": criterion_id,
+                "satisfied": satisfied,
+                "summary": str(payload.get("reason") or "Synthetic lifecycle verifier fixture."),
+                "gaps": list(payload.get("missing_criteria") or []) if not satisfied else [],
+                "evidence_ids": [],
+            }
+            for criterion_id in criterion_ids
+        ]
+        payload.setdefault("material_claim_coverage_complete", True)
+        payload.setdefault("material_claim_checks", [])
+        return payload
+
+    async def request_model(self, request_data: AgentlyRequestData):
+        text = json.dumps(DataFormatter.sanitize(request_data.data), ensure_ascii=False)
+        MockAgentExecutionRequester.requests.append(text)
+        if "Verify the task against every success criterion" in text:
+            payload = {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "Synthetic lifecycle verifier accepted the fixture.",
+                "missing_criteria": [],
+                "final_result_required": True,
+                "final_result": f"ok-{len(MockAgentExecutionRequester.requests)}",
+            }
+            payload = self._complete_semantic_verifier_fixture(text, payload)
+        else:
+            payload = {
                 "answer": f"ok-{ len(MockAgentExecutionRequester.requests) }",
                 "status": "ready",
-            },
-            ensure_ascii=False,
-        )
+            }
+        yield "message", json.dumps(payload, ensure_ascii=False)
 
     async def broadcast_response(
         self,
@@ -4528,6 +4598,66 @@ async def test_taskboard_intermediate_card_relocates_required_final_deliverable_
     )
 
 
+def test_empty_artifact_manifest_does_not_request_workspace_delivery():
+    assert AgentTask._workspace_artifact_delivery_mode({"artifact_manifest": {}}) == ""
+
+
+@pytest.mark.asyncio
+async def test_taskboard_intermediate_card_relocates_explicit_artifact_without_task_output_contract(tmp_path):
+    agent = _create_agent("execution-taskboard-intermediate-uncontracted-path").use_workspace(
+        tmp_path / "workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Use an intermediate card artifact before the final deliverable.",
+        success_criteria=["Intermediate artifacts do not occupy final.md."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    revision = TaskBoardRevision.create(
+        board_id="intermediate-uncontracted-path",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "intermediate-uncontracted-path-graph",
+                "cards": [
+                    {"id": "extract", "objective": "Write an intermediate source summary."},
+                    {
+                        "id": "synthesize",
+                        "objective": "Write final.md.",
+                        "depends_on": ["extract"],
+                    },
+                ],
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        card=revision.graph.card_by_id()["extract"],
+        revision=revision,
+    )
+    prepared, plan = task._prepare_taskboard_workspace_artifact_delivery(
+        {
+            "artifact_markdown": "# Source Summary\n\nIntermediate evidence only.",
+            "artifact_manifest": {"path": "final.md"},
+        },
+        context,
+        deliverable_mode="workspace_artifact",
+    )
+
+    delivered = await task._deliver_workspace_artifact(
+        prepared,
+        plan=plan,
+        execution_meta={"logs": {}},
+        source="test.taskboard.intermediate_uncontracted.workspace_artifact",
+        card_context=context,
+    )
+
+    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == (
+        "working/taskboard/extract/final.md"
+    )
+    assert task.workspace.resolve_file_path("working/taskboard/extract/final.md").is_file()
+    assert not (task.workspace.root / "final.md").exists()
+
+
 @pytest.mark.asyncio
 async def test_taskboard_remaining_work_leaf_card_relocates_required_final_deliverable_path(tmp_path):
     agent = _create_agent("execution-taskboard-leaf-remaining-work-final-path").use_workspace(
@@ -7530,7 +7660,7 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp_path):
+async def test_taskboard_action_card_stops_planning_after_one_successful_action_round(tmp_path):
     agent = _create_taskboard_action_post_execution_planning_stall_agent(
         "execution-taskboard-card-partial-evidence-stall"
     ).use_workspace(tmp_path / "workspace")
@@ -7559,8 +7689,9 @@ async def test_taskboard_failed_card_preserves_partial_child_action_evidence(tmp
         item.get("evidence_summary") for item in diagnostics if isinstance(item, dict) and item.get("evidence_summary")
     ]
 
-    assert result["status"] == "error"
-    assert partial_result["status"] == "failed"
+    assert result["status"] == "completed"
+    assert partial_result["status"] == "completed"
+    assert MockTaskBoardActionPostExecutionPlanningStallRequester.action_planning_calls == 1
     assert evidence_summaries
     first_evidence_summary = evidence_summaries[0]
     assert isinstance(first_evidence_summary, dict)

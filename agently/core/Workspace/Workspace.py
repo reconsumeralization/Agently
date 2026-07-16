@@ -236,7 +236,9 @@ class Workspace:
             return ref
         scoped_ref = dict(ref)
         existing_scope = scoped_ref.get("scope")
-        scoped_ref["scope"] = merge_scope(self.default_scope, existing_scope if isinstance(existing_scope, dict) else {})
+        scoped_ref["scope"] = merge_scope(
+            self.default_scope, existing_scope if isinstance(existing_scope, dict) else {}
+        )
         put_record = getattr(self.backend, "put_record", None)
         if not callable(put_record):
             return cast(WorkspaceRecordRef, scoped_ref)
@@ -275,7 +277,9 @@ class Workspace:
                 kind=kind,
                 scope=self._scoped_record_scope(scope_value if isinstance(scope_value, dict) else None),
                 source=source_value if isinstance(source_value, dict) else {},
-                summary=summary_value if isinstance(summary_value, str) or summary_value is None else str(summary_value),
+                summary=(
+                    summary_value if isinstance(summary_value, str) or summary_value is None else str(summary_value)
+                ),
                 meta=meta,
             )
         if self.default_scope:
@@ -745,6 +749,64 @@ class Workspace:
             offset=offset,
             handler=handler,
             options=options,
+        )
+
+    async def _promote_file_identity(
+        self,
+        path: str | Path,
+        *,
+        role: str,
+    ) -> WorkspaceFileRef:
+        """Promote one physically verified file into the private identity graph."""
+
+        normalized_role = str(role or "").strip()
+        if not normalized_role:
+            raise ValueError("Workspace file identity promotion requires a role.")
+        target = self.resolve_file_path(path)
+        if not target.is_file():
+            raise FileNotFoundError(f"Workspace file not found: {path}")
+        relative = target.relative_to(self.root).as_posix()
+
+        def fingerprint() -> tuple[str, int]:
+            digest = hashlib.sha256()
+            size = 0
+            with target.open("rb") as file:
+                while chunk := file.read(1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+            return digest.hexdigest(), size
+
+        digest, size = await asyncio.to_thread(fingerprint)
+        catalog = getattr(self.backend, "_identity_catalog", None)
+        observe_content = getattr(catalog, "observe_content", None)
+        if not callable(observe_content):
+            raise WorkspacePolicyError("Workspace backend cannot persist the private content identity graph.")
+        typed_observe_content = cast(Callable[..., Awaitable[Any]], observe_content)
+        observation = await typed_observe_content(
+            locator_kind="path",
+            normalized_locator=relative,
+            digest=digest,
+            size=size,
+            payload_pointer={"type": "workspace_file", "path": relative},
+        )
+        info = self.manager.inspect_file_path(target, relative_path=relative)
+        return cast(
+            WorkspaceFileRef,
+            {
+                "type": "file",
+                "path": relative,
+                "workspace_id": self._workspace_id,
+                "execution_id": self._execution_id,
+                "size": size,
+                "bytes": size,
+                "sha256": digest,
+                "available": True,
+                "media_type": info.get("media_type"),
+                "content_kind": str(info.get("content_kind") or "unknown"),
+                "role": normalized_role,
+                "locator_id": observation.locator_id,
+                "content_version_id": observation.content_version_id,
+            },
         )
 
     async def glob_files(
@@ -1382,9 +1444,7 @@ class Workspace:
             target = candidate_target
         elif self.mode == "read_only":
             if external_target.exists() or append:
-                raise WorkspacePolicyError(
-                    "External Workspace mutation requires an explicit write grant or approval."
-                )
+                raise WorkspacePolicyError("External Workspace mutation requires an explicit write grant or approval.")
             target = self._resolve_fallback_file_path(external_target)
         else:
             target = external_target
@@ -1469,7 +1529,9 @@ class Workspace:
                 raise ValueError("old_string was not found in the Workspace file.")
             if replacement_count > 1 and not replace_all:
                 raise ValueError("old_string matched multiple locations; set replace_all=True or provide more context.")
-            new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+            new_content = (
+                content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+            )
         result = dict(
             await self._write_file_unlocked(
                 path,
@@ -1575,9 +1637,7 @@ class Workspace:
         """Close the current fallback carrier without touching external files."""
         if status not in {"completed", "failed", "cancelled"}:
             raise ValueError("Workspace execution status must be completed, failed, or cancelled.")
-        execution_root = (
-            self.root / ".agently" / "files" / self._execution_id
-        ).resolve()
+        execution_root = (self.root / ".agently" / "files" / self._execution_id).resolve()
         if not execution_root.exists():
             return {
                 "status": "noop",
@@ -1755,18 +1815,12 @@ class Workspace:
         candidate_target = self.resolve_file_path(path)
         candidate_relative = candidate_target.relative_to(self.root)
         current_execution_private = self._is_current_execution_file(candidate_relative)
-        external_target = (
-            candidate_target
-            if current_execution_private
-            else self._resolve_external_file_path(path)
-        )
+        external_target = candidate_target if current_execution_private else self._resolve_external_file_path(path)
         if current_execution_private:
             target = candidate_target
         elif self.mode == "read_only":
             if external_target.exists() or overwrite:
-                raise WorkspacePolicyError(
-                    "External Workspace mutation requires an explicit write grant or approval."
-                )
+                raise WorkspacePolicyError("External Workspace mutation requires an explicit write grant or approval.")
             target = self._resolve_fallback_file_path(external_target)
         else:
             target = external_target
@@ -1806,12 +1860,12 @@ class Workspace:
                 cast(
                     WorkspaceFileRef,
                     {
-                    "path": relative_path,
-                    "bytes": int(file_info.get("bytes", len(raw))),
-                    "sha256": str(file_info.get("sha256") or hashlib.sha256(raw).hexdigest()),
-                    "media_type": file_info.get("media_type"),
-                    "content_kind": str(file_info.get("content_kind", "unknown")),
-                    "role": "download",
+                        "path": relative_path,
+                        "bytes": int(file_info.get("bytes", len(raw))),
+                        "sha256": str(file_info.get("sha256") or hashlib.sha256(raw).hexdigest()),
+                        "media_type": file_info.get("media_type"),
+                        "content_kind": str(file_info.get("content_kind", "unknown")),
+                        "role": "download",
                     },
                 )
             ],
@@ -1852,17 +1906,13 @@ class Workspace:
         candidate_relative = candidate_output.relative_to(self.root)
         current_execution_private = self._is_current_execution_file(candidate_relative)
         external_output = (
-            candidate_output
-            if current_execution_private
-            else self._resolve_external_file_path(output_path)
+            candidate_output if current_execution_private else self._resolve_external_file_path(output_path)
         )
         if current_execution_private:
             output = candidate_output
         elif self.mode == "read_only":
             if external_output.exists():
-                raise WorkspacePolicyError(
-                    "External Workspace mutation requires an explicit write grant or approval."
-                )
+                raise WorkspacePolicyError("External Workspace mutation requires an explicit write grant or approval.")
             output = self._resolve_fallback_file_path(external_output)
         else:
             output = external_output
@@ -1892,8 +1942,10 @@ class Workspace:
 
     def capabilities(self) -> WorkspaceBackendCapabilities:
         materialized_components: list[str] = []
+        private_write = True
         if self._backend is not None:
             backend_capabilities = dict(self._backend.capabilities())
+            private_write = bool(backend_capabilities.get("private_write", False))
             components = backend_capabilities.get("materialized_components", [])
             if isinstance(components, list):
                 materialized_components = sorted(str(name) for name in components)
@@ -1904,7 +1956,7 @@ class Workspace:
                 "mode": self.mode,
                 "external_read": True,
                 "external_write": self.mode == "read_write",
-                "private_write": True,
+                "private_write": private_write,
                 "materialized_components": materialized_components,
             },
         )

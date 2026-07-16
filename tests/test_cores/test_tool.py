@@ -401,6 +401,43 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     action._release_artifact_scope(artifact_scope)
 
 
+def test_action_results_keep_action_call_id_for_mapping_scalar_and_failure_results():
+    records = [
+        {
+            "purpose": "mapping result",
+            "action_call_id": "call-mapping",
+            "success": True,
+            "result": {"price": 123.45},
+        },
+        {
+            "purpose": "scalar result",
+            "action_call_id": "call-scalar",
+            "success": True,
+            "result": "available",
+        },
+        {
+            "purpose": "failed result",
+            "action_call_id": "call-failed",
+            "success": False,
+            "status": "error",
+            "error": "source unavailable",
+            "result": None,
+        },
+    ]
+
+    visible = Action.to_action_results(cast(Any, records))
+
+    assert visible["mapping result"] == {
+        "price": 123.45,
+        "action_call_id": "call-mapping",
+    }
+    assert visible["scalar result"] == {
+        "action_call_id": "call-scalar",
+        "result": "available",
+    }
+    assert visible["failed result"]["action_call_id"] == "call-failed"
+
+
 def test_max_output_bytes_preserves_full_output_in_artifact():
     action = Agently.create_agent().action
     artifact_scope = {"kind": "test", "id": "max-output-preserve"}
