@@ -26,6 +26,157 @@ if TYPE_CHECKING:
     from .execution import AgentExecution
 
 
+def _required_skill_plan_summary(plan: Any) -> dict[str, Any]:
+    plan_data = plan if isinstance(plan, Mapping) else {}
+    selected = plan_data.get("selected_skills")
+    selected = (
+        list(selected)
+        if isinstance(selected, Sequence) and not isinstance(selected, str | bytes | bytearray)
+        else []
+    )
+    selected_skill_ids: list[str] = []
+    for item in selected:
+        if not isinstance(item, Mapping):
+            continue
+        skill_id = str(item.get("skill_id") or "").strip()
+        if skill_id and skill_id not in selected_skill_ids:
+            selected_skill_ids.append(skill_id)
+    return DataFormatter.sanitize(
+        {
+            "plan_id": plan_data.get("plan_id"),
+            "mode": plan_data.get("mode"),
+            "status": plan_data.get("status"),
+            "selected_skill_ids": selected_skill_ids,
+            "rejected_skills": plan_data.get("rejected_skills", []),
+            "rejected_skills_packs": plan_data.get("rejected_skills_packs", []),
+            "diagnostics": plan_data.get("diagnostics", []),
+        }
+    )
+
+
+def _required_skill_block_reason(plan_summary: Mapping[str, Any]) -> str:
+    reasons: list[str] = []
+    for key in ("rejected_skills", "rejected_skills_packs"):
+        items = plan_summary.get(key)
+        if not isinstance(items, Sequence) or isinstance(items, str | bytes | bytearray):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            reason = str(item.get("reason") or "").strip()
+            if reason and reason not in reasons:
+                reasons.append(reason)
+    if not reasons:
+        diagnostics = plan_summary.get("diagnostics")
+        if isinstance(diagnostics, Sequence) and not isinstance(
+            diagnostics, str | bytes | bytearray
+        ):
+            for item in diagnostics:
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("level") or "").lower() not in {"warning", "error"}:
+                    continue
+                message = str(item.get("message") or "").strip()
+                if message and message not in reasons:
+                    reasons.append(message)
+    detail = "; ".join(reasons) if reasons else "required Skill resolution returned no usable installed Skill"
+    return f"Required Skill availability check failed: {detail}"
+
+
+async def _resolve_required_skill_availability(
+    execution: "AgentExecution",
+    *,
+    goal: str,
+) -> tuple[list[str], dict[str, Any] | None]:
+    try:
+        candidate_summary = execution.skill_candidate_summary()
+    except Exception:
+        candidate_summary = {}
+    has_required_selectors = bool(
+        isinstance(candidate_summary, Mapping) and candidate_summary.get("required")
+    )
+    configured_required_ids = execution.required_skill_ids()
+    if not has_required_selectors and not configured_required_ids:
+        return [], None
+
+    resolution_kwargs: dict[str, Any] = {"mode": "required"}
+    explicit_selectors = [
+        item.get("selector")
+        for item in execution.local_skill_selectors
+        if item.get("mode") == "required"
+    ]
+    summary_selectors = (
+        list(candidate_summary.get("required_skills") or [])
+        if isinstance(candidate_summary, Mapping)
+        else []
+    )
+    represented_ids = {
+        str(
+            selector.get("id")
+            or selector.get("skill_id")
+            or selector.get("name")
+            or selector.get("source")
+            or ""
+        ).strip()
+        if isinstance(selector, Mapping)
+        else str(selector or "").strip()
+        for selector in [*explicit_selectors, *summary_selectors]
+    }
+    explicit_selectors.extend(
+        skill_id
+        for skill_id in configured_required_ids
+        if skill_id and skill_id not in represented_ids
+    )
+    if explicit_selectors:
+        resolution_kwargs["skills"] = explicit_selectors
+    explicit_pack_selectors = [
+        item.get("selector")
+        for item in execution.local_skills_pack_selectors
+        if item.get("mode") == "required"
+    ]
+    if explicit_pack_selectors:
+        resolution_kwargs["skills_packs"] = explicit_pack_selectors
+
+    prompt_snapshot = getattr(execution, "prompt_snapshot", {})
+    if isinstance(prompt_snapshot, Mapping):
+        if prompt_snapshot.get("output") is not None:
+            resolution_kwargs["output"] = prompt_snapshot.get("output")
+        if prompt_snapshot.get("output_format") is not None:
+            resolution_kwargs["output_format"] = prompt_snapshot.get("output_format")
+
+    try:
+        plan = await execution.async_resolve_skills_plan(goal, **resolution_kwargs)
+        plan_summary = _required_skill_plan_summary(plan)
+    except Exception as error:
+        plan_summary = DataFormatter.sanitize(
+            {
+                "mode": "required",
+                "status": "blocked",
+                "selected_skill_ids": [],
+                "rejected_skills": [],
+                "rejected_skills_packs": [],
+                "diagnostics": [
+                    {
+                        "level": "error",
+                        "code": "required_skill_resolution_failed",
+                        "message": str(error),
+                    }
+                ],
+            }
+        )
+
+    execution.logs["required_skills_plan"] = plan_summary
+    execution.diagnostics["required_skills_plan"] = plan_summary
+    selected_skill_ids = [
+        str(item).strip()
+        for item in list(plan_summary.get("selected_skill_ids") or [])
+        if str(item).strip()
+    ]
+    if plan_summary.get("status") != "resolved" or not selected_skill_ids:
+        return [], plan_summary
+    return list(dict.fromkeys(selected_skill_ids)), None
+
+
 async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str, Any]) -> Any:
     from agently.core.application import AgentTask
 
@@ -85,6 +236,42 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
                 source="agent_execution",
             )
 
+    resolved_required_skills, required_skill_failure = await _resolve_required_skill_availability(
+        execution,
+        goal=goal,
+    )
+    if required_skill_failure is not None:
+        reason = _required_skill_block_reason(required_skill_failure)
+        required_capabilities = {"skills_plan": required_skill_failure}
+        execution.status = "blocked"
+        execution.close_snapshot = {
+            "status": "blocked",
+            "route": "agent_task",
+            "reason": reason,
+            "required_capabilities": required_capabilities,
+        }
+        await execution.emit_stream(
+            "route.agent_task.blocked",
+            {
+                "reason": reason,
+                "required_capabilities": required_capabilities,
+            },
+            route="agent_task",
+            source="skills_manager",
+            meta={"status": "blocked"},
+        )
+        return {
+            "status": "blocked",
+            "accepted": False,
+            "artifact_status": "blocked",
+            "reason": reason,
+            "final_response": (
+                "Task encountered a blocking condition. "
+                f"No complete final deliverable was accepted. Reason: {reason}"
+            ),
+            "required_capabilities": required_capabilities,
+        }
+
     effort_strategy = execution.effective_options.get("effort_strategy")
     effort_strategy = dict(effort_strategy) if isinstance(effort_strategy, dict) else {}
     max_iterations = task_options.get("max_iterations")
@@ -100,7 +287,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         if source is not None:
             agent_task_options["agent_task"]["execution_strategy_source"] = str(source)
     required_actions = execution.required_action_ids()
-    required_skills = execution.required_skill_ids()
+    required_skills = resolved_required_skills or execution.required_skill_ids()
     if required_actions or required_skills:
         constraints = dict(agent_task_options.get("capability_constraints") or {})
         if required_actions:
@@ -121,7 +308,10 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     # construction, from the top-level routing execution. A caller-supplied
     # snapshot, if any, wins.
     if "planner_capabilities" not in agent_task_options:
-        capability_snapshot = _planner_capability_snapshot(execution)
+        capability_snapshot = _planner_capability_snapshot(
+            execution,
+            resolved_required_skill_ids=resolved_required_skills or None,
+        )
         if capability_snapshot:
             agent_task_options["planner_capabilities"] = capability_snapshot
     prompt_snapshot = getattr(execution, "prompt_snapshot", {})
@@ -222,7 +412,11 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     return task.result
 
 
-def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, Any]]:
+def _planner_capability_snapshot(
+    execution: "AgentExecution",
+    *,
+    resolved_required_skill_ids: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
     """Sanitized planner-facing capability snapshot (inert data only).
 
     Adapts the route planner's action / skill / skill-pack
@@ -291,6 +485,17 @@ def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, 
     if isinstance(summary, dict):
         descriptions = _installed_skill_descriptions(execution)
         for mode in ("model_decision", "required"):
+            if mode == "required" and resolved_required_skill_ids is not None:
+                for skill_id in resolved_required_skill_ids:
+                    add(
+                        str(skill_id),
+                        "skill",
+                        "model_request",
+                        "prompt_bound",
+                        mode="required",
+                        description=descriptions.get(str(skill_id), ""),
+                    )
+                continue
             for selector in summary.get(f"{mode}_skills", []) or []:
                 skill_id = _capability_id_from_selector(selector)
                 add(

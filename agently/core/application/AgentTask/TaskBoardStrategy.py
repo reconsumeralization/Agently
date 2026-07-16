@@ -38,11 +38,265 @@ class AgentTaskTaskBoardStrategyMixin(
 ):
     _latest_taskboard_acceptance_index: dict[str, Any] | None
 
+    def _set_taskboard_planned_workspace_deliverables(self, revision: Any) -> list[str]:
+        """Cache model-selected final paths after host-owned Workspace validation."""
+
+        accepted: list[str] = []
+        invalid: list[dict[str, Any]] = []
+        graph = getattr(revision, "graph", None)
+        for card in list(getattr(graph, "cards", ()) or ()):
+            metadata = getattr(card, "metadata", None)
+            if not isinstance(metadata, Mapping):
+                continue
+            for raw_path in self._normalize_string_list(
+                metadata.get("final_workspace_deliverables")
+            ):
+                path = Path(raw_path)
+                try:
+                    if path.is_absolute() or ".." in path.parts:
+                        raise ValueError("TaskBoard final deliverable paths must stay Workspace-relative.")
+                    self.workspace.resolve_file_path(raw_path)
+                except Exception as error:
+                    invalid.append(
+                        {
+                            "card_id": str(getattr(card, "id", "") or ""),
+                            "path": raw_path,
+                            "error": str(error),
+                        }
+                    )
+                    continue
+                normalized = path.as_posix()
+                if normalized not in accepted:
+                    accepted.append(normalized)
+        self._taskboard_planned_workspace_deliverables = accepted
+        if invalid:
+            self.diagnostics.setdefault("taskboard_invalid_final_deliverables", []).extend(invalid)
+        return accepted
+
+    @staticmethod
+    def _taskboard_card_convergence_subject(card: Any) -> str:
+        metadata = getattr(card, "metadata", None)
+        if isinstance(metadata, Mapping):
+            supplied = str(metadata.get("terminal_convergence_subject") or "").strip()
+            if supplied:
+                return supplied
+        evidence_contract = getattr(card, "evidence_contract", None)
+        grounding_contract = (
+            evidence_contract.get("material_claim_repair_contract")
+            if isinstance(evidence_contract, Mapping)
+            else None
+        )
+        if isinstance(grounding_contract, Mapping):
+            supplied = str(grounding_contract.get("contract_subject") or "").strip()
+            if supplied:
+                return supplied
+        card_id = str(getattr(card, "id", "") or "").strip()
+        return f"taskboard_card:{card_id}"
+
+    @staticmethod
+    def _taskboard_card_reference_targets(result: Any) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = []
+        for collection_name in ("artifact_refs", "file_refs"):
+            collection = getattr(result, collection_name, ())
+            if not isinstance(collection, Sequence) or isinstance(
+                collection,
+                str | bytes | bytearray,
+            ):
+                continue
+            for raw_ref in collection:
+                if not isinstance(raw_ref, Mapping):
+                    continue
+                projected = {
+                    field: DataFormatter.sanitize(raw_ref.get(field))
+                    for field in (
+                        "id",
+                        "record_id",
+                        "reference_id",
+                        "locator_id",
+                        "content_version_id",
+                        "path",
+                        "sha256",
+                        "role",
+                    )
+                    if raw_ref.get(field) not in (None, "", [], {})
+                }
+                if projected:
+                    targets.append(projected)
+        return targets
+
+    def _taskboard_card_convergence_result(
+        self,
+        revision: TaskBoardRevision | Mapping[str, Any],
+        *,
+        executed_card_ids: Sequence[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Stop an unbounded board after one required card stays unsatisfied three times."""
+
+        effective_revision = TaskBoardRevision.from_value(revision)
+        executed = (
+            {str(card_id) for card_id in executed_card_ids if str(card_id)} if executed_card_ids is not None else None
+        )
+        for card in effective_revision.graph.cards:
+            if executed is not None and card.id not in executed:
+                continue
+            result = effective_revision.card_results.get(card.id)
+            if result is None or not task_board_card_required(card):
+                continue
+            status = str(result.status or "").strip().lower()
+            if status not in {"setback", "failed", "blocked"}:
+                continue
+            contract_subject = self._taskboard_card_convergence_subject(card)
+            issue = TerminalIssue(
+                "taskboard_card",
+                "required_card_unsatisfied",
+                contract_subject,
+            )
+            evidence_contract = getattr(card, "evidence_contract", None)
+            requires_capability_ids = self._normalize_string_list(
+                evidence_contract.get("requires_capability_ids") if isinstance(evidence_contract, Mapping) else None
+            )
+            repair_contract = {
+                "gate_kind": issue.gate_kind,
+                "issue_code": issue.issue_code,
+                "contract_subject": issue.contract_subject,
+                "requirements": [
+                    {
+                        "card_id": card.id,
+                        "status": status,
+                        "allowed_execution_shape": str(getattr(card, "allowed_execution_shape", "") or "auto"),
+                        "requires_capability_ids": requires_capability_ids,
+                    }
+                ],
+            }
+            state_digest = relevant_state_digest(
+                {
+                    "candidate_content_version_ids": [str(result.output_digest)] if result.output_digest else [],
+                    "source_reference_targets": self._taskboard_card_reference_targets(result),
+                    "capability_facts": {capability_id: "required" for capability_id in requires_capability_ids},
+                    "output_subjects": [contract_subject],
+                    "repair_contract": repair_contract,
+                }
+            )
+            decision = self._terminal_convergence_state.record_detection(
+                issue,
+                state_digest,
+                repair_contract=repair_contract,
+                verifier_called=False,
+            )
+            convergence = {
+                **dict(DataFormatter.sanitize(decision)),
+                "issue": {
+                    "gate_kind": issue.gate_kind,
+                    "issue_code": issue.issue_code,
+                    "contract_subject": issue.contract_subject,
+                },
+                "repair_contract": repair_contract,
+                "relevant_state_digest": state_digest,
+                "stopped_after_third_occurrence": decision.get("terminal") is True,
+            }
+            self.diagnostics.setdefault("taskboard_card_terminal_convergence", []).append(
+                {
+                    "board_id": effective_revision.board_id,
+                    "revision_id": effective_revision.revision_id,
+                    "card_id": card.id,
+                    "status": status,
+                    "terminal_convergence": convergence,
+                }
+            )
+            self.diagnostics["terminal_convergence"] = self._terminal_convergence_state.snapshot()
+            if decision.get("terminal") is not True:
+                continue
+            reason = (
+                "TaskBoard stopped because the same required card contract remained unsatisfied "
+                f"across three executions: {card.id}."
+            )
+            terminal_result = {
+                "status": "blocked",
+                "accepted": False,
+                "artifact_status": "partial",
+                "task_id": self.id,
+                "execution_strategy": self.execution_strategy,
+                "effective_execution_strategy": self.effective_execution_strategy,
+                "final_result": reason,
+                "final_response": reason,
+                "reason": reason,
+                "missing_criteria": [reason],
+                "artifact_refs": [],
+                "terminal_convergence": convergence,
+            }
+            self.status = "blocked"
+            self.result = terminal_result
+            return terminal_result
+        return None
+
+    @staticmethod
+    def _taskboard_tick_executed_card_ids(tick_result: Any) -> tuple[str, ...]:
+        snapshot = getattr(tick_result, "triggerflow_snapshot", None)
+        if isinstance(snapshot, Mapping):
+            collected = snapshot.get("collected_card_results")
+            if isinstance(collected, Mapping):
+                return tuple(str(card_id) for card_id in collected if str(card_id))
+            collected_json = snapshot.get("collected_card_results_json")
+            if isinstance(collected_json, str) and collected_json.strip():
+                try:
+                    parsed = json.loads(collected_json)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, Mapping):
+                    return tuple(str(card_id) for card_id in parsed if str(card_id))
+        schedule = getattr(tick_result, "schedule", None)
+        runnable_card_ids = getattr(schedule, "runnable_card_ids", ())
+        if isinstance(runnable_card_ids, Sequence) and not isinstance(
+            runnable_card_ids,
+            str | bytes | bytearray,
+        ):
+            return tuple(str(card_id) for card_id in runnable_card_ids if str(card_id))
+        return ()
+
     async def _run_taskboard(self) -> dict[str, Any]:
-        iteration_index = 1
+        """Compatibility entry point for the TaskBoard work-producer subflow."""
+
+        frame: dict[str, Any] = {"iteration": 1}
+        frame = await self._taskboard_context_prepare_stage(frame)
+        frame = await self._taskboard_work_plan_stage(frame)
+        if self.effective_execution_strategy == "flat":
+            for stage in (
+                self._flat_work_execute_stage,
+                self._flat_outputs_materialize_stage,
+                self._flat_evidence_ingest_stage,
+                self._flat_terminal_verify_stage,
+                self._flat_transition_decide_stage,
+            ):
+                frame = await stage(frame)
+                if frame.get("iteration_result") is not None:
+                    break
+        else:
+            for stage in (
+                self._taskboard_work_execute_stage,
+                self._taskboard_outputs_materialize_stage,
+                self._taskboard_evidence_ingest_stage,
+                self._taskboard_terminal_verify_stage,
+                self._taskboard_transition_decide_stage,
+            ):
+                frame = await stage(frame)
+                if frame.get("iteration_result") is not None:
+                    break
+        result = frame.get("iteration_result")
+        if not isinstance(result, Mapping):
+            raise ValueError("TaskBoard lifecycle did not produce a structured result.")
+        return dict(result)
+
+    async def _taskboard_context_prepare_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        iteration_index = int(frame["iteration"])
         try:
             if self._task_deadline_exceeded():
-                return await self._terminate_timed_out(iteration_index)
+                frame["iteration_result"] = await self._terminate_timed_out(
+                    iteration_index
+                )
+                return frame
             await self._emit_progress(
                 iteration_index,
                 "context",
@@ -54,13 +308,62 @@ class AgentTaskTaskBoardStrategyMixin(
                 stage="context",
             )
             await self._emit("agent_task.taskboard.context", context_pack)
-
-            resumed_taskboard_state = (
-                self._resumed_taskboard_state if isinstance(self._resumed_taskboard_state, Mapping) else None
-            )
+            carried_revision = frame.get("taskboard_revision")
+            if isinstance(carried_revision, Mapping):
+                resumed_taskboard_state = {
+                    "revision": DataFormatter.sanitize(carried_revision),
+                    "stage": "outer_lifecycle_transition",
+                    "tick_index": int(frame.get("taskboard_tick_index") or 0),
+                    **(
+                        {
+                            "acceptance_index": DataFormatter.sanitize(
+                                frame["taskboard_acceptance_index"]
+                            )
+                        }
+                        if isinstance(frame.get("taskboard_acceptance_index"), Mapping)
+                        else {}
+                    ),
+                }
+            else:
+                resumed_taskboard_state = (
+                    self._resumed_taskboard_state
+                    if isinstance(self._resumed_taskboard_state, Mapping)
+                    else None
+                )
             resumed_revision: TaskBoardRevision | None = None
             if resumed_taskboard_state is not None and isinstance(resumed_taskboard_state.get("revision"), Mapping):
                 resumed_revision = TaskBoardRevision.from_value(resumed_taskboard_state["revision"])
+        except _AgentTaskDeadlineExceeded as error:
+            frame["iteration_result"] = await self._terminate_timed_out(
+                iteration_index,
+                stage=error.stage,
+                reason=error.reason,
+                limit_name=error.limit_name,
+                timeout_seconds=error.timeout_seconds,
+            )
+            return frame
+        frame["context_pack"] = context_pack
+        frame["resumed_taskboard_state"] = resumed_taskboard_state
+        frame["resumed_revision"] = resumed_revision
+        return frame
+
+    async def _taskboard_work_plan_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        iteration_index = int(frame["iteration"])
+        context_pack = cast("WorkspaceContextPackage", frame["context_pack"])
+        resumed_taskboard_state = cast(
+            Mapping[str, Any] | None,
+            frame.get("resumed_taskboard_state"),
+        )
+        resumed_revision = cast(
+            TaskBoardRevision | None,
+            frame.get("resumed_revision"),
+        )
+        try:
             if resumed_revision is None:
                 planning_result = self._initial_taskboard_plan_from_shape_analysis()
                 if planning_result is None:
@@ -92,13 +395,16 @@ class AgentTaskTaskBoardStrategyMixin(
                 )
                 board_revision = resumed_revision
         except _AgentTaskDeadlineExceeded as error:
-            return await self._terminate_timed_out(
+            frame["iteration_result"] = await self._terminate_timed_out(
                 iteration_index,
                 stage=error.stage,
                 reason=error.reason,
                 limit_name=error.limit_name,
                 timeout_seconds=error.timeout_seconds,
             )
+            return frame
+
+        self._set_taskboard_planned_workspace_deliverables(board_revision)
 
         if resumed_revision is None and self._taskboard_should_fallback_to_flat(board_revision):
             self.diagnostics.setdefault("execution_strategy_gates", []).append(
@@ -109,7 +415,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 }
             )
             self._set_effective_execution_strategy("flat", source="taskboard_small_linear_board_fallback")
-            return await self._run_flat()
+            return await self._flat_work_plan_stage(frame)
 
         board = TaskBoard(
             board_revision,
@@ -145,9 +451,9 @@ class AgentTaskTaskBoardStrategyMixin(
                     "card_count": len(board.revision.graph.cards),
                     "execution_strategy": self.execution_strategy,
                     "checkpoint_stage": resumed_taskboard_state.get("stage") if resumed_taskboard_state else None,
-                    "checkpoint_tick_index": resumed_taskboard_state.get("tick_index")
-                    if resumed_taskboard_state
-                    else None,
+                    "checkpoint_tick_index": (
+                        resumed_taskboard_state.get("tick_index") if resumed_taskboard_state else None
+                    ),
                 },
             )
             await self._emit(
@@ -157,6 +463,25 @@ class AgentTaskTaskBoardStrategyMixin(
                     "tick_index": resumed_taskboard_state.get("tick_index") if resumed_taskboard_state else None,
                 },
             )
+        frame["board"] = board
+        frame["planning_policy"] = planning_policy
+        frame["board_revision"] = board_revision
+        return frame
+
+    async def _taskboard_work_execute_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        iteration_index = int(frame["iteration"])
+        context_pack = cast("WorkspaceContextPackage", frame["context_pack"])
+        resumed_taskboard_state = cast(
+            Mapping[str, Any] | None,
+            frame.get("resumed_taskboard_state"),
+        )
+        board = cast(TaskBoard, frame["board"])
+        planning_policy = frame["planning_policy"]
         lifecycle_flow = TriggerFlow(name=f"agent-task-taskboard-lifecycle-{ self.id }")
         tick_requested_event = f"agent_task.taskboard.lifecycle.tick.requested.{ self.id }"
         finalize_requested_event = f"agent_task.taskboard.lifecycle.finalize.requested.{ self.id }"
@@ -216,7 +541,9 @@ class AgentTaskTaskBoardStrategyMixin(
             await data.async_set_state("tick_index", initial_tick_index, emit=False)
             await data.async_set_state("max_ticks", max_ticks, emit=False)
             await data.async_set_state("runtime_topology", topology, emit=False)
-            if resumed_taskboard_state is not None and isinstance(resumed_taskboard_state.get("acceptance_index"), Mapping):
+            if resumed_taskboard_state is not None and isinstance(
+                resumed_taskboard_state.get("acceptance_index"), Mapping
+            ):
                 self._latest_taskboard_acceptance_index = DataFormatter.sanitize(
                     resumed_taskboard_state.get("acceptance_index")
                 )
@@ -339,6 +666,35 @@ class AgentTaskTaskBoardStrategyMixin(
                     "runtime_topology": tick_runtime_topology,
                 },
             )
+            convergence_result = self._taskboard_card_convergence_result(
+                tick_result.revision,
+                executed_card_ids=self._taskboard_tick_executed_card_ids(tick_result),
+            )
+            if convergence_result is not None:
+                await data.async_set_state(
+                    "terminal_reason",
+                    "terminal_convergence_stopped",
+                    emit=False,
+                )
+                await data.async_set_state(
+                    "terminal_result",
+                    convergence_result,
+                    emit=False,
+                )
+                await self._record_taskboard_checkpoint(
+                    stage="terminal_convergence",
+                    tick_index=tick_index,
+                    revision=tick_result.revision,
+                    runtime_topology=tick_runtime_topology,
+                    terminal_reason="terminal_convergence_stopped",
+                    final_result=convergence_result,
+                )
+                await _sync_latest_acceptance_index(data)
+                await self._emit(
+                    "agent_task.terminal_convergence",
+                    convergence_result["terminal_convergence"],
+                )
+                return convergence_result
             await self._record_taskboard_checkpoint(
                 stage="tick",
                 tick_index=tick_index,
@@ -361,59 +717,40 @@ class AgentTaskTaskBoardStrategyMixin(
                 return data.get_state("terminal_result", inherit=False)
             if data.get_state("final_result", None, inherit=False) is not None:
                 return data.get_state("final_result", inherit=False)
-            await self._apply_guidance_boundary(
-                iteration_index=max(int(data.get_state("tick_index", 1, inherit=False) or 1) - 1, 1),
-                boundary="taskboard_finalize",
-            )
             revision = _unpack_revision_state(data)
             previous_acceptance_index = data.get_state("taskboard_acceptance_index", None, inherit=False)
             if not isinstance(previous_acceptance_index, Mapping):
                 previous_acceptance_index = getattr(self, "_latest_taskboard_acceptance_index", None)
-            try:
-                result = await self._finalize_taskboard(
-                    revision,
-                    context_pack=context_pack,
-                    previous_acceptance_index=previous_acceptance_index if isinstance(previous_acceptance_index, Mapping) else None,
-                )
-            except _AgentTaskDeadlineExceeded as error:
-                result = await self._terminate_timed_out(
-                    max(len(self.iterations) + 1, 1),
-                    stage=error.stage,
-                    reason=error.reason,
-                    limit_name=error.limit_name,
-                    timeout_seconds=error.timeout_seconds,
-                )
-                await data.async_set_state("terminal_result", result, emit=False)
-                return result
-            if isinstance(result, Mapping) and result.get("terminal") is False and result.get("status") == "repair_requested":
-                raw_revision = result.get("revision")
-                if isinstance(raw_revision, Mapping):
-                    repair_revision = TaskBoardRevision.from_value(raw_revision)
-                    await data.async_set_state(revision_state_key, _pack_revision_state(repair_revision), emit=False)
-                    next_tick_index = int(data.get_state("tick_index", 1, inherit=False) or 1)
-                    await data.async_set_state("terminal_reason", "final_verification_repair", emit=False)
-                    await self._record_taskboard_checkpoint(
-                        stage="finalize",
-                        tick_index=max(next_tick_index - 1, 1),
-                        revision=repair_revision,
-                        runtime_topology=DataFormatter.sanitize(
-                            data.get_state("runtime_topology", {}, inherit=False) or {}
-                        ),
-                        terminal_reason="final_verification_repair",
-                        final_result=result,
-                    )
-                    await _sync_latest_acceptance_index(data)
-                    await data.async_emit_nowait(tick_requested_event, {"tick_index": next_tick_index})
-                return result
+            tick_index = max(
+                int(data.get_state("tick_index", 1, inherit=False) or 1) - 1,
+                1,
+            )
+            result = {
+                "terminal": False,
+                "status": "ready_to_finalize",
+                "revision": revision.to_dict(),
+                "tick_index": tick_index,
+                "terminal_reason": str(
+                    data.get_state("terminal_reason", "", inherit=False) or ""
+                ),
+                **(
+                    {
+                        "previous_acceptance_index": DataFormatter.sanitize(
+                            previous_acceptance_index
+                        )
+                    }
+                    if isinstance(previous_acceptance_index, Mapping)
+                    else {}
+                ),
+            }
             await data.async_set_state("final_result", result, emit=False)
-            checkpoint_result = self.result if isinstance(self.result, Mapping) else result
             await self._record_taskboard_checkpoint(
-                stage="finalize",
-                tick_index=max(int(data.get_state("tick_index", 1, inherit=False) or 1) - 1, 1),
+                stage="work_execute",
+                tick_index=tick_index,
                 revision=revision,
                 runtime_topology=DataFormatter.sanitize(data.get_state("runtime_topology", {}, inherit=False) or {}),
                 terminal_reason=str(data.get_state("terminal_reason", "", inherit=False) or "") or None,
-                final_result=checkpoint_result if isinstance(checkpoint_result, Mapping) else None,
+                final_result=result,
             )
             await _sync_latest_acceptance_index(data)
             return result
@@ -425,20 +762,146 @@ class AgentTaskTaskBoardStrategyMixin(
         execution = lifecycle_flow.create_execution(auto_close=False, concurrency=1)
         await execution.async_start(board.revision.to_dict())
         snapshot = await execution.async_close()
-        result = snapshot.get("terminal_result") or snapshot.get("final_result")
+        terminal_result = snapshot.get("terminal_result")
+        if isinstance(terminal_result, Mapping):
+            frame["iteration_result"] = dict(terminal_result)
+            return frame
+        result = snapshot.get("final_result")
+        if isinstance(result, Mapping) and isinstance(result.get("revision"), Mapping):
+            frame["taskboard_revision"] = DataFormatter.sanitize(result["revision"])
+            frame["taskboard_tick_index"] = int(result.get("tick_index") or 0)
+            frame["taskboard_terminal_reason"] = str(result.get("terminal_reason") or "")
+            if isinstance(result.get("previous_acceptance_index"), Mapping):
+                frame["taskboard_acceptance_index"] = DataFormatter.sanitize(
+                    result["previous_acceptance_index"]
+                )
+            frame["taskboard_work_result"] = DataFormatter.sanitize(result)
+            return frame
         if isinstance(result, Mapping):
-            return dict(result)
+            frame["iteration_result"] = dict(result)
+            return frame
         raw_revision = snapshot.get(revision_state_key)
         if isinstance(raw_revision, str) and raw_revision.strip():
             revision = TaskBoardRevision.from_value(json.loads(raw_revision))
         else:
             revision = TaskBoardRevision.from_value(board.revision)
-        latest_acceptance_index = getattr(self, "_latest_taskboard_acceptance_index", None)
-        return await self._finalize_taskboard(
-            revision,
-            context_pack=context_pack,
-            previous_acceptance_index=latest_acceptance_index if isinstance(latest_acceptance_index, Mapping) else None,
+        frame["taskboard_revision"] = revision.to_dict()
+        frame["taskboard_tick_index"] = max(initial_tick_index - 1, 0)
+        return frame
+
+    async def _taskboard_outputs_materialize_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        revision = TaskBoardRevision.from_value(frame["taskboard_revision"])
+        schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
+        evidence_view = build_task_board_evidence_view(revision).to_dict()
+        candidate_final_result = self._taskboard_candidate_final_result(revision)
+        final_refs = self._prioritize_taskboard_final_refs(
+            self._taskboard_final_refs_from_evidence_view(evidence_view)
         )
+        final_refs = await self._taskboard_materialize_required_final_deliverable_refs(
+            final_refs
+        )
+        final_refs = await self._taskboard_refresh_current_required_final_refs(final_refs)
+        final_refs = self._taskboard_terminal_candidate_refs(revision, final_refs)
+        frame["taskboard_materialized_outputs"] = {
+            "revision": revision,
+            "schedule": schedule,
+            "result_status": self._taskboard_terminal_status(revision, schedule),
+            "evidence_view": evidence_view,
+            "candidate_final_result": candidate_final_result,
+            "final_refs": final_refs,
+            "trusted_terminal_refs": self._trusted_terminal_refs(final_refs),
+        }
+        return frame
+
+    async def _taskboard_evidence_ingest_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        materialized = cast(
+            dict[str, Any],
+            frame["taskboard_materialized_outputs"],
+        )
+        evidence_view = cast(dict[str, Any], materialized["evidence_view"])
+        evidence_ledger = self._stable_evidence_ledger_view(
+            evidence_view,
+            max_items=120,
+            body_chars=2400,
+            budget_selection="content_first",
+        )
+        materialized["evidence_ledger"] = evidence_ledger
+        materialized["explicit_state_facts"] = task_board_explicit_state_facts(
+            materialized["revision"],
+            evidence_view=evidence_view,
+        )
+        frame["taskboard_materialized_outputs"] = materialized
+        return frame
+
+    async def _taskboard_terminal_verify_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        previous_acceptance_index = frame.get("taskboard_acceptance_index")
+        transition_result = await self._finalize_taskboard(
+            TaskBoardRevision.from_value(frame["taskboard_revision"]),
+            context_pack=cast("WorkspaceContextPackage", frame["context_pack"]),
+            previous_acceptance_index=(
+                previous_acceptance_index
+                if isinstance(previous_acceptance_index, Mapping)
+                else None
+            ),
+            prepared_outputs=cast(
+                Mapping[str, Any],
+                frame.get("taskboard_materialized_outputs") or {},
+            ),
+        )
+        frame["taskboard_transition_result"] = transition_result
+        if (
+            transition_result.get("status") == "verification_retry"
+            and isinstance(transition_result.get("prepared_final"), Mapping)
+        ):
+            materialized_outputs = dict(
+                frame.get("taskboard_materialized_outputs") or {}
+            )
+            materialized_outputs["final_candidate"] = DataFormatter.sanitize(
+                transition_result["prepared_final"]
+            )
+            frame["taskboard_materialized_outputs"] = materialized_outputs
+        return frame
+
+    async def _taskboard_transition_decide_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        result = frame.get("taskboard_transition_result")
+        if not isinstance(result, Mapping):
+            raise ValueError("TaskBoard terminal verification did not produce a transition result.")
+        if result.get("terminal") is False and isinstance(result.get("revision"), Mapping):
+            frame["next_frame_state"] = {
+                "taskboard_revision": DataFormatter.sanitize(result["revision"]),
+                "taskboard_tick_index": int(frame.get("taskboard_tick_index") or 0),
+                **(
+                    {
+                        "taskboard_acceptance_index": DataFormatter.sanitize(
+                            self._latest_taskboard_acceptance_index
+                        )
+                    }
+                    if isinstance(self._latest_taskboard_acceptance_index, Mapping)
+                    else {}
+                ),
+            }
+        frame["iteration_result"] = dict(result)
+        return frame
 
     async def _request_taskboard_plan(self, context_pack: "WorkspaceContextPackage"):
         policy = resolve_task_board_planning_policy(
@@ -503,9 +966,15 @@ class AgentTaskTaskBoardStrategyMixin(
             "decision cards that should be handled by one structured model request. Use allowed_execution_shape='readback' "
             "for cards whose only job is bounded cold artifact readback. Use an action-capable shape such as 'actions' "
             "or 'auto' for cards that need external tools, Workspace operations, side effects, or mixed action/readback work. "
+            "For an actions card, include action_commands only when the exact offered Action ids and every required "
+            "argument are already known now. Omit action_commands when any argument depends on a future card result; "
+            "do not invent placeholders, copy opaque ids, or guess arguments. "
             "When readiness checks are necessary, express them as optional preflight metadata on cards "
             "(preflight_kind, requires_capability_ids, requires_workspace_refs, focus_item_ids) and only for mounted "
             "capabilities or existing Workspace refs; do not require universal git, browser, shell, or init-script checks. "
+            "When the submitted task explicitly requires an exact Workspace-relative final file path, put that exact "
+            "path in final_workspace_deliverables on the one card that owns final materialization. Do not put working "
+            "paths, inferred filenames, source refs, or intermediate artifacts in this field. "
             "After evidence fan-in, do not create a serial chain of control-only cards for synthesis, finalization, "
             "review, and next-step decision when one control card can return the deliverable, sufficient/gaps, "
             "next_board_action, diagnostics, and optional patch_proposal. Multiple dependent control cards are only "
@@ -528,12 +997,20 @@ class AgentTaskTaskBoardStrategyMixin(
     def _initial_taskboard_plan_from_shape_analysis(self):
         if self.execution_strategy != "auto":
             return None
-        raw_plan = self.task_shape_analysis.get("initial_taskboard_plan") if isinstance(self.task_shape_analysis, Mapping) else None
+        raw_plan = (
+            self.task_shape_analysis.get("initial_taskboard_plan")
+            if isinstance(self.task_shape_analysis, Mapping)
+            else None
+        )
         if not isinstance(raw_plan, Mapping) or not raw_plan:
             return None
         policy = resolve_task_board_planning_policy(
             self._taskboard_effort(),
-            metadata={"execution_strategy": self.execution_strategy, "task_id": self.id, "source": "task_shape_analysis"},
+            metadata={
+                "execution_strategy": self.execution_strategy,
+                "task_id": self.id,
+                "source": "task_shape_analysis",
+            },
         )
         try:
             planning_result = coerce_task_board_planning_result(
@@ -634,10 +1111,15 @@ class AgentTaskTaskBoardStrategyMixin(
         }
         if "failed" in required_statuses.values():
             return "failed"
-        if "blocked" in required_statuses.values() or "setback" in required_statuses.values() or schedule.blocked_card_ids:
+        if (
+            "blocked" in required_statuses.values()
+            or "setback" in required_statuses.values()
+            or schedule.blocked_card_ids
+        ):
             return "blocked"
         if cls._taskboard_revision_completed(revision):
             return "completed"
         return "running"
+
 
 __all__ = ["AgentTaskTaskBoardStrategyMixin"]

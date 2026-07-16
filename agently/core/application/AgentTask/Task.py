@@ -17,12 +17,15 @@ from __future__ import annotations
 
 from agently.core.Workspace import Workspace
 
+from .LifecycleState import AgentTaskLifecycleState
+from .LifecycleFlow import AgentTaskLifecycleFlowMixin
 from .TaskShared import *
 from .StrategyRouter import AgentTaskStrategyRouterMixin
 from .TaskBoardStrategy import AgentTaskTaskBoardStrategyMixin
 from .ArtifactDelivery import AgentTaskArtifactMixin
 from .FlatStrategy import AgentTaskFlatStrategyMixin
 from .Carrier import AgentTaskCarrierMixin
+from .TerminalVerification import AgentTaskTerminalVerificationMixin
 from .AcpRecovery import AgentTaskAcpRecoveryMixin
 from .Verification import AgentTaskVerificationMixin
 from .Guidance import AgentTaskGuidanceMixin
@@ -32,11 +35,13 @@ from .Observation import AgentTaskObservationMixin
 
 
 class AgentTask(
+    AgentTaskLifecycleFlowMixin,
     AgentTaskStrategyRouterMixin,
     AgentTaskTaskBoardStrategyMixin,
     AgentTaskArtifactMixin,
     AgentTaskFlatStrategyMixin,
     AgentTaskCarrierMixin,
+    AgentTaskTerminalVerificationMixin,
     AgentTaskAcpRecoveryMixin,
     AgentTaskVerificationMixin,
     AgentTaskGuidanceMixin,
@@ -70,6 +75,8 @@ class AgentTask(
             raise ValueError("agent.create_task(...) requires at least one success criterion.")
         self.agent = agent
         self.id = task_id or f"agent_task_{uuid.uuid4().hex}"
+        self._task_reference_catalog = TaskReferenceCatalog(self.id)
+        self._terminal_convergence_state = TerminalConvergenceState(self.id)
         self.goal = str(goal)
         self.success_criteria = [str(item) for item in success_criteria if str(item).strip()]
         self.execution_strategy = self.normalize_execution_strategy(execution)
@@ -78,6 +85,15 @@ class AgentTask(
             if self.execution_strategy in {"flat", "taskboard"}
             else None
         )
+        self._lifecycle_state = AgentTaskLifecycleState(
+            task_id=self.id,
+            requested_strategy=self.execution_strategy,
+            effective_strategy=self.effective_execution_strategy,
+        )
+        self._terminal_inline_values: dict[str, str] = {}
+        self._terminal_materialization_diagnostics: list[dict[str, Any]] = []
+        self._lifecycle_frames: dict[str, dict[str, Any]] = {}
+        self._lifecycle_error: BaseException | None = None
         self.task_shape_analysis: dict[str, Any] = {}
         self.max_iterations = _normalize_agent_task_max_iterations(max_iterations)
         self.verify = verify
@@ -153,6 +169,7 @@ class AgentTask(
         self._resumed_iteration_summaries: list[dict[str, Any]] = []
         self._resumed_taskboard_state: dict[str, Any] | None = None
         self._latest_taskboard_acceptance_index: dict[str, Any] | None = None
+        self._taskboard_planned_workspace_deliverables: list[str] = []
         self._resumed_prior_result: Any = None
         self._terminal_deliverable_refs: list[WorkspaceRecordRef] = []
         self._terminal_retained_refs: list[Any] = []
@@ -176,60 +193,6 @@ class AgentTask(
         self.add_guidance: Any = FunctionShifter.syncify(self.async_add_guidance)
         self.stream: Any = self.get_async_generator
         self.get_generator: Any = self._get_generator
-
-    def _build_flow(self):
-        flow = TriggerFlow(name="agent-task")
-
-        async def loop(data):
-            await data.async_set_state("task_id", self.id, emit=False)
-            try:
-                effective_strategy = await self._resolve_effective_execution_strategy()
-            except _AgentTaskDeadlineExceeded as error:
-                await self._emit("agent_task.started", self._task_summary())
-                await self._terminate_timed_out(
-                    0,
-                    stage=error.stage,
-                    reason=error.reason,
-                    limit_name=error.limit_name,
-                    timeout_seconds=error.timeout_seconds,
-                )
-                await data.async_set_state("agent_task.execution_strategy", self.execution_strategy, emit=False)
-                await data.async_set_state(
-                    "agent_task.effective_execution_strategy",
-                    self.effective_execution_strategy,
-                    emit=False,
-                )
-                await data.async_set_state("agent_task.result", self.result, emit=False)
-                await data.async_set_state("agent_task.status", self.status, emit=False)
-                return
-            await data.async_set_state("agent_task.execution_strategy", self.execution_strategy, emit=False)
-            await data.async_set_state("agent_task.effective_execution_strategy", effective_strategy, emit=False)
-            await self._emit("agent_task.started", self._task_summary())
-            start_iteration = self._resumed_from_iteration + 1
-            if start_iteration > 1:
-                await self._emit(
-                    "agent_task.resumed",
-                    {"task_id": self.id, "resumed_from_iteration": self._resumed_from_iteration},
-                )
-            if effective_strategy == "taskboard":
-                result = await self._run_taskboard()
-                await data.async_set_state("agent_task.latest_iteration", result, emit=False)
-                await data.async_set_state("agent_task.result", self.result, emit=False)
-                await data.async_set_state("agent_task.status", self.status, emit=False)
-                return
-            iteration_index = start_iteration
-            while self.max_iterations is None or iteration_index <= self.max_iterations:
-                result = await self._run_iteration(iteration_index)
-                await data.async_set_state("agent_task.latest_iteration", result, emit=False)
-                if result["terminal"]:
-                    break
-                iteration_index += 1
-            await data.async_set_state("agent_task.result", self.result, emit=False)
-            await data.async_set_state("agent_task.status", self.status, emit=False)
-
-        flow.to(loop, name="agent_task")
-        return flow
-
 
 __all__ = [
     "AgentTask",

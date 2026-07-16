@@ -53,6 +53,9 @@ agent.use_workspace("/path/to/project", mode="read_write")
 请求路径仍可通过普通逻辑文件视图读取；可信 `file_refs` 会记录实际私有路径。已有外部
 文件绝不会被静默 shadow 或重定向：修改它必须获得写权限或通过 Action 审批。
 
+Workspace 为已提升文件记录私有身份元数据时，外部文件仍保持只读。元数据只写入保留的
+`.agently` 区域，不会因此获得修改外部来源的权限。
+
 面向用户的制品应放入有意义的子目录，例如 `outputs/`、`reports/` 或任务专属目录，
 不要直接堆在根目录。这些是应用选择，不是 Workspace 管理的标准区域。
 
@@ -90,6 +93,26 @@ AgentExecution 或 AgentTask 进入终态时，会激进回收 execution 私有 
 ```python
 assert agent.workspace.capabilities()["materialized_components"] == []
 ```
+
+### 稳定身份分层
+
+需要持久 provenance 时，Workspace 会明确区分三层身份：
+
+- locator 身份表示归一化 path 或 URL 的来源位置；
+- content-version 身份表示该 locator 上一次精确观察到的 digest 与 size；即使 locator
+  不变，只要内容变化就创建新版本；
+- reference 身份是 task/application 拥有的稳定选择 key，用来指向合格 evidence，
+  不要求模型抄写 path、URL 或 canonical storage id。
+
+这些身份使用短类型前缀与可扩展 Base62 编号，在所属 scope 内永不复用。另一个
+Workspace 或 task 中出现相同短值时，canonical scope 仍包含 Workspace/task identity，
+因此不会混淆。reference-closure cleanup 会清理不可达的旧版本、segment 与 payload，
+但保留 allocator high-water mark，已删除 id 不会被重新分配。
+
+身份分配是私有实现行为，不是新的 Workspace public API。普通外部读取保持 zero-state。
+显式 promotion、持久 record、recovery 或 accepted-artifact retention 可以在 `.agently`
+下写入有界的私有身份元数据；这套 filesystem-first metadata 不会仅为身份分配而要求
+record database，除非所选功能本来就使用数据库。
 
 ## 持久 Records
 
@@ -166,8 +189,10 @@ context = await agent.workspace.build_context(
 
 后续模型答案需要引用选中的检索结果时，完整 source record 应留在宿主代码中。每个
 source 只给模型一个短可信 `ref_id`，以及回答所需的 title/snippet；要求正文使用
-application-level token `[[ref:<ref_id>]]`，例如 `[[ref:r1]]`。AgentTask 场景可以
-直接把 evidence ledger 的 `cite_as`（例如 `e1`）作为 token id。
+application-level token `[[ref:<ref_id>]]`。持久 AgentTask 输出应使用 task-owned
+稳定 reference 身份，例如 `[[ref:ref_2]]`。evidence ledger 的 `cite_as`（如 `e1`）
+只是请求内显示别名：模型响应离开该次精确 ledger view 前，必须把它归一化为已提供的
+稳定 `ref_*` 身份。不得持久化或在后续猜测 `(eN)` 位置。
 
 不要使用裸 `${ref_id}`：`${...}` 已属于 Agently prompt 和 TaskDAG placeholder
 家族。`[[ref:...]]` 只是应用渲染约定，不是新的 Workspace 或 Agently public API。

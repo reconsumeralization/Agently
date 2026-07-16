@@ -122,6 +122,13 @@ custom handlers can inspect the provider error object and return `"try_next"`,
 `"retry_same"`, `"raise"`, a key id, a key entry dict, or a wrapper such as
 `{"key_id": "b"}` / `{"key_entry": context.keys[1]}`.
 
+For `OpenAICompatible`, `OpenAIResponsesCompatible`, and
+`AnthropicCompatible`, framework-created HTTP error messages include the
+provider status and response detail but do not append the serialized model
+request. Core `model.requester.error` RuntimeEvents retain structured
+`payload.request_data` for protected cold diagnostics, while the request stream
+propagates the provider error once through its normal terminal path.
+
 ## Where the plugin code lives
 
 - [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/)

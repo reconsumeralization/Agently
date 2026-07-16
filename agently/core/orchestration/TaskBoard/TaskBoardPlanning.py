@@ -222,9 +222,33 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                     "Optional mounted capability ids required before this card can run. This is a structural requirement, not a permission grant.",
                     False,
                 ),
+                "action_commands": (
+                    [
+                        {
+                            "purpose": (str, "Bounded purpose of this exact Action call.", False),
+                            "action_id": (
+                                str,
+                                "Exact id from the offered planner_capabilities Action set.",
+                                False,
+                            ),
+                            "action_input": (
+                                dict,
+                                "Complete kwargs object matching that Action's offered input contract.",
+                                False,
+                            ),
+                        }
+                    ],
+                    "Optional exact Action calls for an actions card when every argument is already known at board-planning time. Omit when an argument depends on a future card result.",
+                    False,
+                ),
                 "requires_workspace_refs": (
                     [str],
                     "Optional Workspace/readback refs that must already exist for this preflight card.",
+                    False,
+                ),
+                "final_workspace_deliverables": (
+                    [str],
+                    "Exact Workspace-relative final paths explicitly required by the submitted task and owned by this card. Omit for intermediate artifacts or when no exact final path was requested.",
                     False,
                 ),
                 "focus_item_ids": (
@@ -469,7 +493,13 @@ def _card_from_planning_item(
     scoped_retrieval = value.get("scoped_retrieval")
     preflight_kind = str(value.get("preflight_kind") or "").strip()
     requires_capability_ids = _str_list(value.get("requires_capability_ids"))
+    action_commands = _planning_action_commands(value.get("action_commands"), card_id=card_id)
+    declared_execution_shape = str(
+        value.get("allowed_execution_shape") or "auto"
+    ).strip()
+    resolved_execution_shape = declared_execution_shape
     requires_workspace_refs = _str_list(value.get("requires_workspace_refs"))
+    final_workspace_deliverables = _str_list(value.get("final_workspace_deliverables"))
     focus_item_ids = _str_list(value.get("focus_item_ids"))
     metadata: dict[str, Any] = {
         "action_block": action_block,
@@ -492,9 +522,21 @@ def _card_from_planning_item(
     if requires_capability_ids:
         metadata["requires_capability_ids"] = requires_capability_ids
         evidence_contract["requires_capability_ids"] = requires_capability_ids
+    if action_commands:
+        metadata["action_commands"] = action_commands
+        evidence_contract["action_commands"] = action_commands
+        if declared_execution_shape.lower().replace("-", "_") != "actions":
+            metadata["declared_execution_shape"] = declared_execution_shape
+            metadata["execution_shape_normalization"] = (
+                "exact_action_commands_override_generic_shape_hint"
+            )
+            resolved_execution_shape = "actions"
     if requires_workspace_refs:
         metadata["requires_workspace_refs"] = requires_workspace_refs
         evidence_contract["requires_workspace_refs"] = requires_workspace_refs
+    if final_workspace_deliverables:
+        metadata["final_workspace_deliverables"] = final_workspace_deliverables
+        evidence_contract["final_workspace_deliverables"] = final_workspace_deliverables
     if focus_item_ids:
         metadata["focus_item_ids"] = focus_item_ids
         evidence_contract["focus_item_ids"] = focus_item_ids
@@ -515,11 +557,42 @@ def _card_from_planning_item(
         ),
         input_refs=tuple(evidence_to_use),
         required_outputs=(done_when,) if done_when else (),
-        allowed_execution_shape=str(value.get("allowed_execution_shape") or "auto"),
+        allowed_execution_shape=resolved_execution_shape,
         evidence_contract=evidence_contract,
         failure_policy=failure_policy,
         metadata=metadata,
     )
+
+
+def _planning_action_commands(value: Any, *, card_id: str) -> list[dict[str, Any]]:
+    if value in (None, [], ()):
+        return []
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        raise TypeError(f"TaskBoard planning card '{card_id}' action_commands must be a sequence.")
+    commands: list[dict[str, Any]] = []
+    for index, raw_command in enumerate(value):
+        if not isinstance(raw_command, Mapping):
+            raise TypeError(
+                f"TaskBoard planning card '{card_id}' action_commands[{index}] must be a mapping."
+            )
+        action_id = str(raw_command.get("action_id") or "").strip()
+        action_input = raw_command.get("action_input")
+        if not action_id:
+            raise ValueError(
+                f"TaskBoard planning card '{card_id}' action_commands[{index}] requires action_id."
+            )
+        if not isinstance(action_input, Mapping):
+            raise TypeError(
+                f"TaskBoard planning card '{card_id}' action_commands[{index}] action_input must be a mapping."
+            )
+        commands.append(
+            {
+                "purpose": str(raw_command.get("purpose") or f"Use {action_id}").strip(),
+                "action_id": action_id,
+                "action_input": dict(action_input),
+            }
+        )
+    return commands
 
 
 def _canonical_taskboard_card_id(

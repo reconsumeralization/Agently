@@ -313,18 +313,6 @@ class AgentlyActionRuntime:
             action_plan_request,
             parent_run_context=parent_run_context,
         )
-        async for instant in action_plan_result.get_async_generator(type="instant"):
-            if not instant.is_complete:
-                continue
-            if not self.action._is_next_action_path(instant.path):
-                continue
-            if isinstance(instant.value, str) and instant.value.strip().lower() == "response":
-                await self.action._try_close_response_stream(action_plan_result)
-                return {
-                    "next_action": "response",
-                    "execution_commands": [],
-                }
-            break
         result_reader = getattr(action_plan_result, "result", action_plan_result)
         result = await result_reader.async_get_data()
         if not isinstance(result, dict):

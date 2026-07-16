@@ -61,9 +61,25 @@ class _FlatArtifactRequester:
                 "is_complete": True,
                 "requires_block": False,
                 "reason": "trusted file readback is present",
+                "failure_analysis": "",
+                "acceptance_delta": [],
                 "missing_criteria": [],
+                "replan_instruction": "",
+                "repair_constraints": [],
+                "next_step_requirements": [],
                 "final_result_required": True,
                 "final_result": "The report is available through the trusted file ref.",
+                "criterion_checks": [
+                    {
+                        "criterion_id": "criterion:1",
+                        "satisfied": True,
+                        "summary": "The trusted Workspace readback contains the report.",
+                        "gaps": [],
+                        "evidence_ids": [],
+                    }
+                ],
+                "material_claim_coverage_complete": True,
+                "material_claim_checks": [],
             }
         elif "Plan the next bounded AgentExecution step" in text:
             payload = {
@@ -193,7 +209,9 @@ async def test_taskboard_tick_does_not_materialize_workspace_storage(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_agent_task_terminal_file_retention_uses_no_database(tmp_path: Path):
+async def test_agent_task_terminal_file_retention_uses_identity_state_without_database(
+    tmp_path: Path,
+):
     root = tmp_path / "project"
     root.mkdir()
     task = AgentTask(
@@ -212,14 +230,113 @@ async def test_agent_task_terminal_file_retention_uses_no_database(tmp_path: Pat
     result = await task._apply_terminal_workspace_retention(status="completed")
 
     assert result and result["status"] == "applied"
-    assert retained == [final_ref]
+    assert len(retained) == 1
+    assert str(retained[0].get("locator_id") or "").startswith("loc_")
+    assert str(retained[0].get("content_version_id") or "").startswith("cv_")
+    assert retained[0]["sha256"] == final_ref["sha256"]
     assert not (root / cast(str, draft["path"])).exists()
     assert (root / cast(str, final["path"])).read_text(encoding="utf-8") == "final"
-    assert _private_paths(root) == [str(final["path"])]
+    private_paths = _private_paths(root)
+    assert str(final["path"]) in private_paths
+    assert ".agently/identity/state.json" in private_paths
+    assert ".agently/identity/state.lock" in private_paths
+    assert ".agently/workspace.db" not in private_paths
 
 
 @pytest.mark.asyncio
-async def test_flat_agent_task_completes_with_only_final_file_on_disk(tmp_path: Path):
+async def test_terminal_artifact_resolves_stable_reference_tokens_to_source_cards(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    task = AgentTask(
+        _agent("agent-task-reference-token").use_workspace(root),
+        task_id="agent-task-reference-token",
+        goal="Write a cited report.",
+        success_criteria=["The report citation resolves."],
+        execution="flat",
+    )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "action.source",
+            "kind": "agent_task.action.result",
+            "action_call_id": "call-source",
+            "source_url": "https://example.com/source",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "source body",
+        }
+    )
+    reference_id = str(source["reference_id"])
+    final = await task.workspace.write_file(
+        "report/final.md",
+        f"# Final\n\nSupported claim [[ref:{reference_id}]].\n",
+    )
+
+    retained = await task._register_terminal_deliverables([cast(Any, final["file_refs"][0])])
+
+    assert len(retained) == 1
+    token_diagnostic = task.diagnostics["reference_tokens"][str(final["path"])]
+    assert token_diagnostic["status"] == "validated"
+    assert token_diagnostic["reference_ids"] == [reference_id]
+    assert token_diagnostic["source_cards"] == [
+        {
+            "reference_id": reference_id,
+            "kind": "agent_task.action.result",
+            "source_role": "action",
+            "source_url": "https://example.com/source",
+        }
+    ]
+    await task._apply_terminal_workspace_retention(status="completed")
+    manifest_path = next((root / ".agently" / "identity" / "tasks").glob("*/manifest.json"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert reference_id in manifest["task_reference_catalog"]["references"]
+    persisted_evidence = next(iter(manifest["task_reference_catalog"]["evidence"].values()))
+    assert "body" not in persisted_evidence["target"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_artifact_unknown_reference_token_fails_closed_and_legacy_alias_is_marked(
+    tmp_path: Path,
+):
+    unknown_root = tmp_path / "unknown"
+    unknown_root.mkdir()
+    unknown_task = AgentTask(
+        _agent("agent-task-reference-token-unknown").use_workspace(unknown_root),
+        task_id="agent-task-reference-token-unknown",
+        goal="Write a cited report.",
+        success_criteria=["The report citation resolves."],
+        execution="flat",
+    )
+    unknown = await unknown_task.workspace.write_file("report.md", "Unknown [[ref:ref_Z]].")
+
+    retained = await unknown_task._register_terminal_deliverables([cast(Any, unknown["file_refs"][0])])
+
+    assert retained == []
+    assert unknown_task._terminal_retention_deferred is True
+    assert unknown_task.diagnostics["workspace_retention"]["diagnostics"][-1]["code"] == (
+        "agent_task.retention.reference_token_invalid"
+    )
+
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
+    legacy_task = AgentTask(
+        _agent("agent-task-reference-token-legacy").use_workspace(legacy_root),
+        task_id="agent-task-reference-token-legacy",
+        goal="Retain a legacy report for explicit re-verification.",
+        success_criteria=["The report is retained without guessing aliases."],
+        execution="flat",
+    )
+    legacy = await legacy_task.workspace.write_file("legacy.md", "Legacy citation (e1).")
+
+    legacy_retained = await legacy_task._register_terminal_deliverables([cast(Any, legacy["file_refs"][0])])
+
+    assert len(legacy_retained) == 1
+    assert legacy_task.diagnostics["reference_tokens"][str(legacy["path"])]["status"] == (
+        "legacy_reference_unverified"
+    )
+
+
+@pytest.mark.asyncio
+async def test_flat_agent_task_completes_with_final_file_and_identity_manifest(tmp_path: Path):
     root = tmp_path / "project"
     root.mkdir()
     execution = _flat_agent("flat-agent-task-effects").create_task(
@@ -239,12 +356,20 @@ async def test_flat_agent_task_completes_with_only_final_file_on_disk(tmp_path: 
     ref = result["artifact_refs"][0]
     assert ref["type"] == "file"
     assert ref["execution_id"] == "flat-agent-task-effects"
+    assert ref["locator_id"].startswith("loc_")
+    assert ref["content_version_id"].startswith("cv_")
     assert (root / ref["path"]).read_text(encoding="utf-8").startswith("# Final report")
-    assert _private_paths(root) == [ref["path"]]
+    private_paths = _private_paths(root)
+    assert ref["path"] in private_paths
+    assert ".agently/workspace.db" not in private_paths
+    assert all(path == ref["path"] or path.startswith(".agently/identity/") for path in private_paths)
 
 
 @pytest.mark.asyncio
-async def test_taskboard_full_run_completes_without_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_taskboard_full_run_completes_with_identity_manifest_without_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     root = tmp_path / "project"
     root.mkdir()
     task = AgentTask(
@@ -254,9 +379,7 @@ async def test_taskboard_full_run_completes_without_database(tmp_path: Path, mon
         success_criteria=["The report is written and read back."],
         execution="taskboard",
     )
-    card = TaskBoardCard.from_value(
-        {"id": "write", "objective": "Write the report.", "required_outputs": ["report"]}
-    )
+    card = TaskBoardCard.from_value({"id": "write", "objective": "Write the report.", "required_outputs": ["report"]})
     revision = TaskBoardRevision.from_value(
         {
             "board_id": task.id,
@@ -291,9 +414,25 @@ async def test_taskboard_full_run_completes_without_database(tmp_path: Path, mon
             "is_complete": True,
             "requires_block": False,
             "reason": "trusted TaskBoard file ref is present",
+            "failure_analysis": "",
+            "acceptance_delta": [],
             "missing_criteria": [],
+            "replan_instruction": "",
+            "repair_constraints": [],
+            "next_step_requirements": [],
             "final_result_required": True,
             "final_result": "report ready",
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "The trusted TaskBoard Workspace readback contains the report.",
+                    "gaps": [],
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [],
         }
 
     async def no_finalizer(*_args: Any, **_kwargs: Any) -> Any:
@@ -311,5 +450,10 @@ async def test_taskboard_full_run_completes_without_database(tmp_path: Path, mon
     assert result["accepted"] is True
     assert len(result["artifact_refs"]) == 1
     ref = result["artifact_refs"][0]
+    assert ref["locator_id"].startswith("loc_")
+    assert ref["content_version_id"].startswith("cv_")
     assert (root / ref["path"]).read_text(encoding="utf-8") == "# TaskBoard final\n"
-    assert _private_paths(root) == [ref["path"]]
+    private_paths = _private_paths(root)
+    assert ref["path"] in private_paths
+    assert ".agently/workspace.db" not in private_paths
+    assert all(path == ref["path"] or path.startswith(".agently/identity/") for path in private_paths)

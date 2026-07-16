@@ -62,6 +62,10 @@ while the trusted `file_refs` entry contains the canonical private path. An
 existing external file is never silently shadowed or redirected: changing it
 requires a write grant or an approved Action.
 
+External files remain read-only when Workspace records private identity metadata
+for a promoted file. That metadata write occurs only inside the reserved
+`.agently` area and never grants permission to mutate the external source.
+
 For user-facing products, prefer a meaningful subdirectory such as
 `outputs/`, `reports/`, or a task-specific directory instead of writing files
 directly at the root. These are application choices, not Workspace-managed
@@ -105,6 +109,32 @@ components have actually materialized.
 ```python
 assert agent.workspace.capabilities()["materialized_components"] == []
 ```
+
+### Stable identity layers
+
+Workspace keeps three identity layers separate when durable provenance is
+needed:
+
+- locator identity represents a normalized path or URL provenance location;
+- content-version identity represents one exact digest and size observed at
+  that locator; changed content creates a new version even when the locator is
+  unchanged;
+- reference identity is the task/application-owned stable selection key that
+  points to eligible evidence without asking a model to copy paths, URLs, or
+  canonical storage ids.
+
+These identities use short type-prefixed Base62 values, expand as needed, and
+are never reused within their owning scope. The same short value in another
+Workspace or task remains distinct because the canonical scope includes its
+Workspace/task identity. Unreachable old versions, segments, and payloads are
+removed by reference-closure cleanup, while the allocator high-water mark is
+retained so deleted ids are not recycled.
+
+Identity allocation is private implementation behavior, not a new public
+Workspace API. Ordinary external reads remain zero-state. Explicit promotion,
+durable records, recovery, or accepted-artifact retention may write bounded
+private identity metadata under `.agently`; this filesystem-first metadata does
+not require the record database unless the selected feature already uses it.
 
 ## Durable Records
 
@@ -189,8 +219,11 @@ context = await agent.workspace.build_context(
 When a later model answer cites selected retrieval results, keep full source
 records in host code. Give the model one short trusted `ref_id` per source plus
 only the title/snippet facts it needs, and require inline tokens in the
-application-level form `[[ref:<ref_id>]]`, for example `[[ref:r1]]`. AgentTask
-code can reuse an evidence-ledger `cite_as` such as `e1` as the token id.
+application-level form `[[ref:<ref_id>]]`. For durable AgentTask output, use the
+task-owned stable reference identity, for example `[[ref:ref_2]]`. An evidence
+ledger `cite_as` value such as `e1` is a request-local display alias: normalize
+it to its offered stable `ref_*` identity before the model response leaves that
+exact ledger view. Never persist or later guess an `(eN)` position.
 
 Do not use a bare `${ref_id}` token: `${...}` already belongs to Agently prompt
 and TaskDAG placeholder families. The `[[ref:...]]` protocol is an application

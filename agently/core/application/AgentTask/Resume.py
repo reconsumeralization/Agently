@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from .LifecycleState import AgentTaskLifecycleState
 from .TaskShared import *
 
 
@@ -53,6 +54,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         if not bool(self._agent_task_option("workspace_recovery", False)):
             return
         try:
+            await self._task_reference_catalog.activate_persistence(self.workspace)
             await self.workspace.put_snapshot(
                 self._resume_run_id(self.id),
                 DataFormatter.sanitize(
@@ -68,6 +70,9 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                         "satisfied_capabilities": sorted(self._satisfied_capabilities),
                         "satisfied_succeeded_actions": sorted(self._satisfied_succeeded_actions),
                         "failed_execution_shapes": sorted(self._failed_execution_shapes),
+                        "task_reference_catalog": self._task_reference_catalog.snapshot(),
+                        "terminal_convergence": self._terminal_convergence_state.snapshot(),
+                        "lifecycle_state": self._lifecycle_state.to_dict(),
                         "last_verification": {
                             "is_complete": bool(verification.get("is_complete")),
                             "requires_block": bool(verification.get("requires_block")),
@@ -132,6 +137,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         }
         try:
             effective_revision = TaskBoardRevision.from_value(revision)
+            await self._task_reference_catalog.activate_persistence(self.workspace)
             await self.workspace.put_snapshot(
                 self._resume_run_id(self.id),
                 DataFormatter.sanitize(
@@ -147,6 +153,9 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                         "satisfied_capabilities": sorted(self._satisfied_capabilities),
                         "satisfied_succeeded_actions": sorted(self._satisfied_succeeded_actions),
                         "failed_execution_shapes": sorted(self._failed_execution_shapes),
+                        "task_reference_catalog": self._task_reference_catalog.snapshot(),
+                        "terminal_convergence": self._terminal_convergence_state.snapshot(),
+                        "lifecycle_state": self._lifecycle_state.to_dict(),
                         "taskboard_state": {
                             "schema_version": "agent_task_taskboard_resume/v1",
                             "stage": stage,
@@ -234,6 +243,24 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
             ),
         )
         task_any = cast(Any, task)
+        task_reference_catalog = state.get("task_reference_catalog")
+        if isinstance(task_reference_catalog, Mapping):
+            task_any._task_reference_catalog = TaskReferenceCatalog.from_snapshot(
+                str(task_id),
+                task_reference_catalog,
+            )
+        terminal_convergence = state.get("terminal_convergence")
+        if isinstance(terminal_convergence, Mapping):
+            task_any._terminal_convergence_state = TerminalConvergenceState.from_snapshot(
+                str(task_id),
+                terminal_convergence,
+            )
+        lifecycle_state = state.get("lifecycle_state")
+        if isinstance(lifecycle_state, Mapping):
+            restored_lifecycle_state = AgentTaskLifecycleState.from_dict(lifecycle_state)
+            if restored_lifecycle_state.task_id != str(task_id):
+                raise ValueError("AgentTask lifecycle snapshot task_id does not match the resume target.")
+            task_any._lifecycle_state = restored_lifecycle_state
         task_any._resumed_from_iteration = int(state.get("iteration") or 0)
         effective_execution_strategy = manifest.get("effective_execution_strategy")
         if effective_execution_strategy in {"flat", "taskboard"}:

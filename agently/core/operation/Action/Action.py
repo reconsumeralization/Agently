@@ -30,7 +30,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import uuid
@@ -79,7 +78,6 @@ from .ActionMetadata import sanitize_action_spec_for_metadata, summarize_action_
 from .ActionResourceRegistrar import ActionResourceRegistrar
 from .ActionNormalization import (
     is_execution_error_result,
-    is_next_action_path,
     normalize_action_call,
     normalize_action_decision,
     normalize_execution_record,
@@ -115,7 +113,9 @@ class _DeprecatedActionManagerProxy:
 class Action:
     ACTION_RESULT_QUOTE_NOTICE = (
         "NOTICE: MUST QUOTE KEY INFO OR MARK SOURCE (PREFER URL INCLUDED) FROM {action_results} "
-        "IN REPLY IF YOU USE {action_results} TO IMPROVE REPLY!"
+        "IN REPLY IF YOU USE {action_results} TO IMPROVE REPLY! WHEN THE OUTPUT CONTRACT REQUESTS "
+        "STRUCTURED EVIDENCE REFERENCES, USE THE OFFERED HOST-ISSUED action_call_id; ORDINARY "
+        "OUTPUTS DO NOT NEED TO ADD EVIDENCE BINDINGS."
     )
     TOOL_RESULT_QUOTE_NOTICE = ACTION_RESULT_QUOTE_NOTICE
 
@@ -1146,25 +1146,6 @@ class Action:
         return await self._flow_controller.default_action_execution_handler(context, request)
 
     @staticmethod
-    def _is_next_action_path(path: Any) -> bool:
-        return is_next_action_path(path)
-
-    @staticmethod
-    async def _try_close_response_stream(response: Any):
-        from agently.utils.GeneratorConsumer import GeneratorConsumer
-
-        result = getattr(response, "result", None)
-        parser = getattr(result, "_response_parser", None)
-        consumer = getattr(parser, "_response_consumer", None)
-        if isinstance(consumer, GeneratorConsumer):
-            return
-        close = getattr(consumer, "close", None)
-        if callable(close):
-            maybe_coroutine = close()
-            if asyncio.iscoroutine(maybe_coroutine):
-                await maybe_coroutine
-
-    @staticmethod
     def _parse_native_arguments(raw_arguments: Any):
         return parse_native_arguments(raw_arguments)
 
@@ -1263,6 +1244,27 @@ class Action:
         from agently.core.runtime.RuntimeEvents import async_emit_action_flow_observation
 
         await async_emit_action_flow_observation(self._to_runtime_visible_observation(observation))
+
+    async def _async_execute_action_calls(
+        self,
+        *,
+        action_calls: list[dict[str, Any]],
+        settings: "Settings",
+        agent_name: str = "Manual",
+        parent_run_context=None,
+        action_execution_handler: "ActionExecutionHandler | None" = None,
+        concurrency: int | None = None,
+        timeout: float | None = None,
+    ) -> list["ActionResult"]:
+        return await self._flow_controller.async_execute_action_calls(
+            action_calls=action_calls,
+            settings=settings,
+            agent_name=agent_name,
+            parent_run_context=parent_run_context,
+            action_execution_handler=action_execution_handler,
+            concurrency=concurrency,
+            timeout=timeout,
+        )
 
     async def async_plan_and_execute(
         self,

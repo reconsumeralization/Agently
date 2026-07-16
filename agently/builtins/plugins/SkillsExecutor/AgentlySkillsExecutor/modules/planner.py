@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 from agently.types.data import (
@@ -194,7 +195,12 @@ class SkillPlanner:
             candidates = self._model_decision_candidates(candidate_pool, task_text=task_text, selectors=selectors, pack_selectors=pack_selectors)
             selected = await self._select_model_ordered(context=context, task_text=task_text, candidates=candidates)
 
-        selected, install_diagnostics = self._materialize_selected_sources(selected, selectors)
+        selected, install_diagnostics, install_rejections = self._materialize_selected_sources(
+            selected,
+            selectors,
+            required=mode == "required",
+        )
+        rejected.extend(install_rejections)
         selected = self._dedupe_contracts(selected)
         diagnostics.extend(install_diagnostics)
 
@@ -317,18 +323,43 @@ class SkillPlanner:
         self,
         selected: list[SkillContract],
         selectors: list[Any],
-    ) -> tuple[list[SkillContract], list[dict[str, Any]]]:
+        *,
+        required: bool,
+    ) -> tuple[list[SkillContract], list[dict[str, Any]], list[SkillPlanRejection]]:
         diagnostics: list[dict[str, Any]] = []
+        rejections: list[SkillPlanRejection] = []
         materialized: list[SkillContract] = []
         installed_ids = {str(record.get("skill_id") or "") for record in self.registry.list_skills()}
         source_selectors = [selector for selector in selectors if self.registry.source_selector_options(selector)]
         installed_sources: set[tuple[str, str, str]] = set()
 
+        def record_materialization_failure(
+            *,
+            skill_id: str,
+            options: Mapping[str, Any],
+            error: Exception,
+        ) -> None:
+            message = str(error)
+            diagnostics.append({
+                "level": "warning",
+                "code": "source_install_failed",
+                "source": options["source"],
+                "source_subpath": str(options.get("subpath") or ""),
+                "skill_id": skill_id,
+                "message": message,
+            })
+            required_label = "Required " if required else ""
+            rejections.append({
+                "skill_id": skill_id,
+                "reason_code": "source_install_failed",
+                "reason": (
+                    f"{required_label}skill '{skill_id}' could not be installed: "
+                    f"{message}"
+                ),
+            })
+
         for contract in selected:
             skill_id = str(contract.get("skill_id") or "")
-            if skill_id in installed_ids:
-                materialized.append(contract)
-                continue
             matched_selector = next(
                 (selector for selector in source_selectors if isinstance(selector, dict) and _matches_source_selector(contract, selector)),
                 None,
@@ -338,6 +369,16 @@ class SkillPlanner:
             options = self.registry.source_selector_options(matched_selector)
             if not options:
                 materialized.append(contract)
+                continue
+            if skill_id in installed_ids:
+                try:
+                    materialized.append(self.registry.inspect_skills(skill_id))
+                except Exception as error:
+                    record_materialization_failure(
+                        skill_id=skill_id,
+                        options=options,
+                        error=error,
+                    )
                 continue
             key = (str(options.get("source") or ""), str(options.get("subpath") or ""), str(options.get("ref") or ""))
             if key not in installed_sources:
@@ -368,21 +409,21 @@ class SkillPlanner:
                     installed_sources.add(key)
                     installed_ids.update(str(item) for item in report.get("installed_skills", []))
                 except Exception as error:
-                    diagnostics.append({
-                        "level": "warning",
-                        "code": "source_install_failed",
-                        "source": options["source"],
-                        "source_subpath": str(options.get("subpath") or ""),
-                        "skill_id": skill_id,
-                        "message": str(error),
-                    })
-                    materialized.append(contract)
+                    record_materialization_failure(
+                        skill_id=skill_id,
+                        options=options,
+                        error=error,
+                    )
                     continue
             try:
                 materialized.append(self.registry.inspect_skills(skill_id))
-            except Exception:
-                materialized.append(contract)
-        return materialized, diagnostics
+            except Exception as error:
+                record_materialization_failure(
+                    skill_id=skill_id,
+                    options=options,
+                    error=error,
+                )
+        return materialized, diagnostics, rejections
 
     def _dedupe_contracts(self, contracts: list[SkillContract]) -> list[SkillContract]:
         """Keep selector order while avoiding installed+discovered duplicates."""

@@ -440,6 +440,8 @@ def test_task_board_evidence_view_uses_bounded_hot_preview_and_cold_refs():
         "path": "artifacts/collect.json",
         "sha256": "abc",
         "bytes": 1200,
+        "role": "workspace_artifact",
+        "source": "agent_task.taskboard.card.collect.workspace_artifact",
         "preview": "ref preview must not enter hot path",
         "content": "full content must not enter hot path",
     }
@@ -475,6 +477,18 @@ def test_task_board_evidence_view_uses_bounded_hot_preview_and_cold_refs():
     assert "preview" not in collect["artifact_refs"][0]
     assert "content" not in collect["artifact_refs"][0]
     assert "content" not in collect["diagnostics"]["items"][0]
+    artifact_items = [
+        item
+        for item in view["evidence_items"]
+        if item.get("kind") == "taskboard_ref"
+        and item.get("path") == "artifacts/collect.json"
+    ]
+    assert artifact_items
+    assert all(item.get("role") == "workspace_artifact" for item in artifact_items)
+    assert all(
+        item.get("source") == "agent_task.taskboard.card.collect.workspace_artifact"
+        for item in artifact_items
+    )
     assert view["truncated"] is True
     assert view["status_counts"]["completed"] == 1
     assert view["status_counts"]["pending"] == 1
@@ -559,7 +573,7 @@ def test_task_board_evidence_view_rejects_unknown_card_scope():
         build_task_board_evidence_view(_revision(), card_ids=["missing"])
 
 
-def test_taskboard_agent_card_status_blocks_on_invalid_evidence_use():
+def test_taskboard_agent_card_status_does_not_duplicate_terminal_evidence_gate():
     status = AgentTask._taskboard_card_status(
         {"status": "completed", "answer": "unsupported claim"},
         {"status": "completed"},
@@ -571,7 +585,7 @@ def test_taskboard_agent_card_status_blocks_on_invalid_evidence_use():
         },
     )
 
-    assert status == "blocked"
+    assert status == "completed"
 
 
 def test_taskboard_card_evidence_repair_rebinds_unique_action_result_labels():
@@ -1590,6 +1604,83 @@ def test_evidence_binding_repair_attempt_gate_only_limits_model_repair():
     ]
 
 
+def test_evidence_binding_repair_candidates_include_bounded_facts_and_one_stable_selection_id():
+    from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
+
+    ledger = evidence_ledger_view(
+        {
+            "evidence_items": [
+            {
+                "id": "agent_task_action_result:market_news:act_call_nvda",
+                "reference_id": "ref_u",
+                "cite_as": "e1",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "action_id": "market_news",
+                "action_call_id": "act_call_nvda",
+                "aliases": ["market_news", "act_call_nvda"],
+                "input_preview": {"ticker": "NVDA", "limit": 5},
+                "body": {"ticker": "NVDA", "headline": "NVDA evidence"},
+            },
+            {
+                "id": "agent_task_action_result:market_news:act_call_avgo",
+                "reference_id": "ref_Q",
+                "cite_as": "e2",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "action_id": "market_news",
+                "action_call_id": "act_call_avgo",
+                "aliases": ["market_news", "act_call_avgo"],
+                "input_preview": {"ticker": "AVGO", "limit": 5},
+                "body": {"ticker": "AVGO", "headline": "AVGO evidence"},
+            },
+            ]
+        }
+    )
+
+    candidates = AgentTask._evidence_binding_repair_candidate_refs(ledger)
+
+    assert candidates == [
+        {
+            "reference_id": "ref_u",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "market_news",
+            "input_preview": {"ticker": "NVDA", "limit": 5},
+            "body_preview": {"ticker": "NVDA", "headline": "NVDA evidence"},
+        },
+        {
+            "reference_id": "ref_Q",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "market_news",
+            "input_preview": {"ticker": "AVGO", "limit": 5},
+            "body_preview": {"ticker": "AVGO", "headline": "AVGO evidence"},
+        },
+    ]
+    assert all("id" not in item and "action_call_id" not in item and "aliases" not in item for item in candidates)
+
+
+def test_evidence_binding_failure_does_not_retry_the_whole_action_card():
+    retryable = AgentTask._taskboard_card_result_retryable(
+        AgentTask.__new__(AgentTask),
+        status="blocked",
+        diagnostics=[
+            {
+                "code": "taskboard.card.evidence_use_guard_blocking",
+                "status": "blocked",
+                "blocking_count": 1,
+            }
+        ],
+    )
+
+    assert retryable is False
+
+
 def test_task_board_acceptance_index_derives_from_criteria_cards_verifier_and_locators():
     revision = TaskBoardRevision.create(
         board_id="acceptance-index",
@@ -2170,6 +2261,13 @@ def test_task_board_planning_result_builds_valid_revision():
                     "evidence_to_use": ["ticket_id", "invoice_id"],
                     "done_when": "Ticket and invoice evidence are available.",
                     "failure_policy": "degradable",
+                    "action_commands": [
+                        {
+                            "purpose": "Fetch the ticket.",
+                            "action_id": "get_ticket",
+                            "action_input": {"ticket_id": "T-1"},
+                        }
+                    ],
                 },
                 {
                     "id": "decide",
@@ -2178,6 +2276,7 @@ def test_task_board_planning_result_builds_valid_revision():
                     "depends_on": ["collect"],
                     "done_when": "Decision has evidence-backed reason.",
                     "allowed_execution_shape": "model",
+                    "final_workspace_deliverables": ["final.md"],
                 },
             ],
             "reflection_points": ["Check that billing status matches the ticket claim."],
@@ -2194,16 +2293,66 @@ def test_task_board_planning_result_builds_valid_revision():
     assert result.revision.graph.cards[0].input_refs == ("ticket_id", "invoice_id")
     assert result.revision.graph.cards[0].evidence_contract["action_block"] == "Collect ticket and invoice evidence."
     assert result.revision.graph.cards[0].failure_policy == "degradable"
+    assert result.revision.graph.cards[0].evidence_contract["action_commands"] == [
+        {
+            "purpose": "Fetch the ticket.",
+            "action_id": "get_ticket",
+            "action_input": {"ticket_id": "T-1"},
+        }
+    ]
+    assert result.revision.graph.cards[0].metadata["action_commands"] == (
+        result.revision.graph.cards[0].evidence_contract["action_commands"]
+    )
     assert result.revision.graph.cards[1].depends_on == ("collect",)
     assert result.revision.graph.cards[1].failure_policy == "required"
     assert result.revision.graph.cards[1].allowed_execution_shape == "model"
+    assert result.revision.graph.cards[1].metadata["final_workspace_deliverables"] == ["final.md"]
+    assert result.revision.graph.cards[1].evidence_contract["final_workspace_deliverables"] == ["final.md"]
     assert result.revision.metadata["completion_gate"] == "Final decision cites collected evidence."
     assert result.planning_policy.effort_profile.name == "medium"
+
+
+def test_task_board_planning_exact_action_commands_override_conflicting_control_hint():
+    result = coerce_task_board_planning_result(
+        {
+            "board_goal": "Retrieve a required host policy.",
+            "cards": [
+                {
+                    "id": "policy",
+                    "action_block": "Retrieve the host policy.",
+                    "objective": "Load the policy before downstream synthesis.",
+                    "depends_on": [],
+                    "done_when": "The policy Action result is available.",
+                    "allowed_execution_shape": "control",
+                    "requires_capability_ids": ["get_policy"],
+                    "action_commands": [
+                        {
+                            "purpose": "Retrieve the host policy.",
+                            "action_id": "get_policy",
+                            "action_input": {},
+                        }
+                    ],
+                }
+            ],
+            "completion_gate": "The policy is available.",
+        },
+        board_id="policy-board",
+        effort="medium",
+    )
+
+    card = result.revision.graph.cards[0]
+    assert card.allowed_execution_shape == "actions"
+    assert card.metadata["declared_execution_shape"] == "control"
+    assert card.metadata["execution_shape_normalization"] == (
+        "exact_action_commands_override_generic_shape_hint"
+    )
 
 
 def test_task_board_planning_canonicalizes_optional_card_id_hints():
     schema = task_board_planning_output_schema()
     assert schema["cards"][0]["id"][2] is False
+    assert schema["cards"][0]["final_workspace_deliverables"][2] is False
+    assert schema["cards"][0]["action_commands"][2] is False
 
     result = coerce_task_board_planning_result(
         {
@@ -2961,3 +3110,95 @@ def test_taskboard_final_verification_evidence_includes_pinned_cited_items():
     assert merged_ids == ["locator-1", "pdf-readback"]
     pdf_item = next(item for item in merged if item["id"] == "pdf-readback")
     assert "bounded preview" in str(pdf_item.get("body"))
+
+
+def test_taskboard_final_verification_evidence_joins_pinned_stable_reference_id():
+    scoped_view = {"evidence_items": []}
+    board_view = {
+        "evidence_items": [
+            {
+                "id": "agent_task_action_result:get_portfolio_mandate:call-mandate",
+                "reference_id": "ref_I",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "Portfolio mandate facts.",
+            }
+        ]
+    }
+
+    merged = AgentTask._taskboard_final_verification_evidence_items(
+        scoped_view,
+        pinned_evidence_ids=["ref_I"],
+        evidence_view=board_view,
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["id"] == "agent_task_action_result:get_portfolio_mandate:call-mandate"
+    assert merged[0]["reference_id"] == "ref_I"
+
+
+def test_taskboard_final_verification_evidence_joins_reference_assigned_only_in_stable_ledger():
+    canonical_id = "workspace_artifact_readback:repair:final.md"
+    board_view = {
+        "evidence_items": [
+            {
+                "id": canonical_id,
+                "kind": "workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "final.md",
+                "body": "Current corrected artifact body.",
+            }
+        ]
+    }
+    stable_ledger = {
+        "items": [
+            {
+                **board_view["evidence_items"][0],
+                "reference_id": "ref_current",
+            }
+        ]
+    }
+
+    merged = AgentTask._taskboard_final_verification_evidence_items(
+        {"evidence_items": []},
+        pinned_evidence_ids=["ref_current"],
+        evidence_view=board_view,
+        evidence_ledger=stable_ledger,
+    )
+
+    assert merged == [stable_ledger["items"][0]]
+
+
+def test_taskboard_terminal_verifier_receives_current_ledger_without_prior_pins():
+    current_source = {
+        "id": "agent_task_action_result:equity_market_snapshot:call-avgo",
+        "reference_id": "ref_market_avgo",
+        "kind": "agent_task.action.result",
+        "status": "ok",
+        "body_state": "bounded",
+        "action_id": "equity_market_snapshot",
+        "body": "AVGO closed at 238.4, up 0.9%.",
+    }
+    current_carrier = {
+        "id": "workspace_artifact_readback:final.md",
+        "reference_id": "ref_final_readback",
+        "kind": "workspace_artifact.readback",
+        "status": "ok",
+        "body_state": "bounded",
+        "path": "final.md",
+        "body": "Current terminal artifact body.",
+    }
+
+    merged = AgentTask._taskboard_final_verification_evidence_items(
+        {"evidence_items": [current_carrier]},
+        pinned_evidence_ids=[],
+        evidence_view={"evidence_items": [current_source, current_carrier]},
+        evidence_ledger={"items": [current_source, current_carrier]},
+    )
+
+    assert [item["reference_id"] for item in merged] == [
+        "ref_final_readback",
+        "ref_market_avgo",
+    ]

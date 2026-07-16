@@ -166,6 +166,227 @@ class ActionFlowController:
     async def async_emit_action_flow_observation(self, observation: dict[str, Any]):
         await self._action._async_emit_action_flow_observation(observation)
 
+    async def async_execute_action_calls(
+        self,
+        *,
+        action_calls: list[dict[str, Any]],
+        settings: "Settings",
+        agent_name: str = "Manual",
+        parent_run_context=None,
+        action_execution_handler: "ActionExecutionHandler | None" = None,
+        concurrency: int | None = None,
+        timeout: float | None = None,
+    ) -> list[ActionResult]:
+        """Execute a host-owned Action batch without entering an ActionLoop.
+
+        Planning and iterative continuation belong to ``ActionFlow.async_run``.
+        This internal path is for callers that already own complete ActionCall
+        values. It deliberately keeps execution inside ActionRuntime and emits
+        the same canonical per-Action lifecycle observations as an ActionFlow.
+        """
+
+        from agently.core.runtime.RuntimeContext import (
+            bind_runtime_context,
+            get_current_agent_execution_context,
+            resolve_parent_run_context,
+        )
+        from agently.types.data import RunContext
+
+        action = self._action
+        normalized_calls: list[ActionCall] = []
+        for index, raw_call in enumerate(action_calls):
+            normalized = action._normalize_action_call(raw_call)
+            if normalized is None:
+                raise ValueError(f"action_calls[{index}] is not a valid ActionCall.")
+            normalized_calls.append(normalized)
+        if not normalized_calls:
+            return []
+
+        parent_run_context = resolve_parent_run_context(parent_run_context)
+        batch_run = RunContext.create(
+            run_kind="action",
+            parent=parent_run_context,
+            agent_name=agent_name,
+            session_id=(
+                str(settings.get("runtime.session_id"))
+                if settings.get("runtime.session_id", None)
+                else None
+            ),
+            meta={
+                "action_count": len(normalized_calls),
+                "action_type": "action_calls",
+            },
+        )
+        parent_artifact_scope = action._artifact_scope_from_agent_execution_context(
+            get_current_agent_execution_context(),
+        )
+        artifact_scope = parent_artifact_scope or action._artifact_scope_from_run_context(batch_run)
+        owns_artifact_scope = artifact_scope.get("kind") == "action_run"
+        action_runs = [
+            batch_run.create_child(
+                run_kind="action",
+                meta={
+                    "action_type": "tool",
+                    "action_name": str(command.get("action_id") or "unknown"),
+                    "command_index": command_index,
+                },
+            )
+            for command_index, command in enumerate(normalized_calls)
+        ]
+
+        async def emit(
+            kind: str,
+            *,
+            command_index: int,
+            message: str,
+            payload: dict[str, Any],
+            level: str = "INFO",
+            error: BaseException | None = None,
+        ) -> None:
+            await action._async_emit_action_flow_observation(
+                {
+                    "kind": kind,
+                    "source": "ActionRuntime",
+                    "level": level,
+                    "message": message,
+                    "payload": payload,
+                    "error": error,
+                    "run": action_runs[command_index],
+                    "compat_event_family": None,
+                }
+            )
+
+        async def async_call_scoped_action(name: str, kwargs: dict[str, Any]) -> Any:
+            return await action._async_call_action_with_scope(
+                name,
+                kwargs,
+                artifact_scope=artifact_scope,
+            )
+
+        resolved_execution_handler = action.action_runtime.resolve_execution_handler(
+            action_execution_handler,
+        )
+        bounded_records: list[ActionResult] = []
+        try:
+            with bind_runtime_context(
+                parent_run_context=batch_run,
+                tool_phase_run_context=batch_run,
+                settings=settings,
+            ):
+                for command_index, command in enumerate(normalized_calls):
+                    action_id = str(command.get("action_id") or "unknown")
+                    await emit(
+                        "action_started",
+                        command_index=command_index,
+                        message=f"Action '{action_id}' started.",
+                        payload={
+                            "agent_name": agent_name,
+                            "command_index": command_index,
+                            "action_type": "tool",
+                            "action_name": action_id,
+                            "command": command,
+                        },
+                    )
+
+                try:
+                    raw_records = await resolved_execution_handler(
+                        {
+                            "prompt": None,
+                            "settings": settings,
+                            "agent_name": agent_name,
+                            "round_index": 0,
+                            "max_rounds": 0,
+                            "done_plans": [],
+                            "last_round_records": [],
+                            "parent_run_context": parent_run_context,
+                            "artifact_scope": artifact_scope,
+                            "action": action,
+                            "runtime": action.action_runtime,
+                        },
+                        {
+                            "action_calls": normalized_calls,
+                            "async_call_action": async_call_scoped_action,
+                            "concurrency": concurrency,
+                            "timeout": timeout,
+                            "trusted_policy_overrides": {},
+                        },
+                    )
+                except BaseException as error:
+                    for command_index, command in enumerate(normalized_calls):
+                        action_id = str(command.get("action_id") or "unknown")
+                        await emit(
+                            "action_failed",
+                            command_index=command_index,
+                            level="WARNING",
+                            message=f"Action '{action_id}' failed.",
+                            payload={
+                                "agent_name": agent_name,
+                                "command_index": command_index,
+                                "action_type": "tool",
+                                "action_name": action_id,
+                            },
+                            error=error,
+                        )
+                    raise
+
+                records = action._normalize_execution_records(
+                    raw_records,
+                    normalized_calls,
+                    artifact_scope=artifact_scope,
+                )
+                bounded_records = action._to_action_flow_return_records(records)
+                execution_context = get_current_agent_execution_context()
+                record_action_records = getattr(execution_context, "record_action_records", None)
+                if callable(record_action_records):
+                    record_action_records(bounded_records, source="ActionRuntime")
+
+                for record_index, record in enumerate(bounded_records):
+                    command_index = min(record_index, len(action_runs) - 1)
+                    action_id = str(record.get("action_id") or record.get("tool_name") or "unknown")
+                    status = str(record.get("status") or "").strip().lower()
+                    if bool(record.get("success")):
+                        kind = "action_completed"
+                        level = "INFO"
+                        message = f"Action '{action_id}' completed."
+                    elif status == "approval_required":
+                        kind = "action_approval_required"
+                        level = "WARNING"
+                        message = f"Action '{action_id}' requires approval."
+                    elif status == "blocked":
+                        kind = "action_blocked"
+                        level = "WARNING"
+                        message = f"Action '{action_id}' blocked."
+                    else:
+                        kind = "action_failed"
+                        level = "WARNING"
+                        message = f"Action '{action_id}' failed."
+                    await emit(
+                        kind,
+                        command_index=command_index,
+                        level=level,
+                        message=message,
+                        payload={
+                            "agent_name": agent_name,
+                            "record_index": record_index,
+                            "command_index": command_index,
+                            "action_type": "tool",
+                            "action_name": action_id,
+                            "record": record,
+                        },
+                    )
+        finally:
+            if owns_artifact_scope:
+                action._release_artifact_scope(artifact_scope)
+
+        if owns_artifact_scope:
+            bounded_records = action._project_released_artifact_scope(
+                bounded_records,
+                artifact_scope,
+            )
+        return action.to_model_visible_records(
+            action._to_action_flow_return_records(bounded_records)
+        )
+
     async def async_plan_and_execute(
         self,
         *,

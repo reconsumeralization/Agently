@@ -147,7 +147,7 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
                     True,
                 ),
                 "initial_taskboard_plan": (
-                    dict,
+                    task_board_planning_output_schema(),
                     "Optional TaskBoard planning result when recommended_shape is taskboard and the initial board is obvious.",
                     False,
                 ),

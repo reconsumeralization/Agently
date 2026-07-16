@@ -101,6 +101,10 @@ class WorkspaceFileRef(TypedDict):
     media_type: NotRequired[str | None]
     content_kind: NotRequired[str]
     role: NotRequired[str]
+    locator_id: NotRequired[str]
+    content_version_id: NotRequired[str]
+    segment_id: NotRequired[str]
+    link_id: NotRequired[str]
 
 
 class WorkspaceFileInfo(TypedDict):

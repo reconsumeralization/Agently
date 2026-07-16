@@ -19,6 +19,208 @@ from .TaskShared import *
 
 
 class AgentTaskCarrierMixin(AgentTaskMixinBase):
+    def _bounded_action_command_failure(
+        self,
+        *,
+        execution_id: str,
+        code: str,
+        message: str,
+        execution_kind: str,
+        command_source: str,
+        action_planning_model_requests: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        diagnostic = {
+            "code": code,
+            "message": message,
+            "execution_kind": execution_kind,
+            "command_source": command_source,
+            "action_planning_model_requests": action_planning_model_requests,
+        }
+        return (
+            {
+                "status": "failed",
+                "step_result": message,
+                "answer": "",
+                "remaining_work": [message],
+                "diagnostics": [diagnostic],
+            },
+            {
+                "execution_id": execution_id,
+                "status": "failed",
+                "route": {"selected_route": "action_call", "status": "failed"},
+                "logs": {"action_logs": [], "route_logs": {}, "errors": [diagnostic]},
+                "diagnostics": [diagnostic],
+            },
+        )
+
+    async def _execute_bounded_action_commands(
+        self,
+        *,
+        raw_commands: Any,
+        required_action_ids: Sequence[str],
+        execution_id: str,
+        code_prefix: str,
+        execution_kind: str,
+        command_source: str,
+        action_planning_model_requests: int,
+        unit_label: str,
+        todo_suggestion: str,
+        concurrency: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Validate one bounded command batch and dispatch it through ActionRuntime."""
+
+        def failure(code_suffix: str, message: str) -> tuple[dict[str, Any], dict[str, Any]]:
+            return self._bounded_action_command_failure(
+                execution_id=execution_id,
+                code=f"{code_prefix}.{code_suffix}",
+                message=message,
+                execution_kind=execution_kind,
+                command_source=command_source,
+                action_planning_model_requests=action_planning_model_requests,
+            )
+
+        if not isinstance(raw_commands, Sequence) or isinstance(
+            raw_commands, str | bytes | bytearray
+        ):
+            return failure(
+                "invalid_shape",
+                f"{unit_label} action_commands must be a sequence of command mappings.",
+            )
+
+        registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
+        has_action = getattr(registry, "has", None)
+        commands: list[dict[str, Any]] = []
+        for index, raw_command in enumerate(raw_commands):
+            if not isinstance(raw_command, Mapping):
+                return failure(
+                    "invalid_command",
+                    f"{unit_label} action_commands[{index}] must be a mapping.",
+                )
+            action_id = str(raw_command.get("action_id") or "").strip()
+            action_input = raw_command.get("action_input")
+            if not action_id or not callable(has_action) or not has_action(action_id):
+                return failure(
+                    "unknown_action",
+                    f"{unit_label} action command references unavailable Action '{action_id}'.",
+                )
+            if not isinstance(action_input, Mapping):
+                return failure(
+                    "invalid_input",
+                    f"{unit_label} action command '{action_id}' requires an action_input mapping.",
+                )
+            commands.append(
+                {
+                    "purpose": str(raw_command.get("purpose") or f"Use {action_id}").strip(),
+                    "action_id": action_id,
+                    "action_input": dict(action_input),
+                    "todo_suggestion": todo_suggestion,
+                    "source_protocol": command_source,
+                }
+            )
+
+        required = set(self._normalize_string_list(required_action_ids))
+        command_action_ids = {command["action_id"] for command in commands}
+        missing_required = sorted(required - command_action_ids)
+        if missing_required:
+            return failure(
+                "missing_required_action",
+                f"{unit_label} action_commands omitted required Action ids: "
+                + ", ".join(missing_required)
+                + ".",
+            )
+
+        action_logs = [
+            dict(record)
+            for record in await self.agent.action._async_execute_action_calls(
+                action_calls=commands,
+                settings=self.agent.settings,
+                agent_name=self.agent.name,
+                concurrency=concurrency,
+            )
+            if isinstance(record, Mapping)
+        ]
+        all_succeeded = len(action_logs) == len(commands) and all(
+            self._bounded_action_command_succeeded(record) for record in action_logs
+        )
+        diagnostic = {
+            "execution_kind": execution_kind,
+            "command_source": command_source,
+            "action_planning_model_requests": action_planning_model_requests,
+            "command_count": len(commands),
+            "action_ids": [command["action_id"] for command in commands],
+            "command_concurrency": concurrency,
+        }
+        status = "completed" if all_succeeded else "failed"
+        summary = (
+            f"Executed {len(action_logs)} bounded Action call(s)."
+            if all_succeeded
+            else "One or more bounded Action calls failed."
+        )
+        return (
+            {
+                "status": status,
+                "step_result": summary,
+                "answer": summary,
+                "evidence": [
+                    f"Action {record.get('action_id')} {record.get('status')}."
+                    for record in action_logs
+                ],
+                "remaining_work": [] if all_succeeded else ["Inspect failed Action diagnostics."],
+                "diagnostics": [] if all_succeeded else [diagnostic],
+            },
+            {
+                "execution_id": execution_id,
+                "status": "success" if all_succeeded else "failed",
+                "route": {"selected_route": "action_call", "status": status},
+                "logs": {
+                    "action_logs": action_logs,
+                    "route_logs": {},
+                    "errors": [] if all_succeeded else [diagnostic],
+                },
+                "diagnostics": [diagnostic],
+            },
+        )
+
+    @staticmethod
+    def _bounded_action_command_succeeded(record: Any) -> bool:
+        if not isinstance(record, Mapping):
+            return False
+        return record.get("ok") is True or str(record.get("status") or "").strip().lower() in {
+            "success",
+            "succeeded",
+            "ok",
+            "completed",
+            "partial_success",
+        }
+
+    def _bounded_action_contracts(
+        self,
+        required_action_ids: Sequence[str],
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
+        get_spec = getattr(registry, "get_spec", None)
+        contracts: list[dict[str, Any]] = []
+        for action_id in self._normalize_string_list(required_action_ids):
+            spec = get_spec(action_id) if callable(get_spec) else None
+            if not isinstance(spec, Mapping) or spec.get("expose_to_model", True) is not True:
+                return [], action_id
+            contracts.append(
+                {
+                    key: DataFormatter.sanitize(spec.get(key))
+                    for key in (
+                        "action_id",
+                        "name",
+                        "desc",
+                        "kwargs",
+                        "returns",
+                        "side_effect_level",
+                        "read_only",
+                    )
+                    if spec.get(key) not in (None, "", [], {})
+                }
+            )
+        return contracts, None
+
     def _build_flat_work_unit_intent(
         self,
         iteration_index: int,
@@ -32,34 +234,54 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             step_scope = {}
         scoped_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
         repair_context = self._active_repair_context()
-        input_payload = {
-            "task_id": self.id,
-            "iteration": iteration_index,
-            "goal": self.goal,
-            "success_criteria": self.success_criteria,
-            "task_context_contract": self._task_context_contract_for_model_prompt(),
-            "plan": DataFormatter.sanitize(plan),
-            "execution_prompt": self._execution_prompt_context(),
-            "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-            "retrieval_policy": scoped_retrieval_policy(),
-            "context_summary": {
-                "item_count": len(context_pack.get("items", [])),
-                "profile": context_pack.get("profile"),
-            },
-        }
-        delivery_contract = {
-            "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
-            "deliverable_mode": plan.get("deliverable_mode"),
-            "task_context_contract": self._task_context_contract_for_model_prompt(),
-            "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-        }
-        if repair_context:
-            input_payload["repair_context"] = DataFormatter.sanitize(repair_context)
-            delivery_contract["repair_context"] = DataFormatter.sanitize(repair_context)
+        grounding_patch_context = self._flat_grounding_workspace_patch_context(repair_context)
+        if grounding_patch_context:
+            effective_shape = "direct"
+            scoped_ids = []
+        if grounding_patch_context:
+            objective = "Apply the structured material-claim repair contract to the authorized Workspace artifact."
+            input_payload = {
+                "task_id": self.id,
+                "iteration": iteration_index,
+                "authorized_workspace_target": {
+                    "path": grounding_patch_context.get("path"),
+                    "content_version_id": grounding_patch_context.get("content_version_id"),
+                },
+            }
+            delivery_contract = {
+                "deliverable_mode": "",
+                "material_claim_workspace_patch": DataFormatter.sanitize(grounding_patch_context),
+            }
+        else:
+            objective = str(plan.get("step_instruction") or "")
+            input_payload = {
+                "task_id": self.id,
+                "iteration": iteration_index,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
+                "plan": DataFormatter.sanitize(plan),
+                "execution_prompt": self._execution_prompt_context(),
+                "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+                "retrieval_policy": scoped_retrieval_policy(),
+                "context_summary": {
+                    "item_count": len(context_pack.get("items", [])),
+                    "profile": context_pack.get("profile"),
+                },
+            }
+            delivery_contract = {
+                "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
+                "deliverable_mode": plan.get("deliverable_mode"),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
+                "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+            }
+            if repair_context:
+                input_payload["repair_context"] = DataFormatter.sanitize(repair_context)
+                delivery_contract["repair_context"] = DataFormatter.sanitize(repair_context)
         return WorkUnitIntent(
             id=f"iter-{iteration_index}:flat-step",
             origin="flat_step",
-            objective=str(plan.get("step_instruction") or ""),
+            objective=objective,
             input_payload=input_payload,
             evidence_requirements=tuple(
                 {"capability_id": capability_id, "source": "step_scope"} for capability_id in scoped_ids
@@ -74,9 +296,22 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             ),
             delivery_contract=delivery_contract,
             runtime_preferences={
-                "handler": "agent_task_bounded_step",
-                "deliverable_mode": plan.get("deliverable_mode"),
+                "handler": (
+                    "agent_task_material_claim_patch"
+                    if grounding_patch_context
+                    else "agent_task_bounded_step"
+                ),
+                "deliverable_mode": "" if grounding_patch_context else plan.get("deliverable_mode"),
                 "preferred_execution_shape": effective_shape,
+                "plan_block_kind": (
+                    "action_call"
+                    if effective_shape == "actions"
+                    and (
+                        self._normalize_string_list(plan.get("required_action_ids"))
+                        or plan.get("action_commands") not in (None, [], ())
+                    )
+                    else "agent_step"
+                ),
                 "step_plan": execution_policy.get("step_plan", "direct"),
                 "strategy": "flat",
             },
@@ -102,7 +337,10 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "plan_id": execution_plan.plan_id,
                 "plan_blocks": [block.to_dict() for block in execution_plan.plan_blocks],
                 "edges": [edge.to_dict() for edge in execution_plan.edges],
-                "capability_resolution": self._blocks_capability_resolution(plan).to_dict(),
+                "capability_resolution": self._blocks_capability_resolution(
+                    plan,
+                    work_unit=work_unit,
+                ).to_dict(),
                 "evidence_requirements": [dict(item) for item in execution_plan.evidence_requirements],
                 "result_contracts": [dict(item) for item in execution_plan.result_contracts],
                 "runtime_policy": {
@@ -220,6 +458,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         execution: Any,
         language_policy: Mapping[str, Any],
         input_payload: Mapping[str, Any],
+        info_payload: Mapping[str, Any] | None = None,
         instruction: str,
         output_schema: Mapping[str, Any],
         output_format: str,
@@ -235,6 +474,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         if isinstance(carrier_output_policy, Mapping):
             payload["carrier_output_policy"] = DataFormatter.sanitize(dict(carrier_output_policy))
         execution.input(payload)
+        if isinstance(info_payload, Mapping) and info_payload:
+            execution.info(dict(info_payload))
         execution.language(language_policy.get("language", "auto"))
         if use_output:
             execution.instruct(instruction)
@@ -405,16 +646,32 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             )
             for block in retrieval_blocks
         )
+        evidence_requirements: list[dict[str, Any]] = [
+            dict(item)
+            for item in work_unit.evidence_requirements
+            if isinstance(item, Mapping)
+        ]
+        seen_capability_ids = {
+            str(item.get("capability_id") or "").strip()
+            for item in evidence_requirements
+            if str(item.get("capability_id") or "").strip()
+        }
+        for capability_id in self._normalize_string_list(
+            step_scope.get("allowed_capability_ids")
+        ):
+            if capability_id in seen_capability_ids:
+                continue
+            evidence_requirements.append(
+                {"capability_id": capability_id, "source": "step_scope"}
+            )
+            seen_capability_ids.add(capability_id)
         return ExecutionPlan(
             plan_id=f"{self.id}:{work_unit.id}:execution-plan",
             task_frame_id=f"{self.id}:{work_unit.id}:task-frame",
             plan_blocks=(*retrieval_blocks, agent_plan_block),
             edges=retrieval_edges,
             semantic_outputs={"step": agent_plan_block.id},
-            evidence_requirements=tuple(
-                {"capability_id": capability_id, "source": "step_scope"}
-                for capability_id in self._normalize_string_list(step_scope.get("allowed_capability_ids"))
-            ),
+            evidence_requirements=tuple(evidence_requirements),
             result_contracts=(
                 {
                     "name": "agent_task_step",
@@ -571,22 +828,61 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             )
         return scoped_results
 
-    @classmethod
-    def _evidence_ledger_from_block_context(cls, block_context: Mapping[str, Any]) -> dict[str, Any]:
+    def _evidence_ledger_from_block_context(self, block_context: Mapping[str, Any]) -> dict[str, Any]:
+        def project(value: Mapping[str, Any]) -> dict[str, Any]:
+            stable_ledger = self._stable_evidence_ledger_view(
+                value,
+                max_items=64,
+                include_body=True,
+                body_chars=1200,
+            )
+            return self._model_evidence_ledger_projection(stable_ledger, max_items=64)
+
         state = block_context.get("state")
         if not isinstance(state, Mapping):
-            return cls._model_hot_evidence_ledger(evidence_ledger_view({"evidence_items": ()}, max_items=64, include_body=False))
+            return project({"evidence_items": ()})
         evidence_items = state.get("evidence_items")
         if isinstance(evidence_items, Sequence) and not isinstance(evidence_items, (str, bytes, bytearray)):
-            return cls._model_hot_evidence_ledger(
-                evidence_ledger_view({"evidence_items": evidence_items}, max_items=64, include_body=False)
-            )
+            return project({"evidence_items": evidence_items})
         results = state.get("execution_block_results")
         if isinstance(results, Sequence) and not isinstance(results, (str, bytes, bytearray)):
-            return cls._model_hot_evidence_ledger(
-                evidence_ledger_view({"execution_block_results": results}, max_items=64, include_body=False)
-            )
-        return cls._model_hot_evidence_ledger(evidence_ledger_view({"evidence_items": ()}, max_items=64, include_body=False))
+            return project({"execution_block_results": results})
+        return project({"evidence_items": ()})
+
+    def _flat_step_evidence_ledger(self, block_context: Mapping[str, Any]) -> dict[str, Any]:
+        """Join prior AgentTask evidence with current Blocks evidence by trusted ref id."""
+        current = self._evidence_ledger_from_block_context(block_context)
+        cumulative = self._model_evidence_ledger_projection(
+            self._cumulative_evidence_ledger({}),
+            max_items=64,
+        )
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for ledger in (current, cumulative):
+            raw_items = ledger.get("items") if isinstance(ledger, Mapping) else None
+            if not isinstance(raw_items, Sequence) or isinstance(raw_items, str | bytes | bytearray):
+                continue
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    continue
+                reference_id = str(item.get("reference_id") or "").strip()
+                if not reference_id or reference_id in seen:
+                    continue
+                seen.add(reference_id)
+                items.append(dict(DataFormatter.sanitize(item)))
+        return {
+            "items": items,
+            "item_count": len(items),
+            "omitted_count": max(
+                int(current.get("omitted_count") or 0)
+                + int(cumulative.get("omitted_count") or 0),
+                0,
+            ),
+            "selection_policy": (
+                "Use only an exact offered items[].reference_id in evidence_use.evidence_ids. "
+                "The host joins that short task-scoped reference to canonical evidence."
+            ),
+        }
 
     @classmethod
     def _model_hot_evidence_ledger(cls, ledger: Mapping[str, Any]) -> dict[str, Any]:
@@ -838,17 +1134,45 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             return prefixed_fallback
         return fallback
 
-    def _blocks_capability_resolution(self, plan: dict[str, Any]):
+    def _blocks_capability_resolution(
+        self,
+        plan: dict[str, Any],
+        *,
+        work_unit: WorkUnitIntent | None = None,
+    ):
         from agently.types.data import CapabilityResolution
 
         step_scope = plan.get("step_scope")
         if not isinstance(step_scope, dict):
             step_scope = {}
-        scoped_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
+        work_unit_ids = self._normalize_string_list(
+            [
+                item.get("capability_id") or item.get("id")
+                for item in (
+                    work_unit.capability_scope
+                    if isinstance(work_unit, WorkUnitIntent)
+                    else ()
+                )
+                if isinstance(item, Mapping)
+            ]
+        )
+        step_scope_ids = self._normalize_string_list(
+            step_scope.get("allowed_capability_ids")
+        )
+        scoped_ids = self._merge_string_lists(work_unit_ids, step_scope_ids)
+        work_unit_id_set = set(work_unit_ids)
         return CapabilityResolution(
             allowed_capabilities=tuple(scoped_ids),
             scoped_action_candidates=tuple(
-                {"action_id": capability_id, "capability_id": capability_id, "source": "AgentTask.step_scope"}
+                {
+                    "action_id": capability_id,
+                    "capability_id": capability_id,
+                    "source": (
+                        "AgentTask.work_unit"
+                        if capability_id in work_unit_id_set
+                        else "AgentTask.step_scope"
+                    ),
+                }
                 for capability_id in scoped_ids
             ),
             diagnostics=(

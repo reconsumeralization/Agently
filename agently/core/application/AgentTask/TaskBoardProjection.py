@@ -125,10 +125,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "card_id": effective.card_id,
             "status": effective.status,
             "output_digest": effective.output_digest,
-            "preview": cls._compact_verifier_prompt_value(
-                effective.preview,
-                max_chars=_TASKBOARD_PROMPT_RESULT_CHARS,
-            ),
+            "preview": cls._compact_taskboard_card_preview_for_prompt(effective.preview),
             "artifact_refs": artifact_refs,
             "file_refs": file_refs,
             "diagnostics": [
@@ -140,6 +137,60 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
         if len(diagnostics) > 8:
             compact["diagnostics_omitted"] = {"count": len(diagnostics) - 8, "reason": "prompt_budget"}
         return compact
+
+    @classmethod
+    def _compact_taskboard_card_preview_for_prompt(cls, preview: Any) -> Any:
+        if not isinstance(preview, Mapping):
+            return cls._compact_verifier_prompt_value(preview, max_chars=_TASKBOARD_PROMPT_RESULT_CHARS)
+        compact: dict[str, Any] = {}
+        text_limits = {
+            "status": 80,
+            "answer": 1200,
+            "content": 1200,
+            "summary": 800,
+            "short_summary": 800,
+            "self_check": 500,
+            "progress_message": 320,
+        }
+        for key, max_chars in text_limits.items():
+            value = preview.get(key)
+            if value not in (None, "", [], {}):
+                compact[key] = cls._truncate_prompt_text(value, max_chars)
+        for key in ("candidate_final_result", "final_result", "artifact_markdown"):
+            value = preview.get(key)
+            if value not in (None, "", [], {}):
+                compact["deliverable_preview"] = cls._truncate_prompt_text(value, 1600)
+                compact["deliverable_source_field"] = key
+                break
+        for key in ("remaining_work", "gaps", "evidence"):
+            values = cls._prompt_sequence(preview.get(key))
+            if values:
+                compact[key] = [cls._truncate_prompt_text(item, 320) for item in list(values)[:8]]
+                if len(values) > 8:
+                    compact[f"{key}_omitted"] = len(values) - 8
+        evidence_use = cls._prompt_sequence(preview.get("evidence_use"))
+        if evidence_use:
+            compact["evidence_use_count"] = len(evidence_use)
+        manifest = preview.get("artifact_manifest")
+        if isinstance(manifest, Mapping):
+            manifest_projection: dict[str, Any] = {}
+            path = str(manifest.get("path") or "").strip()
+            if path:
+                manifest_projection["path"] = path
+            sections = cls._prompt_sequence(manifest.get("sections"))
+            if sections:
+                manifest_projection["sections"] = [
+                    {
+                        key: cls._truncate_prompt_text(section.get(key), 240)
+                        for key in ("id", "title", "intent")
+                        if isinstance(section, Mapping) and section.get(key) not in (None, "", [], {})
+                    }
+                    for section in list(sections)[:8]
+                    if isinstance(section, Mapping)
+                ]
+            if manifest_projection:
+                compact["artifact_manifest"] = manifest_projection
+        return DataFormatter.sanitize(compact)
 
     @classmethod
     def _compact_taskboard_card_result_for_stream(cls, result: Any) -> dict[str, Any]:
@@ -211,22 +262,58 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
         effective = TaskBoardRevision.from_value(revision)
         cards = []
         for card in effective.graph.cards:
+            evidence_contract: dict[str, Any] = {}
+            for key in (
+                "kind",
+                "done_when",
+                "failure_policy",
+                "preflight_kind",
+                "reason",
+            ):
+                value = card.evidence_contract.get(key)
+                if value not in (None, "", [], {}):
+                    evidence_contract[key] = cls._truncate_prompt_text(value, 500)
+            for key in (
+                "evidence_to_use",
+                "requires_capability_ids",
+                "requires_workspace_refs",
+                "focus_item_ids",
+                "missing_criteria",
+                "next_step_requirements",
+                "acceptance_delta",
+            ):
+                values = cls._prompt_sequence(card.evidence_contract.get(key))
+                if values:
+                    evidence_contract[key] = [cls._truncate_prompt_text(item, 320) for item in list(values)[:8]]
             cards.append(
                 {
                     "id": card.id,
                     "status": card.status,
-                    "objective": card.objective,
+                    "objective": cls._truncate_prompt_text(card.objective, 800),
                     "depends_on": list(card.depends_on),
-                    "required_outputs": list(card.required_outputs),
+                    "required_outputs": [
+                        cls._truncate_prompt_text(item, 400) for item in list(card.required_outputs)[:8]
+                    ],
                     "allowed_execution_shape": card.allowed_execution_shape,
                     "failure_policy": card.failure_policy,
-                    "evidence_contract": cls._compact_verifier_prompt_value(
-                        card.evidence_contract,
-                        max_chars=800,
-                    ),
-                    "metadata": cls._compact_verifier_prompt_value(card.metadata, max_chars=800),
+                    "evidence_contract": DataFormatter.sanitize(evidence_contract),
                 }
             )
+        diagnostics = [
+            cls._compact_taskboard_card_diagnostic_for_prompt(item)
+            for item in list(effective.diagnostics)[:16]
+        ]
+        revision_metadata = {
+            key: DataFormatter.sanitize(effective.metadata.get(key))
+            for key in (
+                "terminal_repair_count",
+                "terminal_convergence_subject",
+                "repair_source",
+                "generated_by",
+                "previous_revision_id",
+            )
+            if effective.metadata.get(key) not in (None, "", [], {})
+        }
         compact = {
             "schema_version": effective.schema_version,
             "board_id": effective.board_id,
@@ -236,7 +323,6 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                 "schema_version": effective.graph.schema_version,
                 "graph_id": effective.graph.graph_id,
                 "cards": cards,
-                "metadata": cls._compact_verifier_prompt_value(effective.graph.metadata, max_chars=1000),
             },
             "card_result_statuses": {
                 str(card_id): str(result.status) for card_id, result in effective.card_results.items()
@@ -244,8 +330,8 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "evidence_refs": [
                 cls._compact_artifact_ref_for_verifier(ref) for ref in list(effective.evidence_refs)[:16]
             ],
-            "diagnostics": cls._compact_verifier_prompt_value(list(effective.diagnostics)[:16], max_chars=1600),
-            "metadata": cls._compact_verifier_prompt_value(effective.metadata, max_chars=1200),
+            "diagnostics": DataFormatter.sanitize(diagnostics),
+            "metadata": revision_metadata,
         }
         if include_card_results:
             compact["card_results"] = {
@@ -349,7 +435,8 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
     def _compact_taskboard_evidence_view_for_prompt(cls, evidence_view: Mapping[str, Any]) -> dict[str, Any]:
         raw_cards = evidence_view.get("cards")
         cards = []
-        for card in cls._prompt_sequence(raw_cards):
+        raw_card_sequence = cls._prompt_sequence(raw_cards)
+        for card in list(raw_card_sequence)[:16]:
             if not isinstance(card, Mapping):
                 continue
             raw_metadata = card.get("metadata", {})
@@ -389,9 +476,8 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                     "card_id": card.get("card_id", card.get("id")),
                     "status": card.get("status"),
                     "output_digest": card.get("output_digest"),
-                    "preview": cls._compact_verifier_prompt_value(
-                        card.get("preview", card.get("summary", card.get("answer"))),
-                        max_chars=_TASKBOARD_PROMPT_RESULT_CHARS,
+                    "preview": cls._compact_taskboard_card_preview_for_prompt(
+                        card.get("preview", card.get("summary", card.get("answer")))
                     ),
                     "artifact_refs": artifact_refs,
                     "artifact_refs_omitted": max(0, len(artifact_refs_source) - 8),
@@ -426,13 +512,13 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "status_counts": DataFormatter.sanitize(evidence_view.get("status_counts", {})),
             "metadata": cls._compact_verifier_prompt_value(evidence_view.get("metadata", {}), max_chars=600),
             "cards": cards,
-            "cards_omitted": max(0, len(cls._prompt_sequence(raw_cards)) - len(cards)),
+            "cards_omitted": max(0, len(raw_card_sequence) - len(cards)),
             "artifact_refs": artifact_refs,
             "artifact_refs_omitted": max(0, len(artifact_refs_source) - 16),
             "file_refs": file_refs,
             "file_refs_omitted": max(0, len(file_refs_source) - 16),
-            "evidence_items": cls._compact_taskboard_evidence_items_for_prompt(evidence_items_source, max_items=32),
-            "evidence_items_omitted": max(0, len(evidence_items_source) - 32),
+            "evidence_items": cls._compact_taskboard_evidence_items_for_prompt(evidence_items_source, max_items=16),
+            "evidence_items_omitted": max(0, len(evidence_items_source) - 16),
             "source_refs": source_refs_source,
             "source_refs_omitted": max(0, len(source_refs_sequence) - 16),
         }
@@ -472,7 +558,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             }
             body = item.get("body")
             if isinstance(body, str) and body.strip():
-                compact["body"] = cls._truncate_prompt_text(body, 900)
+                compact["body_preview"] = cls._truncate_prompt_text(body, 320)
             diagnostics = item.get("diagnostics")
             if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
                 compact["diagnostics"] = cls._compact_verifier_prompt_value(list(diagnostics)[:4], max_chars=600)

@@ -270,7 +270,23 @@ def _evidence_item(
             "taskboard_card_id": card_id,
         },
     }
-    for key in ("path", "field", "value", "source_url", "selected_url", "requested_url", "canonical_url", "url", "href", "record_id", "artifact_id", "content_state", "truncated"):
+    for key in (
+        "path",
+        "field",
+        "value",
+        "source_url",
+        "selected_url",
+        "requested_url",
+        "canonical_url",
+        "url",
+        "href",
+        "record_id",
+        "artifact_id",
+        "content_state",
+        "truncated",
+        "role",
+        "source",
+    ):
         if clean_ref.get(key) not in (None, "", [], {}):
             item[key] = clean_ref.get(key)
     message = clean_ref.get("message") or clean_ref.get("summary") or clean_ref.get("preview")

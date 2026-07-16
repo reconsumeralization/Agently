@@ -38,6 +38,7 @@ from agently.types.data.workspace import (
 )
 
 from .Errors import WorkspacePolicyError
+from .Identity import WorkspaceIdentityCatalog
 from .Stores import VectorIndexPipeline
 
 
@@ -89,6 +90,12 @@ class LocalWorkspaceBackend:
         self.create = bool(create)
         self.read_only = mode in {"read", "read_only", "readonly"}
         self._lock = asyncio.Lock()
+        self._identity_catalog = WorkspaceIdentityCatalog(
+            self.root,
+            workspace_id=self.workspace_id,
+            create=self.create,
+            private_write=not self.read_only,
+        )
 
         self.db_store_provider: Any = self
         self.db_store_provider_name = "sqlite"
@@ -102,9 +109,7 @@ class LocalWorkspaceBackend:
         )
         self._db_store_provider_loader: Callable[[], tuple[Any | None, str]] | None = None
         self._embedding_provider_loader: Callable[[], Any | None] | None = None
-        self._vector_store_provider_loader: (
-            Callable[[], tuple[Any | None, str | None, str | None]] | None
-        ) = None
+        self._vector_store_provider_loader: Callable[[], tuple[Any | None, str | None, str | None]] | None = None
         self._db_store_provider_loaded = False
         self._embedding_provider_loaded = False
         self._vector_store_provider_loaded = False
@@ -120,9 +125,7 @@ class LocalWorkspaceBackend:
         *,
         db_store_provider_loader: Callable[[], tuple[Any | None, str]] | None = None,
         embedding_provider_loader: Callable[[], Any | None] | None = None,
-        vector_store_provider_loader: (
-            Callable[[], tuple[Any | None, str | None, str | None]] | None
-        ) = None,
+        vector_store_provider_loader: Callable[[], tuple[Any | None, str | None, str | None]] | None = None,
         db_store_provider_name: str = "sqlite",
         vector_store_provider_name: str | None = None,
     ) -> None:
@@ -154,9 +157,7 @@ class LocalWorkspaceBackend:
                 self.vector_store_provider_name = name
                 self.vector_store_fallback_reason = reason
         if self.embedding_provider is None or self.vector_store_provider is None:
-            raise RuntimeError(
-                "Workspace vector indexing requires both embedding_provider and vector_store_provider."
-            )
+            raise RuntimeError("Workspace vector indexing requires both embedding_provider and vector_store_provider.")
         self._materialized_components.update({"embedding", "vector"})
         self.vector_index = VectorIndexPipeline(
             embedding_provider=self.embedding_provider,
@@ -170,9 +171,7 @@ class LocalWorkspaceBackend:
                 raise WorkspacePolicyError("Workspace persistence backend is read-only.")
             if not self.db_path.exists():
                 if not self.create:
-                    raise WorkspacePolicyError(
-                        "Workspace persistence is not initialized and create=False."
-                    )
+                    raise WorkspacePolicyError("Workspace persistence is not initialized and create=False.")
                 self.root.mkdir(parents=True, exist_ok=True)
         if not self.db_path.exists() and not write:
             raise FileNotFoundError(f"Workspace database does not exist: {self.db_path}")
@@ -264,7 +263,7 @@ class LocalWorkspaceBackend:
             raise ValueError("Workspace collection cannot be empty.")
         stored, content_format, raw = self._serialize_content(content)
         created_at = _now()
-        record_id = f"rec_{uuid.uuid4().hex}"
+        record_id = (await self._identity_catalog.allocate("record")).entity_id
         ref: WorkspaceRecordRef = {
             "id": record_id,
             "collection": str(collection),
@@ -330,13 +329,9 @@ class LocalWorkspaceBackend:
         async with self._lock:
             with self._connect(write=True) as connection:
                 self._create_records_table(connection)
-                existing = connection.execute(
-                    "SELECT id FROM records WHERE id = ?", (ref["id"],)
-                ).fetchone()
+                existing = connection.execute("SELECT id FROM records WHERE id = ?", (ref["id"],)).fetchone()
                 if existing is None:
-                    raise KeyError(
-                        "Workspace.put_record(...) can update metadata only for a locally stored record."
-                    )
+                    raise KeyError("Workspace.put_record(...) can update metadata only for a locally stored record.")
                 connection.execute(
                     """
                     UPDATE records SET collection = ?, kind = ?, path = ?, sha256 = ?,
@@ -344,10 +339,17 @@ class LocalWorkspaceBackend:
                     WHERE id = ?
                     """,
                     (
-                        ref["collection"], ref.get("kind"), ref.get("path"), ref.get("sha256"),
-                        int(ref.get("size", 0)), str(ref.get("summary", "")),
-                        _json(ref.get("scope", {})), _json(ref.get("source", {})),
-                        str(ref.get("created_at") or _now()), _json(ref.get("meta", {})), ref["id"],
+                        ref["collection"],
+                        ref.get("kind"),
+                        ref.get("path"),
+                        ref.get("sha256"),
+                        int(ref.get("size", 0)),
+                        str(ref.get("summary", "")),
+                        _json(ref.get("scope", {})),
+                        _json(ref.get("source", {})),
+                        str(ref.get("created_at") or _now()),
+                        _json(ref.get("meta", {})),
+                        ref["id"],
                     ),
                 )
                 connection.commit()
@@ -379,15 +381,11 @@ class LocalWorkspaceBackend:
 
     @staticmethod
     def _create_fts_table(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(id UNINDEXED, content, summary)"
-        )
+        connection.execute("CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(id UNINDEXED, content, summary)")
 
     @staticmethod
     def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
-        return connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE name = ? LIMIT 1", (name,)
-        ).fetchone() is not None
+        return connection.execute("SELECT 1 FROM sqlite_master WHERE name = ? LIMIT 1", (name,)).fetchone() is not None
 
     @staticmethod
     def _record_id(ref_or_id: WorkspaceRecordRef | str) -> str:
@@ -411,9 +409,7 @@ class LocalWorkspaceBackend:
             raise KeyError(f"Workspace record not found: {record_id}")
         return self._decode_content(str(row["content"]), str(row["content_format"]))
 
-    async def ref_envelope(
-        self, ref_or_id: WorkspaceRecordRef | str
-    ) -> WorkspaceReferenceEnvelope:
+    async def ref_envelope(self, ref_or_id: WorkspaceRecordRef | str) -> WorkspaceReferenceEnvelope:
         ref = ref_or_id if isinstance(ref_or_id, dict) else await self.get_record(str(ref_or_id))
         if ref is None:
             raise KeyError(f"Workspace record not found: {ref_or_id}")
@@ -470,9 +466,7 @@ class LocalWorkspaceBackend:
             consumed = 0
             while limit is None or consumed < limit:
                 current_limit = chunk_size if limit is None else min(chunk_size, limit - consumed)
-                segment = await self.read_bounded(
-                    ref_or_path, offset=offset + consumed, limit=current_limit
-                )
+                segment = await self.read_bounded(ref_or_path, offset=offset + consumed, limit=current_limit)
                 yield segment
                 consumed += segment["size"]
                 if segment["eof"] or segment["size"] == 0:
@@ -538,7 +532,7 @@ class LocalWorkspaceBackend:
         meta: dict[str, Any] | None = None,
     ) -> WorkspaceLinkRef:
         record: WorkspaceLinkRef = {
-            "id": f"link_{uuid.uuid4().hex}",
+            "id": (await self._identity_catalog.allocate("link")).entity_id,
             "source_id": self._record_id(source),
             "target_id": self._record_id(target),
             "relation": str(relation),
@@ -551,8 +545,12 @@ class LocalWorkspaceBackend:
                 connection.execute(
                     "INSERT INTO links VALUES (?, ?, ?, ?, ?, ?)",
                     (
-                        record["id"], record["source_id"], record["target_id"],
-                        record["relation"], record["created_at"], _json(record["meta"]),
+                        record["id"],
+                        record["source_id"],
+                        record["target_id"],
+                        record["relation"],
+                        record["created_at"],
+                        _json(record["meta"]),
                     ),
                 )
                 connection.commit()
@@ -588,8 +586,10 @@ class LocalWorkspaceBackend:
                 continue
             output.append(
                 {
-                    "id": str(row["id"]), "source_id": str(row["source_id"]),
-                    "target_id": str(row["target_id"]), "relation": str(row["relation"]),
+                    "id": str(row["id"]),
+                    "source_id": str(row["source_id"]),
+                    "target_id": str(row["target_id"]),
+                    "relation": str(row["relation"]),
                     "created_at": str(row["created_at"]),
                     "meta": cast(dict[str, Any], _json_loads(row["meta"], {})),
                 }
@@ -648,9 +648,7 @@ class LocalWorkspaceBackend:
             """
         )
 
-    async def checkpoint(
-        self, run_id: str, state: dict[str, Any], *, step_id: str | None = None
-    ) -> WorkspaceRecordRef:
+    async def checkpoint(self, run_id: str, state: dict[str, Any], *, step_id: str | None = None) -> WorkspaceRecordRef:
         return await self.put_checkpoint(run_id, state, step_id=step_id)
 
     async def put_checkpoint(
@@ -664,6 +662,7 @@ class LocalWorkspaceBackend:
         state_version_value = state.get("state_version")
         state_version = int(state_version_value) if state_version_value is not None else None
         async with self._lock:
+            record_id = (await self._identity_catalog.allocate("record")).entity_id
             with self._connect(write=True) as connection:
                 self._create_recovery_tables(connection)
                 latest = connection.execute(
@@ -676,16 +675,21 @@ class LocalWorkspaceBackend:
                         f"expected {expected_state_version}, current is {current_version}."
                     )
                 stored, content_format, raw = self._serialize_content(state)
-                record_id = f"rec_{uuid.uuid4().hex}"
                 created_at = _now()
                 scope = {"run_id": run_id}
                 if step_id is not None:
                     scope["step_id"] = step_id
                 ref: WorkspaceRecordRef = {
-                    "id": record_id, "collection": "checkpoints", "kind": "snapshot",
-                    "path": None, "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw),
-                    "summary": f"Checkpoint for {run_id}", "scope": scope,
-                    "source": {"type": "workspace_recovery"}, "created_at": created_at,
+                    "id": record_id,
+                    "collection": "checkpoints",
+                    "kind": "snapshot",
+                    "path": None,
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "size": len(raw),
+                    "summary": f"Checkpoint for {run_id}",
+                    "scope": scope,
+                    "source": {"type": "workspace_recovery"},
+                    "created_at": created_at,
                     "meta": {"state_version": state_version},
                 }
                 connection.execute(
@@ -693,9 +697,19 @@ class LocalWorkspaceBackend:
                     INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        record_id, "checkpoints", "snapshot", stored, content_format, None,
-                        ref["sha256"], ref["size"], ref["summary"], _json(scope),
-                        _json(ref["source"]), created_at, _json(ref["meta"]),
+                        record_id,
+                        "checkpoints",
+                        "snapshot",
+                        stored,
+                        content_format,
+                        None,
+                        ref["sha256"],
+                        ref["size"],
+                        ref["summary"],
+                        _json(scope),
+                        _json(ref["source"]),
+                        created_at,
+                        _json(ref["meta"]),
                     ),
                 )
                 connection.execute(
@@ -723,9 +737,7 @@ class LocalWorkspaceBackend:
         step_id: str | None = None,
         expected_state_version: int | None = None,
     ) -> WorkspaceRecordRef:
-        return await self.put_checkpoint(
-            run_id, state, step_id=step_id, expected_state_version=expected_state_version
-        )
+        return await self.put_checkpoint(run_id, state, step_id=step_id, expected_state_version=expected_state_version)
 
     async def latest_checkpoint(self, run_id: str) -> WorkspaceRecordRef | None:
         if not self.db_path.exists():
@@ -767,6 +779,7 @@ class LocalWorkspaceBackend:
             }
 
         deleted_record_ids: set[str] = set()
+        deleted_link_ids: set[str] = set()
         deleted_bytes = 0
         remove_database = False
         async with self._lock:
@@ -779,9 +792,7 @@ class LocalWorkspaceBackend:
                     deleted_record_ids.update(str(row["record_id"]) for row in rows)
 
                 if self._table_exists(connection, "records"):
-                    rows = connection.execute(
-                        "SELECT id, size, scope, source, meta FROM records"
-                    ).fetchall()
+                    rows = connection.execute("SELECT id, size, scope, source, meta FROM records").fetchall()
                     for row in rows:
                         scope = _json_loads(row["scope"], {})
                         source = _json_loads(row["source"], {})
@@ -812,6 +823,11 @@ class LocalWorkspaceBackend:
                                 parameters,
                             )
                         if self._table_exists(connection, "links"):
+                            link_rows = connection.execute(
+                                f"SELECT id FROM links WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                                (*parameters, *parameters),
+                            ).fetchall()
+                            deleted_link_ids.update(str(row["id"]) for row in link_rows)
                             connection.execute(
                                 f"DELETE FROM links WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
                                 (*parameters, *parameters),
@@ -863,6 +879,8 @@ class LocalWorkspaceBackend:
                     self._materialized_components.discard("records")
                 self._materialized_components.discard("recovery")
 
+        await self._identity_catalog.discard([*sorted(deleted_record_ids), *sorted(deleted_link_ids)])
+
         return {
             "run_id": run_id,
             "deleted_records": len(deleted_record_ids),
@@ -874,9 +892,10 @@ class LocalWorkspaceBackend:
         if not self.db_path.exists():
             return False
         with self._connect() as connection:
-            return self._table_exists(connection, name) and connection.execute(
-                f"SELECT 1 FROM {name} LIMIT 1"
-            ).fetchone() is not None
+            return (
+                self._table_exists(connection, name)
+                and connection.execute(f"SELECT 1 FROM {name} LIMIT 1").fetchone() is not None
+            )
 
     async def get_snapshot(self, run_id: str) -> dict[str, Any] | None:
         ref = await self.latest_checkpoint(run_id)
@@ -929,9 +948,12 @@ class LocalWorkspaceBackend:
     @staticmethod
     def _row_to_lease(row: sqlite3.Row) -> WorkspaceLeaseRef:
         return {
-            "run_id": str(row["run_id"]), "owner_id": str(row["owner_id"]),
-            "lease_token": str(row["lease_token"]), "lease_ttl": float(row["lease_ttl"]),
-            "lease_until": float(row["lease_until"]), "claimed_at": str(row["claimed_at"]),
+            "run_id": str(row["run_id"]),
+            "owner_id": str(row["owner_id"]),
+            "lease_token": str(row["lease_token"]),
+            "lease_ttl": float(row["lease_ttl"]),
+            "lease_until": float(row["lease_until"]),
+            "claimed_at": str(row["claimed_at"]),
             "heartbeat_at": str(row["heartbeat_at"]),
             "released_at": str(row["released_at"]) if row["released_at"] else None,
             "state_version": int(row["state_version"]) if row["state_version"] is not None else None,
@@ -952,9 +974,7 @@ class LocalWorkspaceBackend:
         async with self._lock:
             with self._connect(write=True) as connection:
                 self._create_leases_table(connection)
-                existing = connection.execute(
-                    "SELECT * FROM leases WHERE run_id = ?", (run_id,)
-                ).fetchone()
+                existing = connection.execute("SELECT * FROM leases WHERE run_id = ?", (run_id,)).fetchone()
                 if (
                     existing is not None
                     and existing["released_at"] is None
@@ -973,8 +993,14 @@ class LocalWorkspaceBackend:
                         state_version = excluded.state_version
                     """,
                     (
-                        run_id, owner_id, token, float(ttl), now_epoch + float(ttl),
-                        now_text, now_text, expected_state_version,
+                        run_id,
+                        owner_id,
+                        token,
+                        float(ttl),
+                        now_epoch + float(ttl),
+                        now_text,
+                        now_text,
+                        expected_state_version,
                     ),
                 )
                 connection.commit()
@@ -982,9 +1008,7 @@ class LocalWorkspaceBackend:
         self._materialized_components.add("recovery")
         return self._row_to_lease(cast(sqlite3.Row, row))
 
-    async def heartbeat_lease(
-        self, run_id: str, owner_id: str, lease_token: str
-    ) -> WorkspaceLeaseRef:
+    async def heartbeat_lease(self, run_id: str, owner_id: str, lease_token: str) -> WorkspaceLeaseRef:
         now_epoch = time.time()
         now_text = _now()
         async with self._lock:
@@ -993,7 +1017,8 @@ class LocalWorkspaceBackend:
                     raise RuntimeError(f"Workspace lease is unavailable for run '{run_id}'.")
                 row = connection.execute("SELECT * FROM leases WHERE run_id = ?", (run_id,)).fetchone()
                 if (
-                    row is None or row["released_at"] is not None
+                    row is None
+                    or row["released_at"] is not None
                     or str(row["owner_id"]) != owner_id
                     or str(row["lease_token"]) != lease_token
                     or float(row["lease_until"]) <= now_epoch
@@ -1007,9 +1032,7 @@ class LocalWorkspaceBackend:
                 row = connection.execute("SELECT * FROM leases WHERE run_id = ?", (run_id,)).fetchone()
         return self._row_to_lease(cast(sqlite3.Row, row))
 
-    async def release_lease(
-        self, run_id: str, owner_id: str, lease_token: str
-    ) -> WorkspaceLeaseRef:
+    async def release_lease(self, run_id: str, owner_id: str, lease_token: str) -> WorkspaceLeaseRef:
         async with self._lock:
             with self._connect(write=True) as connection:
                 if not self._table_exists(connection, "leases"):
@@ -1017,9 +1040,7 @@ class LocalWorkspaceBackend:
                 row = connection.execute("SELECT * FROM leases WHERE run_id = ?", (run_id,)).fetchone()
                 if row is None or str(row["owner_id"]) != owner_id or str(row["lease_token"]) != lease_token:
                     raise RuntimeError(f"Workspace lease conflict for run '{run_id}'.")
-                connection.execute(
-                    "UPDATE leases SET released_at = ? WHERE run_id = ?", (_now(), run_id)
-                )
+                connection.execute("UPDATE leases SET released_at = ? WHERE run_id = ?", (_now(), run_id))
                 connection.commit()
                 row = connection.execute("SELECT * FROM leases WHERE run_id = ?", (run_id,)).fetchone()
         return self._row_to_lease(cast(sqlite3.Row, row))
@@ -1076,8 +1097,10 @@ class LocalWorkspaceBackend:
     @staticmethod
     def _row_to_runtime_event(row: sqlite3.Row) -> WorkspaceRuntimeEventRecord:
         return {
-            "id": str(row["id"]), "execution_id": str(row["execution_id"]),
-            "sequence": int(row["sequence"]), "event_id": str(row["event_id"]),
+            "id": str(row["id"]),
+            "execution_id": str(row["execution_id"]),
+            "sequence": int(row["sequence"]),
+            "event_id": str(row["event_id"]),
             "event_type": str(row["event_type"]),
             "state_version": int(row["state_version"]) if row["state_version"] is not None else None,
             "idempotency_key": str(row["idempotency_key"]) if row["idempotency_key"] else None,
@@ -1128,9 +1151,7 @@ class LocalWorkspaceBackend:
         meta = raw_meta if isinstance(raw_meta, dict) else {}
         resolved_snapshot = await self._optional_envelope(snapshot_ref)
         resolved_artifacts = [
-            envelope
-            for item in artifact_refs or []
-            if (envelope := await self._optional_envelope(item)) is not None
+            envelope for item in artifact_refs or [] if (envelope := await self._optional_envelope(item)) is not None
         ]
         async with self._lock:
             with self._connect(write=True) as connection:
@@ -1163,17 +1184,29 @@ class LocalWorkspaceBackend:
                 event_id = str(event_data.get("event_id") or uuid.uuid4().hex)
                 record_id = f"evt_{uuid.uuid4().hex}"
                 values = (
-                    record_id, execution_id, resolved_sequence, event_id,
-                    str(event_data.get("event_type") or "runtime.event"), state_version,
-                    idempotency_key, parent_id or meta.get("parent_event_id") or meta.get("parent_id"),
+                    record_id,
+                    execution_id,
+                    resolved_sequence,
+                    event_id,
+                    str(event_data.get("event_type") or "runtime.event"),
+                    state_version,
+                    idempotency_key,
+                    parent_id or meta.get("parent_event_id") or meta.get("parent_id"),
                     causation_id or meta.get("causation_id"),
-                    parent_signal_id or meta.get("parent_signal_id"), node_id or meta.get("node_id"),
-                    operator_id or meta.get("operator_id"), interrupt_id or meta.get("interrupt_id"),
-                    resume_request_id or meta.get("resume_request_id"), actor_id or meta.get("actor_id"),
+                    parent_signal_id or meta.get("parent_signal_id"),
+                    node_id or meta.get("node_id"),
+                    operator_id or meta.get("operator_id"),
+                    interrupt_id or meta.get("interrupt_id"),
+                    resume_request_id or meta.get("resume_request_id"),
+                    actor_id or meta.get("actor_id"),
                     lease_owner_id or meta.get("lease_owner_id"),
                     aggregation_scope or meta.get("aggregation_scope"),
                     _json(resolved_snapshot) if resolved_snapshot is not None else None,
-                    exchange_id, _json(resolved_artifacts), _json(event_data), created_at, persisted_at,
+                    exchange_id,
+                    _json(resolved_artifacts),
+                    _json(event_data),
+                    created_at,
+                    persisted_at,
                 )
                 connection.execute(
                     "INSERT INTO runtime_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

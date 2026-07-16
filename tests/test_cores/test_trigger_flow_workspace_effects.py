@@ -177,4 +177,12 @@ async def test_triggerflow_pause_uses_workspace_snapshot_without_enabling_audit(
     await execution.async_close(pending_interrupts="cancel")
     assert await workspace.latest_snapshot(execution.run_context.run_id) is None
     assert not (tmp_path / ".agently" / "workspace.db").exists()
-    assert not (tmp_path / ".agently").exists()
+    private_files = {
+        path.relative_to(tmp_path).as_posix()
+        for path in (tmp_path / ".agently").rglob("*")
+        if path.is_file()
+    }
+    assert private_files == {
+        ".agently/identity/state.json",
+        ".agently/identity/state.lock",
+    }

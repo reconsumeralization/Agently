@@ -143,12 +143,99 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         ordered = sorted(enumerate(refs), key=priority)
         return [dict(DataFormatter.sanitize(ref)) for _, ref in ordered]
 
-    @classmethod
-    def _taskboard_final_source_refs_from_evidence_view(cls, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
-        ledger_refs = source_refs_from_ledger(evidence_view, max_refs=32)
+    def _taskboard_terminal_candidate_refs(
+        self,
+        revision: Any,
+        refs: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Project terminal refs from the unique leaf deliverable owner.
+
+        Intermediate Workspace artifacts remain in the TaskBoard evidence view,
+        but they must not compete with the leaf delivery card for strict
+        grounding merely because their byte size is equal or larger.
+        """
+
+        current_refs = [
+            dict(DataFormatter.sanitize(ref))
+            for ref in refs
+            if isinstance(ref, Mapping)
+        ]
+        sources = self._taskboard_promotable_deliverable_sources(revision)
+        if len(sources) != 1:
+            return current_refs
+        required_path_keys = {
+            self._taskboard_workspace_path_key(path)
+            for path in self._required_workspace_deliverables()
+            if self._taskboard_workspace_path_key(path)
+        }
+        if required_path_keys:
+            return self._dedupe_ref_records(
+                [
+                    ref
+                    for ref in current_refs
+                    if self._taskboard_workspace_path_key(ref.get("path")) in required_path_keys
+                ]
+            )
+
+        declared_path_keys = {
+            self._taskboard_workspace_path_key(path)
+            for path in self._normalize_string_list(sources[0].get("declared_workspace_paths"))
+            if self._taskboard_workspace_path_key(path)
+            and not self._taskboard_workspace_path_is_internal_working(path)
+        }
+        raw_declared_paths = self._normalize_string_list(sources[0].get("declared_workspace_paths"))
+        if raw_declared_paths:
+            return self._dedupe_ref_records(
+                [
+                    ref
+                    for ref in current_refs
+                    if self._taskboard_workspace_path_key(ref.get("path")) in declared_path_keys
+                ]
+            )
+
+        raw_source_refs = sources[0].get("file_refs")
+        if not isinstance(raw_source_refs, Sequence) or isinstance(
+            raw_source_refs,
+            str | bytes | bytearray,
+        ):
+            return []
+        source_refs = [
+            item
+            for item in raw_source_refs
+            if isinstance(item, Mapping)
+            and not self._taskboard_workspace_path_is_internal_working(item.get("path"))
+        ]
+        if not source_refs:
+            return []
+
+        def matches(ref: Mapping[str, Any], source_ref: Mapping[str, Any]) -> bool:
+            path = self._taskboard_workspace_path_key(ref.get("path"))
+            source_path = self._taskboard_workspace_path_key(source_ref.get("path"))
+            if not path or path != source_path:
+                return False
+            digest = str(ref.get("sha256") or "").strip()
+            source_digest = str(source_ref.get("sha256") or "").strip()
+            return not digest or not source_digest or digest == source_digest
+
+        selected = [
+            ref
+            for ref in current_refs
+            if any(matches(ref, source_ref) for source_ref in source_refs)
+        ]
+        return self._dedupe_ref_records(selected)
+
+    def _taskboard_final_source_refs_from_evidence_view(self, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
+        stable_ledger = self._stable_evidence_ledger_view(
+            evidence_view,
+            max_items=120,
+            body_chars=0,
+            include_body=False,
+            budget_selection="content_first",
+        )
+        ledger_refs = source_refs_from_ledger(stable_ledger, max_refs=32)
         if ledger_refs:
             return ledger_refs
-        return cls._collect_taskboard_source_refs(evidence_view, max_refs=32)
+        return self._collect_taskboard_source_refs(evidence_view, max_refs=32)
 
     @classmethod
     def _taskboard_workspace_path_key(cls, path: Any) -> str:
@@ -163,6 +250,86 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         if not path_key:
             return ""
         return PurePosixPath(path_key).name
+
+    @classmethod
+    def _taskboard_workspace_path_is_internal_working(cls, path: Any) -> bool:
+        path_key = cls._taskboard_workspace_path_key(path)
+        if not path_key:
+            return False
+        parts = PurePosixPath(path_key).parts
+        return bool(parts and parts[0] == "working")
+
+    @classmethod
+    def _taskboard_declared_workspace_paths_from_preview(cls, preview: Any) -> list[str]:
+        if not isinstance(preview, Mapping):
+            return []
+        manifest = preview.get("artifact_manifest")
+        if not isinstance(manifest, Mapping) or not manifest:
+            return []
+        paths: list[str] = []
+
+        def add_path(value: Any) -> None:
+            path = cls._workspace_artifact_display_path(value)
+            if (
+                path
+                and cls._workspace_artifact_candidate_path_is_local(path)
+                and path not in paths
+            ):
+                paths.append(path)
+
+        for key in ("path", "output_path", "file_path"):
+            add_path(manifest.get(key))
+        deliverables = manifest.get("deliverables")
+        if isinstance(deliverables, Sequence) and not isinstance(
+            deliverables,
+            str | bytes | bytearray,
+        ):
+            for item in deliverables:
+                if isinstance(item, Mapping):
+                    add_path(item.get("path") or item.get("output_path") or item.get("file_path"))
+        return paths
+
+    def _taskboard_terminal_workspace_deliverables(
+        self,
+        revision: Any,
+    ) -> tuple[list[str], list[str]]:
+        required_paths = [
+            self._workspace_artifact_display_path(path)
+            for path in self._required_workspace_deliverables()
+            if self._workspace_artifact_display_path(path)
+        ]
+        if required_paths:
+            return self._normalize_string_list(required_paths), []
+
+        sources = self._taskboard_promotable_deliverable_sources(revision)
+        if len(sources) != 1:
+            return [], []
+        declared_paths = self._normalize_string_list(sources[0].get("declared_workspace_paths"))
+        valid_paths: list[str] = []
+        invalid_internal_paths: list[str] = []
+        for path in declared_paths:
+            if self._taskboard_workspace_path_is_internal_working(path):
+                invalid_internal_paths.append(path)
+            else:
+                valid_paths.append(path)
+        return valid_paths, invalid_internal_paths
+
+    async def _missing_taskboard_terminal_workspace_deliverables(
+        self,
+        revision: Any,
+    ) -> list[str]:
+        required_paths, _invalid_internal_paths = self._taskboard_terminal_workspace_deliverables(revision)
+        missing: list[str] = []
+        for path in required_paths:
+            try:
+                read_result = await self.workspace.read_file(path, max_bytes=1)
+                byte_count = int(read_result.get("bytes") or 0)
+            except Exception:
+                missing.append(path)
+                continue
+            if byte_count <= 0:
+                missing.append(path)
+        return missing
 
     def _taskboard_select_required_final_deliverable_source_ref(
         self,
@@ -447,6 +614,99 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         )
         return self._prioritize_taskboard_final_refs([promoted_ref, *current_refs])
 
+    async def _taskboard_refresh_current_required_final_refs(
+        self,
+        refs: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Make current physical required deliverables authoritative in the hot terminal view."""
+
+        required_paths = [
+            str(path or "").strip()
+            for path in self._required_workspace_deliverables()
+            if str(path or "").strip()
+        ]
+        required_by_key = {
+            self._taskboard_workspace_path_key(path): path
+            for path in required_paths
+            if self._taskboard_workspace_path_key(path)
+        }
+        if not required_by_key:
+            return self._prioritize_taskboard_final_refs(refs)
+
+        current_refs: list[dict[str, Any]] = []
+        refreshed_path_keys: set[str] = set()
+        for path_key, path in required_by_key.items():
+            try:
+                identity_ref = await self.workspace._promote_file_identity(
+                    path,
+                    role="workspace_artifact",
+                )
+                read_result = await self.workspace.read_file(
+                    path,
+                    max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES,
+                )
+            except FileNotFoundError:
+                continue
+            except Exception as error:
+                self.diagnostics.setdefault("taskboard_current_final_deliverable", []).append(
+                    DataFormatter.sanitize(
+                        {
+                            "status": "readback_failed",
+                            "path": path,
+                            "error": {
+                                "type": error.__class__.__name__,
+                                "message": _compact_agent_task_error_message(
+                                    error,
+                                    fallback=error.__class__.__name__,
+                                ),
+                            },
+                        }
+                    )
+                )
+                continue
+            current_ref = {
+                **dict(DataFormatter.sanitize(identity_ref)),
+                "path": str(read_result.get("path") or path),
+                "bytes": int(read_result.get("bytes") or identity_ref.get("bytes") or 0),
+                "size": int(read_result.get("bytes") or identity_ref.get("size") or 0),
+                "sha256": str(read_result.get("sha256") or identity_ref.get("sha256") or ""),
+                "media_type": read_result.get("media_type") or identity_ref.get("media_type"),
+                "content_kind": str(
+                    read_result.get("content_kind") or identity_ref.get("content_kind") or "text"
+                ),
+                "encoding": read_result.get("encoding"),
+                "handler_id": read_result.get("handler_id"),
+                "role": "workspace_artifact",
+                "source": "agent_task.workspace_artifact.taskboard_current_final_deliverable",
+                "read_bytes": int(read_result.get("read_bytes") or 0),
+                "truncated": bool(read_result.get("truncated")),
+                "preview": str(read_result.get("content") or ""),
+            }
+            current_refs.append(DataFormatter.sanitize(current_ref))
+            refreshed_path_keys.add(path_key)
+
+        if not current_refs:
+            return self._prioritize_taskboard_final_refs(refs)
+        retained_refs = [
+            dict(DataFormatter.sanitize(ref))
+            for ref in refs
+            if isinstance(ref, Mapping)
+            and self._taskboard_workspace_path_key(ref.get("path")) not in refreshed_path_keys
+        ]
+        self.diagnostics.setdefault("taskboard_current_final_deliverable", []).extend(
+            {
+                "status": "current",
+                "path": ref.get("path"),
+                "locator_id": ref.get("locator_id"),
+                "content_version_id": ref.get("content_version_id"),
+                "sha256": ref.get("sha256"),
+            }
+            for ref in current_refs
+        )
+        return self._prioritize_taskboard_final_refs(
+            self._dedupe_ref_records([*current_refs, *retained_refs])
+        )
+
     async def _taskboard_materialize_promotion_candidate_refs(
         self,
         refs: Sequence[Mapping[str, Any]],
@@ -508,6 +768,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         *,
         pinned_evidence_ids: Sequence[str],
         evidence_view: Mapping[str, Any],
+        evidence_ledger: Mapping[str, Any] | None = None,
         max_pinned_items: int = 48,
     ) -> list[dict[str, Any]]:
         """Merge the scoped dirty-acceptance projection with cited evidence.
@@ -523,31 +784,86 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             for item in (scoped_evidence_view.get("evidence_items") or [])
             if isinstance(item, Mapping)
         ]
-        seen_ids = {str(item.get("id") or "").strip() for item in scoped_items}
-        seen_ids.discard("")
+        seen_ids = {
+            str(item.get(field) or "").strip()
+            for item in scoped_items
+            for field in ("id", "reference_id")
+            if str(item.get(field) or "").strip()
+        }
         pinned_wanted = [str(evidence_id or "").strip() for evidence_id in pinned_evidence_ids]
         pinned_wanted = [evidence_id for evidence_id in pinned_wanted if evidence_id and evidence_id not in seen_ids]
-        if not pinned_wanted:
-            return scoped_items
         raw_items = evidence_view.get("evidence_items") if isinstance(evidence_view, Mapping) else None
-        raw_sequence = raw_items if isinstance(raw_items, Sequence) and not isinstance(raw_items, str | bytes | bytearray) else ()
+        raw_sequence = (
+            raw_items
+            if isinstance(raw_items, Sequence)
+            and not isinstance(raw_items, str | bytes | bytearray)
+            else ()
+        )
         items_by_id: dict[str, Mapping[str, Any]] = {}
+        raw_items_by_canonical_id: dict[str, Mapping[str, Any]] = {}
         for raw_item in raw_sequence:
             if not isinstance(raw_item, Mapping):
                 continue
-            raw_id = str(raw_item.get("id") or "").strip()
-            if raw_id and raw_id not in items_by_id:
-                items_by_id[raw_id] = raw_item
+            canonical_id = str(raw_item.get("id") or "").strip()
+            if canonical_id:
+                raw_items_by_canonical_id.setdefault(canonical_id, raw_item)
+            for field in ("id", "reference_id"):
+                raw_id = str(raw_item.get(field) or "").strip()
+                if raw_id and raw_id not in items_by_id:
+                    items_by_id[raw_id] = raw_item
+        ledger_items = evidence_ledger.get("items") if isinstance(evidence_ledger, Mapping) else None
+        ledger_sequence = (
+            ledger_items
+            if isinstance(ledger_items, Sequence)
+            and not isinstance(ledger_items, str | bytes | bytearray)
+            else ()
+        )
+        merged_ledger_items: list[dict[str, Any]] = []
+        for ledger_item in ledger_sequence:
+            if not isinstance(ledger_item, Mapping):
+                continue
+            canonical_id = str(ledger_item.get("id") or "").strip()
+            merged_item = dict(ledger_item)
+            raw_item = raw_items_by_canonical_id.get(canonical_id)
+            if raw_item is not None:
+                merged_item.update(dict(raw_item))
+                for identity_field in ("reference_id", "evidence_id"):
+                    identity_value = str(ledger_item.get(identity_field) or "").strip()
+                    if identity_value:
+                        merged_item[identity_field] = identity_value
+            merged_ledger_items.append(merged_item)
+            for field in ("id", "reference_id"):
+                value = str(merged_item.get(field) or "").strip()
+                if value:
+                    items_by_id[value] = merged_item
         appended = 0
         for evidence_id in pinned_wanted:
             raw_item = items_by_id.get(evidence_id)
             if raw_item is None:
                 continue
             scoped_items.append(dict(DataFormatter.sanitize(raw_item)))
-            seen_ids.add(evidence_id)
+            seen_ids.update(
+                str(raw_item.get(field) or "").strip()
+                for field in ("id", "reference_id")
+                if str(raw_item.get(field) or "").strip()
+            )
             appended += 1
             if appended >= max_pinned_items:
                 break
+        if appended < max_pinned_items:
+            for merged_item in merged_ledger_items:
+                item_ids = {
+                    str(merged_item.get(field) or "").strip()
+                    for field in ("id", "reference_id")
+                    if str(merged_item.get(field) or "").strip()
+                }
+                if not item_ids or item_ids.intersection(seen_ids):
+                    continue
+                scoped_items.append(dict(DataFormatter.sanitize(merged_item)))
+                seen_ids.update(item_ids)
+                appended += 1
+                if appended >= max_pinned_items:
+                    break
         return scoped_items
 
     async def _finalize_taskboard(
@@ -556,18 +872,64 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         *,
         context_pack: "WorkspaceContextPackage",
         previous_acceptance_index: Mapping[str, Any] | None = None,
+        prepared_outputs: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
-        result_status = self._taskboard_terminal_status(revision, schedule)
-        evidence_view = build_task_board_evidence_view(revision).to_dict()
-        evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400, budget_selection="content_first")
-        explicit_state_facts = task_board_explicit_state_facts(revision, evidence_view=evidence_view)
+        prepared = dict(prepared_outputs or {})
+        schedule = prepared.get("schedule")
+        if schedule is None:
+            schedule = TaskBoard(revision, handler=lambda _context: None).schedule()
+        result_status = str(
+            prepared.get("result_status")
+            or self._taskboard_terminal_status(revision, schedule)
+        )
+        evidence_view = (
+            dict(prepared["evidence_view"])
+            if isinstance(prepared.get("evidence_view"), Mapping)
+            else build_task_board_evidence_view(revision).to_dict()
+        )
+        evidence_ledger = (
+            dict(prepared["evidence_ledger"])
+            if isinstance(prepared.get("evidence_ledger"), Mapping)
+            else self._stable_evidence_ledger_view(
+                evidence_view,
+                max_items=120,
+                body_chars=2400,
+                budget_selection="content_first",
+            )
+        )
+        explicit_state_facts = (
+            list(prepared["explicit_state_facts"])
+            if isinstance(prepared.get("explicit_state_facts"), Sequence)
+            and not isinstance(prepared.get("explicit_state_facts"), str | bytes | bytearray)
+            else task_board_explicit_state_facts(revision, evidence_view=evidence_view)
+        )
         blocking_state_facts = task_board_blocking_state_facts(explicit_state_facts)
-        candidate_final_result = self._taskboard_candidate_final_result(revision)
-        final_refs = self._prioritize_taskboard_final_refs(self._taskboard_final_refs_from_evidence_view(evidence_view))
-        final_refs = await self._taskboard_materialize_required_final_deliverable_refs(final_refs)
-        trusted_terminal_refs = self._trusted_terminal_refs(final_refs)
+        candidate_final_result = str(
+            prepared.get("candidate_final_result")
+            or self._taskboard_candidate_final_result(revision)
+        )
+        if isinstance(prepared.get("final_refs"), Sequence) and not isinstance(
+            prepared.get("final_refs"),
+            str | bytes | bytearray,
+        ):
+            final_refs = list(prepared["final_refs"])
+        else:
+            final_refs = self._prioritize_taskboard_final_refs(
+                self._taskboard_final_refs_from_evidence_view(evidence_view)
+            )
+            final_refs = await self._taskboard_materialize_required_final_deliverable_refs(
+                final_refs
+            )
+            final_refs = await self._taskboard_refresh_current_required_final_refs(final_refs)
+            final_refs = self._taskboard_terminal_candidate_refs(revision, final_refs)
+        trusted_terminal_refs = (
+            list(prepared["trusted_terminal_refs"])
+            if isinstance(prepared.get("trusted_terminal_refs"), Sequence)
+            and not isinstance(prepared.get("trusted_terminal_refs"), str | bytes | bytearray)
+            else self._trusted_terminal_refs(final_refs)
+        )
         trusted_final_refs = self._trusted_terminal_file_refs(trusted_terminal_refs)
+        effective_candidate_final_result = "" if trusted_final_refs else candidate_final_result
         can_attempt_degraded_final = self._taskboard_can_attempt_degraded_final(revision, schedule)
         if result_status != "completed" and not can_attempt_degraded_final:
             promoted_partial_refs = await self._register_terminal_deliverables(trusted_terminal_refs)
@@ -617,16 +979,27 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 evidence_view,
                 final_artifact_evidence_items,
             )
-            evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400, budget_selection="content_first")
+            evidence_ledger = self._stable_evidence_ledger_view(
+                evidence_view, max_items=120, body_chars=2400, budget_selection="content_first"
+            )
 
-        finalization_source = "model_finalizer"
-        final = self._promote_taskboard_final_candidate(
-            revision,
-            candidate_final_result=candidate_final_result,
-            final_refs=final_refs,
-            board_status=result_status,
+        prepared_final_candidate = prepared.get("final_candidate")
+        reusing_prepared_final = isinstance(prepared_final_candidate, Mapping)
+        finalization_source = "prepared_final_retry"
+        final = (
+            dict(DataFormatter.sanitize(prepared_final_candidate))
+            if isinstance(prepared_final_candidate, Mapping)
+            else None
         )
-        if final is not None:
+        if final is None:
+            finalization_source = "model_finalizer"
+            final = self._promote_taskboard_final_candidate(
+                revision,
+                candidate_final_result=effective_candidate_final_result,
+                final_refs=final_refs,
+                board_status=result_status,
+            )
+        if final is not None and not reusing_prepared_final:
             promotion_guard = validate_evidence_use(collect_evidence_use(final), evidence_ledger)
             if promotion_guard.get("valid") is True:
                 final = value_with_normalized_evidence_use(final, promotion_guard.get("normalized_evidence_use"))
@@ -648,14 +1021,14 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             final = await self._request_taskboard_final(
                 revision,
                 evidence_view,
-                candidate_final_result=candidate_final_result,
+                candidate_final_result=effective_candidate_final_result,
                 board_status=result_status,
                 schedule=schedule,
                 allow_degraded_final=result_status != "completed",
             )
             final = self._normalize_taskboard_final_result(
                 final,
-                candidate_final_result,
+                effective_candidate_final_result,
                 fallback_final_result=self._workspace_artifact_final_result_from_refs(trusted_final_refs),
             )
         final_artifact_evidence_items = self._dedupe_taskboard_final_evidence_items(
@@ -672,7 +1045,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 evidence_view,
                 final_artifact_evidence_items,
             )
-            evidence_ledger = evidence_ledger_view(evidence_view, max_items=120, body_chars=2400, budget_selection="content_first")
+            evidence_ledger = self._stable_evidence_ledger_view(
+                evidence_view, max_items=120, body_chars=2400, budget_selection="content_first"
+            )
         revision_metadata = getattr(revision, "metadata", {})
         previous_acceptance_index = previous_acceptance_index or (
             revision_metadata.get("taskboard_acceptance_index")
@@ -696,14 +1071,25 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         )
         final_evidence_guard = validate_evidence_use(collect_evidence_use(final), evidence_ledger)
         final = value_with_normalized_evidence_use(final, final_evidence_guard.get("normalized_evidence_use"))
+        if final_evidence_guard.get("blocking_count"):
+            final, final_evidence_guard = await self._repair_taskboard_final_evidence_use(
+                final,
+                final_evidence_guard,
+                evidence_ledger,
+                language_policy=self._language_policy(),
+            )
         pinned_evidence_ids = self._taskboard_final_pinned_evidence_ids(final_evidence_guard)
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         final_verification: dict[str, Any] | None = None
-        missing_deliverables = await self._missing_required_workspace_deliverables()
+        terminal_transition: dict[str, Any] | None = None
+        missing_deliverables = await self._missing_taskboard_terminal_workspace_deliverables(revision)
+        _terminal_deliverables, invalid_internal_terminal_paths = (
+            self._taskboard_terminal_workspace_deliverables(revision)
+        )
         should_verify_final = (
             accepted
             or bool(str(final.get("final_result") or "").strip())
-            or bool(str(candidate_final_result or "").strip())
+            or bool(str(effective_candidate_final_result or "").strip())
             or bool(final_refs)
         )
         if should_verify_final:
@@ -711,7 +1097,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             if not verifier_final_result and trusted_final_refs:
                 verifier_final_result = self._workspace_artifact_final_result_from_refs(trusted_final_refs)
             if not verifier_final_result:
-                verifier_final_result = str(candidate_final_result or "").strip()
+                verifier_final_result = str(effective_candidate_final_result or "").strip()
             taskboard_capability_logs = self._taskboard_final_capability_logs(
                 revision,
                 context_pack=context_pack if isinstance(context_pack, Mapping) else None,
@@ -724,7 +1110,6 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "final_result": verifier_final_result,
                 "reason": final.get("reason", ""),
                 "missing_criteria": final.get("missing_criteria", []),
-                "evidence_use": DataFormatter.sanitize(final.get("evidence_use", [])),
                 "file_refs": final_refs,
                 "artifact_refs": final_refs,
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_stream(evidence_view),
@@ -757,6 +1142,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                             scoped_evidence_view,
                             pinned_evidence_ids=pinned_evidence_ids,
                             evidence_view=evidence_view,
+                            evidence_ledger=evidence_ledger,
                         ),
                         "pinned_evidence_ids": pinned_evidence_ids,
                         "diagnostics": [],
@@ -771,93 +1157,109 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     "taskboard_capability_logs": DataFormatter.sanitize(taskboard_capability_logs),
                 },
             }
-            final_execution_evidence_summary = self._cumulative_execution_evidence_summary(final_execution_meta)
-            cache_can_satisfy_final_gate = (
-                isinstance(previous_acceptance_index, Mapping)
-                and acceptance_verification_plan.get("all_satisfied") is True
-                and not acceptance_verification_plan.get("dirty_item_ids")
-                and final_evidence_guard.get("valid") is True
-                and not missing_deliverables
-                and not blocking_state_facts
-            )
-            if cache_can_satisfy_final_gate:
-                final_verification = {
-                    "is_complete": True,
-                    "requires_block": False,
-                    "reason": "Reused clean TaskBoard acceptance verdict cache; no dirty acceptance items require model verification.",
-                    "acceptance_delta": [],
-                    "missing_criteria": [],
-                    "final_result_required": False,
-                    "final_result": verifier_final_result,
-                    "guard_reasons": [],
-                    "verification_source": "taskboard_acceptance_cache",
-                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
-                }
-                await self._record_phase(
-                    "taskboard_final_verification_cache_hit",
-                    diagnostics={
-                        "revision_id": revision.revision_id,
-                        "green_count": acceptance_index.get("metadata", {}).get("green_count"),
-                        "dirty_count": acceptance_index.get("metadata", {}).get("dirty_count"),
-                        "acceptance_progress_percent": acceptance_index.get("metadata", {}).get("acceptance_progress_percent"),
-                    },
+            # The acceptance index is a projection/cache for dirty-item
+            # selection. It is not a terminal semantic authority: the current
+            # carrier content may have changed since the cached criterion
+            # verdict. Always verify the current terminal candidate once.
+            terminal_guard_issues: list[dict[str, Any]] = []
+            if invalid_internal_terminal_paths:
+                invalid_message = (
+                    "A model-declared framework-internal working path cannot satisfy terminal delivery without an "
+                    "explicit structured required-deliverable contract: "
+                    + ", ".join(invalid_internal_terminal_paths)
                 )
-            else:
-                try:
-                    final_verification = await self._request_verification(
-                        max(len(self.iterations) + 1, 1),
-                        plan={
-                            "execution_shape": "taskboard",
-                            "effective_execution_shape": "taskboard",
-                            "deliverable_mode": "workspace_artifact",
-                            "expected_evidence": "Dirty TaskBoard acceptance items, final deliverable, and trusted Workspace refs",
-                        },
-                        execution_result=final_execution_result,
-                        execution_meta=final_execution_meta,
-                        context_pack=context_pack,
-                    )
-                except Exception as error:
-                    message = _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
-                    final_verification = {
-                        "is_complete": False,
+                terminal_guard_issues.append(
+                    {
+                        "code": "taskboard_terminal_workspace_delivery_invalid",
+                        "reason": invalid_message,
                         "requires_block": True,
-                        "reason": "TaskBoard final verification failed structurally.",
-                        "failure_analysis": message,
-                        "acceptance_delta": ["TaskBoard final verification must return structured completion status."],
-                        "missing_criteria": ["TaskBoard final verification did not produce a valid structured result."],
-                        "replan_instruction": "Run a continuation step that produces verifier-readable final evidence.",
-                        "repair_constraints": ["Preserve trusted Workspace refs and final deliverable evidence."],
-                        "next_step_requirements": ["Return structured verification fields."],
-                        "final_result_required": True,
-                        "final_result": "",
-                        "guard_reasons": ["taskboard_final_verification_error"],
-                        "error": {"type": error.__class__.__name__, "message": message},
                     }
-            if final_verification is not None:
-                final_verification = self._normalize_verification(
-                    final_verification,
-                    execution_evidence_summary=final_execution_evidence_summary,
-                    candidate_final_result=verifier_final_result,
                 )
-            if missing_deliverables:
-                self._guard_missing_required_deliverables(final_verification, missing_deliverables)
-            if blocking_state_facts and final_verification is not None:
-                reason = "; ".join(
-                    str(fact.get("reason") or fact.get("code") or fact.get("status") or "explicit state fact")
+            if blocking_state_facts:
+                blocking_reason = "; ".join(
+                    str(
+                        fact.get("reason")
+                        or fact.get("code")
+                        or fact.get("status")
+                        or "explicit state fact"
+                    )
                     for fact in blocking_state_facts
                 )
-                final_verification["is_complete"] = False
-                final_verification["requires_block"] = True
-                final_verification["reason"] = reason or "TaskBoard final gate blocked on explicit state facts."
-                final_verification["missing_criteria"] = [
-                    *list(final_verification.get("missing_criteria") or []),
-                    "Resolve explicit task-scoped state facts before accepting the final result.",
-                ]
-                final_verification["guard_reasons"] = [
-                    *list(final_verification.get("guard_reasons") or []),
-                    "taskboard_explicit_state_fact_block",
-                ]
-            if final_verification is not None and bool(final_verification.get("is_complete")):
+                terminal_guard_issues.append(
+                    {
+                        "code": "taskboard_explicit_state_fact_block",
+                        "reason": blocking_reason
+                        or "TaskBoard final gate blocked on explicit state facts.",
+                        "requires_block": True,
+                        "missing_criteria": [
+                            "Resolve explicit task-scoped state facts before accepting the final result."
+                        ],
+                    }
+                )
+            promotion_meta = final.get("taskboard_final_promotion")
+            preserve_explicit_final_result = (
+                isinstance(promotion_meta, Mapping)
+                and promotion_meta.get("final_result_source")
+                == "explicit_final_result"
+            )
+            try:
+                terminal_transition = await self._run_terminal_verification(
+                    max(len(self.iterations) + 1, 1),
+                    plan={
+                        "execution_shape": "taskboard",
+                        "effective_execution_shape": "taskboard",
+                        "deliverable_mode": "workspace_artifact",
+                        "expected_evidence": "Current TaskBoard terminal carriers and trusted Workspace refs",
+                    },
+                    execution_result=final_execution_result,
+                    execution_meta=final_execution_meta,
+                    context_pack=context_pack,
+                    missing_deliverables=missing_deliverables,
+                    terminal_guard_issues=terminal_guard_issues,
+                    preferred_final_result=final.get("final_result") or None,
+                    terminal_refs=trusted_terminal_refs,
+                    preserve_final_result=preserve_explicit_final_result,
+                )
+                assert terminal_transition is not None
+                final_verification = cast(
+                    dict[str, Any],
+                    terminal_transition["verification"],
+                )
+            except Exception as error:
+                message = _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
+                final_verification = {
+                    "is_complete": False,
+                    "requires_block": True,
+                    "reason": "TaskBoard final verification failed structurally.",
+                    "failure_analysis": message,
+                    "acceptance_delta": ["TaskBoard final verification must return structured completion status."],
+                    "missing_criteria": ["TaskBoard final verification did not produce a valid structured result."],
+                    "replan_instruction": "Run a continuation step that produces verifier-readable final evidence.",
+                    "repair_constraints": ["Preserve trusted Workspace refs and final deliverable evidence."],
+                    "next_step_requirements": ["Return structured verification fields."],
+                    "final_result_required": True,
+                    "final_result": "",
+                    "guard_reasons": ["taskboard_final_verification_error"],
+                    "error": {"type": error.__class__.__name__, "message": message},
+                }
+                terminal_transition = {
+                    "transition": "blocked",
+                    "verification": final_verification,
+                    "issue": {
+                        "gate_kind": "structure",
+                        "issue_code": "taskboard_final_verification_error",
+                        "contract_subject": f"taskboard:{revision.revision_id}:final",
+                    },
+                    "repair_contract": {},
+                    "accepted_carrier_ids": [],
+                    "rejected_carrier_ids": [],
+                    "terminal_result": {},
+                }
+            if (
+                final_verification is not None
+                and terminal_transition is not None
+                and terminal_transition.get("transition") == "accepted"
+            ):
                 accepted = True
                 final = dict(final)
                 final["accepted"] = True
@@ -870,7 +1272,23 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 verifier_reason = str(final_verification.get("reason") or "").strip()
                 final["reason"] = verifier_reason or "TaskBoard final verification accepted."
                 final["missing_criteria"] = []
-            elif final_verification is not None and not bool(final_verification.get("is_complete")):
+            elif final_verification is not None:
+                if (
+                    terminal_transition is not None
+                    and terminal_transition.get("transition")
+                    == "verification_retry"
+                ):
+                    return {
+                        "terminal": False,
+                        "status": "verification_retry",
+                        "prepared_final": DataFormatter.sanitize(final),
+                        "final_verification": DataFormatter.sanitize(
+                            final_verification
+                        ),
+                        "terminal_transition": DataFormatter.sanitize(
+                            terminal_transition
+                        ),
+                    }
                 repair_revision = None
                 if self._taskboard_final_verification_allows_repair(
                     final_verification,
@@ -913,11 +1331,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 final["final_result"] = final_verification.get("final_result") or final.get("final_result", "")
             if final_verification is not None:
                 verification_cost_telemetry = {
-                    "model_requests": (
-                        0
-                        if final_verification.get("verification_source") == "taskboard_acceptance_cache"
-                        else 1
-                    )
+                    "model_requests": 1,
+                    "semantic_verifier_model_requests": 1,
                 }
                 acceptance_index = build_task_board_acceptance_index(
                     revision,
@@ -954,6 +1369,19 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             degraded=degraded,
             final=final,
         )
+        terminal_result_projection = (
+            terminal_transition.get("terminal_result")
+            if isinstance(terminal_transition, Mapping)
+            and isinstance(terminal_transition.get("terminal_result"), Mapping)
+            else None
+        )
+        if isinstance(terminal_result_projection, Mapping):
+            trusted_terminal_refs = list(
+                terminal_result_projection.get("terminal_refs") or []
+            )
+            trusted_final_refs = list(
+                terminal_result_projection.get("final_file_refs") or []
+            )
         final_response = self._taskboard_user_final_response(
             final=final,
             accepted=accepted,
@@ -967,10 +1395,21 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         )
         self.status = "completed" if accepted else "blocked"
         promoted_refs = await self._register_terminal_deliverables(trusted_terminal_refs)
-        compact_final_result = self._compact_terminal_final_result(
-            final.get("final_result", ""),
-            trusted_file_refs=trusted_final_refs,
-        )
+        if isinstance(terminal_result_projection, Mapping):
+            compact_final_result = terminal_result_projection.get("final_result", "")
+        else:
+            promotion_meta = final.get("taskboard_final_promotion")
+            preserve_explicit_final_result = (
+                isinstance(promotion_meta, Mapping)
+                and promotion_meta.get("final_result_source")
+                == "explicit_final_result"
+            )
+            compact_final_result = self._compact_terminal_final_result(
+                final.get("final_result", ""),
+                trusted_file_refs=(
+                    () if preserve_explicit_final_result else trusted_final_refs
+                ),
+            )
         self._terminal_taskboard_state = {
             "revision": revision.to_dict(),
             "schedule": schedule.to_dict(),
@@ -1022,6 +1461,17 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             return False
         if blocking_state_facts:
             return False
+        for field in (
+            "criterion_repair_contract",
+            "material_claim_repair_contract",
+        ):
+            repair_contract = final_verification.get(field)
+            if (
+                isinstance(repair_contract, Mapping)
+                and str(repair_contract.get("gate_kind") or "")
+                == "output_contract"
+            ):
+                return False
         if not bool(final_verification.get("requires_block")):
             return True
         return False
@@ -1215,6 +1665,82 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 manifest[key] = DataFormatter.sanitize(ref.get(key))
         return DataFormatter.sanitize(manifest)
 
+    async def _repair_taskboard_final_evidence_use(
+        self,
+        final: Mapping[str, Any],
+        evidence_use_guard: Mapping[str, Any],
+        evidence_ledger: Mapping[str, Any],
+        *,
+        language_policy: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], Mapping[str, Any]]:
+        normalized_final = dict(
+            value_with_normalized_evidence_use(
+                final,
+                evidence_use_guard.get("normalized_evidence_use"),
+            )
+        )
+        original_blocking_count = self._taskboard_evidence_guard_blocking_count(evidence_use_guard)
+        if original_blocking_count <= 0:
+            return normalized_final, evidence_use_guard
+        repaired_evidence_use = self._deterministic_evidence_binding_repair(
+            evidence_use_guard,
+            evidence_ledger,
+        )
+        repair_source = "deterministic"
+        if not repaired_evidence_use and self._should_attempt_evidence_binding_repair(evidence_use_guard):
+            if self._can_attempt_model_evidence_binding_repair():
+                try:
+                    attempt_count = int(self.diagnostics.get("evidence_binding_repair_attempt_count") or 0)
+                except (TypeError, ValueError):
+                    attempt_count = 0
+                self.diagnostics["evidence_binding_repair_attempt_count"] = attempt_count + 1
+                try:
+                    repaired_evidence_use = await self._request_evidence_binding_repair(
+                        evidence_use_guard,
+                        evidence_ledger,
+                        language_policy=language_policy,
+                    )
+                except Exception as error:
+                    self.diagnostics.setdefault("taskboard_final_evidence_binding_repair", []).append(
+                        DataFormatter.sanitize(
+                            {
+                                "source": "model",
+                                "accepted": False,
+                                "original_blocking_count": original_blocking_count,
+                                "error": {
+                                    "type": error.__class__.__name__,
+                                    "message": str(error),
+                                },
+                            }
+                        )
+                    )
+                    return normalized_final, evidence_use_guard
+                repair_source = "model"
+        if not repaired_evidence_use:
+            return normalized_final, evidence_use_guard
+        merged_evidence_use = self._merge_repaired_evidence_use(
+            evidence_use_guard.get("normalized_evidence_use"),
+            repaired_evidence_use,
+        )
+        candidate_final = dict(value_with_normalized_evidence_use(normalized_final, merged_evidence_use))
+        candidate_guard = validate_evidence_use(collect_evidence_use(candidate_final), evidence_ledger)
+        repaired_blocking_count = self._taskboard_evidence_guard_blocking_count(candidate_guard)
+        accepted = repaired_blocking_count < original_blocking_count
+        self.diagnostics.setdefault("taskboard_final_evidence_binding_repair", []).append(
+            DataFormatter.sanitize(
+                {
+                    "source": repair_source,
+                    "accepted": accepted,
+                    "original_blocking_count": original_blocking_count,
+                    "repaired_blocking_count": repaired_blocking_count,
+                    "repaired_claim_count": len(repaired_evidence_use),
+                }
+            )
+        )
+        if not accepted:
+            return normalized_final, evidence_use_guard
+        return candidate_final, candidate_guard
+
     async def _request_taskboard_final(
         self,
         revision: Any,
@@ -1239,6 +1765,13 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             schedule=schedule,
             preflight_diagnostics=explicit_state_facts,
         )
+        finalizer_evidence_ledger = self._stable_evidence_ledger_view(
+            evidence_view,
+            max_items=64,
+            body_chars=1200,
+            budget_selection="content_first",
+            max_overflow_refs=64,
+        )
         request = self.agent.create_temp_request()
         self._apply_language_policy_to_request(request, language_policy)
         request.input(
@@ -1250,7 +1783,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "allow_degraded_final": allow_degraded_final,
                 "schedule": DataFormatter.sanitize(schedule.to_dict() if schedule is not None else {}),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
-                "evidence_ledger": evidence_ledger_view(evidence_view, max_items=120, body_chars=2400, budget_selection="content_first"),
+                "evidence_ledger": self._model_evidence_ledger_projection(
+                    finalizer_evidence_ledger,
+                    max_items=64,
+                ),
                 "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
                 "taskboard_focus_payload": DataFormatter.sanitize(focus_payload),
                 "taskboard_explicit_state_facts": DataFormatter.sanitize(explicit_state_facts),
@@ -1269,8 +1805,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         request.instruct(
             "Assemble a verifier-ready final result for this TaskBoard task from completed card evidence. "
             "Self-check obvious success-criteria gaps, but do not act as the terminal verifier. "
-            "Use evidence_ledger as the authoritative grounding ledger and bind "
-            "factual claims through evidence_use ids. Use the hot evidence view for summaries and preserve cold refs "
+            "Use evidence_ledger as the authoritative grounding ledger and bind factual claims only through exact "
+            "offered evidence_ledger.items[].reference_id values in evidence_use.evidence_ids; no other prompt field "
+            "is an evidence identity. Use the hot evidence view for summaries and preserve cold refs "
             "as evidence pointers; do not invent unsupported facts. failed/empty ledger items support only missing "
             "or unavailable-data claims; ref_only items support only URL/path/ref discovery until readback exists. "
             "When candidate_final_result contains a "
@@ -1337,12 +1874,12 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 ),
                 "evidence_use": (
                     [dict],
-                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer",
+                    "Claim bindings: [{claim, evidence_ids, support_type}], where every evidence_ids value is an exact offered evidence_ledger.items[].reference_id and support_type is content, unavailability, or ref_pointer",
                     False,
                 ),
                 "acceptance_points": (
                     [dict],
-                    "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}]",
+                    "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}], where evidence_ids contains only exact offered evidence_ledger.items[].reference_id values",
                     False,
                 ),
                 "self_check": (
@@ -1386,12 +1923,19 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         if len(sources) != 1:
             return None
         trusted_refs = [dict(DataFormatter.sanitize(ref)) for ref in final_refs if self._is_trusted_workspace_artifact_ref(ref)]
-        final_result = candidate_final_result.strip()
-        if not final_result and trusted_refs:
+        source = sources[0]
+        explicit_final_result = str(source.get("explicit_final_result") or "").strip()
+        if explicit_final_result:
+            final_result = explicit_final_result
+            final_result_source = "explicit_final_result"
+        elif trusted_refs:
             final_result = self._workspace_artifact_final_result_from_refs(trusted_refs)
+            final_result_source = "workspace_artifact"
+        else:
+            final_result = candidate_final_result.strip()
+            final_result_source = "candidate_final_result"
         if not final_result:
             return None
-        source = sources[0]
         evidence_use = source.get("evidence_use") if isinstance(source, Mapping) else []
         return DataFormatter.sanitize(
             {
@@ -1403,6 +1947,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "taskboard_final_promotion": {
                     "source_card_id": source.get("card_id"),
                     "file_ref_count": len(trusted_refs),
+                    "final_result_source": final_result_source,
                 },
             }
         )
@@ -1425,6 +1970,11 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 continue
             preview = getattr(result, "preview", None)
             candidate = self._candidate_final_result_from_execution_result(preview, include_answer=False)
+            explicit_final_result = (
+                str(preview.get("final_result") or "").strip()
+                if isinstance(preview, Mapping)
+                else ""
+            )
             trusted_refs = self._trusted_taskboard_result_refs(result, preview)
             if not candidate and not trusted_refs:
                 continue
@@ -1432,7 +1982,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 {
                     "card_id": card_id_text,
                     "candidate_final_result": candidate,
+                    "explicit_final_result": explicit_final_result,
                     "file_refs": trusted_refs,
+                    "declared_workspace_paths": self._taskboard_declared_workspace_paths_from_preview(preview),
                     "evidence_use": self._taskboard_result_evidence_use(preview),
                 }
             )

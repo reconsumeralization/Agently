@@ -20,9 +20,38 @@ from .TaskShared import *
 
 class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
     async def _run_iteration(self, iteration_index: int) -> dict[str, Any]:
+        """Compatibility entry point for one iteration outside the lifecycle flow."""
+
+        frame: dict[str, Any] = {"iteration": iteration_index}
+        for stage in (
+            self._flat_context_prepare_stage,
+            self._flat_work_plan_stage,
+            self._flat_work_execute_stage,
+            self._flat_outputs_materialize_stage,
+            self._flat_evidence_ingest_stage,
+            self._flat_terminal_verify_stage,
+            self._flat_transition_decide_stage,
+        ):
+            frame = await stage(frame)
+            if frame.get("iteration_result") is not None:
+                break
+        result = frame.get("iteration_result")
+        if not isinstance(result, Mapping):
+            raise ValueError("Flat lifecycle did not produce a structured iteration result.")
+        return dict(result)
+
+    async def _flat_context_prepare_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        iteration_index = int(frame["iteration"])
         try:
             if self._task_deadline_exceeded():
-                return await self._terminate_timed_out(iteration_index, stage="plan")
+                frame["iteration_result"] = await self._terminate_timed_out(
+                    iteration_index,
+                    stage="plan",
+                )
+                return frame
             await self._emit_progress(
                 iteration_index,
                 "context",
@@ -48,6 +77,27 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 ),
             )
 
+        except _AgentTaskDeadlineExceeded as error:
+            frame["iteration_result"] = await self._terminate_timed_out(
+                iteration_index,
+                stage=error.stage,
+                reason=error.reason,
+                limit_name=error.limit_name,
+                timeout_seconds=error.timeout_seconds,
+            )
+            return frame
+        frame["context_pack"] = context_pack
+        return frame
+
+    async def _flat_work_plan_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        iteration_index = int(frame["iteration"])
+        context_pack = cast("WorkspaceContextPackage", frame["context_pack"])
+        try:
             await self._emit_progress(
                 iteration_index,
                 "plan",
@@ -60,13 +110,14 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 )
             )
         except _AgentTaskDeadlineExceeded as error:
-            return await self._terminate_timed_out(
+            frame["iteration_result"] = await self._terminate_timed_out(
                 iteration_index,
                 stage=error.stage,
                 reason=error.reason,
                 limit_name=error.limit_name,
                 timeout_seconds=error.timeout_seconds,
             )
+            return frame
         await self._emit_process_progress_from_output(plan, stage="plan", iteration=iteration_index)
         await self._record_phase(
             "planned",
@@ -98,7 +149,19 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         )
         decision_ref = await self._record_decision(iteration_index, plan, context_pack)
         await self._emit(f"agent_task.iteration.{iteration_index}.decision", {"record": decision_ref})
+        frame["plan"] = plan
+        frame["decision_ref"] = decision_ref
+        return frame
 
+    async def _flat_work_execute_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        iteration_index = int(frame["iteration"])
+        plan = cast(dict[str, Any], frame["plan"])
+        context_pack = cast("WorkspaceContextPackage", frame["context_pack"])
         await self._emit_progress(
             iteration_index,
             "execute",
@@ -121,43 +184,84 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 stage="execute",
             )
         except _AgentTaskDeadlineExceeded as error:
-            return await self._terminate_timed_out(
+            frame["iteration_result"] = await self._terminate_timed_out(
                 iteration_index,
                 stage=error.stage,
                 reason=error.reason,
                 limit_name=error.limit_name,
                 timeout_seconds=error.timeout_seconds,
             )
+            return frame
         execution_failed = str(execution_meta.get("status") or "").strip().lower() in {
             "failed",
             "error",
             "timed_out",
             "blocked",
         }
+        grounding_patch_mode = self._flat_execution_is_grounding_workspace_patch(
+            execution_meta
+        )
         if execution_failed:
             self._record_failed_execution_shape(plan, execution_meta)
-            execution_result, execution_meta = await self._maybe_run_acp_recovery(
-                iteration_index,
+            if not grounding_patch_mode:
+                execution_result, execution_meta = await self._maybe_run_acp_recovery(
+                    iteration_index,
+                    plan=plan,
+                    execution_result=execution_result,
+                    execution_meta=execution_meta,
+                )
+                execution_failed = str(execution_meta.get("status") or "").strip().lower() in {
+                    "failed",
+                    "error",
+                    "timed_out",
+                    "blocked",
+                }
+        frame["execution_result"] = execution_result
+        frame["execution_meta"] = execution_meta
+        frame["execution_failed"] = execution_failed
+        frame["grounding_patch_mode"] = grounding_patch_mode
+        return frame
+
+    async def _flat_outputs_materialize_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        iteration_index = int(frame["iteration"])
+        plan = cast(dict[str, Any], frame["plan"])
+        context_pack = cast("WorkspaceContextPackage", frame["context_pack"])
+        execution_result = frame["execution_result"]
+        execution_meta = cast(dict[str, Any], frame["execution_meta"])
+        execution_failed = bool(frame["execution_failed"])
+        grounding_patch_mode = bool(frame["grounding_patch_mode"])
+        if not grounding_patch_mode:
+            execution_result = await self._deliver_workspace_artifact(
+                execution_result,
                 plan=plan,
-                execution_result=execution_result,
                 execution_meta=execution_meta,
+                source=f"agent_task.iteration.{iteration_index}.workspace_artifact",
+                context_pack=context_pack,
+                iteration_index=iteration_index,
+                repair_context=self._active_repair_context(),
+                allow_stream_draft=not execution_failed,
             )
-            execution_failed = str(execution_meta.get("status") or "").strip().lower() in {
-                "failed",
-                "error",
-                "timed_out",
-                "blocked",
-            }
-        execution_result = await self._deliver_workspace_artifact(
-            execution_result,
-            plan=plan,
-            execution_meta=execution_meta,
-            source=f"agent_task.iteration.{iteration_index}.workspace_artifact",
-            context_pack=context_pack,
-            iteration_index=iteration_index,
-            repair_context=self._active_repair_context(),
-            allow_stream_draft=not execution_failed,
-        )
+        frame["execution_result"] = execution_result
+        return frame
+
+    async def _flat_evidence_ingest_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        iteration_index = int(frame["iteration"])
+        plan = cast(dict[str, Any], frame["plan"])
+        context_pack = cast("WorkspaceContextPackage", frame["context_pack"])
+        decision_ref = frame["decision_ref"]
+        execution_result = frame["execution_result"]
+        execution_meta = cast(dict[str, Any], frame["execution_meta"])
+        execution_failed = bool(frame["execution_failed"])
         cumulative_evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
         flat_evidence_guard = validate_evidence_use(
             collect_evidence_use(execution_result),
@@ -258,11 +362,32 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "route": execution_meta.get("route"),
             },
         )
+        frame["execution_result"] = execution_result
+        frame["execution_meta"] = execution_meta
+        frame["observation_ref"] = observation_ref
+        frame["checkpoint_ref"] = checkpoint_ref
+        frame["step_reflection_ref"] = step_reflection_ref
+        return frame
 
+    async def _flat_terminal_verify_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        iteration_index = int(frame["iteration"])
+        plan = cast(dict[str, Any], frame["plan"])
+        context_pack = cast("WorkspaceContextPackage", frame["context_pack"])
+        decision_ref = frame["decision_ref"]
+        execution_result = frame["execution_result"]
+        execution_meta = cast(dict[str, Any], frame["execution_meta"])
+        observation_ref = frame["observation_ref"]
+        step_reflection_ref = frame.get("step_reflection_ref")
         should_verify, verification_decision = self._should_request_flat_final_verification(
             execution_result,
             execution_meta,
         )
+        terminal_transition: dict[str, Any] | None = None
         if should_verify:
             await self._emit_progress(
                 iteration_index,
@@ -270,15 +395,29 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 f"Iteration {iteration_index}: verifying the evidence against every success criterion.",
             )
             try:
-                verification = await self._await_task_deadline(
-                    self._request_verification(
+                terminal_transition = await self._await_task_deadline(
+                    self._run_terminal_verification(
                         iteration_index,
                         plan=plan,
                         execution_result=execution_result,
                         execution_meta=execution_meta,
                         context_pack=context_pack,
+                        preferred_final_result=(
+                            self._candidate_final_result_from_execution_result(
+                                execution_result,
+                                include_answer=False,
+                            )
+                            if str(plan.get("deliverable_mode") or "")
+                            == "inline_final"
+                            else None
+                        ),
                     ),
                     stage="verify",
+                )
+                assert terminal_transition is not None
+                verification = cast(
+                    dict[str, Any],
+                    terminal_transition["verification"],
                 )
             except _AgentTaskDeadlineExceeded as error:
                 await self._record_timed_out_verification_iteration(
@@ -291,13 +430,14 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     step_reflection_ref=step_reflection_ref,
                     error=error,
                 )
-                return await self._terminate_timed_out(
+                frame["iteration_result"] = await self._terminate_timed_out(
                     iteration_index,
                     stage=error.stage,
                     reason=error.reason,
                     limit_name=error.limit_name,
                     timeout_seconds=error.timeout_seconds,
                 )
+                return frame
             verification_source = "independent_verifier"
         else:
             verification = self._flat_consumer_continuation_verification(
@@ -311,10 +451,6 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "continue",
                 f"Iteration {iteration_index}: bounded step reported remaining work; the next iteration will consume its evidence.",
             )
-        if bool(verification.get("is_complete")):
-            missing_deliverables = await self._missing_required_workspace_deliverables()
-            if missing_deliverables:
-                self._guard_missing_required_deliverables(verification, missing_deliverables)
         await self._record_phase(
             "verified",
             iteration=iteration_index,
@@ -392,17 +528,39 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         # _normalize_verification; persist a resumable snapshot for this
         # iteration so a crashed task can continue from the next iteration.
         await self._write_resume_snapshot(iteration_index, verification)
+        frame["verification"] = verification
+        frame["verification_source"] = verification_source
+        frame["verification_ref"] = verification_ref
+        frame["verification_reflection_ref"] = verification_reflection_ref
+        frame["terminal_transition"] = terminal_transition
+        return frame
 
+    async def _flat_transition_decide_stage(
+        self,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        if frame.get("iteration_result") is not None:
+            return frame
+        iteration_index = int(frame["iteration"])
+        verification = cast(dict[str, Any], frame["verification"])
+        verification_source = str(frame["verification_source"])
+        execution_result = frame["execution_result"]
+        terminal_transition = cast(
+            dict[str, Any] | None,
+            frame.get("terminal_transition"),
+        )
         if bool(verification.get("is_complete")):
             self.status = "completed"
-            final_result = verification.get("final_result") or execution_result
-            terminal_refs = self._trusted_terminal_refs(execution_result, verification)
-            terminal_file_refs = self._trusted_terminal_file_refs(terminal_refs)
-            promoted_refs = await self._register_terminal_deliverables(terminal_refs)
-            final_result = self._compact_terminal_final_result(
-                final_result,
-                trusted_file_refs=terminal_file_refs,
+            terminal_result = cast(
+                Mapping[str, Any],
+                terminal_transition.get("terminal_result", {})
+                if terminal_transition is not None
+                else {},
             )
+            final_result = terminal_result.get("final_result")
+            terminal_refs = list(terminal_result.get("terminal_refs") or [])
+            terminal_file_refs = list(terminal_result.get("final_file_refs") or [])
+            promoted_refs = await self._register_terminal_deliverables(terminal_refs)
             self.result = {
                 "status": "completed",
                 "accepted": True,
@@ -436,23 +594,31 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 diagnostics={"status": self.status, "accepted": True, "artifact_status": "accepted"},
             )
             await self._emit("agent_task.completed", self.result)
-            return {"terminal": True, "status": self.status}
+            frame["iteration_result"] = {"terminal": True, "status": self.status}
+            return frame
 
         if verification.get("requires_block"):
             self.status = "blocked"
             reason = verification.get("reason") or "Verifier blocked the task."
-            blocked_final_result = verification.get("final_result") or ""
-            blocked_terminal_refs = self._trusted_terminal_refs(execution_result, verification)
-            blocked_final_refs = self._trusted_terminal_file_refs(blocked_terminal_refs)
-            promoted_refs = await self._register_terminal_deliverables(blocked_terminal_refs)
-            blocked_final_result = self._compact_terminal_final_result(
-                blocked_final_result,
-                trusted_file_refs=blocked_final_refs,
+            convergence = verification.get("terminal_convergence")
+            stopped_after_repeated_issue = isinstance(convergence, Mapping) and bool(
+                convergence.get("stopped_after_third_occurrence")
             )
+            artifact_status = "partial" if stopped_after_repeated_issue else "blocked"
+            terminal_result = cast(
+                Mapping[str, Any],
+                terminal_transition.get("terminal_result", {})
+                if terminal_transition is not None
+                else {},
+            )
+            blocked_final_result = terminal_result.get("final_result", "")
+            blocked_terminal_refs = list(terminal_result.get("terminal_refs") or [])
+            blocked_final_refs = list(terminal_result.get("final_file_refs") or [])
+            promoted_refs = await self._register_terminal_deliverables(blocked_terminal_refs)
             self.result = {
                 "status": "blocked",
                 "accepted": False,
-                "artifact_status": "blocked",
+                "artifact_status": artifact_status,
                 "task_id": self.id,
                 "execution_strategy": self.execution_strategy,
                 "effective_execution_strategy": self.effective_execution_strategy,
@@ -460,7 +626,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "final_response": self._agent_task_user_final_response(
                     final=verification,
                     accepted=False,
-                    artifact_status="blocked",
+                    artifact_status=artifact_status,
                     status="blocked",
                     reason=str(reason),
                     missing_criteria=verification.get("missing_criteria", []),
@@ -480,10 +646,11 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             await self._record_phase(
                 "terminal",
                 iteration=iteration_index,
-                diagnostics={"status": self.status, "accepted": False, "artifact_status": "blocked"},
+                diagnostics={"status": self.status, "accepted": False, "artifact_status": artifact_status},
             )
             await self._emit("agent_task.blocked", self.result)
-            return {"terminal": True, "status": self.status}
+            frame["iteration_result"] = {"terminal": True, "status": self.status}
+            return frame
 
         if self.max_iterations is not None and iteration_index >= self.max_iterations:
             missing_capabilities = self._normalize_string_list(verification.get("missing_required_capabilities"))
@@ -496,14 +663,29 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             else:
                 self.status = "max_iterations"
                 reason = verification.get("reason") or "Task did not pass verification before max_iterations."
-            partial_final_result = verification.get("final_result") or ""
-            partial_terminal_refs = self._trusted_terminal_refs(execution_result, verification)
-            partial_final_refs = self._trusted_terminal_file_refs(partial_terminal_refs)
-            promoted_refs = await self._register_terminal_deliverables(partial_terminal_refs)
-            partial_final_result = self._compact_terminal_final_result(
-                partial_final_result,
-                trusted_file_refs=partial_final_refs,
+            terminal_result = cast(
+                Mapping[str, Any],
+                terminal_transition.get("terminal_result", {})
+                if terminal_transition is not None
+                else {},
             )
+            partial_final_result = terminal_result.get("final_result") or verification.get("final_result") or ""
+            partial_terminal_refs = list(terminal_result.get("terminal_refs") or [])
+            partial_final_refs = list(terminal_result.get("final_file_refs") or [])
+            if terminal_transition is None:
+                partial_terminal_refs = self._trusted_terminal_refs(
+                    execution_result,
+                    verification,
+                )
+                partial_final_refs = self._trusted_terminal_file_refs(
+                    partial_terminal_refs
+                )
+            promoted_refs = await self._register_terminal_deliverables(partial_terminal_refs)
+            if terminal_transition is None:
+                partial_final_result = self._compact_terminal_final_result(
+                    partial_final_result,
+                    trusted_file_refs=partial_final_refs,
+                )
             self.result = {
                 "status": self.status,
                 "accepted": False,
@@ -538,7 +720,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 diagnostics={"status": self.status, "accepted": False, "artifact_status": "partial"},
             )
             await self._emit("agent_task.blocked", self.result)
-            return {"terminal": True, "status": self.status}
+            frame["iteration_result"] = {"terminal": True, "status": self.status}
+            return frame
 
         await self._emit_progress(
             iteration_index,
@@ -572,7 +755,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "replan_signals": verification.get("replan_signals", []),
             },
         )
-        return {"terminal": False, "status": "continue"}
+        frame["iteration_result"] = {"terminal": False, "status": "continue"}
+        return frame
 
     def _flat_execution_meta_with_context_capability_logs(
         self,
@@ -882,52 +1066,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             case = prompt_input.get("case")
             if isinstance(case, Mapping):
                 add_contract(case.get("output_contract"))
+        add_deliverables(getattr(self, "_taskboard_planned_workspace_deliverables", []))
         return paths
-
-    async def _missing_required_workspace_deliverables(self) -> list[str]:
-        missing: list[str] = []
-        for path in self._required_workspace_deliverables():
-            try:
-                read_result = await self.workspace.read_file(path, max_bytes=1)
-            except Exception:
-                missing.append(path)
-                continue
-            try:
-                size = int(read_result.get("bytes") or 0)
-            except (TypeError, ValueError):
-                size = 0
-            if size <= 0:
-                missing.append(path)
-        return missing
-
-    def _guard_missing_required_deliverables(
-        self,
-        verification: dict[str, Any],
-        missing_deliverables: Sequence[str],
-    ) -> None:
-        if not missing_deliverables:
-            return
-        message = "Missing required Workspace deliverable(s): " + ", ".join(str(item) for item in missing_deliverables)
-        verification["is_complete"] = False
-        verification["final_result_required"] = True
-        verification["missing_criteria"] = self._merge_string_lists(
-            verification.get("missing_criteria"),
-            [message],
-        )
-        verification["acceptance_delta"] = self._merge_string_lists(
-            verification.get("acceptance_delta"),
-            [message],
-        )
-        verification["guard_reasons"] = self._merge_string_lists(
-            verification.get("guard_reasons"),
-            ["required_workspace_deliverable_missing"],
-        )
-        if not str(verification.get("failure_analysis") or "").strip():
-            verification["failure_analysis"] = message
-        if not str(verification.get("replan_instruction") or "").strip():
-            verification["replan_instruction"] = (
-                "Write and read back the required Workspace deliverable before accepting completion."
-            )
 
     def _normalize_step_plan(self, plan: Any) -> dict[str, Any]:
         normalized: dict[str, Any]
@@ -980,6 +1120,22 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             or raw_scope.get("required_actions")
         )
         normalized["required_action_ids"] = required_action_ids
+        raw_action_commands = normalized.get("action_commands")
+        if raw_action_commands is not None:
+            normalized["action_commands"] = DataFormatter.sanitize(raw_action_commands)
+        if raw_action_commands not in (None, [], ()) and shape != "actions":
+            normalized["declared_execution_shape"] = shape
+            diagnostics = normalized.setdefault("normalization_diagnostics", [])
+            if isinstance(diagnostics, list):
+                diagnostics.append(
+                    {
+                        "code": "agent_task.flat_plan.action_commands_override_shape",
+                        "declared_execution_shape": shape,
+                        "resolved_execution_shape": "actions",
+                    }
+                )
+            normalized["execution_shape"] = "actions"
+            normalized["effective_execution_shape"] = "actions"
         scoped_retrieval = self._normalize_scoped_retrieval_plan(normalized.get("scoped_retrieval"))
         if scoped_retrieval:
             normalized["scoped_retrieval"] = scoped_retrieval
@@ -1138,7 +1294,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             normalized_mode = ""
 
         required_deliverables = self._required_workspace_deliverables()
-        if required_deliverables and normalized_mode in {"", "inline_final"}:
+        if required_deliverables and not normalized_mode:
             plan["deliverable_mode"] = "sectioned_workspace_artifact"
             plan["deliverable_mode_source"] = "required_workspace_deliverables"
             plan.setdefault("required_workspace_deliverables", required_deliverables)
@@ -1612,6 +1768,42 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 deduped.append(capability_id)
         return deduped, unenforced
 
+    def _accumulate_capability_evidence(
+        self,
+        execution_evidence_summary: Mapping[str, Any],
+    ) -> None:
+        """Record host-observed capability facts before any completion gate.
+
+        This is deliberately structural: Action success comes only from the
+        accumulated Action evidence producer, never from verifier prose or a
+        Workspace readback. Both terminal preflight and post-verifier
+        normalization consume the same state owner.
+        """
+
+        self._satisfied_required_actions.update(
+            self._normalize_string_list(execution_evidence_summary.get("action_ids"))
+        )
+        self._satisfied_required_skills.update(
+            self._normalize_string_list(
+                execution_evidence_summary.get("selected_skill_ids")
+            )
+        )
+        self._satisfied_capabilities.update(
+            self._normalize_string_list(
+                execution_evidence_summary.get("capabilities_used")
+            )
+        )
+        capability_evidence = execution_evidence_summary.get("capability_evidence")
+        if isinstance(capability_evidence, Mapping) and isinstance(
+            capability_evidence.get("actions"),
+            Mapping,
+        ):
+            self._satisfied_succeeded_actions.update(
+                self._normalize_string_list(
+                    capability_evidence["actions"].get("succeeded")
+                )
+            )
+
     async def _request_plan(self, iteration_index: int, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
         request = self.agent.create_temp_request()
         language_policy = self._language_policy()
@@ -1672,6 +1864,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "acceptance facts and deterministic guards. When repair_context.available_evidence_anchors is present, "
             "use its exact source_refs values and action_result_previews as the bounded evidence anchor set for repair; "
             "do not shorten, infer, or reconstruct URLs, file paths, or source refs from source titles or prose feedback. "
+            "When repair_context.material_claim_repair_contract is present, repair its structured claim/state "
+            "requirements directly; do not derive a factual repair contract from verifier prose. "
             "source_refs with content_state='ref_only' prove only discovery or materialization; read the referenced "
             "file/ref before using its content for repository, document, or source-grounded claims. "
             "When context_pack.skills_context_pack is present, its guidance and selected_resources are already "
@@ -1693,7 +1887,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "ids when it is only meant to gather evidence; leave it empty when the step may use any available capability. "
             "When the user explicitly requires a named action/tool to be called, or the next step cannot be accepted "
             "without that exact action's execution record, set required_action_ids to those action ids instead of "
-            "claiming the action was requested in prose."
+            "claiming the action was requested in prose. The host will then provide only those required Action contracts "
+            "to one narrow command request before direct ActionRuntime dispatch; do not attempt to reproduce strict "
+            "Action kwargs from the compact planner capability list."
             " For Workspace, repository, or file-backed evidence, prefer scoped retrieval before bulk reads when it can "
             "reduce prompt input. If useful, return scoped_retrieval.query_groups with prioritized exact phrases or "
             "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. Workspace.retrieve/read executors only "
@@ -1769,6 +1965,139 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         plan = await self._await_task_request(request.async_get_data(), stage="plan")
         return self._normalize_step_plan(plan)
 
+    async def _try_flat_preplanned_action_calls(
+        self,
+        iteration_index: int,
+        plan: Mapping[str, Any],
+        *,
+        raw_commands_override: Any = None,
+        command_source: str = "flat_plan",
+        action_planning_model_requests: int = 0,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        if str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "") != "actions":
+            return None
+        raw_commands = (
+            raw_commands_override
+            if raw_commands_override is not None
+            else plan.get("action_commands")
+        )
+        if raw_commands in (None, [], ()):
+            return None
+        return await self._execute_bounded_action_commands(
+            raw_commands=raw_commands,
+            required_action_ids=self._normalize_string_list(plan.get("required_action_ids")),
+            execution_id=f"{self.id}:flat:iter-{iteration_index}:action-call",
+            code_prefix="agent_task.flat.action_commands",
+            execution_kind="flat_bounded_action_calls",
+            command_source=command_source,
+            action_planning_model_requests=action_planning_model_requests,
+            unit_label="Flat step",
+            todo_suggestion="Finish this bounded Flat action step after execution.",
+            concurrency=1,
+        )
+
+    async def _try_flat_narrow_action_command_request(
+        self,
+        iteration_index: int,
+        plan: Mapping[str, Any],
+        context_pack: "WorkspaceContextPackage",
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """Resolve required Flat Action kwargs once, then dispatch directly."""
+
+        if str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "") != "actions":
+            return None
+        if plan.get("action_commands") not in (None, [], ()):
+            return None
+        required_action_ids = self._normalize_string_list(plan.get("required_action_ids"))
+        if not required_action_ids:
+            return None
+
+        execution_id = f"{self.id}:flat:iter-{iteration_index}:action-call"
+        action_contracts, unavailable_action_id = self._bounded_action_contracts(
+            required_action_ids
+        )
+        if unavailable_action_id is not None:
+            return self._bounded_action_command_failure(
+                execution_id=execution_id,
+                code="agent_task.flat.action_commands.required_action_unavailable",
+                message=f"Required Flat Action '{unavailable_action_id}' is unavailable.",
+                execution_kind="flat_bounded_action_calls",
+                command_source="flat_action_command_request",
+                action_planning_model_requests=0,
+            )
+
+        request = self.agent.create_temp_request()
+        language_policy = self._language_policy()
+        self._apply_language_policy_to_request(request, language_policy)
+        repair_context = self._active_repair_context()
+        request.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "iteration": iteration_index,
+                "bounded_step_plan": DataFormatter.sanitize(dict(plan)),
+                "context_pack": DataFormatter.sanitize(context_pack),
+                "repair_context": DataFormatter.sanitize(repair_context or {}),
+            }
+        )
+        request.info(
+            {
+                "available_actions": action_contracts,
+                "required_action_ids": required_action_ids,
+            }
+        )
+        request.instruct(
+            "Produce the complete bounded Action command batch for this one Flat AgentTask step. "
+            "Use only offered action_id values and exact kwargs defined by each Action contract. "
+            "Use bounded_step_plan, context_pack, and repair_context only to fill required arguments. "
+            "Return commands in dependency order; the host executes this bounded Flat batch serially. "
+            "Do not execute Actions, synthesize a final response outside Action inputs, invent placeholders, or "
+            "request another planning round. Include every required_action_id at least once; repeated calls are "
+            "allowed only when distinct inputs are required by this bounded step."
+        )
+        request.output(
+            {
+                "action_commands": (
+                    [
+                        {
+                            "purpose": (str, "Bounded purpose for this exact Action call.", True),
+                            "action_id": (str, "Exact offered Action id.", True),
+                            "action_input": (dict, "Complete kwargs for the Action contract.", True),
+                        }
+                    ],
+                    "Complete Action command batch for this Flat step.",
+                    True,
+                )
+            },
+            format="json",
+        )
+        await self._emit(
+            f"agent_task.iteration.{iteration_index}.action_commands.started",
+            {
+                "iteration": iteration_index,
+                "required_action_ids": required_action_ids,
+            },
+        )
+        raw = await self._await_task_request(request.async_get_data(), stage="execute")
+        raw_commands = raw.get("action_commands") if isinstance(raw, Mapping) else None
+        if raw_commands in (None, [], ()):
+            return self._bounded_action_command_failure(
+                execution_id=execution_id,
+                code="agent_task.flat.action_commands.empty_model_result",
+                message="The Flat Action command request returned no commands.",
+                execution_kind="flat_bounded_action_calls",
+                command_source="flat_action_command_request",
+                action_planning_model_requests=1,
+            )
+        return await self._try_flat_preplanned_action_calls(
+            iteration_index,
+            plan,
+            raw_commands_override=raw_commands,
+            command_source="flat_action_command_request",
+            action_planning_model_requests=1,
+        )
+
     async def _execute_step(
         self,
         iteration_index: int,
@@ -1784,10 +2113,40 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
 
         plan = self._normalize_step_plan(plan)
         work_unit = self._build_flat_work_unit_intent(iteration_index, plan, context_pack)
+        grounding_patch_context = self._flat_grounding_workspace_patch_context(
+            self._active_repair_context()
+        )
 
         async def run_agent_step(_context: Mapping[str, Any]) -> Mapping[str, Any]:
+            if grounding_patch_context:
+                return await self._run_flat_grounding_workspace_patch_step(
+                    iteration_index,
+                    plan=plan,
+                    patch_context=grounding_patch_context,
+                )
+            preplanned_action_calls = await self._try_flat_preplanned_action_calls(
+                iteration_index,
+                plan,
+            )
+            if preplanned_action_calls is not None:
+                direct_result, direct_meta = preplanned_action_calls
+                return {
+                    "execution_result": DataFormatter.sanitize(direct_result),
+                    "execution_meta": DataFormatter.sanitize(direct_meta),
+                }
+            narrow_action_commands = await self._try_flat_narrow_action_command_request(
+                iteration_index,
+                plan,
+                context_pack,
+            )
+            if narrow_action_commands is not None:
+                direct_result, direct_meta = narrow_action_commands
+                return {
+                    "execution_result": DataFormatter.sanitize(direct_result),
+                    "execution_meta": DataFormatter.sanitize(direct_meta),
+                }
             scoped_retrieval_results = self._scoped_retrieval_results_from_block_context(_context)
-            evidence_ledger = self._evidence_ledger_from_block_context(_context)
+            evidence_ledger = self._flat_step_evidence_ledger(_context)
             execution_result, execution_meta = await self._run_bounded_agent_execution_step(
                 iteration_index,
                 plan,
@@ -1810,12 +2169,23 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 context_pack=context_pack,
                 execution_id=f"{self.id}:iter-{iteration_index}",
                 handler=run_agent_step,
-                start_payload={
-                    "task_id": self.id,
-                    "iteration": iteration_index,
-                    "plan": DataFormatter.sanitize(plan),
-                    "context_pack": DataFormatter.sanitize(context_pack),
-                },
+                start_payload=(
+                    {
+                        "task_id": self.id,
+                        "iteration": iteration_index,
+                        "material_claim_workspace_patch": {
+                            "path": grounding_patch_context.get("path"),
+                            "content_version_id": grounding_patch_context.get("content_version_id"),
+                        },
+                    }
+                    if grounding_patch_context
+                    else {
+                        "task_id": self.id,
+                        "iteration": iteration_index,
+                        "plan": DataFormatter.sanitize(plan),
+                        "context_pack": DataFormatter.sanitize(context_pack),
+                    }
+                ),
             )
         except Exception as error:
             result, failed_meta = self._failed_execution_result(
@@ -1845,6 +2215,348 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         if status not in {"failed", "error", "timed_out", "blocked"}:
             await self._emit(f"agent_task.iteration.{iteration_index}.execution.completed", execution_meta)
         return execution_result, cast(dict[str, Any], execution_meta)
+
+    @staticmethod
+    def _flat_execution_is_grounding_workspace_patch(
+        execution_meta: Mapping[str, Any],
+    ) -> bool:
+        diagnostics = execution_meta.get("diagnostics")
+        candidates: list[Mapping[str, Any]] = []
+        if isinstance(diagnostics, Mapping):
+            candidates.append(diagnostics)
+        elif isinstance(diagnostics, Sequence) and not isinstance(
+            diagnostics,
+            str | bytes | bytearray,
+        ):
+            candidates.extend(item for item in diagnostics if isinstance(item, Mapping))
+        return any(
+            str(item.get("execution_kind") or "") == "flat_grounding_workspace_patch"
+            for item in candidates
+        )
+
+    def _flat_grounding_workspace_patch_context(
+        self,
+        repair_context: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(repair_context, Mapping):
+            return {}
+        grounding_contract = repair_context.get("material_claim_repair_contract")
+        if not isinstance(grounding_contract, Mapping):
+            return {}
+        requirements = self._grounding_patch_mapping_sequence(
+            grounding_contract.get("requirements")
+        )
+        if not requirements:
+            return {}
+        candidate = self._terminal_carrier_for_repair_contract(grounding_contract)
+        if candidate is None or candidate.kind != "workspace_artifact":
+            return {}
+        candidate_path = self._workspace_artifact_display_path(candidate.path)
+        if not candidate_path:
+            return {}
+        required_paths = {
+            self._workspace_artifact_display_path(path)
+            for path in self._required_workspace_deliverables()
+            if self._workspace_artifact_display_path(path)
+        }
+        # A promoted Grounding candidate is already a host-selected file. When
+        # the task declares file deliverables, never redirect the repair to a
+        # different path supplied by the model.
+        if required_paths and candidate_path not in required_paths:
+            return {
+                "path": candidate_path,
+                "content_version_id": candidate.content_version_id,
+                "material_claim_repair_contract": DataFormatter.sanitize(dict(grounding_contract)),
+                "invalid_reason": (
+                    "The promoted grounding candidate is not an authorized required Workspace deliverable."
+                ),
+            }
+        candidate_version = candidate.content_version_id
+        contract_versions = {
+            str(item.get("content_version_id") or "").strip()
+            for item in requirements
+            if str(item.get("content_version_id") or "").strip()
+        }
+        if not candidate_version or contract_versions != {candidate_version}:
+            return {
+                "path": candidate_path,
+                "content_version_id": candidate_version,
+                "material_claim_repair_contract": DataFormatter.sanitize(dict(grounding_contract)),
+                "invalid_reason": (
+                    "The grounding repair contract does not identify the current promoted artifact content version."
+                ),
+            }
+        return {
+            "path": candidate_path,
+            "content_version_id": candidate_version,
+            "material_claim_repair_contract": DataFormatter.sanitize(dict(grounding_contract)),
+        }
+
+    @staticmethod
+    def _flat_grounding_workspace_patch_output_schema() -> dict[str, Any]:
+        return {
+            "step_result": (
+                str,
+                "Concise summary of the bounded grounding repair; no artifact body",
+                True,
+            ),
+            "patch_proposal": (
+                {
+                    "path": (str, "The one authorized Workspace artifact path", True),
+                    "operations": (
+                        [
+                            {
+                                "claim_key": (
+                                    str,
+                                    "One exact host-issued material_claim_repair_contract claim_key",
+                                    True,
+                                ),
+                                "op": (Literal["replace"], "Only exact replacement is allowed", True),
+                                "old_string": (
+                                    str,
+                                    "Exact current artifact text wholly within that claim's artifact_quote",
+                                    True,
+                                ),
+                                "new_string": (
+                                    str,
+                                    "Bounded supported replacement; empty removes the unsupported claim",
+                                    True,
+                                ),
+                            }
+                        ],
+                        "Exactly one replace operation per offered claim_key",
+                        True,
+                    ),
+                },
+                "A claim-scoped Workspace patch proposal; never a complete artifact body",
+                True,
+            ),
+            "evidence": (
+                [str],
+                "Short notes identifying the offered evidence used for each replacement",
+                False,
+            ),
+            "remaining_work": (
+                [str],
+                "Grounding repair work that remains after the proposed replacements",
+                False,
+            ),
+            "ready_for_final_verification": (
+                bool,
+                "True only when every grounding requirement has one bounded replacement",
+                False,
+            ),
+            "self_check": (
+                str,
+                "Short check that no unrelated artifact text was changed",
+                False,
+            ),
+            "short_summary": (
+                str,
+                "Short downstream summary without copying the artifact body",
+                False,
+            ),
+            "progress_message": (
+                str,
+                "One safe progress sentence without a whole-task completion claim",
+                False,
+            ),
+        }
+
+    async def _run_flat_grounding_workspace_patch_step(
+        self,
+        iteration_index: int,
+        *,
+        plan: Mapping[str, Any],
+        patch_context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        grounding_contract = patch_context.get("material_claim_repair_contract")
+        if not isinstance(grounding_contract, Mapping):
+            raise ValueError("Flat grounding patch requires a structured grounding repair contract.")
+        path = self._workspace_artifact_display_path(patch_context.get("path"))
+        invalid_reason = str(patch_context.get("invalid_reason") or "").strip()
+        if invalid_reason:
+            execution_id = f"{self.id}:iter-{iteration_index}:grounding-patch"
+            await self._emit(
+                f"agent_task.iteration.{iteration_index}.execution.started",
+                {
+                    "execution_id": execution_id,
+                    "step_execution": {
+                        "requested_shape": str(plan.get("execution_shape") or "direct"),
+                        "effective_shape": "direct",
+                        "action_scope_source": "grounding_host_patch",
+                    },
+                },
+            )
+            return {
+                "execution_result": {
+                    "step_result": "Grounding-only Workspace repair was rejected before model execution.",
+                    "workspace_patch_delivery": {
+                        "status": "failed",
+                        "path": path,
+                        "reason": invalid_reason,
+                    },
+                    "file_refs": [],
+                    "remaining_work": [invalid_reason],
+                    "ready_for_final_verification": False,
+                    "diagnostics": [
+                        {
+                            "code": "agent_task.flat.grounding_workspace_patch_contract_invalid",
+                            "path": path,
+                            "message": invalid_reason,
+                            "source": "agent_task.flat.grounding_workspace_patch",
+                        }
+                    ],
+                },
+                "execution_meta": {
+                    "execution_id": execution_id,
+                    "status": "blocked",
+                    "route": {"selected_route": "model_request", "status": "not_started"},
+                    "logs": {
+                        "action_logs": {},
+                        "route_logs": {},
+                        "errors": [{"message": invalid_reason}],
+                    },
+                    "diagnostics": [
+                        {
+                            "execution_kind": "flat_grounding_workspace_patch",
+                            "execution_strategy": self.execution_strategy,
+                            "path": path,
+                            "contract_status": "invalid",
+                        }
+                    ],
+                },
+            }
+        request = self.agent.create_temp_request()
+        language_policy = self._language_policy()
+        self._apply_language_policy_to_request(request, language_policy)
+        repair_context = self._active_repair_context()
+        request.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "iteration": iteration_index,
+                "authorized_workspace_target": {
+                    "path": path,
+                    "content_version_id": patch_context.get("content_version_id"),
+                },
+                "available_evidence_anchors": DataFormatter.sanitize(
+                    repair_context.get("available_evidence_anchors", {})
+                    if isinstance(repair_context, Mapping)
+                    else {}
+                ),
+                "language_policy": language_policy,
+            }
+        )
+        request.info(
+            {
+                "material_claim_repair_contract": DataFormatter.sanitize(dict(grounding_contract)),
+                "patch_contract": {
+                    "authorized_operation": "replace",
+                    "claim_cardinality": "exactly_one_operation_per_claim_key",
+                    "scope": "old_string_within_matching_artifact_quote",
+                    "version_policy": "host_validates_content_version_before_write",
+                },
+            }
+        )
+        request.instruct(
+            "Propose the smallest deterministic repair for the structured grounding requirements. "
+            "Return exactly one replace operation for every offered claim_key and copy old_string exactly from that "
+            "requirement's artifact_quote. Use only the authorized Workspace target path. new_string may narrow the "
+            "claim to what the offered evidence supports or remove it when no supported replacement is available. "
+            "Do not call Actions, do not return candidate_final_result, final_result, artifact_markdown, a full-file "
+            "body, a full-file rewrite, append/insert/write operations, replace_all, or edits outside the implicated "
+            "artifact quotes. The host validates identity, scope, current content version, exact-match cardinality, "
+            "applies the patch, and reads the artifact back."
+        )
+        request.output(self._flat_grounding_workspace_patch_output_schema(), format="json")
+        execution_id = f"{self.id}:iter-{iteration_index}:grounding-patch"
+        await self._emit(
+            f"agent_task.iteration.{iteration_index}.execution.started",
+            {
+                "execution_id": execution_id,
+                "step_execution": {
+                    "requested_shape": str(plan.get("execution_shape") or "direct"),
+                    "effective_shape": "direct",
+                    "action_scope_source": "grounding_host_patch",
+                },
+            },
+        )
+        output = await self._await_task_request(request.async_get_data(), stage="execute")
+        result: dict[str, Any] = (
+            dict(output) if isinstance(output, Mapping) else {"step_result": str(output or "")}
+        )
+        raw_patch = result.get("patch_proposal")
+        delivery = (
+            await self._apply_grounding_workspace_patch(
+                raw_patch,
+                grounding_contract,
+                allowed_patch_paths=[path],
+                source=f"agent_task.iteration.{iteration_index}.grounding_workspace_patch",
+            )
+            if isinstance(raw_patch, Mapping)
+            else {
+                "status": "failed",
+                "path": path,
+                "reason": "Grounding repair request returned no structured patch_proposal.",
+            }
+        )
+        result["workspace_patch_proposal"] = DataFormatter.sanitize(raw_patch or {})
+        result.pop("patch_proposal", None)
+        result["workspace_patch_delivery"] = DataFormatter.sanitize(delivery)
+        diagnostics = self._grounding_patch_mapping_sequence(result.get("diagnostics"))
+        execution_meta: dict[str, Any] = {
+            "execution_id": execution_id,
+            "status": "completed" if delivery.get("status") == "completed" else "blocked",
+            "route": {"selected_route": "model_request", "status": "completed"},
+            "logs": {"action_logs": {}, "route_logs": {}, "errors": []},
+            "diagnostics": [
+                {
+                    "execution_kind": "flat_grounding_workspace_patch",
+                    "execution_strategy": self.execution_strategy,
+                    "path": path,
+                    "base_content_version_id": patch_context.get("content_version_id"),
+                    "result_content_version_id": delivery.get("content_version_id"),
+                }
+            ],
+        }
+        if delivery.get("status") == "completed":
+            refs = [
+                dict(item)
+                for item in self._grounding_patch_mapping_sequence(delivery.get("file_refs"))
+            ]
+            result["file_refs"] = DataFormatter.sanitize(refs)
+            result["remaining_work"] = []
+            result["ready_for_final_verification"] = True
+            diagnostics.append(
+                {
+                    "code": "agent_task.flat.grounding_workspace_patch_applied",
+                    "path": path,
+                    "operation_count": delivery.get("operation_count", 0),
+                    "source": "agent_task.flat.grounding_workspace_patch",
+                }
+            )
+            self._append_workspace_artifact_meta(execution_meta, refs)
+        else:
+            reason = str(delivery.get("reason") or "Grounding Workspace patch could not be applied.").strip()
+            result["file_refs"] = []
+            result["remaining_work"] = [reason]
+            result["ready_for_final_verification"] = False
+            diagnostics.append(
+                {
+                    "code": "agent_task.flat.grounding_workspace_patch_failed",
+                    "path": path,
+                    "message": reason,
+                    "source": "agent_task.flat.grounding_workspace_patch",
+                }
+            )
+            execution_meta["logs"]["errors"].append({"message": reason})
+        result["diagnostics"] = DataFormatter.sanitize(diagnostics)
+        return {
+            "execution_result": DataFormatter.sanitize(result),
+            "execution_meta": DataFormatter.sanitize(execution_meta),
+        }
 
     async def _run_bounded_agent_execution_step(
         self,
@@ -1941,6 +2653,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "Use its acceptance_delta, advisory_repair_constraints, advisory_next_step_requirements, and "
                     "available_evidence_anchors as the correction contract; do not rely on the planner restating every "
                     "repair fact in step_instruction. "
+                    "If material_claim_repair_contract is present, consume its structured claim requirements directly and "
+                    "do not infer them from reason or other prose fields. "
                     "Do not claim final completion unless evidence supports it. "
                     "Use remaining_work for task-level work that the next Flat iteration should consume or perform. "
                     "Non-empty remaining_work defaults to intermediate and skips terminal verification for this work "
@@ -2066,7 +2780,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 ),
                 "evidence_use": (
                     [dict],
-                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
+                    "Claim bindings: [{claim, evidence_ids, support_type}], where evidence_ids contains only offered stable reference_id values and support_type is content, unavailability, or ref_pointer; for file/section claims select the bounded readback reference, never a free-text locator label",
                     False,
                 ),
                 "acceptance_points": (
@@ -2124,7 +2838,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             ),
             "evidence_use": (
                 [dict],
-                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
+                "Claim bindings: [{claim, evidence_ids, support_type}], where evidence_ids contains only offered stable reference_id values and support_type is content, unavailability, or ref_pointer; for file/section claims select the bounded readback reference, never a free-text locator label",
                 False,
             ),
             "acceptance_points": (

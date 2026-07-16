@@ -51,6 +51,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             self.status = "running"
             execution = self._flow.create_execution(auto_close=False, workspace=False)
             terminal_retention_status: WorkspaceRetentionTerminalStatus | None = None
+            self._lifecycle_error = None
             try:
                 await self._record_phase(
                     "configured",
@@ -64,6 +65,14 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     },
                 )
                 await execution.async_start({"task_id": self.id})
+                # The lifecycle graph schedules later iterations through
+                # chunk-owned signals. Seal and drain those accepted signals
+                # before inspecting terminal state; otherwise async_start can
+                # return after lifecycle.start while transition.decide is
+                # still running in the queue.
+                await execution.async_close(reason="agent_task.lifecycle_complete")
+                if self._lifecycle_error is not None:
+                    raise self._lifecycle_error
                 if self.status == "running":
                     if self.max_iterations is not None:
                         self.status = "max_iterations"
@@ -535,8 +544,14 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             return configured
         return _AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS
 
-    def _apply_child_execution_action_loop_guard(self, execution: Any) -> Any:
-        max_rounds = self._task_action_loop_max_rounds()
+    def _apply_child_execution_action_loop_guard(
+        self,
+        execution: Any,
+        *,
+        max_rounds: int | None = None,
+    ) -> Any:
+        if max_rounds is None:
+            max_rounds = self._task_action_loop_max_rounds()
         if max_rounds is None:
             return execution
         request = getattr(execution, "request", None)

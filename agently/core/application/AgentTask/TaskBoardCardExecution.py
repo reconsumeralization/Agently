@@ -19,6 +19,416 @@ from .TaskBoardSourceRefs import _TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION
 
 
 class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
+    async def _try_taskboard_preplanned_action_calls(
+        self,
+        context: Any,
+        *,
+        raw_commands_override: Any = None,
+        command_source: str = "taskboard_plan",
+        action_planning_model_requests: int = 0,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        card = getattr(context, "card", None)
+        if self._taskboard_card_execution_shape(card) != "actions":
+            return None
+        metadata = getattr(card, "metadata", None)
+        raw_commands = (
+            raw_commands_override
+            if raw_commands_override is not None
+            else metadata.get("action_commands")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        if raw_commands in (None, [], ()):
+            return None
+        card_id = str(getattr(card, "id", "") or "")
+        return await self._execute_bounded_action_commands(
+            raw_commands=raw_commands,
+            required_action_ids=self._taskboard_card_required_action_ids(card),
+            execution_id=f"{self.id}:taskboard:{card_id or 'card'}:action-call",
+            code_prefix="taskboard.action_commands",
+            execution_kind="taskboard_preplanned_action_calls",
+            command_source=command_source,
+            action_planning_model_requests=action_planning_model_requests,
+            unit_label="TaskBoard",
+            todo_suggestion="Finish this bounded TaskBoard action card after execution.",
+        )
+
+    def _taskboard_preplanned_action_failure(
+        self,
+        *,
+        card_id: str,
+        code: str,
+        message: str,
+        command_source: str = "taskboard_plan",
+        action_planning_model_requests: int = 0,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        diagnostic = {
+            "code": code,
+            "message": message,
+            "execution_kind": "taskboard_preplanned_action_calls",
+            "command_source": command_source,
+            "action_planning_model_requests": action_planning_model_requests,
+        }
+        return (
+            {
+                "status": "failed",
+                "answer": "",
+                "remaining_work": [message],
+                "diagnostics": [diagnostic],
+            },
+            {
+                "execution_id": f"{self.id}:taskboard:{card_id or 'card'}:action-call",
+                "status": "failed",
+                "route": {"selected_route": "action_call", "status": "failed"},
+                "logs": {"action_logs": [], "route_logs": {}, "errors": [diagnostic]},
+                "diagnostics": [diagnostic],
+            },
+        )
+
+    async def _try_taskboard_narrow_action_command_request(
+        self,
+        context: Any,
+        *,
+        card_input_payload: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """Resolve unknown kwargs once, then dispatch through ActionRuntime directly."""
+
+        card = getattr(context, "card", None)
+        if self._taskboard_card_execution_shape(card) != "actions":
+            return None
+        metadata = getattr(card, "metadata", None)
+        if isinstance(metadata, Mapping) and metadata.get("action_commands") not in (None, [], ()):
+            return None
+
+        required_action_ids = self._taskboard_card_required_action_ids(card)
+        if not required_action_ids:
+            return None
+
+        action_contracts, unavailable_action_id = self._bounded_action_contracts(
+            required_action_ids
+        )
+        if unavailable_action_id is not None:
+            return self._taskboard_preplanned_action_failure(
+                card_id=str(getattr(card, "id", "") or ""),
+                code="taskboard.action_commands.required_action_unavailable",
+                message=f"Required TaskBoard Action '{unavailable_action_id}' is unavailable.",
+                command_source="taskboard_action_command_request",
+                action_planning_model_requests=0,
+            )
+
+        request = self.agent.create_temp_request()
+        self._apply_language_policy_to_request(request)
+        request.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "card": {
+                    "id": str(getattr(card, "id", "") or ""),
+                    "objective": str(getattr(card, "objective", "") or ""),
+                    "done_when": list(getattr(card, "done_when", ()) or ()),
+                    "required_outputs": list(getattr(card, "required_outputs", ()) or ()),
+                },
+                "dependency_results": DataFormatter.sanitize(
+                    card_input_payload.get("dependency_results", {})
+                ),
+            }
+        )
+        request.info(
+            {
+                "available_actions": action_contracts,
+                "required_action_ids": required_action_ids,
+            }
+        )
+        request.instruct(
+            "Produce the complete bounded Action command batch for this one TaskBoard card. "
+            "Use only offered action_id values and exact kwargs defined by each Action contract. "
+            "Use dependency_results for arguments that became available from upstream cards. "
+            "Do not execute Actions, synthesize the whole task, invent placeholders, or request another planning round. "
+            "Include every required_action_id at least once; repeated calls are allowed only when distinct inputs are "
+            "required by this card."
+        )
+        request.output(
+            {
+                "action_commands": (
+                    [
+                        {
+                            "purpose": (str, "Bounded purpose for this exact Action call.", True),
+                            "action_id": (str, "Exact offered Action id.", True),
+                            "action_input": (dict, "Complete kwargs for the Action contract.", True),
+                        }
+                    ],
+                    "Complete Action command batch for this card.",
+                    True,
+                )
+            },
+            format="json",
+        )
+        await self._emit(
+            f"agent_task.taskboard.card.{self._stream_path_token(str(getattr(card, 'id', '') or 'card'))}.action_commands.started",
+            {
+                "card_id": str(getattr(card, "id", "") or ""),
+                "required_action_ids": required_action_ids,
+            },
+        )
+        raw = await self._await_taskboard_card_execution(
+            request.async_get_data(),
+            card_id=str(getattr(card, "id", "") or ""),
+            stage="action_commands",
+        )
+        raw_commands = raw.get("action_commands") if isinstance(raw, Mapping) else None
+        if raw_commands in (None, [], ()):
+            return self._taskboard_preplanned_action_failure(
+                card_id=str(getattr(card, "id", "") or ""),
+                code="taskboard.action_commands.empty_model_result",
+                message="The TaskBoard Action command request returned no commands.",
+                command_source="taskboard_action_command_request",
+                action_planning_model_requests=1,
+            )
+        return await self._try_taskboard_preplanned_action_calls(
+            context,
+            raw_commands_override=raw_commands,
+            command_source="taskboard_action_command_request",
+            action_planning_model_requests=1,
+        )
+
+    async def _try_taskboard_workspace_artifact_action_transfer(
+        self,
+        context: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """Lower an exact Workspace artifact handoff to direct Action calls.
+
+        This path is intentionally structural: one upstream Workspace file, one
+        exact final path, and registered Workspace write/read Actions. It does
+        not infer paths or choose among competing source artifacts.
+        """
+
+        card = getattr(context, "card", None)
+        if self._taskboard_card_execution_shape(card) != "actions":
+            return None
+        metadata = getattr(card, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            return None
+        target_paths = self._normalize_string_list(metadata.get("final_workspace_deliverables"))
+        if len(target_paths) != 1:
+            return None
+        target_path = target_paths[0]
+        try:
+            self.workspace.resolve_file_path(target_path)
+        except Exception:
+            return None
+
+        action_requirements = self._taskboard_card_action_requirements(card)
+        required_card_action_ids = self._taskboard_card_required_action_ids(card)
+        registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
+        get_spec = getattr(registry, "get_spec", None)
+        if not callable(get_spec):
+            return None
+
+        def action_spec(action_id: str) -> Mapping[str, Any] | None:
+            spec = get_spec(action_id)
+            return spec if isinstance(spec, Mapping) else None
+
+        def is_workspace_write(action_id: str) -> bool:
+            spec = action_spec(action_id)
+            meta = spec.get("meta") if isinstance(spec, Mapping) else None
+            return bool(
+                isinstance(meta, Mapping)
+                and str(meta.get("component") or "") == "workspace"
+                and meta.get("write") is True
+                and isinstance(spec.get("kwargs"), Mapping)
+                and {"path", "content"}.issubset(spec["kwargs"])
+            )
+
+        write_action_ids = [action_id for action_id in required_card_action_ids if is_workspace_write(action_id)]
+        if len(write_action_ids) != 1:
+            return None
+
+        source_paths: list[str] = []
+        dependency_results = getattr(context, "dependency_results", None)
+        if not isinstance(dependency_results, Mapping):
+            return None
+        for dependency_result in dependency_results.values():
+            for collection_name in ("file_refs", "artifact_refs"):
+                refs = getattr(dependency_result, collection_name, ())
+                if not isinstance(refs, Sequence) or isinstance(refs, str | bytes | bytearray):
+                    continue
+                for ref in refs:
+                    if not isinstance(ref, Mapping) or ref.get("available", True) is False:
+                        continue
+                    path = str(ref.get("path") or "").strip()
+                    if path and path != target_path and path not in source_paths:
+                        source_paths.append(path)
+        if len(source_paths) != 1:
+            return None
+        source_path = source_paths[0]
+
+        try:
+            source_info = self.workspace.inspect_file(source_path)
+            source_size = int(source_info.get("size") or source_info.get("bytes") or 0)
+            source_read = await self.workspace.read_file(
+                source_path,
+                max_bytes=max(source_size + 1, 1),
+            )
+        except Exception as error:
+            return self._taskboard_direct_artifact_action_failure(
+                card_id=str(getattr(card, "id", "") or ""),
+                source_path=source_path,
+                target_path=target_path,
+                action_logs=[],
+                error=error,
+            )
+        source_content = source_read.get("content")
+        if not isinstance(source_content, str) or source_read.get("truncated") is True:
+            return self._taskboard_direct_artifact_action_failure(
+                card_id=str(getattr(card, "id", "") or ""),
+                source_path=source_path,
+                target_path=target_path,
+                action_logs=[],
+                error=RuntimeError("The source Workspace artifact is not a complete text body."),
+            )
+
+        write_action_id = write_action_ids[0]
+        write_records = await self.agent.action._async_execute_action_calls(
+            action_calls=[
+                {
+                    "action_id": write_action_id,
+                    "action_input": {"path": target_path, "content": source_content, "append": False},
+                    "purpose": f"Materialize {target_path} from the completed TaskBoard artifact.",
+                    "source_protocol": "taskboard_action_call",
+                }
+            ],
+            settings=self.agent.settings,
+            agent_name=self.agent.name,
+        )
+        action_logs = [dict(record) for record in write_records if isinstance(record, Mapping)]
+        write_result = action_logs[0] if action_logs else None
+
+        task_required_action_ids = self._task_contract_required_action_ids()
+
+        def is_workspace_read(action_id: str) -> bool:
+            spec = action_spec(action_id)
+            meta = spec.get("meta") if isinstance(spec, Mapping) else None
+            return bool(
+                isinstance(meta, Mapping)
+                and str(meta.get("component") or "") == "workspace"
+                and str(spec.get("side_effect_level") or "").strip().lower() == "read"
+                and isinstance(spec.get("kwargs"), Mapping)
+                and "path" in spec["kwargs"]
+            )
+
+        read_action_ids = sorted(
+            action_id for action_id in task_required_action_ids if is_workspace_read(action_id)
+        )
+        write_succeeded = self._taskboard_direct_action_succeeded(write_result)
+        if write_succeeded:
+            read_records = await self.agent.action._async_execute_action_calls(
+                action_calls=[
+                    {
+                        "action_id": read_action_id,
+                        "action_input": {
+                            "path": target_path,
+                            "max_bytes": max(source_size + 1, 1),
+                            "offset": 0,
+                        },
+                        "purpose": f"Read back {target_path} after TaskBoard materialization.",
+                        "source_protocol": "taskboard_action_call",
+                    }
+                    for read_action_id in read_action_ids
+                ],
+                settings=self.agent.settings,
+                agent_name=self.agent.name,
+            )
+            for read_result in read_records:
+                if isinstance(read_result, Mapping):
+                    action_logs.append(dict(read_result))
+
+        all_succeeded = bool(action_logs) and all(
+            self._taskboard_direct_action_succeeded(record) for record in action_logs
+        )
+        if not all_succeeded:
+            return self._taskboard_direct_artifact_action_failure(
+                card_id=str(getattr(card, "id", "") or ""),
+                source_path=source_path,
+                target_path=target_path,
+                action_logs=action_logs,
+                error=RuntimeError("A required Workspace artifact Action did not succeed."),
+            )
+
+        target_info = dict(self.workspace.inspect_file(target_path))
+        target_info.update({"path": target_path, "role": "workspace_artifact", "available": True})
+        execution_id = f"{self.id}:taskboard:{getattr(card, 'id', 'card')}:action-call"
+        return (
+            {
+                "status": "completed",
+                "answer": f"Workspace artifact materialized at {target_path} and read back.",
+                "artifact_manifest": {"path": target_path},
+                "file_refs": [DataFormatter.sanitize(target_info)],
+                "evidence": [f"Action {record.get('action_id')} succeeded." for record in action_logs],
+                "remaining_work": [],
+                "diagnostics": [],
+            },
+            {
+                "execution_id": execution_id,
+                "status": "success",
+                "route": {"selected_route": "action_call", "status": "completed"},
+                "logs": {"action_logs": action_logs, "route_logs": {}, "errors": []},
+                "diagnostics": [
+                    {
+                        "execution_kind": "taskboard_workspace_artifact_action_transfer",
+                        "source_path": source_path,
+                        "target_path": target_path,
+                        "action_planning_model_requests": 0,
+                    }
+                ],
+            },
+        )
+
+    @staticmethod
+    def _taskboard_direct_action_succeeded(record: Any) -> bool:
+        if not isinstance(record, Mapping):
+            return False
+        return record.get("ok") is True or str(record.get("status") or "").strip().lower() in {
+            "success",
+            "succeeded",
+            "ok",
+            "completed",
+            "partial_success",
+        }
+
+    def _taskboard_direct_artifact_action_failure(
+        self,
+        *,
+        card_id: str,
+        source_path: str,
+        target_path: str,
+        action_logs: Sequence[Mapping[str, Any]],
+        error: BaseException,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        execution_id = f"{self.id}:taskboard:{card_id or 'card'}:action-call"
+        diagnostic = {
+            "execution_kind": "taskboard_workspace_artifact_action_transfer",
+            "source_path": source_path,
+            "target_path": target_path,
+            "action_planning_model_requests": 0,
+            "error": str(error),
+        }
+        return (
+            {
+                "status": "failed",
+                "answer": "",
+                "remaining_work": [str(error)],
+                "diagnostics": [diagnostic],
+            },
+            {
+                "execution_id": execution_id,
+                "status": "failed",
+                "route": {"selected_route": "action_call", "status": "failed"},
+                "logs": {"action_logs": [dict(record) for record in action_logs], "route_logs": {}, "errors": [diagnostic]},
+                "diagnostics": [diagnostic],
+            },
+        )
+
     async def _run_taskboard_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
         if self._taskboard_card_uses_readback(context.card):
             result = await self._run_taskboard_readback_card(context, context_pack)
@@ -166,17 +576,77 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             ).to_dict()
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
-        evidence_ledger = evidence_ledger_view(evidence_view, max_items=80, body_chars=1800)
+        skill_context_readbacks = self._taskboard_skill_context_readbacks(
+            context.card,
+            context_pack,
+        )
+        skill_readback_evidence_items = self._taskboard_skill_context_readback_evidence_items(
+            skill_context_readbacks,
+            card_id=str(getattr(context.card, "id", "") or ""),
+        )
+        raw_evidence_items = evidence_view.get("evidence_items", [])
+        combined_evidence_view = {
+            "evidence_items": [
+                *(
+                    list(raw_evidence_items)
+                    if isinstance(raw_evidence_items, Sequence)
+                    and not isinstance(raw_evidence_items, str | bytes | bytearray)
+                    else []
+                ),
+                *skill_readback_evidence_items,
+            ]
+        }
+        evidence_ledger = self._stable_evidence_ledger_view(combined_evidence_view, max_items=80, body_chars=1800)
+        prompt_evidence_ledger = self._model_evidence_ledger_projection(
+            self._stable_evidence_ledger_view(
+                combined_evidence_view,
+                max_items=64,
+                body_chars=1200,
+                budget_selection="content_first",
+                max_overflow_refs=64,
+            ),
+            max_items=64,
+        )
         readback_records = self._taskboard_action_artifact_recall_records(evidence_view)
         dependency_readbacks = await self._taskboard_dependency_action_artifact_readbacks(
             evidence_view,
             card_id=str(getattr(context.card, "id", "") or ""),
             context_pack=context_pack,
         )
+        card_value = context.card.to_dict()
+        card_metadata = (
+            card_value.get("metadata")
+            if isinstance(card_value.get("metadata"), Mapping)
+            else {}
+        )
+        done_when = card_value.get("done_when") or card_metadata.get("done_when") or []
+        if isinstance(done_when, str):
+            done_when = [done_when]
+        work_unit_boundary = {
+            "card_id": str(card_value.get("id") or ""),
+            "objective": str(
+                card_value.get("objective") or card_value.get("title") or ""
+            ),
+            "done_when": [
+                str(item)
+                for item in done_when
+                if str(item or "").strip()
+            ],
+            "whole_task_completion_out_of_scope": True,
+        }
+        task_orientation_payload = {
+            "goal": self.goal,
+            "success_criteria": self.success_criteria,
+            "context_pack": DataFormatter.sanitize(context_pack),
+            "execution_prompt": DataFormatter.sanitize(
+                self._execution_prompt_context()
+            ),
+        }
         max_attempts = self._taskboard_card_max_attempts()
         previous_errors: list[dict[str, Any]] = []
         language_policy = self._language_policy()
         for attempt_index in range(1, max_attempts + 1):
+            carrier_plan = self._taskboard_card_carrier_plan(context.card)
             execution = self._create_bounded_child_execution(
                 lineage={
                     "task_id": self.id,
@@ -192,12 +662,24 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "allowed_routes": ["model_request"],
                     "on_violation": "block",
                     "owner": "AgentTaskTaskBoard",
-                    "step_execution_shape": "taskboard_card",
+                    "step_execution_shape": str(
+                        carrier_plan.get("effective_execution_shape")
+                        or carrier_plan.get("execution_shape")
+                        or "auto"
+                    ),
                 },
                 recall_records=cast(Sequence[Mapping[str, Any]], readback_records),
                 recall_source="AgentTaskTaskBoard.evidence_view",
             )
+            self._configure_step_execution(execution, carrier_plan)
+            if self._taskboard_card_execution_shape(context.card) == "actions":
+                # A TaskBoard action card already owns the bounded work unit.
+                # Plan its Action commands once, execute them, and let the same
+                # child request produce the card result; do not ask ActionLoop
+                # for a second "response or execute" decision after success.
+                self._apply_child_execution_action_loop_guard(execution, max_rounds=1)
             source_refs = self._collect_taskboard_source_refs(
+                evidence_ledger,
                 evidence_view,
                 dependency_readbacks,
                 context.dependency_results,
@@ -205,14 +687,14 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             )
             card_input_payload = {
                 "task_id": self.id,
-                "goal": self.goal,
-                "success_criteria": self.success_criteria,
                 "task_context_contract": self._task_context_contract_for_model_prompt(),
-                "card": context.card.to_dict(),
+                "card": card_value,
+                "work_unit_boundary": work_unit_boundary,
                 "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
-                "evidence_ledger": evidence_ledger,
+                "evidence_ledger": prompt_evidence_ledger,
                 "dependency_readbacks": dependency_readbacks,
+                "skill_context_readbacks": DataFormatter.sanitize(skill_context_readbacks),
                 "available_readback": self._taskboard_available_readback(evidence_view),
                 "source_ref_policy": self._taskboard_source_ref_policy(),
                 "scoped_retrieval": self._taskboard_card_scoped_retrieval(context.card),
@@ -224,12 +706,13 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "attempt_index": attempt_index,
                     "max_attempts": max_attempts,
                 },
-                "context_pack": DataFormatter.sanitize(context_pack),
-                "execution_prompt": self._execution_prompt_context(),
                 "language_policy": language_policy,
             }
             card_instruction = (
                 "Execute exactly one TaskBoard card. "
+                "work_unit_boundary is authoritative for this Action-planning run. "
+                "Do not execute sibling objectives merely because task orientation describes the whole task. "
+                "Finish this run when the card objective and done_when facts are satisfied. "
                 "Provide short card_intent and decision_basis fields before the card result fields to frame this "
                 "card-local decision; do not include raw chain-of-thought or hidden reasoning. "
                 "Use task_context_contract.current_time only when the card needs current/latest/as-of evidence; label older "
@@ -241,16 +724,21 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "the same failing source or method when a bounded fallback can satisfy the card. dependency_readbacks "
                 "contains bounded readback previews for dependency Action artifacts that were "
                 "structurally truncated or marked full_value_available; inspect those before declaring dependency "
-                "evidence missing. If available_readback lists Action artifact refs and the prefetched previews are "
+                "evidence missing. skill_context_readbacks contains only the already-loaded Skill guidance and "
+                "resources selected for this card; apply that context directly without treating its citations as "
+                "Workspace paths. If available_readback lists Action artifact refs and the prefetched previews are "
                 "still insufficient, call read_action_artifact with the host-issued selection_key before blocking "
                 "on missing evidence. If scoped_retrieval_results is present, those are already executed bounded "
                 "Workspace search facts; use visible evidence_snippet content only within the excerpt, and treat "
                 "locator_ref records as targets for later readback/search rather than source-content proof. "
-                "Treat evidence_ledger as the authoritative grounding ledger for dependency evidence. Use ledger item "
-                "ids in evidence_use for factual claims. failed/empty items support unavailable or missing-data claims "
+                "Treat evidence_ledger as the authoritative grounding ledger for dependency evidence. Use only an "
+                "exact offered evidence_ledger.items[].reference_id in evidence_use.evidence_ids; no other prompt "
+                "field is an evidence identity. failed/empty items support unavailable or missing-data claims "
                 "only; ref_only items support only discovery/ref-pointer claims until readback evidence exists. "
                 "Return card-local evidence and remaining work. If the card's original method fails but equivalent evidence or a bounded fallback "
                 "is available, return status completed with diagnostics that explain the degraded source boundary. "
+                "For a final-verification repair card, preserve valid stable bindings from "
+                "card.evidence_contract.prior_final_evidence_use and change only bindings or claims implicated by the repair contract. "
                 "Only return failed or blocked when the card cannot produce the required outcome or the missing "
                 "evidence is truly critical. If this card produces the user-facing deliverable, provide the complete "
                 "bounded body in candidate_final_result, final_result, or artifact_markdown when it fits the bounded "
@@ -325,12 +813,12 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "evidence": ([str], "Evidence produced or used by this card", False),
                 "evidence_use": (
                     [dict],
-                    "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
+                    "Claim bindings: [{claim, evidence_ids, support_type}], where evidence_ids contains only offered stable reference_id values and support_type is content, unavailability, or ref_pointer; for file/section claims select the bounded readback reference, never a free-text locator label",
                     False,
                 ),
                 "acceptance_points": (
                     [dict],
-                    "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}]",
+                    "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}], where evidence_ids contains only exact offered evidence_ledger.items[].reference_id values",
                     False,
                 ),
                 "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
@@ -351,6 +839,8 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 ),
                 "diagnostics": ([dict], "Optional card diagnostics", False),
             }
+            action_requirements = self._taskboard_card_action_requirements(context.card)
+            required_action_ids = self._taskboard_card_required_action_ids(context.card)
             work_unit = WorkUnitIntent(
                 id=f"taskboard:{context.card.id}:attempt:{attempt_index}",
                 origin="taskboard_card",
@@ -362,8 +852,23 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "allowed_execution_shape": self._taskboard_card_execution_shape(context.card),
                 },
                 evidence_requirements=tuple(
-                    {"required_output": str(item), "source": "taskboard_card"}
-                    for item in list(getattr(context.card, "required_outputs", ()) or ())
+                    [
+                        *(
+                            {"required_output": str(item), "source": "taskboard_card"}
+                            for item in list(
+                                getattr(context.card, "required_outputs", ()) or ()
+                            )
+                        ),
+                        *action_requirements,
+                    ]
+                ),
+                capability_scope=tuple(
+                    {
+                        "capability_id": capability_id,
+                        "capability_kind": "action",
+                        "source": "taskboard_card",
+                    }
+                    for capability_id in required_action_ids
                 ),
                 delivery_contract={
                     "card": DataFormatter.sanitize(context.card.to_dict()),
@@ -379,17 +884,49 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 ),
                 runtime_preferences={
                     "handler": "agent_task_bounded_step",
-                    "preferred_execution_shape": "taskboard_card",
+                    "plan_block_kind": (
+                        "action_call"
+                        if required_action_ids
+                        else "agent_step"
+                    ),
+                    "preferred_execution_shape": str(
+                        carrier_plan.get("effective_execution_shape")
+                        or carrier_plan.get("execution_shape")
+                        or "auto"
+                    ),
                     "strategy": "taskboard",
                     "card_id": context.card.id,
                     "attempt_index": attempt_index,
                     "max_attempts": max_attempts,
                 },
             )
-            carrier_plan = self._taskboard_card_carrier_plan(context.card)
 
             async def run_card_work_unit(_context: Mapping[str, Any]) -> Mapping[str, Any]:
                 carrier_output_policy = self._carrier_output_policy_from_block_context(_context)
+                direct_artifact_transfer = await self._try_taskboard_workspace_artifact_action_transfer(context)
+                if direct_artifact_transfer is not None:
+                    direct_result, direct_meta = direct_artifact_transfer
+                    return {
+                        "execution_result": DataFormatter.sanitize(direct_result),
+                        "execution_meta": DataFormatter.sanitize(direct_meta),
+                    }
+                preplanned_action_calls = await self._try_taskboard_preplanned_action_calls(context)
+                if preplanned_action_calls is not None:
+                    direct_result, direct_meta = preplanned_action_calls
+                    return {
+                        "execution_result": DataFormatter.sanitize(direct_result),
+                        "execution_meta": DataFormatter.sanitize(direct_meta),
+                    }
+                narrow_action_commands = await self._try_taskboard_narrow_action_command_request(
+                    context,
+                    card_input_payload=card_input_payload,
+                )
+                if narrow_action_commands is not None:
+                    direct_result, direct_meta = narrow_action_commands
+                    return {
+                        "execution_result": DataFormatter.sanitize(direct_result),
+                        "execution_meta": DataFormatter.sanitize(direct_meta),
+                    }
                 effective_card_input_payload = self._taskboard_card_payload_with_scoped_retrieval_results(
                     card_input_payload,
                     _context,
@@ -398,6 +935,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     execution=execution,
                     language_policy=language_policy,
                     input_payload=effective_card_input_payload,
+                    info_payload=task_orientation_payload,
                     instruction=card_instruction,
                     output_schema=card_output_schema,
                     output_format=self._carrier_control_output_format(carrier_output_policy),
@@ -497,15 +1035,9 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             )
             summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
             execution_evidence_ledger = self._evidence_ledger_from_execution_meta(cast(Mapping[str, Any], execution_meta))
-            card_evidence_ledger = evidence_ledger_view(
-                {
-                    "evidence_items": [
-                        *list(evidence_ledger.get("items", [])),
-                        *list(execution_evidence_ledger.get("items", [])),
-                    ]
-                },
-                max_items=120,
-                body_chars=1800,
+            card_evidence_ledger = self._taskboard_card_binding_evidence_ledger(
+                evidence_ledger,
+                execution_evidence_ledger,
             )
             evidence_use_guard = validate_evidence_use(collect_evidence_use(card_output), card_evidence_ledger)
             evidence_repair_diagnostic: dict[str, Any] | None = None
@@ -517,6 +1049,19 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                         card_evidence_ledger,
                     )
                 )
+                if self._should_attempt_evidence_binding_repair(evidence_use_guard):
+                    card_output, evidence_use_guard, model_repair_diagnostic = (
+                        await self._repair_taskboard_card_evidence_use_with_model(
+                            card_output,
+                            evidence_use_guard,
+                            card_evidence_ledger,
+                            language_policy=language_policy,
+                        )
+                    )
+                    if model_repair_diagnostic is not None:
+                        if evidence_repair_diagnostic is not None:
+                            model_repair_diagnostic["prior_repair"] = evidence_repair_diagnostic
+                        evidence_repair_diagnostic = model_repair_diagnostic
                 card_output = value_with_normalized_evidence_use(
                     card_output,
                     evidence_use_guard.get("normalized_evidence_use"),
@@ -639,6 +1184,35 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             execution_id=None,
         )
 
+    def _taskboard_card_binding_evidence_ledger(
+        self,
+        historical_evidence_ledger: Mapping[str, Any],
+        current_execution_evidence_ledger: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build the card-local binding view with current evidence first."""
+        current_items = current_execution_evidence_ledger.get("items", [])
+        historical_items = historical_evidence_ledger.get("items", [])
+        return self._stable_evidence_ledger_view(
+            {
+                "evidence_items": [
+                    *(
+                        list(current_items)
+                        if isinstance(current_items, Sequence)
+                        and not isinstance(current_items, str | bytes | bytearray)
+                        else []
+                    ),
+                    *(
+                        list(historical_items)
+                        if isinstance(historical_items, Sequence)
+                        and not isinstance(historical_items, str | bytes | bytearray)
+                        else []
+                    ),
+                ]
+            },
+            max_items=120,
+            body_chars=1800,
+        )
+
     async def _run_taskboard_control_card(
         self, context: Any, context_pack: "WorkspaceContextPackage"
     ) -> TaskBoardCardResult:
@@ -650,7 +1224,17 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             ).to_dict()
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
-        evidence_ledger = evidence_ledger_view(evidence_view, max_items=80, body_chars=1800)
+        evidence_ledger = self._stable_evidence_ledger_view(evidence_view, max_items=80, body_chars=1800)
+        prompt_evidence_ledger = self._model_evidence_ledger_projection(
+            self._stable_evidence_ledger_view(
+                evidence_view,
+                max_items=64,
+                body_chars=1200,
+                budget_selection="content_first",
+                max_overflow_refs=64,
+            ),
+            max_items=64,
+        )
         preflight_diagnostics = task_board_preflight_diagnostics(
             context.revision,
             mounted_capabilities=self._planner_capabilities(),
@@ -686,6 +1270,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             context_pack=context_pack,
         )
         source_refs = self._collect_taskboard_source_refs(
+            evidence_ledger,
             evidence_view,
             dependency_readbacks,
             context.dependency_results,
@@ -700,7 +1285,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "card": context.card.to_dict(),
             "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
             "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
-            "evidence_ledger": evidence_ledger,
+            "evidence_ledger": prompt_evidence_ledger,
             "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
             "taskboard_acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
             "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
@@ -728,7 +1313,9 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "unless the goal or verifier-visible evidence explicitly provides it. "
             "do not plan or call tools from this request. taskboard_evidence_view is the compact evidence summary "
             "and preserve cold refs as pointers. Treat evidence_ledger as the authoritative grounding ledger and "
-            "bind factual claims through evidence_use ids. failed/empty items support unavailability only; ref_only "
+            "bind factual claims through only exact offered evidence_ledger.items[].reference_id values in "
+            "evidence_use.evidence_ids; no other prompt field is an evidence identity. failed/empty items support "
+            "unavailability only; ref_only "
             "items support only discovery/ref-pointer claims until readback evidence exists. dependency_readbacks contains bounded "
             "readback previews for dependency Action artifacts that were structurally truncated or marked "
             "full_value_available; inspect those before declaring dependency evidence missing. If bounded previews "
@@ -760,9 +1347,28 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "critical verification points; do not invent line numbers or trusted file refs. "
             "After the main control result fields, include short self_check, short_summary, and progress_message for "
             "downstream board context and human progress; these process fields are not evidence. "
+            "Judge status, sufficient, gaps, and remaining_work only against this card's objective and done_when; "
+            "work already assigned to a downstream card is not remaining work for the current card. "
             f"{_TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION}Also return whether the card is sufficient "
             "and what continuation, if any, the board should consider."
         )
+        grounding_repair_contract = self._taskboard_grounding_repair_contract(context)
+        grounding_patch_mode = bool(
+            grounding_repair_contract
+            and self._taskboard_grounding_patch_paths(context)
+        )
+        if grounding_patch_mode:
+            control_instruction += (
+                " This is a grounding-only Workspace repair. Do not return candidate_final_result, final_result, "
+                "artifact_markdown, or a complete artifact body. Set next_board_action='patch' and return only a "
+                "Workspace patch_proposal for an authorized final deliverable path. Return exactly one replace operation "
+                "for every material_claim_repair_contract requirement and copy that requirement's claim_key into the operation. "
+                "Each requirement's artifact_quote is a host-validated exact span from its immutable segment_id; treat it "
+                "as present in the contracted content version and use it to construct old_string without guessing from claim prose. "
+                "Each operation must use op='replace', old_string for exact artifact text wholly within the implicated "
+                "artifact_quote, and new_string for its bounded replacement; "
+                "do not use write, append, insert, full-file replacement, or unrelated edits."
+            )
         control_output_schema = {
             "card_intent": (
                 str,
@@ -804,7 +1410,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "sufficient": (bool, "True when this card has enough evidence to satisfy its objective", False),
             "next_board_action": (
                 str,
-                "finalize, continue, readback, repair, patch, block, or stop",
+                "finalize, continue, readback, repair, patch, block, or stop; continue advances the board without overriding this card's explicit status",
                 False,
             ),
             "gaps": ([str], "Evidence or quality gaps that remain after this control request", False),
@@ -816,15 +1422,19 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "evidence": ([str], "Evidence used by this control card", False),
             "evidence_use": (
                 [dict],
-                "Claim bindings: [{claim, evidence_ids, support_type}], where support_type is content, unavailability, or ref_pointer. Cite each evidence id by its evidence-ledger cite_as (eN) or canonical id; for file/section claims cite the bounded readback evidence id, never a free-text locator label",
+                "Claim bindings: [{claim, evidence_ids, support_type}], where evidence_ids contains only offered stable reference_id values and support_type is content, unavailability, or ref_pointer; for file/section claims select the bounded readback reference, never a free-text locator label",
                 False,
             ),
             "acceptance_points": (
                 [dict],
-                "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}]",
+                "Optional artifact verification anchors: [{criterion, expected_anchor, evidence_ids, artifact_path}], where evidence_ids contains only exact offered evidence_ledger.items[].reference_id values",
                 False,
             ),
-            "remaining_work": ([str], "Remaining work for this card, empty when complete", False),
+            "remaining_work": (
+                [str],
+                "Remaining work inside this card's objective/done_when only; exclude work owned by downstream cards",
+                False,
+            ),
             "self_check": (
                 str,
                 "Short post-control self check of uncertainty or residual risk.",
@@ -842,8 +1452,41 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             ),
             "diagnostics": ([dict], "Optional control-card diagnostics", False),
             "patch_proposal": (
-                dict,
-                "Optional TaskBoardPatch or Workspace text patch proposal when next_board_action is patch",
+                {
+                    "path": (str, "Authorized Workspace file path to patch", True),
+                    "operations": (
+                        [
+                            {
+                                "claim_key": (
+                                    str,
+                                    "Exact host-issued claim_key for the one grounding requirement repaired by this operation",
+                                    True,
+                                ),
+                                "op": (Literal["replace"], "Only replace is allowed", True),
+                                "old_string": (
+                                    str,
+                                    "Exact existing artifact text wholly within one host-validated artifact_quote",
+                                    True,
+                                ),
+                                "new_string": (
+                                    str,
+                                    "Bounded replacement text for that implicated claim",
+                                    True,
+                                ),
+                            }
+                        ],
+                        "Exactly one replace operation per grounding repair requirement",
+                        True,
+                    ),
+                }
+                if grounding_patch_mode
+                else dict,
+                (
+                    "Grounding-only Workspace replace patch using path and operations with exact "
+                    "old_string/new_string fields"
+                    if grounding_patch_mode
+                    else "Optional TaskBoardPatch or Workspace text patch proposal when next_board_action is patch"
+                ),
                 False,
             ),
         }
@@ -956,7 +1599,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 execution_id=None,
             )
         required_deliverables = self._required_workspace_deliverables()
-        allow_workspace_delivery = self._taskboard_control_output_allows_workspace_delivery(card_output)
+        allow_workspace_delivery = (
+            not grounding_patch_mode
+            and self._taskboard_control_output_allows_workspace_delivery(card_output)
+        )
         deliverable_mode = self._workspace_artifact_delivery_mode(card_output) if allow_workspace_delivery else None
         prefer_stream_draft = False
         if (
@@ -1002,7 +1648,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             self._taskboard_dependency_readback_evidence_items(dependency_readbacks),
         )
         execution_evidence_ledger = self._evidence_ledger_from_execution_meta(cast(Mapping[str, Any], execution_meta))
-        card_evidence_ledger = evidence_ledger_view(
+        card_evidence_ledger = self._stable_evidence_ledger_view(
             {
                 "evidence_items": [
                     *list(evidence_ledger.get("items", [])),
@@ -1020,6 +1666,19 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 evidence_use_guard,
                 card_evidence_ledger,
             )
+            if self._should_attempt_evidence_binding_repair(evidence_use_guard):
+                card_output, evidence_use_guard, model_repair_diagnostic = (
+                    await self._repair_taskboard_card_evidence_use_with_model(
+                        card_output,
+                        evidence_use_guard,
+                        card_evidence_ledger,
+                        language_policy=language_policy,
+                    )
+                )
+                if model_repair_diagnostic is not None:
+                    if evidence_repair_diagnostic is not None:
+                        model_repair_diagnostic["prior_repair"] = evidence_repair_diagnostic
+                    evidence_repair_diagnostic = model_repair_diagnostic
             card_output = value_with_normalized_evidence_use(
                 card_output,
                 evidence_use_guard.get("normalized_evidence_use"),
@@ -1413,6 +2072,61 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         }
         return repaired_output, repaired_guard, diagnostic
 
+    async def _repair_taskboard_card_evidence_use_with_model(
+        self,
+        card_output: Mapping[str, Any],
+        evidence_use_guard: Mapping[str, Any],
+        card_evidence_ledger: Mapping[str, Any],
+        *,
+        language_policy: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], dict[str, Any] | None]:
+        original_blocking_count = self._taskboard_evidence_guard_blocking_count(evidence_use_guard)
+        if original_blocking_count <= 0:
+            return card_output, evidence_use_guard, None
+        try:
+            repaired_evidence_use = await self._request_evidence_binding_repair(
+                evidence_use_guard,
+                card_evidence_ledger,
+                language_policy=language_policy,
+            )
+        except Exception as error:
+            diagnostic = {
+                "code": "taskboard.card.model_evidence_binding_repair",
+                "status": "failed",
+                "original_blocking_count": original_blocking_count,
+                "repaired_blocking_count": original_blocking_count,
+                "error": {
+                    "type": error.__class__.__name__,
+                    "message": str(error),
+                },
+            }
+            return card_output, evidence_use_guard, DataFormatter.sanitize(diagnostic)
+        if not repaired_evidence_use:
+            return card_output, evidence_use_guard, {
+                "code": "taskboard.card.model_evidence_binding_repair",
+                "status": "no_match",
+                "original_blocking_count": original_blocking_count,
+                "repaired_blocking_count": original_blocking_count,
+            }
+        merged_evidence_use = self._merge_repaired_evidence_use(
+            evidence_use_guard.get("normalized_evidence_use"),
+            repaired_evidence_use,
+        )
+        repaired_output = value_with_normalized_evidence_use(card_output, merged_evidence_use)
+        repaired_guard = validate_evidence_use(collect_evidence_use(repaired_output), card_evidence_ledger)
+        repaired_blocking_count = self._taskboard_evidence_guard_blocking_count(repaired_guard)
+        diagnostic = {
+            "code": "taskboard.card.model_evidence_binding_repair",
+            "status": "completed" if repaired_blocking_count == 0 else "partial",
+            "original_blocking_count": original_blocking_count,
+            "repaired_blocking_count": repaired_blocking_count,
+            "repaired_claim_count": len(repaired_evidence_use),
+        }
+        if repaired_blocking_count >= original_blocking_count:
+            diagnostic["status"] = "rejected"
+            return card_output, evidence_use_guard, diagnostic
+        return repaired_output, repaired_guard, diagnostic
+
     @staticmethod
     def _taskboard_evidence_guard_blocking_count(evidence_use_guard: Mapping[str, Any]) -> int:
         try:
@@ -1447,7 +2161,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "status": "blocked",
             "message": (
                 "TaskBoard card evidence_use contains invalid or unbound evidence refs; retry using "
-                "evidence_ledger item ids or cite_as values from the available evidence."
+                "offered reference_id values from the available evidence."
             ),
             "blocking_count": blocking_count,
             "guard_diagnostics": guard_diagnostics,
@@ -1463,13 +2177,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         execution_status = str(execution_meta.get("status") or "").strip().lower()
         if execution_status in {"failed", "error", "timed_out", "blocked"}:
             return "failed"
-        if isinstance(evidence_use_guard, Mapping):
-            try:
-                blocking_count = int(evidence_use_guard.get("blocking_count") or 0)
-            except (TypeError, ValueError):
-                blocking_count = 0
-            if blocking_count > 0:
-                return "blocked"
+        # A card owns execution, not terminal semantic acceptance. Invalid
+        # model-authored evidence bindings stay diagnostic/untrusted and are
+        # excluded by the evidence guard, but they must not reverse a canonical
+        # successful Action execution into a failed business card. The outer
+        # terminal verifier owns acceptance against the canonical ledger.
         if isinstance(card_output, Mapping):
             status = str(card_output.get("status") or "completed").strip().lower()
             if status in {"completed", "setback", "blocked", "failed", "skipped"}:
@@ -1493,9 +2205,9 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 and str(workspace_patch_delivery.get("status") or "").strip().lower() == "completed"
             ):
                 return status
-            if next_action in {"readback", "needs_readback", "repair", "patch", "continue"}:
+            if next_action in {"readback", "needs_readback", "repair", "patch"}:
                 return "setback"
-            if next_action in {"block", "stop"}:
+            if next_action == "block":
                 return "blocked"
             if status in {"completed", "setback", "blocked", "failed", "skipped"}:
                 return status

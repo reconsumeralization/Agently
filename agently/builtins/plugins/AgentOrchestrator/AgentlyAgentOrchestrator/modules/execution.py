@@ -1070,7 +1070,11 @@ class AgentExecution:
             raw_required_selectors = []
         required_selectors = raw_required_selectors if isinstance(raw_required_selectors, (list, tuple, set)) else []
         for item in required_selectors:
-            selector = item.get("selector") if isinstance(item, dict) else item
+            selector = (
+                item.get("selector")
+                if isinstance(item, dict) and "selector" in item
+                else item
+            )
             if isinstance(selector, dict):
                 required.append(selector.get("id") or selector.get("skill_id") or selector.get("name") or selector.get("source"))
             else:

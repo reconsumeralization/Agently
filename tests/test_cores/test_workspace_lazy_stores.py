@@ -37,7 +37,7 @@ def _private_files(root: Path) -> tuple[str, ...]:
 
 
 @pytest.mark.asyncio
-async def test_plain_record_uses_one_lazy_sqlite_copy_without_fts_or_vector(
+async def test_plain_record_uses_sqlite_and_bounded_identity_state_without_fts_or_vector(
     tmp_path: Path,
 ) -> None:
     manager = WorkspaceManager()
@@ -65,7 +65,12 @@ async def test_plain_record_uses_one_lazy_sqlite_copy_without_fts_or_vector(
 
     assert vector_factory_calls == []
     assert await workspace.get_data(ref) == {"answer": 42, "detail": "stored once"}
-    assert _private_files(tmp_path) == (".agently/workspace.db",)
+    assert _private_files(tmp_path) == (
+        ".agently/identity/objects/rec/00000000/1.json",
+        ".agently/identity/state.json",
+        ".agently/identity/state.lock",
+        ".agently/workspace.db",
+    )
     assert not (tmp_path / ".agently" / "content").exists()
     assert not (tmp_path / ".agently" / "files").exists()
     assert not (tmp_path / ".agently" / "vectors").exists()
@@ -256,7 +261,12 @@ async def test_recovery_schema_is_created_only_by_explicit_snapshot(tmp_path: Pa
             if not str(row[0]).startswith("sqlite_")
         }
     assert tables == {"records", "checkpoints", "manifests"}
-    assert _private_files(tmp_path) == (".agently/workspace.db",)
+    assert _private_files(tmp_path) == (
+        ".agently/identity/objects/rec/00000000/1.json",
+        ".agently/identity/state.json",
+        ".agently/identity/state.lock",
+        ".agently/workspace.db",
+    )
 
 
 @pytest.mark.asyncio

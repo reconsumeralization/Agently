@@ -17,22 +17,14 @@ from agently.utils import Settings
 def _allocated_bytes(root: Path) -> int:
     if not root.exists():
         return 0
-    return sum(
-        int(path.stat().st_blocks) * 512
-        for path in (root, *root.rglob("*"))
-        if not path.is_symlink()
-    )
+    return sum(int(path.stat().st_blocks) * 512 for path in (root, *root.rglob("*")) if not path.is_symlink())
 
 
 def _private_files(root: Path) -> list[str]:
     private_root = root / ".agently"
     if not private_root.exists():
         return []
-    return sorted(
-        str(path.relative_to(root))
-        for path in private_root.rglob("*")
-        if path.is_file()
-    )
+    return sorted(str(path.relative_to(root)) for path in private_root.rglob("*") if path.is_file())
 
 
 def _tables(database: Path) -> set[str]:
@@ -41,9 +33,7 @@ def _tables(database: Path) -> set[str]:
     with sqlite3.connect(database) as connection:
         return {
             str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")
             if not str(row[0]).startswith("sqlite_")
         }
 
@@ -120,7 +110,9 @@ async def test_acceptance_denied_edit_keeps_external_file_unchanged(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_acceptance_plain_record_creates_only_records_sqlite(tmp_path: Path) -> None:
+async def test_acceptance_plain_record_creates_records_sqlite_and_bounded_identity_state(
+    tmp_path: Path,
+) -> None:
     manager = WorkspaceManager()
     vector_calls = 0
 
@@ -136,7 +128,12 @@ async def test_acceptance_plain_record_creates_only_records_sqlite(tmp_path: Pat
 
     database = tmp_path / ".agently" / "workspace.db"
     assert vector_calls == 0
-    assert _private_files(tmp_path) == [".agently/workspace.db"]
+    assert _private_files(tmp_path) == [
+        ".agently/identity/objects/rec/00000000/1.json",
+        ".agently/identity/state.json",
+        ".agently/identity/state.lock",
+        ".agently/workspace.db",
+    ]
     assert _tables(database) == {"records"}
     assert not (tmp_path / ".agently" / "vectors").exists()
 
@@ -169,7 +166,7 @@ async def test_acceptance_finite_triggerflow_has_zero_workspace_persistence(tmp_
 
 
 @pytest.mark.asyncio
-async def test_acceptance_triggerflow_pause_resume_uses_minimal_recovery_then_cleans(
+async def test_acceptance_triggerflow_pause_resume_cleans_recovery_but_keeps_identity_high_water(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace(tmp_path)
@@ -204,7 +201,15 @@ async def test_acceptance_triggerflow_pause_resume_uses_minimal_recovery_then_cl
     close_snapshot = await execution.async_close()
 
     assert close_snapshot["result"] == {"approved": True}
-    assert not (tmp_path / ".agently").exists()
+    private_files = _private_files(tmp_path)
+    assert ".agently/workspace.db" not in private_files
+    assert ".agently/identity/state.json" in private_files
+    assert ".agently/identity/state.lock" in private_files
+    assert all(
+        path in {".agently/identity/state.json", ".agently/identity/state.lock"}
+        or path.startswith(".agently/identity/objects/rec/")
+        for path in private_files
+    )
 
 
 @pytest.mark.asyncio
@@ -258,7 +263,12 @@ async def test_acceptance_session_memory_disabled_and_record_only_are_vector_fre
 
     assert calls == {"embedding": 0, "vector": 0}
     assert record_workspace.capabilities()["materialized_components"] == ["records"]
-    assert _private_files(record_root) == [".agently/workspace.db"]
+    assert _private_files(record_root) == [
+        ".agently/identity/objects/rec/00000000/1.json",
+        ".agently/identity/state.json",
+        ".agently/identity/state.lock",
+        ".agently/workspace.db",
+    ]
 
 
 @pytest.mark.asyncio
@@ -283,13 +293,20 @@ async def test_acceptance_taskboard_terminal_closure_keeps_only_selected_product
     closure = await task._apply_terminal_workspace_retention(status="completed")
 
     assert closure and closure["status"] == "applied"
+    assert str(retained[0].get("locator_id") or "").startswith("loc_")
+    assert str(retained[0].get("content_version_id") or "").startswith("cv_")
     assert not (root / cast(str, draft["path"])).exists()
     assert (root / cast(str, final["path"])).read_text(encoding="utf-8") == "final"
-    assert _private_files(root) == [str(final["path"])]
+    private_files = _private_files(root)
+    assert str(final["path"]) in private_files
+    assert ".agently/workspace.db" not in private_files
+    assert all(path == str(final["path"]) or path.startswith(".agently/identity/") for path in private_files)
 
 
 @pytest.mark.asyncio
-async def test_acceptance_empty_transient_recovery_database_is_reclaimed(tmp_path: Path) -> None:
+async def test_acceptance_empty_transient_recovery_database_is_reclaimed_without_rewinding_ids(
+    tmp_path: Path,
+) -> None:
     workspace = Workspace(tmp_path)
 
     await workspace.put_snapshot("transient-run", {"status": "waiting"}, step_id="wait")
@@ -298,5 +315,8 @@ async def test_acceptance_empty_transient_recovery_database_is_reclaimed(tmp_pat
     result = await workspace.delete_snapshot("transient-run")
 
     assert result["database_removed"] is True
-    assert not (tmp_path / ".agently").exists()
+    assert not (tmp_path / ".agently" / "workspace.db").exists()
+    assert (tmp_path / ".agently" / "identity" / "state.json").exists()
+    assert (tmp_path / ".agently" / "identity" / "state.lock").exists()
+    assert list((tmp_path / ".agently" / "identity" / "objects").rglob("*.json")) == []
     assert workspace.capabilities()["materialized_components"] == []

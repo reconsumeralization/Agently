@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Literal, cast
@@ -273,18 +274,25 @@ async def async_run_and_print(execution: Any, *, provider: ProviderName, workspa
 
     result = execution.get_result()
     data = await result.async_get_data()
+    full_data = await result.async_get_full_data()
     meta = await result.async_get_meta()
+    terminal_data: Mapping[str, Any] = (
+        full_data if isinstance(full_data, Mapping) else {}
+    )
+    nested_result = terminal_data.get("result")
+    if not terminal_data.get("status") and isinstance(nested_result, Mapping):
+        terminal_data = nested_result
     task_refs = meta.get("task_refs", {}) if isinstance(meta, dict) else {}
     route_logs = meta.get("logs", {}).get("route_logs", {}) if isinstance(meta, dict) else {}
     task_log = route_logs.get("agent_task", {}) if isinstance(route_logs, dict) else {}
     summary = {
         "provider": provider,
-        "status": data.get("status") if isinstance(data, dict) else "",
-        "accepted": data.get("accepted") if isinstance(data, dict) else None,
+        "status": terminal_data.get("status", ""),
+        "accepted": terminal_data.get("accepted"),
+        "artifact_status": terminal_data.get("artifact_status"),
+        "missing_criteria": terminal_data.get("missing_criteria"),
         "execution_strategy": (
-            data.get("execution_strategy")
-            if isinstance(data, dict)
-            else None
+            terminal_data.get("execution_strategy")
         )
         or (task_refs.get("execution_strategy") if isinstance(task_refs, dict) else None)
         or (task_log.get("execution_strategy") if isinstance(task_log, dict) else None),

@@ -261,6 +261,46 @@ candidate carries one host-issued `selection_key` plus task-relevant facts such
 as role, media type, label, and a bounded preview. Canonical artifact ids, call
 ids, scope, digest, size, and provenance remain host-owned and are not copied
 through the model.
+Artifact selection and Action-evidence binding are separate contracts. When a
+structured task result asks the model to bind claims to Action evidence, each
+offered Action result includes its host-issued `action_call_id`. The model
+returns only an offered call id; host code validates it against that result set
+and resolves it to the canonical EvidenceLedger identity. An `action_call_id`
+is neither a model-invented canonical id nor an artifact readback selector.
+
+### Required Action evidence
+
+When AgentTask completion requires `action_succeeded`, the requirement names an
+exact capability id and kind. Workspace readback cannot satisfy a specified
+Action: a readable file may prove file content, but it does not prove that the
+required callable capability ran successfully. If the exact Action is mounted,
+TaskBoard may create an Action-shaped repair that carries the same structured
+id/kind contract through dispatch and evidence binding. It does not derive the
+Action from verifier prose or special-case an Action name. AgentTask evaluates
+this deterministic evidence contract before the semantic terminal verifier, so
+a missing Action schedules the capability-directed repair without spending or
+masking the gap behind a verifier request.
+
+When final verification or grounding requests a repair without an exact
+`action_succeeded` requirement, a trusted file-backed factual-grounding repair
+uses a control-shaped bounded Workspace patch in both Flat and TaskBoard. The
+patch proposal is a structured ModelRequest result; this repair does not open a
+general AgentExecution/ActionRuntime round, so mounted `write_file` or unrelated
+Actions cannot rewrite the artifact. Host code validates the authorized path,
+one operation per `claim_key`, exact `old_string` scope, and the current
+`content_version_id` before applying and reading back the patch. Other repairs
+keep the ordinary `auto` execution shape, so mounted Actions remain available
+for fresh evidence collection. The host does not infer an Action id from
+verifier prose in either case. An exact structured Action gap continues to use
+the narrowed Action-shaped route above.
+
+An unavailable required Action fails closed immediately instead of scheduling
+an equivalent-looking read, tool, or model-only substitute. Denied/blocked
+Action policy also fails closed. This is separate from required Skill
+availability: required remote Skills must finish discovery, installation, and
+inspection before AgentTask business work begins, so an artifact produced
+without an unavailable required Skill cannot later pass the terminal gate.
+
 Actions that explicitly return `artifacts` or `artifact_refs` use the same
 contract even when the output is small. This includes MCP resource/content
 blocks surfaced by `MCPActionExecutor`; Agently records the declared artifact
@@ -272,6 +312,14 @@ media type, and SHA-256 when available. A path-only payload such as
 Action result evidence and a ref pointer, but it is not treated as a trusted
 Workspace file unless the path is inside the Workspace files root and Workspace
 readback succeeds.
+
+For a declared AgentTask deliverable path, a successful file-producing Action
+is the write owner. AgentTask reads back and adopts that exact Workspace file;
+it does not overwrite it with a model-returned artifact body during terminal
+materialization. Updating the file requires another explicit file Action. If
+the successful Action's path cannot be read back, artifact delivery fails
+closed rather than substituting model prose.
+
 Built-in web actions such as Search and Browse do not prompt for package
 installation while running. Missing optional dependencies surface as structured
 Action failures so service hosts can decide whether to install, retry, or fall
@@ -381,6 +429,12 @@ This applies to the default structured-plan and native tool-call planning
 paths. It is especially important when a higher-level runtime such as
 SkillsManager-backed Skills execution or AgentTask delegates a bounded action round to
 ActionRuntime.
+
+Structured planning fields are provisional while the provider response is
+still open. `next_action="response"` means that ActionRuntime should schedule no
+further Action; it is not a cancellation signal. ActionRuntime awaits the final
+parsed structured response so normal request/model completion, metadata, and
+usage can settle before the bounded Action step closes.
 
 `agent.get_action_result(..., timeout=N)` bounds the full action loop,
 including structured planning and native tool-call selection. If the loop

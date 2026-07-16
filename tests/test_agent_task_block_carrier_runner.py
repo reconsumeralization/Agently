@@ -8,6 +8,17 @@ from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_runner_sys_path():
+    original = list(sys.path)
+    try:
+        yield
+    finally:
+        sys.path[:] = original
+
 
 def _load_block_carrier_runner() -> ModuleType:
     runner_path = (

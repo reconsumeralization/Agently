@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from agently.types.data import (
@@ -63,6 +63,7 @@ class RuntimeStageStallError(TimeoutError):
         provider: str | None = None,
         model: str | None = None,
         planning_protocol: str | None = None,
+        diagnostic_context: Mapping[str, Any] | None = None,
     ):
         super().__init__(message)
         self.stage = stage
@@ -77,9 +78,10 @@ class RuntimeStageStallError(TimeoutError):
         self.provider = provider
         self.model = model
         self.planning_protocol = planning_protocol
+        self.diagnostic_context = dict(diagnostic_context or {})
 
     def to_diagnostic(self) -> dict[str, Any]:
-        return {
+        diagnostic = {
             "error_type": self.__class__.__name__,
             "stage": self.stage,
             "status": self.status,
@@ -95,6 +97,9 @@ class RuntimeStageStallError(TimeoutError):
             "model": self.model,
             "planning_protocol": self.planning_protocol,
         }
+        if self.diagnostic_context:
+            diagnostic["diagnostic_context"] = dict(self.diagnostic_context)
+        return diagnostic
 
 
 def normalize_execution_lineage(value: AgentExecutionLineage | dict[str, Any] | None = None) -> AgentExecutionLineage:

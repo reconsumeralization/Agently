@@ -120,6 +120,11 @@ HTTP 状态码重试另一个 key；自定义 handler 可以检查 provider erro
 `"try_next"`、`"retry_same"`、`"raise"`、某个 key id、一个 key entry dict，或
 `{"key_id": "b"}` / `{"key_entry": context.keys[1]}` 这样的包装。
 
+对 `OpenAICompatible`、`OpenAIResponsesCompatible` 和 `AnthropicCompatible`，框架构造的
+HTTP 错误消息会保留 provider status 与 response detail，但不会附加序列化的模型请求。
+core `model.requester.error` RuntimeEvent 仍在 `payload.request_data` 中保留结构化请求，供受控
+冷诊断使用；request stream 则只通过正常终态路径传播一次 provider error。
+
 ## 插件源码位置
 
 - [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/)

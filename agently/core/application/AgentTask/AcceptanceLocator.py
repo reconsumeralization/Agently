@@ -197,6 +197,39 @@ def build_workspace_artifact_acceptance_locator_items(
             index=index,
         )
         items.append(item)
+    located_heading_lines: set[int] = set()
+    for item in items:
+        line_start = item.get("line_start")
+        if item.get("status") == "ok" and isinstance(line_start, int):
+            located_heading_lines.add(line_start)
+    for heading_index, heading in enumerate(_primary_section_headings(headings)):
+        if len(items) >= max_items:
+            break
+        line_start = heading.get("line_start")
+        if isinstance(line_start, int) and line_start in located_heading_lines:
+            continue
+        title = str(heading.get("title") or "").strip()
+        if not title:
+            continue
+        items.append(
+            _locator_item(
+                path=artifact_path,
+                source=source,
+                point={
+                    "criterion_id": f"artifact:heading:{heading_index}",
+                    "criterion": f"Artifact heading: {title}",
+                    "expected_anchor": title,
+                    "source": "artifact_structure",
+                },
+                locator=heading,
+                source_evidence_ids=_dedupe_strings(
+                    [artifact_evidence_id, *(source_evidence_ids or ())]
+                ),
+                index=len(items),
+            )
+        )
+        if isinstance(line_start, int):
+            located_heading_lines.add(line_start)
     if not items and headings:
         item = _locator_item(
             path=artifact_path,
@@ -230,9 +263,9 @@ def acceptance_locator_view_from_ledger(value: Any, *, max_items: int = 32) -> d
             continue
         if str(item.get("kind") or "") != ACCEPTANCE_LOCATOR_KIND:
             continue
+        stable_reference_id = str(item.get("reference_id") or "").strip()
+        canonical_id = str(item.get("id") or "").strip()
         locator: dict[str, Any] = {
-            "id": str(item.get("id") or ""),
-            "cite_as": str(item.get("cite_as") or ""),
             "status": str(item.get("status") or ""),
             "body_state": str(item.get("body_state") or ""),
             "point_source": str(item.get("point_source") or ""),
@@ -248,8 +281,13 @@ def acceptance_locator_view_from_ledger(value: Any, *, max_items: int = 32) -> d
             "byte_offset": item.get("byte_offset"),
             "byte_end": item.get("byte_end"),
             "content_fingerprint": str(item.get("content_fingerprint") or ""),
-            "source_evidence_ids": _string_list(item.get("source_evidence_ids")),
         }
+        if not canonical_id and stable_reference_id:
+            locator["reference_id"] = stable_reference_id
+        else:
+            locator["id"] = canonical_id
+            locator["cite_as"] = str(item.get("cite_as") or "")
+            locator["source_evidence_ids"] = _string_list(item.get("source_evidence_ids"))
         locators.append(DataFormatter.sanitize({key: value for key, value in locator.items() if value not in ("", [], None)}))
         if len(locators) >= max_items:
             break

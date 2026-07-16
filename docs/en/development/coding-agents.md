@@ -137,15 +137,55 @@ When you audit or author guidance for Agently `4.1+`, these are the defaults cod
   publishing or using any intermediate value. Stream only when the application
   forwards deltas, updates UI/state, records events, or starts explicitly
   cancelable/idempotent preparation; then read final data from the same result.
-- Retrieval citations: give the model one short trusted `ref_id` (or an existing
-  evidence `cite_as`) per selected source and require inline
-  `[[ref:<ref_id>]]` tokens such as `[[ref:r1]]`. Host code validates and
+- ActionRuntime completion: treat a streamed `next_action="response"` as a
+  provisional decision to schedule no more Actions, not as permission to close
+  the provider stream. Await the final parsed planning result so ordinary
+  request/model terminal events, metadata, and usage can settle.
+- Retrieval citations: give the model one short trusted stable `ref_id` per
+  selected source and require inline `[[ref:<ref_id>]]` tokens such as
+  `[[ref:ref_2]]`. An evidence `cite_as` such as `e1` is only a request-local
+  display alias; normalize it through the exact offered map before persisting a
+  response. Host code validates and
   resolves those tokens, renders safe links, and separately emits complete
   authorized source-card records for hover cards, source lists, or attached
   result cards. Avoid bare `${ref_id}` because `${...}` is already Agently
   placeholder syntax; do not ask the model to reproduce URLs or full retrieval
   metadata.
+- Required Skill availability: resolve and materialize every required remote
+  Skill selector before AgentTask business work. Continue only with canonical
+  installed ids after discovery, installation, and inspection succeed; otherwise
+  fail closed as blocked. Authorization such as `auto_allow=True` does not waive
+  availability, and producing an artifact without the required Skill is not a
+  valid fallback.
 - Task execution quality: when a goal-pursuit task must use a particular capability (an Action, Skill, or Skill pack), do not lean on a strong instruction in the prompt or a business-specific special case to force or check it. Express the requirement as framework contract: make capabilities visible to the planner (`planner_capabilities`), bound action steps with structured `step_scope` that reaches the ActionRuntime boundary, and require completion evidence with a structured `capability_evidence_requirements` entry. For Skills steps that may produce long artifact text, configure the Skills route output format instead of forcing large raw content through JSON streaming. If a Skills step needs file writes, reads, shell calls, HTTP calls, or other side effects, explicitly grant the action/tool scope through route/effort configuration, declare required side-effect actions when the React strategy should stop after they succeed, and require `action_succeeded` evidence for the host actions; Skills provide guidance, while ActionRuntime owns callable execution and evidence. Prior-step Workspace context must preserve action evidence before bulky execution metadata. TaskDAG / DynamicTask is not an AgentTask bounded-step strategy; use TaskDAG / DynamicTask separately when the application or visual automation surface owns the submitted graph. The AgentTask host guard checks requirements deterministically against execution evidence; the prompt is explanatory, not the guarantee. Keep scenario-specific checks (visual fingerprints, domain names, source choices) in examples and tests, never in framework paths.
+  Missing required `action_succeeded` evidence may schedule a TaskBoard
+  Action-shaped repair only from the authored structured requirement; do not
+  parse verifier prose, special-case Action names, or let Workspace readback
+  satisfy an Action requirement. Model-visible Action results may offer the
+  host-issued `action_call_id`; validate that offered key and resolve canonical
+  evidence identity in host code. Give each TaskBoard Action card one card-local
+  work unit plus dependency evidence, keeping the global task as orientation
+  rather than sibling-work authorization. Terminal verifier hot input should
+  have one bounded body-bearing evidence ledger plus body-light locator/ref
+  indexes; keep raw evidence cold for scoped readback and audit.
+  A fitting candidate enters one semantic terminal-verifier request over the
+  current versioned terminal-carrier inventory. The same structured response
+  returns exact criterion checks and material-claim checks; host code rejoins
+  current carrier ids, exact artifact quotes, content versions, and offered
+  evidence ids. There is no separate claim-inventory, source-selection, or
+  per-claim support-judgment request loop. Candidate and
+  delivery/readback/acceptance records cannot support descendant carriers. A
+  failed material check produces a structured repair contract; apply
+  three-occurrence convergence to its exact gate-kind/issue-code/contract-subject
+  key: schedule no more than two repairs, skip a repeated verifier when relevant
+  state is unchanged, and return a useful partial blocked result on occurrence
+  three.
+  Count a required TaskBoard card's non-satisfying structured result (`setback`,
+  `failed`, or `blocked`) only when that card ran in the current tick, and stop
+  before a fourth execution of the same stable contract subject. A generated final
+  repair without an exact Action requirement keeps the ordinary `auto` shape so
+  mounted capabilities remain available; do not infer capability ids from
+  verifier prose.
 
 ## When to write your own skill
 

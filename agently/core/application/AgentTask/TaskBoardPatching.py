@@ -20,6 +20,28 @@ from agently.types.data import TaskBoardPatch
 from .TaskShared import *
 
 
+_TASKBOARD_WORKSPACE_REPLACE_OLD_KEYS = (
+    "old_string",
+    "old",
+    "from",
+    "search",
+    "old_text",
+    "from_text",
+    "search_text",
+    "find",
+    "find_text",
+)
+_TASKBOARD_WORKSPACE_REPLACE_NEW_KEYS = (
+    "new_string",
+    "new",
+    "to",
+    "replacement",
+    "new_text",
+    "to_text",
+    "replacement_text",
+)
+
+
 class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
     @classmethod
     def _taskboard_control_output_allows_workspace_delivery(cls, card_output: Any) -> bool:
@@ -34,7 +56,22 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if card_output.get("sufficient") is False:
             return False
         if cls._has_remaining_work(card_output.get("remaining_work")):
-            return False
+            manifest = card_output.get("artifact_manifest")
+            manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
+            manifest_path = cls._workspace_artifact_manifest_path(manifest_dict)
+            content, _content_key = cls._select_workspace_artifact_content(
+                card_output,
+                manifest_dict,
+                deliverable_mode="workspace_artifact",
+                manifest_path=manifest_path,
+            )
+            if not (
+                status == "completed"
+                and card_output.get("sufficient") is True
+                and next_action == "finalize"
+                and cls._workspace_artifact_content_is_complete_body(content)
+            ):
+                return False
         if cls._has_remaining_work(card_output.get("gaps")):
             if not (status == "completed" and card_output.get("sufficient") is True):
                 return False
@@ -100,11 +137,59 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         raw_patch = card_output.get("patch_proposal")
         if not isinstance(raw_patch, Mapping) or not self._taskboard_patch_proposal_is_workspace_patch(raw_patch):
             return card_output
+        card_id = str(getattr(getattr(context, "card", None), "id", "") or "")
+        grounding_repair_contract = self._taskboard_grounding_repair_contract(context)
+        grounding_patch_paths = self._taskboard_grounding_patch_paths(context)
+        if grounding_repair_contract:
+            scoped, reason = self._taskboard_grounding_workspace_patch_scope(
+                raw_patch,
+                grounding_repair_contract,
+                allowed_patch_paths=grounding_patch_paths,
+            )
+            if not scoped:
+                patched_output = dict(card_output)
+                patched_output["workspace_patch_proposal"] = DataFormatter.sanitize(raw_patch)
+                patched_output.pop("patch_proposal", None)
+                patched_output["status"] = "blocked"
+                patched_output["sufficient"] = False
+                patched_output["workspace_patch_delivery"] = {
+                    "status": "failed",
+                    "reason": reason,
+                }
+                diagnostics = [
+                    dict(item)
+                    for item in self._taskboard_mapping_sequence(patched_output.get("diagnostics"))
+                ]
+                diagnostics.append(
+                    {
+                        "code": "taskboard.control.grounding_patch_out_of_scope",
+                        "card_id": str(getattr(getattr(context, "card", None), "id", "") or ""),
+                        "message": reason,
+                        "source": "agent_task.taskboard.workspace_patch",
+                    }
+                )
+                patched_output["diagnostics"] = DataFormatter.sanitize(diagnostics)
+                remaining_work = self._normalize_string_list(patched_output.get("remaining_work"))
+                if reason and reason not in remaining_work:
+                    remaining_work.append(reason)
+                patched_output["remaining_work"] = remaining_work
+                self.diagnostics.setdefault("taskboard_workspace_patch_delivery", []).append(
+                    DataFormatter.sanitize(patched_output["workspace_patch_delivery"])
+                )
+                return DataFormatter.sanitize(patched_output)
         patched_output = dict(card_output)
         patched_output["workspace_patch_proposal"] = DataFormatter.sanitize(raw_patch)
         patched_output.pop("patch_proposal", None)
-        card_id = str(getattr(getattr(context, "card", None), "id", "") or "")
-        delivery = await self._apply_taskboard_workspace_patch(raw_patch, card_id=card_id)
+        if grounding_repair_contract:
+            delivery = await self._apply_grounding_workspace_patch(
+                raw_patch,
+                grounding_repair_contract,
+                allowed_patch_paths=grounding_patch_paths,
+                source="agent_task.workspace_artifact.taskboard_patch",
+            )
+            delivery = {**delivery, "card_id": card_id}
+        else:
+            delivery = await self._apply_taskboard_workspace_patch(raw_patch, card_id=card_id)
         patched_output["workspace_patch_delivery"] = DataFormatter.sanitize(delivery)
         diagnostics = [dict(item) for item in self._taskboard_mapping_sequence(patched_output.get("diagnostics"))]
         if delivery.get("status") == "completed":
@@ -148,6 +233,55 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             DataFormatter.sanitize(delivery)
         )
         return DataFormatter.sanitize(patched_output)
+
+    @staticmethod
+    def _taskboard_grounding_repair_contract(context: Any) -> dict[str, Any] | None:
+        card = getattr(context, "card", None)
+        evidence_contract = getattr(card, "evidence_contract", {})
+        if not isinstance(evidence_contract, Mapping):
+            return None
+        grounding_contract = evidence_contract.get("material_claim_repair_contract")
+        if not isinstance(grounding_contract, Mapping):
+            return None
+        return dict(DataFormatter.sanitize(grounding_contract))
+
+    def _taskboard_grounding_patch_paths(self, context: Any) -> list[str]:
+        card = getattr(context, "card", None)
+        evidence_contract = getattr(card, "evidence_contract", {})
+        raw_paths = (
+            evidence_contract.get("material_claim_patch_paths")
+            if isinstance(evidence_contract, Mapping)
+            else None
+        )
+        candidates = (
+            raw_paths
+            if isinstance(raw_paths, Sequence)
+            and not isinstance(raw_paths, str | bytes | bytearray)
+            else [raw_paths]
+            if raw_paths is not None
+            else self._required_workspace_deliverables()
+        )
+        paths: list[str] = []
+        for item in candidates:
+            path = self._workspace_artifact_display_path(item)
+            if path and path not in paths:
+                paths.append(path)
+        return paths
+
+    def _taskboard_grounding_workspace_patch_scope(
+        self,
+        patch_proposal: Mapping[str, Any],
+        grounding_contract: Mapping[str, Any],
+        *,
+        allowed_patch_paths: Sequence[Any],
+    ) -> tuple[bool, str]:
+        return self._grounding_workspace_patch_scope(
+            patch_proposal,
+            grounding_contract,
+            allowed_patch_paths=allowed_patch_paths,
+            require_exact_claim_coverage=True,
+            require_versioned_requirements=True,
+        )
 
     @classmethod
     def _taskboard_patch_proposal_is_workspace_patch(cls, patch_proposal: Mapping[str, Any]) -> bool:
@@ -492,13 +626,13 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             raise ValueError(f"Unsupported Workspace patch operation '{ op or '<empty>' }'.")
         old = cls._first_present_patch_string(
             operation,
-            ("old", "from", "search", "old_text", "from_text", "search_text", "find", "find_text"),
+            _TASKBOARD_WORKSPACE_REPLACE_OLD_KEYS,
         )
         if not old:
             raise ValueError("Workspace replace patch requires non-empty old/from/search text.")
         new = cls._first_present_patch_string(
             operation,
-            ("new", "to", "replacement", "new_text", "to_text", "replacement_text"),
+            _TASKBOARD_WORKSPACE_REPLACE_NEW_KEYS,
             default="",
         )
         match_count = content.count(old)
@@ -553,9 +687,9 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
 
     @staticmethod
     def _taskboard_workspace_patch_operation_has_replace_fields(operation: Mapping[str, Any]) -> bool:
-        old_keys = {"old", "from", "search", "old_text", "from_text", "search_text", "find", "find_text"}
-        new_keys = {"new", "to", "replacement", "new_text", "to_text", "replacement_text"}
-        return any(key in operation for key in old_keys) and any(key in operation for key in new_keys)
+        return any(key in operation for key in _TASKBOARD_WORKSPACE_REPLACE_OLD_KEYS) and any(
+            key in operation for key in _TASKBOARD_WORKSPACE_REPLACE_NEW_KEYS
+        )
 
     @staticmethod
     def _taskboard_mapping_sequence(value: Any) -> list[Mapping[str, Any]]:
@@ -1047,11 +1181,43 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         ]
         if not completed_dependencies:
             return None
-        gaps = [
-            *self._normalize_string_list(final_verification.get("missing_criteria")),
-            *self._normalize_string_list(final_verification.get("next_step_requirements")),
-            *self._normalize_string_list(final_verification.get("acceptance_delta")),
-        ]
+        grounding_repair_contract: dict[str, Any] | None = None
+        raw_repair_contract = final_verification.get("material_claim_repair_contract")
+        if isinstance(raw_repair_contract, Mapping):
+            grounding_repair_contract = dict(DataFormatter.sanitize(raw_repair_contract))
+        if grounding_repair_contract is not None:
+            raw_requirements = grounding_repair_contract.get("requirements")
+            requirements = (
+                raw_requirements
+                if isinstance(raw_requirements, Sequence)
+                and not isinstance(raw_requirements, str | bytes | bytearray)
+                else []
+            )
+            gaps = [
+                ": ".join(
+                    part
+                    for part in (
+                        str(requirement.get("subject_key") or "").strip(),
+                        str(requirement.get("state") or "").strip(),
+                        str(
+                            requirement.get("artifact_quote")
+                            or requirement.get("claim")
+                            or requirement.get("reason")
+                            or ""
+                        ).strip(),
+                    )
+                    if part
+                )
+                for requirement in requirements
+                if isinstance(requirement, Mapping)
+            ]
+            gaps = [gap for gap in gaps if gap]
+        else:
+            gaps = [
+                *self._normalize_string_list(final_verification.get("missing_criteria")),
+                *self._normalize_string_list(final_verification.get("next_step_requirements")),
+                *self._normalize_string_list(final_verification.get("acceptance_delta")),
+            ]
         if not gaps:
             reason = str(final_verification.get("reason") or final.get("reason") or "").strip()
             if reason:
@@ -1059,7 +1225,70 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if not gaps:
             return None
 
-        required_deliverables = self._required_workspace_deliverables()
+        missing_capability_ids = self._normalize_string_list(
+            final_verification.get("missing_capability_evidence")
+        )
+        missing_capability_id_set = set(missing_capability_ids)
+        action_requirements = self._merge_capability_evidence_requirements(
+            [
+                requirement
+                for requirement in self._capability_evidence_requirements()
+                if requirement.get("required", True) is not False
+                and str(requirement.get("kind") or "capability_used")
+                == "action_succeeded"
+                and str(requirement.get("capability_id") or "").strip()
+                in missing_capability_id_set
+            ]
+        )
+        required_action_ids = self._normalize_string_list(
+            [
+                requirement.get("capability_id")
+                for requirement in action_requirements
+            ]
+        )
+        if required_action_ids:
+            available_action_ids = {
+                str(capability.get("id") or "").strip()
+                for capability in self._planner_capabilities()
+                if isinstance(capability, Mapping)
+                and str(capability.get("kind") or "").strip() == "action"
+                and str(capability.get("id") or "").strip()
+            }
+            unavailable_action_ids = [
+                capability_id
+                for capability_id in required_action_ids
+                if capability_id not in available_action_ids
+            ]
+            if unavailable_action_ids:
+                self.diagnostics.setdefault(
+                    "taskboard_final_repair_unavailable_capabilities",
+                    [],
+                ).append(
+                    {
+                        "code": "taskboard.final_verification.repair_capability_unavailable",
+                        "unavailable_capability_ids": unavailable_action_ids,
+                        "revision_id": effective_revision.revision_id,
+                    }
+                )
+                return None
+
+        required_deliverables, _invalid_terminal_paths = self._taskboard_terminal_workspace_deliverables(
+            effective_revision
+        )
+        grounding_patch_paths = [
+            self._workspace_artifact_display_path(item)
+            for item in required_deliverables
+            if self._workspace_artifact_display_path(item)
+        ]
+        repair_carrier = (
+            self._terminal_carrier_for_repair_contract(grounding_repair_contract)
+            if grounding_repair_contract is not None
+            else None
+        )
+        if repair_carrier is not None and repair_carrier.kind == "workspace_artifact":
+            candidate_path = self._workspace_artifact_display_path(repair_carrier.path)
+            if candidate_path and candidate_path not in grounding_patch_paths:
+                grounding_patch_paths.append(candidate_path)
 
         def safe_id(raw: str) -> str:
             text = "".join(ch if ch.isalnum() or ch in {"_", ".", "-"} else "-" for ch in raw.strip())
@@ -1081,35 +1310,112 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         required_outputs = [
             "Corrected final deliverable that resolves final verification gaps using existing evidence.",
         ]
-        if required_deliverables:
+        grounding_scope_instruction = ""
+        grounding_patch_mode = bool(
+            grounding_repair_contract is not None
+            and grounding_patch_paths
+            and not action_requirements
+        )
+        repair_deliverables = grounding_patch_paths if grounding_patch_mode else required_deliverables
+        if grounding_repair_contract is not None:
+            if grounding_patch_mode:
+                required_outputs[0] = (
+                    "A bounded Workspace replace patch that changes only the structured grounding claim requirements."
+                )
+                grounding_scope_instruction = (
+                    " Change only the implicated claims named by the structured grounding repair contract and preserve "
+                    "all unrelated artifact text and facts exactly. Return a Workspace replace patch for the authorized "
+                    "final deliverable. Do not return or rewrite the complete artifact body; do not introduce a new "
+                    "factual clause outside the implicated claims."
+                )
+            else:
+                required_outputs[0] = (
+                    "Minimally corrected final deliverable that changes only the structured grounding claim requirements."
+                )
+                grounding_scope_instruction = (
+                    " Change only the implicated claims named by the structured grounding repair contract and preserve "
+                    "all unrelated artifact text and facts exactly. When a complete artifact body is required for "
+                    "delivery, copy unchanged sections verbatim; do not introduce a new factual clause outside the "
+                    "implicated claims."
+                )
+        if repair_deliverables:
             required_outputs.append(
-                "Trusted Workspace final deliverable path(s): " + ", ".join(required_deliverables)
+                "Trusted Workspace final deliverable path(s): " + ", ".join(repair_deliverables)
             )
+        repair_instruction = "Repair"
+        if required_action_ids:
+            repair_instruction = (
+                "First produce the listed structured Action evidence with the mounted capabilities "
+                f"({', '.join(required_action_ids)}), then repair"
+            )
+        repair_completion_instruction = (
+            " Preserve verifier-visible source refs; remove, qualify, or replace unsupported facts instead of "
+            "inventing evidence."
+            if grounding_patch_mode
+            else " Produce a complete corrected deliverable; preserve verifier-visible source refs; remove, "
+            "qualify, or replace unsupported facts instead of inventing evidence."
+        )
+        evidence_contract = {
+            "kind": "taskboard_final_verification_repair",
+            "missing_criteria": self._normalize_string_list(final_verification.get("missing_criteria")),
+            "next_step_requirements": self._normalize_string_list(final_verification.get("next_step_requirements")),
+            "acceptance_delta": self._normalize_string_list(final_verification.get("acceptance_delta")),
+            "reason": str(final_verification.get("reason") or ""),
+        }
+        prior_final_evidence_use = []
+        for item in collect_evidence_use(final)[:24]:
+            if not isinstance(item, Mapping):
+                continue
+            prior_final_evidence_use.append(
+                {
+                    "claim": self._truncate_prompt_text(item.get("claim"), 500),
+                    "evidence_ids": self._normalize_string_list(item.get("evidence_ids"))[:8],
+                    "support_type": str(item.get("support_type") or "content"),
+                }
+            )
+        if prior_final_evidence_use:
+            evidence_contract["prior_final_evidence_use"] = DataFormatter.sanitize(prior_final_evidence_use)
+        metadata = {
+            "generated_by": "agent_task.taskboard.final_verification_repair",
+            "repair_source": "final_verification",
+            "previous_revision_id": effective_revision.revision_id,
+            "final_workspace_deliverables": repair_deliverables,
+            "terminal_convergence_subject": "taskboard_final_verification",
+        }
+        if grounding_repair_contract is not None:
+            evidence_contract["material_claim_repair_contract"] = grounding_repair_contract
+            if grounding_patch_mode:
+                evidence_contract["material_claim_patch_paths"] = grounding_patch_paths
+            metadata["repair_source"] = "material_claim_audit"
+            contract_subject = str(grounding_repair_contract.get("contract_subject") or "").strip()
+            if contract_subject:
+                metadata["terminal_convergence_subject"] = contract_subject
+        if action_requirements:
+            evidence_contract["capability_evidence_requirements"] = action_requirements
+            evidence_contract["requires_capability_ids"] = required_action_ids
+            metadata["requires_capability_ids"] = required_action_ids
         repair_card = {
             "id": repair_id,
             "objective": (
-                "Repair the final TaskBoard deliverable using existing completed-card evidence and final "
-                f"verification feedback. Address these gaps: {gap_text}. Produce a complete corrected "
-                "deliverable; preserve verifier-visible source refs; remove, qualify, or replace unsupported "
-                "facts instead of inventing evidence."
+                repair_instruction
+                + " the final TaskBoard deliverable using existing completed-card evidence and final "
+                f"verification feedback. Address these gaps: {gap_text}.{grounding_scope_instruction}"
+                + repair_completion_instruction
             ),
             "depends_on": completed_dependencies,
             "required_outputs": required_outputs,
-            "allowed_execution_shape": "control",
+            # Exact action_succeeded gaps remain narrowed deterministically by
+            # action_requirements. A file-backed grounding-only repair uses the
+            # host-owned bounded patch route; other semantic repairs retain the
+            # ordinary bounded route with mounted capabilities available.
+            "allowed_execution_shape": (
+                "actions"
+                if action_requirements
+                else ("control" if grounding_patch_mode else "auto")
+            ),
             "failure_policy": "required",
-            "evidence_contract": {
-                "kind": "taskboard_final_verification_repair",
-                "missing_criteria": self._normalize_string_list(final_verification.get("missing_criteria")),
-                "next_step_requirements": self._normalize_string_list(final_verification.get("next_step_requirements")),
-                "acceptance_delta": self._normalize_string_list(final_verification.get("acceptance_delta")),
-                "reason": str(final_verification.get("reason") or ""),
-            },
-            "metadata": {
-                "generated_by": "agent_task.taskboard.final_verification_repair",
-                "repair_source": "final_verification",
-                "previous_revision_id": effective_revision.revision_id,
-                "final_workspace_deliverables": required_deliverables,
-            },
+            "evidence_contract": evidence_contract,
+            "metadata": metadata,
         }
         diagnostic = {
             "code": "taskboard.final_verification.repair_patch",
