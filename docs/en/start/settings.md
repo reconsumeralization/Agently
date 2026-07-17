@@ -126,7 +126,19 @@ Agently.set_settings("debug", True)
 Prints concise model request and result logs to the console. For AgentTask runs,
 `"simple"` also prints process event summaries such as phases, progress, and
 snapshots without token-level deltas. Use `debug="detail"` when you need the
-full observation stream, including model delta output.
+full diagnostic RuntimeEvent stream, including model delta output. Debug output
+does not automatically print the user-facing process and final answer. Consume
+the public delta stream as well:
+
+```python
+agent.set_settings("debug", "detail")
+task = agent.create_task(goal="Prepare the report.", execution="flat")
+await task.async_streaming_print()
+result = await task.async_get_full_data()
+```
+
+This combination shows complete diagnostics plus the readable task stages and
+terminal result without mixing raw event JSON into public text delta.
 
 Runtime logs can also be enabled per family:
 

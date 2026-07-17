@@ -467,8 +467,8 @@ def test_taskboard_delta_projects_structured_status_table():
     text = project_agent_execution_text_delta(item)
 
     assert text is not None
-    assert text.startswith("**TaskBoard tick 2 updated** `demo-board` - revision `rev-2`")
-    assert "Progress: 1/5 completed - 1 in progress - 1 not started - 1 failed - 1 degraded" in text
+    assert text.startswith("📋 TaskBoard tick 2 updated `demo-board` - revision `rev-2`")
+    assert "📊 Overall progress: 1/5 completed - 1 in progress - 1 not started - 1 failed - 1 degraded" in text
     assert "| ✅ Completed | `collect` | Collect source facts. |" in text
     assert "| 🔄 In progress | `draft` | Draft the answer. |" in text
     assert "| ⏳ Not started | `final` | Finalize the user-facing answer. |" in text
@@ -566,7 +566,7 @@ def test_flat_delta_projector_describes_plan_with_previous_completed_action():
     assert context_text is not None
     assert context_text == "Iteration 1: context is ready with 2 item(s).\n\n"
     assert text is not None
-    assert text.startswith("Iteration 1: plan ready.")
+    assert text.startswith("🧭 Iteration 1 — Plan ready")
     assert text.endswith("\n\n")
     assert "Previous completed action: prepared the working context with 2 item(s)." in text
     assert "Current action plan: Read the source file and draft the final answer." in text
@@ -650,14 +650,15 @@ def test_flat_delta_projector_summarizes_completed_actions_and_terminal_result()
     assert context_text == "Iteration 1: context is ready with 2 item(s).\n\n"
     assert execution_text is not None
     assert execution_text.endswith("\n\n")
-    assert "Iteration 1: completed action: Drafted the answer from bounded source evidence." in execution_text
+    assert "✅ Iteration 1 — Step completed: Drafted the answer from bounded source evidence." in execution_text
     assert "| State | Step | Detail |" not in execution_text
     assert verification_text is not None
     assert verification_text.endswith("\n\n")
-    assert "Iteration 1: verification passed: All requested facts are covered." in verification_text
+    assert "🔎 Iteration 1 — Verification passed: All requested facts are covered." in verification_text
     assert result_text is not None
     assert result_text.endswith("\n\n")
-    assert result_text.startswith("Task summary:")
+    assert result_text.startswith("🎯 Task completed")
+    assert "📊 Overall progress: 2 completed stages · accepted" in result_text
     assert "What was done:" in result_text
     assert "- Drafted the answer from bounded source evidence." in result_text
     assert "- verified the final result." in result_text
@@ -797,7 +798,7 @@ async def test_agent_task_flat_child_stream_uses_raw_events_without_synthetic_de
     ]
     child_paths = [(item.meta or {}).get("child_path") for item in task._stream_items]
 
-    assert delta_chunks == ["A"]
+    assert delta_chunks == []
     assert child_paths == ["answer"]
     assert child_execution.requested_types == ["all"]
 
@@ -816,7 +817,7 @@ async def test_agent_task_taskboard_child_stream_uses_raw_events_without_synthet
     ]
     child_paths = [(item.meta or {}).get("child_path") for item in task._stream_items]
 
-    assert delta_chunks == ["A"]
+    assert delta_chunks == []
     assert child_paths == ["answer"]
     assert child_execution.requested_types == ["all"]
 
@@ -877,16 +878,13 @@ def test_agent_task_action_observation_delta_projects_safe_progress_text():
         meta={"stream_kind": "action_observation", "phase": "failed"},
     )
 
-    assert project_agent_execution_text_delta(started) == (
-        "Action started: grep_workspace (shell_search). Input: query=deadline\n\n"
-    )
+    assert project_agent_execution_text_delta(started) == "🔄 `grep_workspace (shell_search)` — Running\n\n"
     completed_text = project_agent_execution_text_delta(completed)
     assert completed_text is not None
     assert completed_text.endswith("\n\n")
-    assert "Action completed: grep_workspace (shell_search)." in completed_text
-    assert "Result: path notes.md" in completed_text
-    assert "Refs: notes.md" in completed_text
-    assert project_agent_execution_text_delta(failed) == "Action setback: read_file failed. Error: file not found\n\n"
+    assert "✅ `grep_workspace (shell_search)` — Completed: path notes.md" in completed_text
+    assert "📎 References: notes.md" in completed_text
+    assert project_agent_execution_text_delta(failed) == "❌ `read_file` — Failed: file not found\n\n"
 
 
 def test_evidence_ledger_guard_rejects_structurally_invalid_support():
@@ -13789,7 +13787,7 @@ async def test_agent_task_loop_replans_without_workspace_audit_records(tmp_path)
     assert any(item.path.endswith(".replan") for item in stream_items)
     assert any(item.path == "result" for item in stream_items)
     assert "building a Workspace context pack" in delta_text
-    assert "plan ready" in delta_text
+    assert "🧭 Iteration 1 — Plan ready" in delta_text
     assert "execution evidence was captured" in delta_text
     assert "all success criteria are satisfied" in delta_text
     assert result["final_response"] in delta_text

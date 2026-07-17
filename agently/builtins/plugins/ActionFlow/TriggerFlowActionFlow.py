@@ -186,6 +186,7 @@ class TriggerFlowActionFlow:
             *,
             message: str,
             payload: dict[str, Any],
+            stream_projection: dict[str, Any] | None = None,
             level: str = "INFO",
             error: BaseException | None = None,
             run=None,
@@ -206,6 +207,11 @@ class TriggerFlowActionFlow:
                         "run": action_loop_run if run is None else run,
                         "compat_event_family": compat_event_family,
                         "compat_message": compat_message,
+                        **(
+                            {"stream_projection": stream_projection}
+                            if stream_projection is not None
+                            else {}
+                        ),
                     }
                 )
             )
@@ -331,6 +337,11 @@ class TriggerFlowActionFlow:
                 )
             )
 
+            dispatch_confirmed = action._should_continue(
+                decision,
+                round_index=round_index,
+                max_rounds=max_rounds,
+            )
             await publish_runtime_observation(
                 "plan_ready",
                 message=f"Action plan ready for round { round_index }.",
@@ -339,6 +350,11 @@ class TriggerFlowActionFlow:
                     "agent_name": agent_name,
                     "round_index": round_index,
                     "decision": decision,
+                },
+                stream_projection={
+                    "concurrency": concurrency,
+                    "parallel": len(decision.get("action_calls", [])) > 1 and concurrency != 1,
+                    "dispatch_confirmed": dispatch_confirmed,
                 },
             )
             planning_diagnostics = decision.get("diagnostics", [])
@@ -391,7 +407,7 @@ class TriggerFlowActionFlow:
                         record_index=len(diagnostic_records),
                     )
                 )
-            if action._should_continue(decision, round_index=round_index, max_rounds=max_rounds):
+            if dispatch_confirmed:
                 await data.async_emit("EXECUTE", decision.get("action_calls", []))
             else:
                 await data.async_emit("DONE", [*done_plans, *diagnostic_records])
@@ -626,7 +642,17 @@ class TriggerFlowActionFlow:
             agent_execution_context = get_current_agent_execution_context()
             record_action_records = getattr(agent_execution_context, "record_action_records", None)
             if callable(record_action_records):
-                record_action_records(bounded_records, source="ActionFlow")
+                record_action_records(
+                    [
+                        {
+                            **record,
+                            "round_index": round_index,
+                            "command_index": record_index,
+                        }
+                        for record_index, record in enumerate(bounded_records)
+                    ],
+                    source="ActionFlow",
+                )
             should_stop_after_failed_actions = self._update_failed_action_counts(
                 data,
                 bounded_records,

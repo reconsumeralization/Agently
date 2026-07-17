@@ -951,15 +951,17 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
     @staticmethod
     def _dedupe_action_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, str, str]] = set()
+        seen: set[tuple[str, str, str, str, str, str]] = set()
         for record in records:
-            action_id = str(record.get("id") or record.get("name") or "")
+            action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "")
             call_id = str(record.get("action_call_id") or "")
+            round_index = str(record.get("round_index") if record.get("round_index") is not None else "")
+            command_index = str(record.get("command_index") if record.get("command_index") is not None else "")
             preview_sha = str(record.get("result_preview_sha256") or "")
             preview = str(record.get("result_preview") or "")
             if len(preview) > 120:
                 preview = preview[:120]
-            key = (action_id, call_id, preview_sha, preview)
+            key = (action_id, call_id, round_index, command_index, preview_sha, preview)
             if key in seen:
                 continue
             seen.add(key)
@@ -979,29 +981,168 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         if owner_context is None:
             owner_context = self._action_event_owner_context(iteration_index, execution_meta)
         for record in records:
-            action_id = str(record.get("id") or record.get("name") or "").strip()
+            indexed_record = dict(record)
+            action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "").strip()
             if not action_id:
                 continue
             await self._emit_normalized_action_event(
                 "started",
-                record,
+                indexed_record,
                 execution_meta=execution_meta,
                 owner_context=owner_context,
             )
-            if self._action_record_failed(record):
+            if self._action_record_failed(indexed_record):
                 await self._emit_normalized_action_event(
                     "failed",
-                    record,
+                    indexed_record,
                     execution_meta=execution_meta,
                     owner_context=owner_context,
                 )
             else:
                 await self._emit_normalized_action_event(
                     "completed",
-                    record,
+                    indexed_record,
                     execution_meta=execution_meta,
                     owner_context=owner_context,
                 )
+
+    async def _emit_planned_action_batch(
+        self,
+        *,
+        iteration_index: int | None,
+        commands: Sequence[Mapping[str, Any]],
+        execution_id: str,
+        round_index: int | None,
+        concurrency: int | None,
+        parallel: bool | None,
+        projection_source: str,
+    ) -> None:
+        actions: list[dict[str, Any]] = []
+        for position, command in enumerate(commands):
+            if not isinstance(command, Mapping):
+                continue
+            action_id = " ".join(str(command.get("action_id") or "").split())[:80]
+            if not action_id:
+                continue
+            purpose = " ".join(str(command.get("purpose") or f"Use {action_id}").split())[:180]
+            action_call_id = " ".join(str(command.get("action_call_id") or "").split())[:120]
+            actions.append(
+                {
+                    "position": position,
+                    "action_id": action_id,
+                    "purpose": purpose,
+                    "action_call_id": action_call_id or None,
+                }
+            )
+        if not actions:
+            return
+        normalized_concurrency = concurrency if isinstance(concurrency, int) and concurrency > 0 else None
+        normalized_parallel = parallel if isinstance(parallel, bool) else None
+        source = " ".join(str(projection_source or "").split())[:80]
+        await self._emit(
+            "agent_task.action.batch.planned",
+            {
+                "iteration": iteration_index,
+                "round_index": round_index,
+                "command_count": len(actions),
+                "concurrency": normalized_concurrency,
+                "parallel": normalized_parallel,
+                "actions": actions,
+                "projection_source": source,
+            },
+            meta={
+                "task_id": self.id,
+                "status": self.status,
+                "stream_kind": "action_observation",
+                "phase": "planned",
+                "strategy": "flat",
+                "iteration": iteration_index,
+                "round_index": round_index,
+                "execution_id": execution_id,
+                "projection_source": source,
+            },
+        )
+
+    async def _project_live_action_observation(
+        self,
+        iteration_index: int,
+        observation: Mapping[str, Any],
+        *,
+        child_execution_id: str,
+    ) -> None:
+        kind = str(observation.get("kind") or "").strip().lower()
+        payload = observation.get("payload")
+        if not isinstance(payload, Mapping):
+            return
+        if kind == "plan_ready":
+            decision = payload.get("decision")
+            if not isinstance(decision, Mapping):
+                return
+            commands = decision.get("action_calls")
+            if not isinstance(commands, Sequence) or isinstance(commands, str | bytes | bytearray):
+                return
+            stream_projection = observation.get("stream_projection")
+            stream_projection = stream_projection if isinstance(stream_projection, Mapping) else {}
+            if stream_projection.get("dispatch_confirmed") is not True:
+                return
+            concurrency = stream_projection.get("concurrency")
+            parallel = stream_projection.get("parallel")
+            round_index = payload.get("round_index")
+            await self._emit_planned_action_batch(
+                iteration_index=iteration_index,
+                commands=[command for command in commands if isinstance(command, Mapping)],
+                execution_id=child_execution_id,
+                round_index=(
+                    round_index
+                    if isinstance(round_index, int) and not isinstance(round_index, bool)
+                    else None
+                ),
+                concurrency=(
+                    concurrency
+                    if isinstance(concurrency, int) and not isinstance(concurrency, bool)
+                    else None
+                ),
+                parallel=parallel if isinstance(parallel, bool) else None,
+                projection_source="action.plan_ready",
+            )
+            return
+
+        phase_by_kind = {
+            "action_started": "started",
+            "action_completed": "completed",
+            "action_failed": "failed",
+            "action_blocked": "failed",
+            "action_approval_required": "failed",
+        }
+        phase = phase_by_kind.get(kind)
+        if phase is None:
+            return
+        raw_record = payload.get("command") if phase == "started" else payload.get("record")
+        record = dict(raw_record) if isinstance(raw_record, Mapping) else {}
+        action_id = str(
+            record.get("action_id")
+            or record.get("id")
+            or payload.get("action_name")
+            or ""
+        ).strip()
+        if not action_id:
+            return
+        record["id"] = action_id
+        record["status"] = "started" if phase == "started" else record.get("status", phase)
+        command_index = payload.get("command_index") if phase == "started" else payload.get("record_index")
+        if isinstance(command_index, int) and not isinstance(command_index, bool):
+            record["command_index"] = command_index
+        round_index = payload.get("round_index")
+        if isinstance(round_index, int) and not isinstance(round_index, bool):
+            record["round_index"] = round_index
+        await self._emit_normalized_action_event(
+            cast(Literal["started", "completed", "failed"], phase),
+            record,
+            execution_meta={"execution_id": child_execution_id, "route": {}},
+            owner_context={"iteration": iteration_index, "strategy": "flat"},
+            projection_source=f"action.{phase}",
+            posthoc_projection=False,
+        )
 
     @staticmethod
     def _action_event_owner_context(iteration_index: int | None, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
@@ -1029,11 +1170,15 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         *,
         execution_meta: Mapping[str, Any],
         owner_context: Mapping[str, Any],
+        projection_source: str = "execution_meta.action_logs",
+        posthoc_projection: bool = True,
     ) -> None:
         if self._normalized_action_event_already_emitted(phase, record, execution_meta=execution_meta):
             return
-        action_id = str(record.get("id") or record.get("name") or "").strip()
+        action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "").strip()
         action_call_id = str(record.get("action_call_id") or "").strip()
+        command_index = record.get("command_index")
+        round_index = record.get("round_index")
         status = str(record.get("status") or "").strip() or ("started" if phase == "started" else phase)
         payload: dict[str, Any] = {
             "action_id": action_id,
@@ -1043,8 +1188,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "kind": str(record.get("kind") or "").strip() or None,
             "execution_id": execution_meta.get("execution_id"),
             "route": DataFormatter.sanitize(execution_meta.get("route", {})),
-            "projection_source": "execution_meta.action_logs",
-            "posthoc_projection": True,
+            "projection_source": projection_source,
+            "posthoc_projection": posthoc_projection,
+            "command_index": command_index if isinstance(command_index, int) and not isinstance(command_index, bool) else None,
+            "round_index": round_index if isinstance(round_index, int) and not isinstance(round_index, bool) else None,
             **{key: value for key, value in owner_context.items() if value is not None},
         }
         if "input_preview" in record:
@@ -1066,7 +1213,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 "warnings",
             ):
                 if key in record:
-                    payload[key] = record.get(key)
+                    if key in {"artifact_refs", "file_refs"}:
+                        payload[key] = await self._public_action_file_refs(record.get(key))
+                    else:
+                        payload[key] = record.get(key)
             source_refs = self._collect_source_refs_from_action_records([record])
             if source_refs:
                 payload["source_refs"] = source_refs
@@ -1086,15 +1236,62 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 "stream_kind": "action_observation",
                 "action_id": action_id,
                 "action_call_id": action_call_id or None,
+                "command_index": payload.get("command_index"),
+                "round_index": payload.get("round_index"),
                 "phase": phase,
                 "iteration": owner_context.get("iteration"),
                 "origin": owner_context.get("origin"),
                 "work_unit_id": owner_context.get("work_unit_id"),
                 "strategy": owner_context.get("strategy"),
                 "card_id": owner_context.get("card_id"),
-                "projection_source": "execution_meta.action_logs",
+                "projection_source": projection_source,
+                "trusted_ref_projection": True,
             },
         )
+
+    async def _public_action_file_refs(self, refs: Any) -> list[dict[str, Any]]:
+        if not isinstance(refs, Sequence) or isinstance(refs, str | bytes | bytearray):
+            return []
+        workspace = getattr(self, "workspace", None)
+        projected: list[dict[str, Any]] = []
+        for raw_ref in refs[:8]:
+            if not isinstance(raw_ref, Mapping):
+                continue
+            ref = dict(DataFormatter.sanitize(dict(raw_ref)))
+            ref.pop("open_path", None)
+            ref.pop("open_path_verified", None)
+            ref.pop("display_path", None)
+            projected.append(ref)
+            path = str(ref.get("path") or "").strip()
+            expected_sha256 = str(ref.get("sha256") or "").strip()
+            expected_bytes = ref.get("bytes")
+            if (
+                workspace is None
+                or not path
+                or not expected_sha256
+                or not isinstance(expected_bytes, int)
+                or isinstance(expected_bytes, bool)
+                or expected_bytes < 0
+                or ref.get("available") is False
+            ):
+                continue
+            try:
+                target = workspace.resolve_file_path(path)
+                if not target.is_file():
+                    continue
+                readback = await workspace.read_file(path, max_bytes=1)
+                if (
+                    readback.get("ok") is not True
+                    or str(readback.get("sha256") or "") != expected_sha256
+                    or int(readback.get("bytes", -1)) != expected_bytes
+                ):
+                    continue
+                ref["open_path"] = str(target.resolve())
+                ref["open_path_verified"] = True
+                ref["display_path"] = self._workspace_artifact_display_path(path)
+            except Exception:
+                continue
+        return projected
 
     def _normalized_action_event_already_emitted(
         self,
@@ -1107,8 +1304,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         if not isinstance(emitted, set):
             emitted = set()
             setattr(self, "_emitted_action_event_keys", emitted)
-        action_id = str(record.get("id") or record.get("name") or "").strip()
+        action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "").strip()
         action_call_id = str(record.get("action_call_id") or "").strip()
+        command_index = record.get("command_index")
+        round_index = record.get("round_index")
         preview_key = str(record.get("result_preview_sha256") or "")
         if not preview_key:
             try:
@@ -1124,16 +1323,34 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 )[:160]
             except Exception:
                 preview_key = f"{record.get('input_preview') or ''}|{record.get('result_preview') or ''}"[:160]
-        key = (
-            str(phase),
-            str(execution_meta.get("execution_id") or ""),
-            action_id,
-            action_call_id,
-            preview_key or str(record.get("status") or ""),
-        )
-        if key in emitted:
+        execution_id = str(execution_meta.get("execution_id") or "")
+        keys: list[tuple[Any, ...]] = []
+        if action_call_id:
+            keys.append((str(phase), execution_id, "call", action_call_id))
+        if isinstance(command_index, int) and not isinstance(command_index, bool):
+            keys.append(
+                (
+                    str(phase),
+                    execution_id,
+                    "position",
+                    round_index if isinstance(round_index, int) and not isinstance(round_index, bool) else None,
+                    command_index,
+                    action_id,
+                )
+            )
+        if not keys:
+            keys.append(
+                (
+                    str(phase),
+                    execution_id,
+                    "fingerprint",
+                    action_id,
+                    preview_key or str(record.get("status") or ""),
+                )
+            )
+        if any(key in emitted for key in keys):
             return True
-        emitted.add(key)
+        emitted.update(keys)
         return False
 
     @staticmethod
@@ -1180,7 +1397,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
     def _collect_source_refs_from_action_records(cls, records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []
         for record in records:
-            action_id = str(record.get("id") or record.get("name") or "").strip()
+            action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "").strip()
             action_call_id = str(record.get("action_call_id") or "").strip()
 
             def collect(value: Any, *, path: str = "") -> None:
@@ -1303,6 +1520,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "action_type": str(record.get("action_type") or record.get("type") or ""),
             "kind": str(record.get("kind") or ""),
         }
+        for identity_key in ("round_index", "command_index"):
+            identity_value = record.get(identity_key)
+            if isinstance(identity_value, int) and not isinstance(identity_value, bool):
+                compact[identity_key] = identity_value
         action_call_id = str(record.get("action_call_id") or record.get("call_id") or "").strip()
         if action_call_id:
             compact["action_call_id"] = action_call_id

@@ -253,8 +253,11 @@ AgentExecution records progress in `async_get_meta()["diagnostics"]`:
 When debugging a live app, attach a temporary Event Center hook or enable
 console logs with `.set_settings("debug", True)` for request/result and process
 summaries, or `.set_settings("debug", "detail")` for full observation and model
-delta output. Remove temporary debug hooks and debug settings after the issue is
-understood.
+delta output. RuntimeEvent diagnostics and public business text are separate:
+also consume `execution.get_async_generator(type="delta")` or call
+`await execution.async_streaming_print()` to see the complete readable process
+and final result. Remove temporary debug hooks and debug settings after the
+issue is understood.
 
 ## Compatibility rules
 

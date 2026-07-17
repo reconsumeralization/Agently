@@ -350,6 +350,10 @@ class AgentExecutionContext:
             return f"call:{ action_call_id }"
         action_id = str(record.get("action_id") or record.get("tool_name") or "action")
         status = str(record.get("status") or "")
+        command_index = record.get("command_index")
+        round_index = record.get("round_index")
+        if isinstance(command_index, int) and not isinstance(command_index, bool):
+            return f"position:{ round_index }:{ command_index }:{ action_id }:{ status }"
         data = record.get("data") if record.get("data") is not None else record.get("result")
         digest = str(DataFormatter.sanitize(data))
         return f"{ action_id }:{ status }:{ hash(digest) }"

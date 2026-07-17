@@ -1241,9 +1241,24 @@ class Action:
         return should_continue(decision, round_index=round_index, max_rounds=max_rounds)
 
     async def _async_emit_action_flow_observation(self, observation: dict[str, Any]):
+        from agently.core.runtime import get_current_agent_execution_context
         from agently.core.runtime.RuntimeEvents import async_emit_action_flow_observation
 
-        await async_emit_action_flow_observation(self._to_runtime_visible_observation(observation))
+        visible = self._to_runtime_visible_observation(observation)
+        await async_emit_action_flow_observation(visible)
+        context = get_current_agent_execution_context()
+        record_progress = getattr(context, "record_progress", None)
+        if callable(record_progress):
+            kind = str(visible.get("kind") or "progress")
+            try:
+                record_progress(
+                    stage="action_observation",
+                    status=kind,
+                    event_type=f"action.{kind}",
+                    meta={"action_observation": visible},
+                )
+            except Exception:
+                pass
 
     async def _async_execute_action_calls(
         self,

@@ -55,6 +55,8 @@ async def main() -> None:
     agent = Agently.create_agent("goal-effort-public-stream").use_workspace(workspace_dir)
     provider = configure_agent_model_pool(agent, temperature=0.0)
     agent.settings.set("agent_task.progress.language", progress_language)
+    if os.getenv("AGENTLY_DEBUG_DETAIL", "").strip().lower() in {"1", "true", "yes"}:
+        agent.set_settings("debug", "detail")
 
     incident_facts = {
         "incident_id": "INC-4242",
@@ -110,6 +112,13 @@ async def main() -> None:
         )
     )
 
+    public_delta_chunks: list[str] = []
+    print("[public delta]")
+    async for chunk in execution.get_async_generator(type="delta"):
+        public_delta_chunks.append(chunk)
+        print(chunk, end="", flush=True)
+
+    result = await execution.async_start()
     stream_items: list[Any] = []
     print("[setup] top-level AgentExecution Goal Pursuit stream")
     print(f"[setup] provider={provider} progress_language={progress_language}")
@@ -121,7 +130,6 @@ async def main() -> None:
             trace_file.flush()
             print_stream_item(item)
 
-    result = await execution.async_start()
     meta = await execution.async_get_meta()
     task = getattr(execution, "task_record", None)
     task_options = getattr(task, "options", {}) if task is not None else {}
@@ -132,6 +140,7 @@ async def main() -> None:
         for item in stream_items
         if (item.meta or {}).get("stream_kind") == "progress_delta"
     )
+    public_delta_text = "".join(public_delta_chunks)
     host_checks = {
         "route_is_agent_task": meta.get("route", {}).get("selected_route") == "agent_task",
         "effective_strategy_is_flat": meta.get("task_refs", {}).get("effective_execution_strategy") == "flat",
@@ -143,6 +152,9 @@ async def main() -> None:
         ),
         "execution_output_contract_reached_task_loop": isinstance(execution_prompt, dict) and "output" in execution_prompt,
         "progress_delta_streamed": bool(progress_delta_text.strip()),
+        "public_delta_streamed": bool(public_delta_text.strip()),
+        "public_delta_has_plan": "🧭" in public_delta_text and "Plan ready" in public_delta_text,
+        "public_delta_has_terminal_status": "🎯 Task completed" in public_delta_text,
         "progress_language_observed": any(
             (item.meta or {}).get("progress_language") == progress_language
             for item in stream_items
@@ -165,6 +177,7 @@ async def main() -> None:
         "host_checks": host_checks,
         "final_result": final_result,
         "stream_trace_file": str(trace_path),
+        "public_delta_chars": len(public_delta_text),
     }
     print("\n[summary]")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -175,7 +188,16 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 
-# Expected key output from a real DeepSeek run on 2026-06-26:
+# Optional full diagnostic console plus the readable process stream:
+#   AGENTLY_DEBUG_DETAIL=1 python examples/agent_task/goal_effort_public_stream.py
+# `debug="detail"` prints RuntimeEvent/model diagnostics; the public delta still
+# comes from `type="delta"` and keeps inputs, keys, raw JSON, and long results out.
+#
+# Historical task/result baseline from a real DeepSeek run on 2026-06-26 (the
+# exact stream counts can vary by provider/model). The public-delta checks were
+# added later; they are executable host assertions above and are covered by the
+# current AgentTask delta regression/real-trace validation, not attributed to
+# this older run:
 # command:
 #   AGENT_TASK_PUBLIC_STREAM_WORKSPACE=agent-task-workspaces/goal-effort-public-stream-4138 \
 #   python examples/agent_task/goal_effort_public_stream.py

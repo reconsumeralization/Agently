@@ -1994,6 +1994,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             unit_label="Flat step",
             todo_suggestion="Finish this bounded Flat action step after execution.",
             concurrency=1,
+            iteration_index=iteration_index,
+            project_flat_action_batch=True,
         )
 
     async def _try_flat_narrow_action_command_request(
@@ -2669,7 +2671,9 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 started_event=f"agent_task.iteration.{iteration_index}.execution.started",
                 started_payload={"step_execution": step_execution},
                 stream_bridge=lambda child_execution: self._bridge_step_execution_stream(
-                    iteration_index, child_execution
+                    iteration_index,
+                    child_execution,
+                    execution_shape=str(step_execution.get("effective_shape") or ""),
                 ),
             )
         except Exception as error:
@@ -2877,14 +2881,25 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             )
         return ""
 
-    async def _bridge_step_execution_stream(self, iteration_index: int, execution: Any) -> None:
+    async def _bridge_step_execution_stream(
+        self,
+        iteration_index: int,
+        execution: Any,
+        *,
+        execution_shape: str | None = None,
+    ) -> None:
         try:
             async for stream_record in execution.get_async_generator(type="all"):
                 if isinstance(stream_record, tuple) and len(stream_record) == 2:
                     _, item = stream_record
                 else:
                     item = stream_record
-                await self._emit_step_execution_stream_item(iteration_index, execution, item)
+                await self._emit_step_execution_stream_item(
+                    iteration_index,
+                    execution,
+                    item,
+                    execution_shape=execution_shape,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -2903,6 +2918,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         iteration_index: int,
         execution: Any,
         item: Any,
+        *,
+        execution_shape: str | None = None,
     ) -> AgentExecutionStreamData:
         raw_path = str(getattr(item, "path", "") or "stream")
         event_type: Literal["delta", "done"] = "delta" if getattr(item, "event_type", None) == "delta" else "done"
@@ -2921,9 +2938,29 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         }
         if isinstance(item_meta, Mapping):
             meta["child_meta"] = DataFormatter.sanitize(dict(item_meta))
+        item_value = getattr(item, "value", None)
+        if (
+            str(execution_shape or "").strip().lower() == "actions"
+            and isinstance(item_meta, Mapping)
+            and item_meta.get("stream_kind") == "runtime_progress"
+            and isinstance(item_value, Mapping)
+            and item_value.get("stage") == "action_observation"
+        ):
+            progress_meta = item_value.get("meta")
+            observation = (
+                progress_meta.get("action_observation")
+                if isinstance(progress_meta, Mapping)
+                else None
+            )
+            if isinstance(observation, Mapping):
+                await self._project_live_action_observation(
+                    iteration_index,
+                    observation,
+                    child_execution_id=str(getattr(execution, "id", "") or ""),
+                )
         return await self._emit(
             f"agent_task.iteration.{iteration_index}.execution.{raw_path}",
-            getattr(item, "value", None),
+            item_value,
             event_type=event_type,
             delta=delta,
             is_complete=bool(getattr(item, "is_complete", event_type == "done")),

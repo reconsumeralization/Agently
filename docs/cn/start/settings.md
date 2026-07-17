@@ -126,7 +126,18 @@ Agently.set_settings("debug", True)
 
 打印精简的模型请求与结果日志。AgentTask 运行时，`"simple"` 还会打印 phase、
 progress、snapshot 等过程事件摘要，但不打印 token 级 delta。需要完整 observation
-流和模型 delta 输出时，使用 `debug="detail"`。
+诊断流和模型 delta 输出时，使用 `debug="detail"`。debug 不会自动替代面向用户的过程
+与最终答案输出；还需要同时消费公开 delta：
+
+```python
+agent.set_settings("debug", "detail")
+task = agent.create_task(goal="准备报告。", execution="flat")
+await task.async_streaming_print()
+result = await task.async_get_full_data()
+```
+
+这个组合会同时显示完整诊断、可读任务阶段和终态结果，但不会把原始事件 JSON 混入
+公开文本 delta。
 
 运行时日志也可以按 family 单独打开：
 

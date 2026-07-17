@@ -94,6 +94,13 @@ def normalize_action_log(
     action_id = str(log.get("action_id") or log.get("tool_name") or model_digest.get("action_id") or "action")
     action_call_id = log.get("action_call_id") or model_digest.get("action_call_id")
     status = str(log.get("status") or model_digest.get("status") or "")
+    identity: dict[str, int] = {}
+    for identity_key in ("round_index", "command_index"):
+        identity_value = log.get(identity_key)
+        if identity_value is None:
+            identity_value = model_digest.get(identity_key)
+        if isinstance(identity_value, int) and not isinstance(identity_value, bool):
+            identity[identity_key] = identity_value
     artifact_refs = log.get("artifact_refs") or model_digest.get("artifact_refs") or []
     if not isinstance(artifact_refs, list):
         artifact_refs = []
@@ -112,6 +119,7 @@ def normalize_action_log(
             "route": route,
             "data": data if isinstance(data, dict) else {},
             "artifact_refs": artifact_refs,
+            **identity,
         }
     )
     return normalized if isinstance(normalized, dict) else {}
@@ -123,6 +131,10 @@ def _action_log_key(log: dict[str, Any]) -> str:
         return str(action_call_id)
     action_id = str(log.get("action_id") or "action")
     status = str(log.get("status") or "")
+    command_index = log.get("command_index")
+    round_index = log.get("round_index")
+    if isinstance(command_index, int) and not isinstance(command_index, bool):
+        return f"position:{ round_index }:{ command_index }:{ action_id }:{ status }"
     digest = str(DataFormatter.sanitize(log.get("data")))
     return f"{ action_id }:{ status }:{ hash(digest) }"
 

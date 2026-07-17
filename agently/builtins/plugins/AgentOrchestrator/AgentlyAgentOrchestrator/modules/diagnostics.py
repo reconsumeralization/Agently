@@ -167,6 +167,10 @@ def _action_log_key(log: dict[str, Any]) -> str:
         return str(action_call_id)
     action_id = str(log.get("action_id") or "action")
     status = str(log.get("status") or "")
+    command_index = log.get("command_index")
+    round_index = log.get("round_index")
+    if isinstance(command_index, int) and not isinstance(command_index, bool):
+        return f"position:{ round_index }:{ command_index }:{ action_id }:{ status }"
     digest = str(DataFormatter.sanitize(log.get("data") if log.get("data") is not None else log.get("result")))
     return f"{ action_id }:{ status }:{ hash(digest) }"
 

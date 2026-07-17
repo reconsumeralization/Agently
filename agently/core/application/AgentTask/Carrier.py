@@ -148,6 +148,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         unit_label: str,
         todo_suggestion: str,
         concurrency: int | None = None,
+        iteration_index: int | None = None,
+        project_flat_action_batch: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Validate one bounded command batch and dispatch it through ActionRuntime."""
 
@@ -177,6 +179,41 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             for command in commands
         ]
 
+        owner_context = {"iteration": iteration_index, "strategy": "flat"}
+        projection_meta = {
+            "execution_id": execution_id,
+            "route": {"selected_route": "action_call", "status": "running"},
+        }
+        if project_flat_action_batch:
+            if len(commands) <= 1 or concurrency == 1:
+                batch_is_parallel: bool | None = False
+            elif isinstance(concurrency, int) and not isinstance(concurrency, bool) and concurrency > 1:
+                batch_is_parallel = True
+            else:
+                batch_is_parallel = None
+            await self._emit_planned_action_batch(
+                iteration_index=iteration_index,
+                commands=commands,
+                execution_id=execution_id,
+                round_index=None,
+                concurrency=concurrency,
+                parallel=batch_is_parallel,
+                projection_source="validated_bounded_commands",
+            )
+            for command_index, command in enumerate(commands):
+                await self._emit_normalized_action_event(
+                    "started",
+                    {
+                        "id": command["action_id"],
+                        "status": "started",
+                        "command_index": command_index,
+                    },
+                    execution_meta=projection_meta,
+                    owner_context=owner_context,
+                    projection_source="validated_bounded_commands",
+                    posthoc_projection=False,
+                )
+
         action_logs = [
             dict(record)
             for record in await self.agent.action._async_execute_action_calls(
@@ -187,6 +224,17 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             )
             if isinstance(record, Mapping)
         ]
+        if project_flat_action_batch:
+            for command_index, record in enumerate(action_logs):
+                normalized_record = {**record, "command_index": command_index}
+                await self._emit_normalized_action_event(
+                    "failed" if self._action_record_failed(normalized_record) else "completed",
+                    normalized_record,
+                    execution_meta=projection_meta,
+                    owner_context=owner_context,
+                    projection_source="validated_bounded_commands",
+                    posthoc_projection=False,
+                )
         all_succeeded = len(action_logs) == len(commands) and all(
             self._bounded_action_command_succeeded(record) for record in action_logs
         )

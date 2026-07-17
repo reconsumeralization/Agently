@@ -349,19 +349,33 @@ and also projects selected process events into operator-readable paragraph
 text: template progress, snapshots, phase status, action observations,
 Flat plan/action summaries, TaskBoard status tables, retry markers, and the terminal task
 result. These public text projections intentionally summarize instead of
-dumping raw JSON payloads: action inputs/results are compact, recoverable
-failures are presented as setbacks, terminal results prefer `final_response`
-when available, and process
+dumping raw JSON payloads: Action inputs, credentials, and raw command JSON are
+omitted; bounded result summaries may be shown; recoverable failures are
+presented as setbacks; and the terminal headline is followed by the bounded
+`final_response` when available. Process
 paragraphs are separated from model body deltas so CLI-style consumers do not
-print glued-together text. Flat projections are linear display-only summaries:
-plan completion states the previous completed action and current action plan,
-and terminal output summarizes what was done and the result. TaskBoard tables
+print glued-together text. Internal AgentTask child/control model fields stay in
+the structured `instant`/`all` streams and detailed diagnostics; they are not
+concatenated into public delta. Long terminal text is truncated, and a
+structured final object is referenced through the full result stream instead
+of being serialized as raw JSON. Flat projections are linear display-only summaries:
+plan completion states the previous completed action and current action plan.
+Direct ModelRequest and Skill steps stay at that high level. Only a concrete
+Action batch that the framework has normalized and is about to dispatch expands
+into `Next Action`, ordered-batch, parallel-batch, or neutral-batch rows; the
+label comes from the Action owner's real concurrency policy. Live Action
+started/completed/failed phases then update the same bounded calls, and terminal
+output reports completed stages plus acceptance. TaskBoard tables
 remain display-only projections from structured AgentTask events: the first
 TaskBoard projection renders a compact table, and later ticks summarize
 card-state changes instead of reprinting the whole table. TaskBoard state is
 summarized as not started, in progress, completed, failed, or degraded;
 completion and quality still come from verifier and host-guard facts, not from
-the projected text.
+the projected text. Emoji are redundant visual labels paired with explicit
+words; they do not change task state. Long results stay in Workspace/Action
+artifacts. Delta renders at most three compact links only when AgentTask has
+verified a Workspace file by path, bytes, digest, and physical readback; an
+unverified or model-declared path is never rendered as an openable link.
 Use `type="instant"` when the UI needs the original structured event payloads
 with `path`, `value`, `delta`, `is_complete`, and `meta`. When a structured
 execution item can also be represented as natural-language stream text,
@@ -1163,13 +1177,26 @@ For development diagnostics, attach an EventCenter observation hook or
 temporarily enable console details:
 
 ```python
-Agently.event_center.register_hook(print, event_types=None, hook_name="debug")
 agent.set_settings("debug", "detail")
+
+task = agent.create_task(
+    goal="Prepare the report.",
+    success_criteria=["The report is complete and verified."],
+    execution="flat",
+)
+await task.async_streaming_print()
+result = await task.async_get_full_data()
 ```
 
-Use this only while debugging route selection, model requests, ActionRuntime, or
-Workspace persistence. Remove debug hooks/settings from examples and production
-snippets once the problem is understood.
+`debug=True` (the `simple` profile) prints concise model request/result and
+process summaries. `debug="detail"` prints the complete diagnostic RuntimeEvent
+flow, including model streaming deltas, ActionRuntime, TriggerFlow, and
+AgentExecution details. It does not replace or duplicate the business output:
+consume `type="delta"` or call `async_streaming_print()` to see the readable
+task stages and final result. Use both together for the complete development
+view. Remove debug settings from examples and production snippets once the
+problem is understood. An EventCenter hook remains available when code needs a
+custom diagnostic sink rather than the built-in console profile.
 
 ## Submitted DAG Input
 

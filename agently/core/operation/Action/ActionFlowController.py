@@ -338,7 +338,16 @@ class ActionFlowController:
                 execution_context = get_current_agent_execution_context()
                 record_action_records = getattr(execution_context, "record_action_records", None)
                 if callable(record_action_records):
-                    record_action_records(bounded_records, source="ActionRuntime")
+                    record_action_records(
+                        [
+                            {
+                                **record,
+                                "command_index": min(record_index, len(action_runs) - 1),
+                            }
+                            for record_index, record in enumerate(bounded_records)
+                        ],
+                        source="ActionRuntime",
+                    )
 
                 for record_index, record in enumerate(bounded_records):
                     command_index = min(record_index, len(action_runs) - 1)

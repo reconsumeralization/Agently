@@ -313,14 +313,25 @@ progress model 只接收 operator-safe snapshot；底层 Workspace/SQLite fallba
 execution 中，它既包含模型生成的文本增量，也会把部分过程事件投影成段落文本：
 模板 progress、snapshot、phase 状态、Action observation、Flat plan/action 摘要、
 TaskBoard 状态表、retry marker 和任务终态结果。这些公开文本投影面向 operator 可读性，会摘要而不是
-直出原始 JSON payload：Action 输入/结果会被压缩，可恢复失败会表达为 setback，
-终态结果会优先使用 `final_response`，并且过程段落会和
-模型正文 delta 保持边界，避免 CLI 文本黏连。Flat 投影是线性展示摘要：
-plan 完成时说明上一个已完成动作和当前行动规划，终态输出完成事项与结果摘要。
+直出原始 JSON payload：Action 输入、密钥和原始命令 JSON 不进入文本 delta，
+只有有界结果摘要可以显示；可恢复失败会表达为 setback；终态先显示明确的整体状态，
+再显示有界 `final_response`。过程段落会和
+模型正文 delta 保持边界，避免 CLI 文本黏连。AgentTask 内部 child/control 模型字段
+只保留在结构化 `instant`/`all` stream 和详细诊断中，不会拼接进公开 delta。过长终态
+文本会截断；结构化最终对象只提示从 full result stream 读取，不会序列化为原始 JSON。
+Flat 投影是线性展示摘要：
+plan 完成时说明上一个已完成动作和当前行动规划。Direct ModelRequest 和 Skill 步骤
+仍保持为一个高层步骤；只有框架已经规范化且即将调度的具体 Action 批次，才展开为
+`Next Action`、有序批次、并行批次或未知并发的中性批次。并行标签来自 Action owner
+的真实 concurrency 策略；之后再用 started/completed/failed 增量更新同一批调用，
+终态输出完成阶段数与验收状态。
 TaskBoard 状态表仍是结构化 AgentTask event 的展示投影：第一次 TaskBoard 投影
 输出紧凑表格，后续 tick 默认输出 card 状态变化摘要，而不是反复重印整张表。
 TaskBoard 状态汇总为未开始、进行中、完成、失败、降级五类；完成与质量判断仍来自
-verifier 和 host guard 结构化事实，而不是投影文本本身。UI 如果需要
+verifier 和 host guard 结构化事实，而不是投影文本本身。emoji 只是带有明确文字的
+冗余视觉标签，不改变任务状态。长结果保留在 Workspace/Action artifact；只有 AgentTask
+已经通过 path、bytes、digest 和物理回读核验的 Workspace file ref，才会在 delta 中显示
+最多三个可打开链接。未核验路径或模型自行声明的路径不会被渲染为链接。UI 如果需要
 原始结构化事件载荷，包括 `path`、`value`、`delta`、`is_complete` 和 `meta`，应使用
 `type="instant"`。当某个结构化 execution item 也能投影成自然语言流式文本时，
 `instant` 会先产出原始 item，然后额外产出一个 synthetic
@@ -924,12 +935,23 @@ checkpoint 之间写入 evidence link。record id、checkpoint id 和 evidence l
 开发排障时，可以挂 EventCenter observation hook，或临时打开控制台明细：
 
 ```python
-Agently.event_center.register_hook(print, event_types=None, hook_name="debug")
 agent.set_settings("debug", "detail")
+
+task = agent.create_task(
+    goal="准备报告。",
+    success_criteria=["报告内容完整并已核验。"],
+    execution="flat",
+)
+await task.async_streaming_print()
+result = await task.async_get_full_data()
 ```
 
-这只用于调试 route selection、model request、ActionRuntime 或 Workspace 持久化。
-问题定位后，应从示例和生产代码中移除 debug hook/settings。
+`debug=True`（即 `simple` profile）打印精简的模型请求/结果和过程摘要；
+`debug="detail"` 打印完整诊断 RuntimeEvent 流，包括模型流式 delta、ActionRuntime、
+TriggerFlow 与 AgentExecution 明细。它不会替代或重复业务输出：要查看可读的任务阶段和
+最终结果，仍需消费 `type="delta"` 或调用 `async_streaming_print()`。两者同时使用，
+才是完整的开发观察视图。问题定位后，应从示例和生产代码中移除 debug settings；
+如果需要自定义诊断出口，仍可挂 EventCenter hook。
 
 ## 提交式 DAG 输入
 

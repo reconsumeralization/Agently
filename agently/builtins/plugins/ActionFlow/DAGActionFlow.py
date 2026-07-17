@@ -127,6 +127,7 @@ class DAGActionFlow:
             *,
             message: str,
             payload: dict[str, Any],
+            stream_projection: dict[str, Any] | None = None,
             level: str = "INFO",
             error: BaseException | None = None,
             run=None,
@@ -147,6 +148,11 @@ class DAGActionFlow:
                         "run": action_loop_run if run is None else run,
                         "compat_event_family": compat_event_family,
                         "compat_message": compat_message,
+                        **(
+                            {"stream_projection": stream_projection}
+                            if stream_projection is not None
+                            else {}
+                        ),
                     }
                 )
             )
@@ -217,6 +223,11 @@ class DAGActionFlow:
                 )
             )
 
+            dispatch_confirmed = action._should_continue(
+                decision,
+                round_index=round_index,
+                max_rounds=max_rounds,
+            )
             await publish_runtime_observation(
                 "plan_ready",
                 message=f"Action plan ready for round {round_index}.",
@@ -226,8 +237,13 @@ class DAGActionFlow:
                     "round_index": round_index,
                     "decision": decision,
                 },
+                stream_projection={
+                    "concurrency": concurrency,
+                    "parallel": len(decision.get("action_calls", [])) > 1 and concurrency != 1,
+                    "dispatch_confirmed": dispatch_confirmed,
+                },
             )
-            if action._should_continue(decision, round_index=round_index, max_rounds=max_rounds):
+            if dispatch_confirmed:
                 await data.async_emit("EXECUTE", decision.get("action_calls", []))
             else:
                 await data.async_emit("DONE", done_plans)
@@ -343,6 +359,20 @@ class DAGActionFlow:
             )
 
             bounded_records = action._to_action_flow_return_records(records)
+            agent_execution_context = get_current_agent_execution_context()
+            record_action_records = getattr(agent_execution_context, "record_action_records", None)
+            if callable(record_action_records):
+                record_action_records(
+                    [
+                        {
+                            **record,
+                            "round_index": round_index,
+                            "command_index": record_index,
+                        }
+                        for record_index, record in enumerate(bounded_records)
+                    ],
+                    source="DAGActionFlow",
+                )
             for record_index, record in enumerate(bounded_records):
                 action_id = record.get("action_id", record.get("tool_name", "unknown"))
                 success = bool(record.get("success"))

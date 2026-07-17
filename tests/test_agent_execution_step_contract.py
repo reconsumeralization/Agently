@@ -470,7 +470,7 @@ async def test_agent_execution_instant_uses_stateful_flat_plan_projection():
     assert len(delta_items) == 2
     assert str(delta_items[0].delta) == "Iteration 1: context is ready with 2 item(s).\n\n"
     assert str(delta_items[1].delta).endswith("\n\n")
-    assert "Iteration 1: plan ready." in str(delta_items[1].delta)
+    assert "🧭 Iteration 1 — Plan ready" in str(delta_items[1].delta)
     assert "Previous completed action: prepared the working context with 2 item(s)." in str(delta_items[1].delta)
     assert "Current action plan: Read the source file and draft the final answer." in str(delta_items[1].delta)
     assert "| State | Step | Detail |" not in str(delta_items[1].delta)
@@ -6398,11 +6398,11 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
     assert action_ids
     delta_paragraphs = [item for item in delta_text.split("\n\n") if item.strip()]
     assert len(delta_paragraphs) >= 3
-    assert "Action started: probe_action" in delta_text
-    assert "Action completed: probe_action" in delta_text
+    assert "🔄 `probe_action` — Running" in delta_text
+    assert "✅ `probe_action` — Completed" in delta_text
     assert "Result:" in delta_text
     assert "flat action accepted result" in delta_text
-    assert delta_text.index("Action started: probe_action") < delta_text.index("Action completed: probe_action")
+    assert delta_text.index("🔄 `probe_action` — Running") < delta_text.index("✅ `probe_action` — Completed")
 
 
 @pytest.mark.asyncio
@@ -6747,6 +6747,12 @@ async def test_flat_actions_shape_fans_out_multiple_commands_in_one_step(tmp_pat
 
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
+    all_items: list[AgentExecutionStreamData] = []
+    async for record in execution.get_async_generator(type="all"):
+        item = record[1] if isinstance(record, tuple) and len(record) == 2 else record
+        if isinstance(item, AgentExecutionStreamData):
+            all_items.append(item)
+    delta_text = "".join([chunk async for chunk in execution.get_async_generator(type="delta")])
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     action_logs = task_meta["iterations"][0]["execution_meta"]["logs"]["action_logs"]
     if isinstance(action_logs, dict):
@@ -6758,6 +6764,22 @@ async def test_flat_actions_shape_fans_out_multiple_commands_in_one_step(tmp_pat
     assert result["accepted"] is True
     assert max_active == 2
     assert set(action_ids) == {"slow_a", "slow_b"}
+    planned_index = next(
+        index
+        for index, item in enumerate(all_items)
+        if getattr(item, "path", "") == "agent_task.action.batch.planned"
+    )
+    started_indexes = [
+        index
+        for index, item in enumerate(all_items)
+        if getattr(item, "path", "") == "agent_task.action.started"
+    ]
+    assert started_indexes and planned_index < min(started_indexes)
+    planned_item = all_items[planned_index]
+    assert planned_item.value["parallel"] is True
+    assert {item["action_id"] for item in planned_item.value["actions"]} == {"slow_a", "slow_b"}
+    assert "🚀 Next parallel Action batch — 2 tasks" in delta_text
+    assert "🎯 Task completed" in delta_text
 
 
 @pytest.mark.asyncio
