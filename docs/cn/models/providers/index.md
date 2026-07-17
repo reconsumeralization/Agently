@@ -87,9 +87,43 @@ Agently.set_settings("OpenAICompatible", {
 
 ## MiniMax
 
+MiniMax 同时提供全球站与中国站的 OpenAI 兼容和 Anthropic 兼容端点。
+
+OpenAI 兼容全球站端点：
+
 ```python
 Agently.set_settings("OpenAICompatible", {
-    "base_url": "https://api.minimax.chat/v1",
+    "base_url": "https://api.minimax.io/v1",
+    "api_key": "${ENV.MINIMAX_API_KEY}",
+    "model": "${ENV.MINIMAX_MODEL}",
+})
+```
+
+OpenAI 兼容中国站端点：
+
+```python
+Agently.set_settings("OpenAICompatible", {
+    "base_url": "https://api.minimaxi.com/v1",
+    "api_key": "${ENV.MINIMAX_API_KEY}",
+    "model": "${ENV.MINIMAX_MODEL}",
+})
+```
+
+Anthropic 兼容全球站端点：
+
+```python
+Agently.set_settings("AnthropicCompatible", {
+    "base_url": "https://api.minimax.io/anthropic/v1",
+    "api_key": "${ENV.MINIMAX_API_KEY}",
+    "model": "${ENV.MINIMAX_MODEL}",
+})
+```
+
+Anthropic 兼容中国站端点：
+
+```python
+Agently.set_settings("AnthropicCompatible", {
+    "base_url": "https://api.minimaxi.com/anthropic/v1",
     "api_key": "${ENV.MINIMAX_API_KEY}",
     "model": "${ENV.MINIMAX_MODEL}",
 })

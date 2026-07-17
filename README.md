@@ -1,6 +1,6 @@
 <img width="640" alt="Agently" src="https://github.com/user-attachments/assets/c645d031-c8b0-4dba-a515-9d7a4b0a6881" />
 
-# Agently 4.1.3.9 - AI Application Runtime Framework
+# Agently 4.1.4.1 - AI Application Runtime Framework
 
 > Build AI service backends with structured outputs, observable Actions, runtime Skills, MCP capabilities, process streams, and recoverable workflows.
 
@@ -32,25 +32,19 @@ Agently is for teams moving from "the model can do it once" to "the application 
 
 The main design question is simple: how do you keep model behavior useful while still giving application code stable contracts, observable execution, and restart-safe workflow boundaries?
 
-Agently 4.1.3.9 promotes Workspace retrieval and Session memory as shared
-framework substrate: `workspace.retrieve(...)` packages record/file evidence
-with keyword/tag candidates, optional vector/hybrid retrieval, structure-gated
-rerank, refill, and compact model-hot projections; `SessionMemory` plus
-`AgentlyMemory` stores durable `GLOBAL_MEMORY` and `SESSION_MEMORY` in
-Workspace; AgentTask scoped retrieval uses the same retrieval substrate; and
-public typing covers the new Workspace vector seam plus common dict payloads on
-TaskBoard update helpers. Read the
-[4.1.3.9 Release Notes](docs/en/development/release-notes-4.1.3.9.md),
-[4.1.3.8 Release Notes](docs/en/development/release-notes-4.1.3.8.md),
-[4.1.3.7 Release Notes](docs/en/development/release-notes-4.1.3.7.md),
-[4.1.3.6 Release Notes](docs/en/development/release-notes-4.1.3.6.md),
-[4.1.3.5 Release Notes](docs/en/development/release-notes-4.1.3.5.md),
-[4.1.3.4 Release Notes](docs/en/development/release-notes-4.1.3.4.md),
-[4.1.3.3 Release Notes](docs/en/development/release-notes-4.1.3.3.md),
-[4.1.3.2 Release Notes](docs/en/development/release-notes-4.1.3.2.md),
-[4.1.3.1 Release Notes](docs/en/development/release-notes-4.1.3.1.md), and
-[4.1.3 Release Notes](docs/en/development/release-notes-4.1.3.md) for the full
-release story.
+Agently 4.1.4.1 is the compatibility release over the 4.1.4 execution
+baseline. `AgentExecution` is the stable public run surface across direct,
+flat, and TaskBoard strategies. `AgentExecutionResult.get_data()` consistently
+returns business data, `get_full_data()` exposes the complete route/task
+envelope, and `get_text()` remains the user-facing final-text view. The 4.1.4
+baseline also brings Workspace evidence and retrieval, ActionRuntime
+capabilities, validated TaskDAG execution, TriggerFlow orchestration,
+RuntimeEvents, and public typing into one production-oriented application
+stack. Read the
+[4.1.4.1 Release Notes](docs/en/development/release-notes-4.1.4.1.md),
+[4.1.4 Release Notes](docs/en/development/release-notes-4.1.4.md), and
+[4.1.3.9 Release Notes](docs/en/development/release-notes-4.1.3.9.md) for the
+current release and upgrade path.
 
 ## Why Agently
 
@@ -58,19 +52,19 @@ Many AI frameworks are strong at exploration or at assembling broad integration 
 
 Agently is a good fit when you care about:
 
-- **AI services should be runtime executions, not prompt glue** - one Agent execution can declare candidate Actions, Skills, MCP services, Dynamic Task planning, process streams, Workspace-backed retrieval, and output contracts, then execute through the same runtime surface. Read [4.1.3.9 Release Notes](docs/en/development/release-notes-4.1.3.9.md), [Agent Auto Orchestration examples](examples/agent_auto_orchestration/), and [Skills Executor examples](examples/skills_executor/).
+- **AI services should be runtime executions, not prompt glue** - `AgentExecution` owns one run's prompt, strategy, Actions, Skills, process stream, Workspace evidence, and result views across direct, flat, and TaskBoard strategies. Read [4.1.4.1 Release Notes](docs/en/development/release-notes-4.1.4.1.md), [4.1.4 Release Notes](docs/en/development/release-notes-4.1.4.md), and [Agent Auto Orchestration examples](examples/agent_auto_orchestration/).
 - **Model switching should not rewrite business logic** - Agently normalizes provider setup, prompt slots, response parsing, action execution, and response reading into one request/runtime contract. Read [Model Setup](docs/en/start/model-setup.md), [Models Overview](docs/en/models/overview.md), and [Requests Overview](docs/en/requests/overview.md).
 - **Structured output should be a framework guarantee, not only a provider feature** - `.output(...)` schemas, required field extraction, parser feedback, retries, `ensure_keys`, `ensure_all_keys`, and validation handlers work together inside Agently. Read [Schema as Prompt](docs/en/requests/schema-as-prompt.md), [Output Control](docs/en/requests/output-control.md), and examples in [`examples/basic/`](examples/basic/).
 - **Streaming should expose structure before the final token** - `instant` mode lets consumers react to structured fields while the model is still streaming, which is useful for UI updates, SSE routes, and workflow signals. Read [Model Response](docs/en/requests/model-response.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [`examples/fastapi/`](examples/fastapi/).
 - **Actions should be observable and model-portable** - local functions, built-in actions, MCP servers, shell/Python/Node/SQLite/workspace helpers, and custom executors produce structured records and can share one Action Runtime. Read [Action Runtime](docs/en/actions/action-runtime.md), [MCP](docs/en/actions/mcp.md), and [`examples/action_runtime/`](examples/action_runtime/).
-- **Skills should be runtime capabilities, not inline prompt snippets** - `agent.use_skills(...)` can declare local or remote Skill sources; the Skills Executor discovers, installs, selects, mounts MCP/script capabilities, streams diagnostics, and executes only when the planner needs them. Read [Skills Executor](docs/en/development/skills-executor.md) and [`examples/skills_executor/`](examples/skills_executor/).
+- **Skills should be runtime capabilities, not inline prompt snippets** - `agent.use_skills(...)` is the public entry point; the internal `SkillsManager` owns discovery, context preparation, capability requirements, policy-gated candidates, and execution diagnostics. `SkillsExecutor` remains a compatibility facade. Read [Skills](docs/en/development/skills-executor.md) and [`examples/skills_executor/`](examples/skills_executor/).
 - **Execution dependencies should have lifecycle owners** - Execution Resource providers manage reusable resources such as MCP processes, browser sessions, shell/Python/Node runtimes, SQLite handles, and sandboxes. Read [Execution Resource](docs/en/actions/execution-environment.md) and [`examples/execution_resource/`](examples/execution_resource/).
 - **Generated plans should become validated task graphs** - Dynamic Task turns model-generated or app-generated DAG data into validated, observable task execution through `Agently.create_dynamic_task(...)`. Read [Dynamic Task](docs/en/dynamic-task/README.md) and [`examples/dynamic_task/`](examples/dynamic_task/).
 - **Workflows should be signal-driven, not just graph-shaped** - TriggerFlow supports events, fan-out, runtime streams, pause/resume, save/load, sub-flows, and close snapshots; `instant` structured output can become workflow input without waiting for the whole response. Read [TriggerFlow Overview](docs/en/triggerflow/overview.md), [Events and Streams](docs/en/triggerflow/events-and-streams.md), and [`examples/trigger_flow/`](examples/trigger_flow/).
 - **Common model-app patterns should be composable** - router, To-Do/dependency execution, planning, reflection, evaluator/reviser, and multi-agent collaboration can be built from the same request/action/signal primitives. Read [Playbooks](docs/en/playbooks/overview.md), [TriggerFlow Model Integration](docs/en/triggerflow/model-integration.md), and [`examples/step_by_step/`](examples/step_by_step/).
 - **Services should keep clean project boundaries** - async APIs, FastAPI helpers, settings files, prompt files, DevTools observation, and companion coding-agent skills fit non-trivial projects. Read [Project Framework](docs/en/start/project-framework.md), [FastAPI Service Exposure](docs/en/services/fastapi.md), and [Observability](docs/en/observability/overview.md).
 
-Current framework version: `4.1.3.9`.
+Current framework version: `4.1.4.1`.
 
 Python: `>=3.10`.
 
@@ -113,7 +107,7 @@ Agently.set_settings(
     {
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat",
-        "auth": "DEEPSEEK_API_KEY",
+        "api_key": "${ENV.DEEPSEEK_API_KEY}",
         "model_type": "chat",
         "request_options": {"temperature": 0.2},
     },
@@ -123,15 +117,19 @@ agent = Agently.create_agent()
 
 result = (
     agent
-    .input("Introduce Python in one sentence and list three strengths.")
+    .input("Introduce Python in one sentence and state three distinct strengths.")
     .output({
         "intro": (str, "one sentence", True),
-        "strengths": [(str, "one strength")],
+        "strengths": {
+            "first": (str, "first strength", True),
+            "second": (str, "second strength", True),
+            "third": (str, "third strength", True),
+        },
     })
-    .start(ensure_all_keys=True)
+    .get_result()
 )
 
-print(result)
+print(result.get_data())
 ```
 
 Use local Ollama by changing provider settings:
@@ -155,25 +153,45 @@ Agently.set_settings(
 Use a Model Pool when the same application needs multiple models:
 
 ```python
-agent.set_settings("model_pool", {
-    "ollama-qwen2.5": "qwen2.5:7b",
-    "deepseek-v4": "deepseek-chat",
+Agently.set_settings("model_pool", {
+    "support-chat": "deepseek-chat-prod",
+    "reasoning": "deepseek-reason-prod",
 })
-agent.set_settings("key_pool", {
-    "local": "ollama",
-    "deepseek-main": "${ENV.DEEPSEEK_API_KEY}",
-    "deepseek-backup": "${ENV.DEEPSEEK_BACKUP_API_KEY}",
+Agently.set_settings("model_profiles", {
+    "deepseek-chat-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_pool": "deepseek-prod",
+    },
+    "deepseek-reason-prod": {
+        "provider": "OpenAICompatible",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-reasoner",
+        "api_key_pool": "deepseek-prod",
+        "request_options": {"temperature": 0},
+    },
 })
-agent.set_settings("key_pool_strategy", {
-    "qwen2.5:7b": {"mode": "fixed", "pool": ["local"]},
-    "deepseek-chat": {"mode": "round_robin", "pool": ["deepseek-main", "deepseek-backup"]},
+Agently.set_settings("api_key_pools", {
+    "deepseek-prod": {
+        "selection": {"strategy": "round_robin"},
+        "failover": {
+            "strategy": "try_next",
+            "max_attempts": 2,
+            "retry_status_codes": [401, 403, 429],
+        },
+        "keys": [
+            {"id": "a", "value": "${ENV.DEEPSEEK_API_KEY_A}"},
+            {"id": "b", "value": "${ENV.DEEPSEEK_API_KEY_B}"},
+        ],
+    },
 })
 
-agent.activate_model("ollama-qwen2.5")
+agent.activate_model("reasoning")
 ```
 
 `activate_model(...)` changes the default model key for subsequent Agent-owned
-requests. Use `agent.create_request(model_key="deepseek-v4")` for a one-off
+requests. Use `agent.create_request(model_key="support-chat")` for a one-off
 override.
 
 For file-backed settings, prefer:
@@ -194,7 +212,7 @@ Prompts are composed from named slots. That keeps application intent, constraint
 result = (
     agent
     .role("You are a concise release-note writer.")
-    .info({"version": "4.1.3.9", "audience": "framework users"})
+    .info({"version": "4.1.4.1", "audience": "framework users"})
     .instruct("Return only facts grounded in the input.")
     .input("Summarize this release line for an engineering changelog.")
     .output({
@@ -205,11 +223,16 @@ result = (
 )
 
 data = result.get_data()
+full_data = result.get_full_data()
 text = result.get_text()
 meta = result.get_meta()
 ```
 
-Use `get_result()` when the same model call will be inspected in more than one way.
+Use `get_result()` when the same model call will be inspected in more than one
+way. For `AgentExecutionResult`, `get_data()` returns the business result across
+direct, flat, and TaskBoard strategies; use `get_full_data()` only when the
+caller needs the full route/task envelope. `get_text()` remains the user-facing
+final-text view.
 
 ### 2. Contract-First Output Control
 
@@ -256,6 +279,12 @@ for event in result.get_generator(type="instant"):
 
 This is useful for dashboards, chat UIs, SSE responses, and workflows that need partial structured results before the final response is complete.
 
+Treat `instant` updates as provisional. Use `get_data()` / `async_get_data()`
+when the caller does not publish or parse progressive fields; draining an
+`instant` generator without consuming its updates only wastes work. Final
+validation must complete before irreversible side effects or business
+decisions.
+
 ### 4. Actions and Tool Use
 
 Actions are model-callable capabilities. New code should start with `@agent.action_func` and `agent.use_actions(...)`:
@@ -279,7 +308,8 @@ result = (
 )
 
 print(result.get_text())
-print(result.full_result_data["extra"].get("action_logs", []))
+full_data = result.get_full_data()
+print(full_data.get("extra", {}).get("action_logs", []))
 ```
 
 Common capability helpers:
@@ -320,32 +350,39 @@ The older `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` family remains a
 
 ### 5. Runtime Skills
 
-Skills are reusable task guidance and capability packages. In 4.1.3, the
+Skills are reusable task guidance and capability packages. In 4.1.4.1, the
 recommended application surface is `agent.use_skills(...)`: declare candidate
-Skill sources on the Agent and let the Skills Executor perform lightweight
-discovery, planner selection, on-demand materialization, capability mounting,
-and execution diagnostics.
+Skill sources on the Agent and let AgentExecution select the relevant guidance.
+The internal `SkillsManager` owns discovery, progressive context preparation,
+capability requirements, policy-gated Action candidates, and diagnostics;
+`SkillsExecutor` remains a legacy compatibility facade.
 
 ```python
-agent.use_skills(
-    [
-        {"source": "GarethManning/education-agent-skills"},
-        {"source": "anthropics/skills", "subpath": "skills/docx"},
-        {"source": "anthropics/skills", "subpath": "skills/pptx"},
-        {"source": "anthropics/skills", "subpath": "skills/xlsx"},
-    ],
-    mode="model_decision",
-)
-
-execution = await agent.async_run_skills_task(
-    "Create a four-week B1 business English course package.",
-    effort="normal",
-    output={
+result = (
+    agent
+    .use_skills(
+        [
+            {"source": "GarethManning/education-agent-skills"},
+            {"source": "anthropics/skills", "subpath": "skills/docx"},
+            {"source": "anthropics/skills", "subpath": "skills/pptx"},
+            {"source": "anthropics/skills", "subpath": "skills/xlsx"},
+        ],
+        mode="model_decision",
+    )
+    .goal(
+        "Create a four-week B1 business English course package.",
+        ["Include a course plan, teacher guide, and progress tracker"],
+    )
+    .effort("medium")
+    .output({
         "course_plan": (dict, "course goals and weekly structure", True),
         "teacher_guide": (str, "teacher-facing guide summary", True),
         "progress_tracker": ([str], "tracking columns and checkpoints", True),
-    },
+    })
+    .get_result()
 )
+
+data = await result.async_get_data()
 ```
 
 Business value: reusable Skills can turn a model call into a deliverable
@@ -354,11 +391,12 @@ travel plan, or operational review. Application code stays focused on business
 inputs and output contracts instead of cloning remote repositories, parsing
 Skill files, or manually wiring each tool.
 
-Skill-declared MCP, shell, and script capabilities mount through Action Runtime
-and Execution Resource, so side effects remain observable and policy
-controlled. High-risk local execution requires approval or `auto_allow=True`;
-safe pure-computation gaps can be synthesized as sandboxed Python actions, and
-business-system capabilities fail closed unless a real connector is mounted.
+Skill capability requirements do not authorize side effects by themselves.
+Host code must explicitly mount the required Actions, MCP services, or
+ExecutionResource providers and apply policy before execution. Unavailable,
+ambiguous, low-confidence, or policy-denied capabilities fail closed with
+diagnostics; side effects remain owned by Action Runtime, ExecutionResource,
+Workspace, or TriggerFlow.
 
 ### 6. TriggerFlow Orchestration
 
@@ -413,9 +451,20 @@ TriggerFlow is the right tool when you need:
 | Restart safety | `save(...)`, `load(...)`, close snapshots |
 | Reusable workflow topology | blueprint export/import |
 
+For complex services, map real serial and parallel dependencies before writing
+the flow. Run independent work concurrently and expose pressure controls where
+they are owned: host in-flight coroutine limits, TriggerFlow execution and
+fan-out concurrency, model rate/concurrency limits, and thread-pool sizes for
+blocking code.
+
 ### 7. Dynamic Task
 
-Dynamic Task is Agently's framework-level surface for executing model-generated or app-generated DAGs. It is an application API, not a TriggerFlow sub-API; internally the executor compiles validated task graphs to TriggerFlow so it can reuse lifecycle, stream, pause/resume, and runtime resource mechanics.
+Dynamic Task is Agently's convenience surface for model-generated or
+application-submitted DAG data; TaskDAG owns planning, validation, resolution,
+and execution. It is an application API, not a TriggerFlow sub-API. By default,
+`TaskDAGExecutor.async_run(...)` compiles the validated DAG directly to the
+TriggerFlow substrate. Blocks compilation is an explicit opt-in path when the
+caller needs Blocks lifecycle evidence or `ExecutionBlockGraph` output.
 
 ```python
 from agently import Agently
@@ -439,7 +488,10 @@ task = Agently.create_dynamic_task(
 snapshot = await task.async_start(timeout=10)
 ```
 
-Use Dynamic Task when the task plan itself is data that needs planning, validation, pruning, and execution. Use TriggerFlow directly when you own a stable workflow topology in code.
+Use Dynamic Task when the task plan itself is data that needs planning,
+validation, pruning, and execution. Never compile unvalidated runtime plan data
+directly into new TriggerFlow definitions. Use TriggerFlow directly when you
+own a stable workflow topology in trusted source code.
 
 ### 8. Session Memory
 
@@ -469,7 +521,7 @@ pip install agently-devtools
 agently-devtools init my_project
 ```
 
-Agently 4.1.3.9 recommends `agently-devtools >=0.1.10,<0.2.0`.
+Agently 4.1.4.1 recommends `agently-devtools >=0.1.10,<0.2.0`.
 
 ## Architecture
 
@@ -481,26 +533,34 @@ Agently organizes AI application code into explicit layers. The layers can be us
 graph TB
     App["Application and business logic"]
     Settings["Settings files and environment"]
-    Prompt["Prompt slots and output schema"]
-    Agent["Agent request layer"]
+    Execution["AgentExecution: direct / flat / TaskBoard"]
+    Request["ModelRequest: prompt and output control"]
     Model["Model requester plugins"]
-    Result["ModelResponseResult: text, data, meta, stream"]
+    Result["AgentExecutionResult / ModelRequestResult"]
+    Skills["Agent Skills APIs\nSkillsManager internal owner"]
     Action["Action Runtime: planning, dispatch, logs"]
     Env["Execution Resource: MCP, Python, Bash, Node, Browser, SQLite"]
+    Workspace["Workspace: records, files, evidence, checkpoints"]
+    DAG["TaskDAG / DynamicTask\nvalidated acyclic plan data"]
     Flow["TriggerFlow: branch, fan-out, stream, pause/resume, persist"]
-    Observe["Observation events and DevTools"]
+    Observe["RuntimeEvents and DevTools"]
 
     App --> Settings
-    App --> Agent
-    Settings --> Agent
-    Prompt --> Agent
-    Agent --> Model
+    App --> Execution
+    Settings --> Execution
+    Execution --> Request
+    Request --> Model
     Model --> Result
-    Agent --> Action
+    Execution --> Result
+    Execution --> Skills
+    Execution --> Action
+    Execution --> Workspace
     Action --> Env
+    App --> DAG
+    DAG --> Flow
     App --> Flow
-    Flow --> Agent
-    Agent --> Observe
+    Flow --> Execution
+    Execution --> Observe
     Action --> Observe
     Env --> Observe
     Flow --> Observe
@@ -533,9 +593,11 @@ Extension points:
 | Layer | Extension point |
 |---|---|
 | Agent | custom agent extension and lifecycle hooks |
+| Agent execution | strategies, lifecycle, result views, Workspace evidence |
 | Request | prompt generator, model requester, response parser |
 | Actions | `ActionRuntime`, `ActionFlow`, `ActionExecutor` |
 | Managed resources | `ExecutionResourceProvider` |
+| Dynamic DAG | TaskDAG planner, validator, resolver, executor; DynamicTask facade |
 | Workflow | TriggerFlow chunks, conditions, events, runtime stream, persistence |
 | Observation | event hookers, sinks, DevTools bridge |
 
@@ -628,7 +690,7 @@ Agently-Skills gives coding agents current Agently implementation guidance.
 - Repository: https://github.com/AgentEra/Agently-Skills
 - Current catalog generation: `v2`
 - Recommended bundle: `app`
-- Agently 4.1.3 compatibility: Skills authoring protocol `agently-skills.authoring.v2`
+- Agently 4.1.4.1 compatibility: Skills authoring protocol `agently-skills.authoring.v2`
 
 Use it when asking Codex, Claude Code, Cursor, or another coding agent to implement Agently patterns.
 
@@ -689,6 +751,7 @@ Use the async request APIs directly or wrap agents, requests, generators, Trigge
 | Quickstart | https://agently.tech/docs/en/start/quickstart.html |
 | Model Setup | https://agently.tech/docs/en/start/model-setup.html |
 | Project Framework | https://agently.tech/docs/en/start/project-framework.html |
+| Execution Layer Selection | https://agently.tech/docs/en/reference/execution-layer-selection.html |
 | Output Control | https://agently.tech/docs/en/requests/output-control.html |
 | Model Response and Streaming | https://agently.tech/docs/en/requests/model-response.html |
 | Session Memory | https://agently.tech/docs/en/requests/session-memory.html |
@@ -702,10 +765,12 @@ Use the async request APIs directly or wrap agents, requests, generators, Trigge
 
 ## Compatibility Notes
 
-- The current package version is `4.1.3.9`.
-- The current release manifest is `compatibility/releases/4.1.3.9.json`.
+- The current package version is `4.1.4.1`.
+- The current release manifest is `compatibility/releases/4.1.4.1.json`.
 - Development-line planning belongs in `compatibility/in-development.json`; do not treat planned future versions as released.
-- README examples use the current Action and TriggerFlow close-snapshot paths.
+- `AgentExecutionResult.get_data()` returns business data; callers that need status, TaskBoard, diagnostics, or other route/task internals use `get_full_data()`.
+- An explicitly captured `AgentExecution` represents one run. Create a fresh execution for the next request after it starts.
+- README examples use the current AgentExecution result, Action, TaskDAG, and TriggerFlow lifecycle paths.
 - Deprecated APIs emit warnings once per Python process unless `runtime.show_deprecation_warnings` is disabled.
 
 ## Community
