@@ -541,6 +541,7 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -645,7 +646,7 @@ def _build_sbpl_profile(
         ";; ═══ Basic capabilities (always allowed) ═══",
         "(allow process-exec* process-fork signal)",
         "(allow sysctl-read)",
-        "(allow mach(*))",
+        "(allow mach*)",
         "(allow ipc-posix*)",
         "",
         ";; ═══ File read: globally allowed ═══",
@@ -695,7 +696,7 @@ def _build_sbpl_profile(
         lines.append("(allow network-outbound)")
     else:
         lines.append(";; Network: completely denied")
-        lines.append("(deny network)")
+        lines.append("(deny network-outbound)")
 
     # Extra rules (verbatim)
     if extra_rules.strip():
@@ -768,15 +769,19 @@ class SeatbeltExecutionResource:
         effective_timeout = timeout or self.timeout
         profile_text = self.build_profile()
 
-        cmd = [
-            "sandbox-exec", "-f", "-",
-            self.python_binary, "-c", python_code,
-        ]
-
+        # Write profile to temp file (sandbox-exec -f requires a real file path)
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".sb", delete=False)
         try:
+            tmp.write(profile_text)
+            tmp.close()
+
+            cmd = [
+                "sandbox-exec", "-f", tmp.name,
+                self.python_binary, "-c", python_code,
+            ]
+
             result = subprocess.run(
                 cmd,
-                input=profile_text,
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,
@@ -802,6 +807,11 @@ class SeatbeltExecutionResource:
                 "stdout": "",
                 "stderr": "",
             }
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
         return {
             "ok": result.returncode == 0,
