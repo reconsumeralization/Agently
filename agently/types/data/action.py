@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable, Literal
 from typing_extensions import TypedDict
 
-from .workspace import WorkspaceFileRef
+from .task_workspace import TaskWorkspaceFileRef
 from .tool import KwargsType, ReturnType
 from .execution_resource import ExecutionResourceRequirement
 
@@ -31,7 +31,7 @@ class ActionPolicy(TypedDict, total=False):
     policy_approval_granted: bool
     policy_approval_handler: str
     policy_approval_decision: dict[str, Any]
-    workspace_roots: list[str]
+    task_workspace_roots: list[str]
     path_allowlist: list[str]
     path_denylist: list[str]
     allowed_cmd_prefixes: list[str]
@@ -151,7 +151,7 @@ class ActionResult(TypedDict, total=False):
     data: Any
     model_digest: dict[str, Any]
     artifact_refs: list[ActionArtifact]
-    file_refs: list[WorkspaceFileRef]
+    file_refs: list[TaskWorkspaceFileRef]
     artifacts: list[ActionArtifact]
     diagnostics: list[ActionDiagnostic]
     approval: ActionApproval

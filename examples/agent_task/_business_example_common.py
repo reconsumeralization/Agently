@@ -76,10 +76,10 @@ def default_workspace(prefix: str) -> Path:
     return Path(os.getenv("AGENT_TASK_WORKSPACE", "") or f"agent-task-workspaces/{prefix}-{run_id}").resolve()
 
 
-def resolve_result_artifact_path(workspace: Any, result: dict[str, Any], requested_path: str) -> Path:
+def resolve_result_artifact_path(task_workspace: Any, result: dict[str, Any], requested_path: str) -> Path:
     """Resolve one trusted task file ref without assuming a physical file layout."""
 
-    root = Path(str(workspace.root)).resolve()
+    root = Path(str(task_workspace.root)).resolve()
     direct = (root / requested_path).resolve()
     if direct.is_file():
         return direct

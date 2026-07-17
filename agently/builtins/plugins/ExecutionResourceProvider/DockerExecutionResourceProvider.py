@@ -632,8 +632,8 @@ class DockerExecutionResource:
                 "ok": False,
                 "status": "blocked",
                 "need_approval": True,
-                "reason": "workspace_boundary_required",
-                "diagnostics": [{"code": "shell.workspace_boundary_required"}],
+                "reason": "task_workspace_boundary_required",
+                "diagnostics": [{"code": "shell.task_workspace_boundary_required"}],
             }
         if root is None or container_workdir is None:
             return {
@@ -653,23 +653,23 @@ class DockerExecutionResource:
                 "cmd": args,
                 "diagnostics": [{"code": "shell.cmd_not_allowed", "cmd": args}],
             }
-        declared_mounts = profile.get("workspace_mounts")
+        declared_mounts = profile.get("task_workspace_mounts")
         extra_mounts: list[str] = []
         if isinstance(declared_mounts, list) and declared_mounts:
             for item in declared_mounts:
                 if not isinstance(item, dict):
-                    raise ValueError("Docker Workspace mount entries must be mappings.")
+                    raise ValueError("Docker TaskWorkspace mount entries must be mappings.")
                 host_path = Path(str(item.get("host_path") or "")).expanduser().resolve()
                 container_path = str(item.get("container_path") or "").strip()
                 mode = str(item.get("mode") or "ro").strip().lower()
                 if not container_path.startswith("/") or ":" in container_path:
-                    raise ValueError("Docker Workspace mount container_path must be an absolute container path.")
+                    raise ValueError("Docker TaskWorkspace mount container_path must be an absolute container path.")
                 if mode not in {"ro", "rw"}:
-                    raise ValueError("Docker Workspace mount mode must be 'ro' or 'rw'.")
+                    raise ValueError("Docker TaskWorkspace mount mode must be 'ro' or 'rw'.")
                 if mode == "rw":
                     host_path.mkdir(parents=True, exist_ok=True)
                 elif not host_path.exists():
-                    raise FileNotFoundError(f"Read-only Docker Workspace mount does not exist: {host_path}")
+                    raise FileNotFoundError(f"Read-only Docker TaskWorkspace mount does not exist: {host_path}")
                 extra_mounts.append(f"{host_path}:{container_path}:{mode}")
         else:
             extra_mounts = [f"{root}:/workspace:rw"]

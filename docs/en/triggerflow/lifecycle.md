@@ -246,63 +246,61 @@ External execution snapshot stores can persist the same snapshot by exposing
 `put_snapshot(run_id, state, step_id=...)`. Durable providers can additionally
 expose `get_snapshot(run_id)` for reading snapshot state,
 `put_snapshot(..., expected_state_version=...)`, lease methods, and
-`put_artifact_ref(...)`. A Workspace can be configured directly because it
+`put_artifact_ref(...)`. A RecordStore can be configured directly because it
 implements the same snapshot-store port:
 
 ```python
-execution = flow.create_execution(workspace=agent.workspace)
+execution = flow.create_execution(record_store=agent.record_store)
 snapshot_ref = await execution.async_save(step_id="after-approval")
 ```
 
-For shared task information, prefer a Workspace instance that the application
+For shared task information, prefer a RecordStore instance that the application
 creates and owns explicitly:
 
 ```python
-shared_workspace = Agently.create_workspace("./project")
-execution = flow.create_execution(workspace=shared_workspace)
+from agently.core.storage import RecordStore
+
+shared_record_store = RecordStore("./project-state", mode="read_write")
+execution = flow.create_execution(record_store=shared_record_store)
 ```
 
-`flow.create_execution()` binds a lightweight Workspace over the entry-script
-directory by default. Every execution sees the same direct ordinary file root;
-new files created without external write permission are isolated under
-`.agently/files/<execution-id>/`.
-Pass `workspace=False` to opt out, or pass a Workspace instance, path, or
-backend when the execution should use an explicitly selected Workspace. The
-resolved execution-local Workspace facade is available to TriggerFlow chunks as
-`runtime_resources["workspace"]` / `data.require_resource("workspace")`.
+`flow.create_execution()` binds a lazy execution-scoped RecordStore view by
+default. It does not create or bind a task file boundary.
+Pass `record_store=False` to opt out, or pass a RecordStore instance, path, or
+backend when the execution should use an explicitly selected RecordStore. The
+resolved execution-local RecordStore facade is available to TriggerFlow chunks as
+`runtime_resources["record_store"]` / `data.require_resource("record_store")`.
 
-This binding does not enable RuntimeEvent persistence and does not create
-`.agently`. Only real file products, records, recovery, or explicitly configured
-event storage materialize private state.
+This binding does not create a TaskWorkspace. Records, recovery, or explicitly
+configured event storage materialize RecordStore state lazily.
 
 It is a live resource, not serialized state. If a chunk needs an Agent to use
 the same explicit information scope, bind that Agent or the single
-AgentExecution to the same Workspace in application code. If a flow needs to
-move data between two isolated Workspaces, do it explicitly in the flow's
+AgentExecution to the same RecordStore in application code. If a flow needs to
+move data between two isolated RecordStores, do it explicitly in the flow's
 business logic with
-Workspace `search(...)`, `get(...)`, `get_data(...)`, `put(...)`, and
-`link(...)`. Workspace itself does not provide a cross-space communication
+RecordStore `search(...)`, `get(...)`, `get_data(...)`, `put(...)`, and
+`link(...)`. RecordStore itself does not provide a cross-space communication
 or replication protocol.
 
-You can also pass a store through existing execution resources when a service
-does not use `workspace=...`:
+You can also pass a store through explicit durability resource ports:
 
 ```python
 execution = flow.create_execution(
-    runtime_resources={"snapshot_store": agent.workspace}
+    runtime_resources={"snapshot_store": agent.record_store}
 )
 snapshot_ref = await execution.async_save(step_id="after-approval")
 ```
 
-To resume from a Workspace-backed snapshot, read the stored snapshot and pass it
+To resume from a RecordStore-backed snapshot, read the stored snapshot and pass it
 back to TriggerFlow's load API:
 
 ```python
-saved_state = await agent.workspace.get_snapshot(execution.run_context.run_id)
+saved_state = await agent.record_store.get_snapshot(execution.run_context.run_id)
 assert saved_state is not None
 
-restored = flow.create_execution(workspace=agent.workspace)
-await restored.async_load(saved_state, runtime_resources={"workspace": agent.workspace})
+restored = flow.create_execution(record_store=agent.record_store)
+await restored.async_load(saved_state, runtime_resources={"record_store": agent.record_store})
 await restored.async_continue_with(
     "approval",
     {"approved": True},
@@ -312,11 +310,11 @@ await restored.async_continue_with(
 ```
 
 This path preserves TriggerFlow-owned pause/resume ledgers, policy-approval
-waits, and `when(..., mode="and")` join progress while keeping Workspace as the
+waits, and `when(..., mode="and")` join progress while keeping RecordStore as the
 snapshot provider.
 
 For a runnable foundation check of this path, use
-`examples/trigger_flow/durable_recovery.py`. It writes a Workspace-backed
+`examples/trigger_flow/durable_recovery.py`. It writes a RecordStore-backed
 snapshot, loads it in a fresh execution, resumes with a stable
 `resume_request_id`, and proves duplicate callback delivery does not execute the
 downstream chunk twice.
@@ -338,16 +336,16 @@ execution whose execution-local lease has already expired fail fast without
 writing a resume ledger entry; a reclaimed worker should load or claim the
 execution first, then process the same stable `resume_request_id`.
 
-Workspace-backed providers expose the corresponding lease port:
+RecordStore-backed providers expose the corresponding lease port:
 
 ```python
-lease = await agent.workspace.claim_lease(
+lease = await agent.record_store.claim_lease(
     execution.run_context.run_id,
     "worker-1",
     ttl=30.0,
     expected_state_version=snapshot_state_version,
 )
-await agent.workspace.heartbeat_lease(
+await agent.record_store.heartbeat_lease(
     execution.run_context.run_id,
     "worker-1",
     lease["lease_token"],
@@ -367,7 +365,7 @@ await execution.async_save(
 The selected snapshot provider must report CAS, lease, range-read, and
 retention capabilities and expose the matching snapshot, lease, and artifact
 methods. The execution must also have a RuntimeEvent store that reports event
-sequencing. The local Workspace backend passes this fail-closed provider check
+sequencing. The local RecordStore backend passes this fail-closed provider check
 for single-node development and local restart recovery, but it is not a
 production cross-worker Redis/Postgres/object-storage backend.
 
@@ -375,14 +373,14 @@ For durable diagnostics, bind a RuntimeEvent store through execution resources:
 
 ```python
 execution = flow.create_execution(
-    runtime_resources={"runtime_event_store": agent.workspace}
+    runtime_resources={"runtime_event_store": agent.record_store}
 )
 await execution.async_start(request)
-events = await agent.workspace.query_runtime_events(execution.id)
+events = await agent.record_store.query_runtime_events(execution.id)
 ```
 
 TriggerFlow still owns event identity, pause/resume semantics, DAG readiness,
-and replay validation. Workspace stores the canonical RuntimeEvent records and
+and replay validation. RecordStore stores the canonical RuntimeEvent records and
 snapshot refs; it does not become a workflow control plane.
 
 Durable RuntimeEvent records include the execution-local sequence,
@@ -416,7 +414,7 @@ await data.async_pause_for(
 
 The template is stored under `interrupt.external_wait_request` in the
 execution snapshot. If `audit_metadata.exchange_id` is present, TriggerFlow projects it
-onto durable RuntimeEvent records through Workspace or any compatible runtime
+onto durable RuntimeEvent records through RecordStore or any compatible runtime
 event provider that accepts `exchange_id`.
 
 When a host owns an approval router, queue, or exchange transport, bind an
@@ -501,7 +499,7 @@ await execution.async_save(step_id="auto-compacted")
 `inspect_load(...)` reports retained lineage anchor mismatches, missing
 required artifact refs, and invalid load read limits as snapshot
 diagnostics. TriggerFlow records the execution facts and provider refs; the
-Workspace or enterprise provider owns artifact storage, retention anchors, and
+RecordStore or enterprise provider owns artifact storage, retention anchors, and
 bounded runtime-event reads.
 
 `execution.inspect_load(...)` reports typed recovery diagnostics for

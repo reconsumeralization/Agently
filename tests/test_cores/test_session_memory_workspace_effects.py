@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently
-from agently.core.Workspace import Workspace, WorkspaceManager
+from agently.core.storage import RecordStore, RecordStoreRegistry
 from agently.core.session import Session
 from agently.utils import Settings
 
@@ -28,7 +28,7 @@ def _memory_record() -> dict[str, Any]:
 
 
 def _session(
-    workspace: Workspace,
+    memory_store: RecordStore,
     *,
     vector_enabled: bool = False,
 ) -> Session:
@@ -38,46 +38,46 @@ def _session(
         id="memory-effects",
         plugin_manager=Agently.plugin_manager,
         settings=settings,
-        workspace=workspace,
+        memory_store=memory_store,
     )
     session.use_memory(mode="AgentlyMemory")
     return session
 
 
-def test_session_without_memory_does_not_materialize_workspace(tmp_path: Path) -> None:
+def test_session_without_memory_does_not_materialize_record_store(tmp_path: Path) -> None:
     root = tmp_path / "project"
-    workspace = Workspace(root)
+    memory_store = RecordStore(root)
 
     Session(
         id="memory-disabled",
         plugin_manager=Agently.plugin_manager,
         settings=Agently.settings,
-        workspace=workspace,
+        memory_store=memory_store,
     )
 
-    assert workspace._backend is None
+    assert memory_store._backend is None
     assert not root.exists()
 
 
-def test_record_only_memory_metadata_does_not_materialize_workspace_backend(
+def test_record_only_memory_metadata_does_not_materialize_record_store_backend(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace(tmp_path / "project")
-    session = _session(workspace)
+    memory_store = RecordStore(tmp_path / "project")
+    session = _session(memory_store)
     memory = cast(Any, session.memory)
 
-    metadata = memory._vector_index_meta(workspace)
+    metadata = memory._vector_index_meta(memory_store)
 
     assert metadata == {"requested": False, "backend": None, "available": False}
-    assert workspace._backend is None
-    assert not workspace.root.exists()
+    assert memory_store._backend is None
+    assert not memory_store.root.exists()
 
 
 @pytest.mark.asyncio
 async def test_record_only_memory_creates_no_vector_provider_or_vector_carrier(
     tmp_path: Path,
 ) -> None:
-    manager = WorkspaceManager()
+    manager = RecordStoreRegistry()
     calls = {"embedding": 0, "vector": 0}
 
     def unexpected_embedding(**_options: Any) -> Any:
@@ -90,25 +90,25 @@ async def test_record_only_memory_creates_no_vector_provider_or_vector_carrier(
 
     manager.register_embedding_provider("probe", unexpected_embedding)
     manager.register_vector_store_provider("probe", unexpected_vector)
-    workspace = Workspace(
+    memory_store = RecordStore(
         tmp_path / "project",
         manager,
         embedding_provider="probe",
         vector_store_provider="probe",
     )
-    session = _session(workspace)
+    session = _session(memory_store)
 
     ref = await cast(Any, session.memory)._store_memory(
-        workspace,
+        memory_store,
         _memory_record(),
         session=session,
     )
 
     assert calls == {"embedding": 0, "vector": 0}
-    assert workspace.capabilities()["materialized_components"] == ["records"]
-    assert (workspace.root / ".agently" / "workspace.db").is_file()
-    assert not (workspace.root / ".agently" / "vectors").exists()
-    stored = await workspace.get_data(ref)
+    assert memory_store.capabilities()["materialized_components"] == ["records"]
+    assert (memory_store.root / ".agently" / "records" / "records.db").is_file()
+    assert not (memory_store.root / ".agently" / "records" / "vectors").exists()
+    stored = await memory_store.get_data(ref)
     assert stored["vector_index"] == {
         "requested": False,
         "backend": None,
@@ -117,10 +117,10 @@ async def test_record_only_memory_creates_no_vector_provider_or_vector_carrier(
 
 
 @pytest.mark.asyncio
-async def test_vector_enabled_memory_uses_explicit_workspace_vector_write(
+async def test_vector_enabled_memory_uses_explicit_record_store_vector_write(
     tmp_path: Path,
 ) -> None:
-    manager = WorkspaceManager()
+    manager = RecordStoreRegistry()
     calls = {"embedding": 0, "vector": 0, "indexed": 0}
 
     class EmbeddingProbe:
@@ -158,25 +158,25 @@ async def test_vector_enabled_memory_uses_explicit_workspace_vector_write(
 
     manager.register_embedding_provider("probe", embedding_factory)
     manager.register_vector_store_provider("probe", vector_factory)
-    workspace = Workspace(
+    memory_store = RecordStore(
         tmp_path / "project",
         manager,
         embedding_provider="probe",
         vector_store_provider="probe",
     )
-    session = _session(workspace, vector_enabled=True)
+    session = _session(memory_store, vector_enabled=True)
 
     ref = await cast(Any, session.memory)._store_memory(
-        workspace,
+        memory_store,
         _memory_record(),
         session=session,
     )
 
     assert calls == {"embedding": 1, "vector": 1, "indexed": 1}
-    assert workspace.capabilities()["materialized_components"] == [
+    assert memory_store.capabilities()["materialized_components"] == [
         "embedding",
         "records",
         "vector",
     ]
-    stored = await workspace.get_data(ref)
+    stored = await memory_store.get_data(ref)
     assert stored["vector_index"]["requested"] is True

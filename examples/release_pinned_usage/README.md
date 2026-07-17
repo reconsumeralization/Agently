@@ -11,7 +11,7 @@ Policy:
 - If a selected script fails because the recommended usage shape changed, stop
   the release check and ask whether the release should accept that usage update.
 - Release example checks run with an explicit all-allowed test capability policy
-  when a script may exercise Skills, Actions, Workspace, network, Python, shell,
+  when a script may exercise Skills, Actions, TaskWorkspace, network, Python, shell,
   HTTP, browse, search, or MCP capability loading. This test posture is separate
   from Agently's default fail-closed runtime permission posture.
 - Additive scripts may be proposed for new release claims, but selection should

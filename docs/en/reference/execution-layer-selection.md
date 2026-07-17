@@ -1,196 +1,78 @@
 ---
-title: Execution Layer Selection
-description: Choose between ModelRequest, AgentExecution, TaskDAG, and TriggerFlow by business problem shape.
-keywords: Agently, AgentExecution, ModelRequest, TaskDAG, TriggerFlow, execution layer, DAG, orchestration
+title: Execution layer selection
+description: Choose ModelRequest, AgentExecution, AgentTask, TaskDAG, Blocks, TriggerFlow, and context/storage owners.
+keywords: Agently, AgentExecution, AgentTask, TaskContext, TaskDAG, Blocks, TriggerFlow
 ---
 
-# Execution Layer Selection
+# Execution layer selection
 
-Agently exposes several execution layers because business problems do not all
-need the same amount of planning, state, evidence, or customization.
-
-The default user-facing layer is `AgentExecution`: start there when the product
-needs an Agent run with prompt, Actions, Skills, goals, effort, result, stream,
-and metadata. Drop down only when the problem needs a lower-level contract.
-
-## Layer Map
+Start at `AgentExecution` for an Agent run. Move to a lower owner only when the
+business problem needs that owner's contract.
 
 ```mermaid
 flowchart TD
-    business["Business problem"]
-    model_request["ModelRequest\none model request"]
-    agent_execution["AgentExecution\nunified Agent run"]
-    task_dag["TaskDAG / DAG substrate\nplanner, validator, resolver, executor, handlers"]
-    blocks["Blocks\nExecutionPlan, PlanBlocks, ExecutionBlocks"]
-    triggerflow["TriggerFlow\nworkflow execution substrate"]
-    workspace["Workspace / Evidence\nrecords, checkpoints, context packs"]
+    App["Business application"]
+    AE["AgentExecution\nrun, result, stream, meta"]
+    MR["ModelRequest\none semantic request"]
+    AT["AgentTask\ngoal, plan, verify, replan"]
+    DAG["TaskDAG\nvalidated submitted DAG"]
+    BL["Blocks\nvalidated execution blocks"]
+    TF["TriggerFlow\nworkflow lifecycle"]
+    TC["TaskContext + ContextReader\nprogressive disclosure"]
+    TW["TaskWorkspace\ntask files"]
+    RS["RecordStore\nrecords and durability"]
 
-    business -->|"single answer"| model_request
-    business -->|"Agent run, tools, Skills, goals, stream"| agent_execution
-    business -->|"submitted dependency graph"| task_dag
-    agent_execution -->|"direct route"| model_request
-    agent_execution -->|"bounded task frame"| blocks
-    task_dag -->|"default async_run"| triggerflow
-    task_dag -.->|"explicit compile_blocks / async_run_blocks"| blocks
-    blocks -->|"compiled execution block graph"| triggerflow
-    agent_execution -->|"task evidence"| workspace
-    task_dag -.->|"snapshot evidence handoff"| agent_execution
-    triggerflow -->|"runtime events, state, pause/resume"| task_dag
+    App --> AE
+    AE --> MR
+    AE --> AT
+    DAG --> TF
+    DAG -. "explicit Blocks carrier" .-> BL
+    AT --> BL
+    BL --> TF
+    AE --> TC
+    AT --> TC
+    TC --> TW
+    TC --> RS
+    TF --> RS
 ```
 
-Contract behind the edges:
+## Owners
 
-- `ModelRequest` owns one normalized model call and its structured output.
-- `AgentExecution` owns the user-facing Agent run and result/stream/meta
-  facade.
-- `TaskDAG` owns graph-shaped planning and execution logic: Planner,
-  Validator, Resolver, Executor, handlers, dependency results, semantic
-  outputs, and runtime placeholders.
-- `TaskDAG` is an independent submitted-DAG API. `AgentExecution` may consume a
-  TaskDAG snapshot as evidence, but it does not select TaskDAG / DynamicTask as
-  a route or bounded-step strategy.
-- `Blocks` owns the lowering bridge from bounded ExecutionPlan / PlanBlock
-  instances into TriggerFlow-backed ExecutionBlocks. For TaskDAG it is an
-  explicit opt-in carrier used by `compile_blocks(...)` /
-  `async_run_blocks(...)` when `ExecutionBlockGraph` and evidence/result mapping
-  are needed; ordinary `TaskDAGExecutor.async_run(...)` goes directly to the
-  TriggerFlow substrate.
-- `TriggerFlow` owns the lower-level workflow substrate: execution state,
-  signals, concurrency, stream, pause/resume, persistence, and lifecycle.
-- `Workspace` stores evidence and context; it does not decide completion.
-
-`DynamicTask` is the current compatibility and convenience facade over the DAG
-substrate. It can still be used, but the architectural owner is `TaskDAG`.
-
-## Choose By Problem Shape
-
-| Business shape | Start from | Framework capability you get |
+| Owner | Use it for | Do not use it for |
 |---|---|---|
-| One answer, extraction, classification, or rewrite | `ModelRequest` or `agent.input(...).output(...).start()` | Prompt rendering, provider abstraction, structured output, streaming |
-| One Agent run that may use Actions or Skills | `AgentExecution` / `agent.start()` | Route selection, Action/Skill evidence, result/stream/meta facade |
-| One complex business task that must verify completion | `agent.goal(...).effort(...).start()` or `agent.create_task(...)` | Goal planning, bounded steps, Workspace evidence, model verifier, host guards, replan |
-| A submitted or model-generated dependency graph | `TaskDAG` modules, or the DynamicTask facade | DAG planning, validation, handler resolution, dependency result collection, semantic outputs |
-| A stable workflow topology owned by application code | `TriggerFlow` | Branching, concurrency, signals, pause/resume, persistence, runtime stream |
-| A product team wants maximum DAG customization and still an Agent result surface | Build/customize `TaskDAG` modules, then pass its snapshot into `AgentExecution` as evidence | Custom Planner/Validator/Resolver/Executor plus AgentExecution result, stream, meta, and evidence paths |
+| `ModelRequest` | Exact prompt, structured output, settings, one response | Workflow state or long-task lifecycle |
+| `AgentExecution` | One public Agent run, candidate binding, result/stream/meta | Custom DAG validation or durable workflow topology |
+| `AgentTask` | One goal-driven task with plan, bounded execution, evidence, verification, repair/replan | Developer-owned stable workflow topology |
+| `TaskDAG` | Model/app-submitted acyclic plan data, validation, resolver, dependency results | Human-facing acceptance or pause/resume policy |
+| `Blocks` | Validated block lowering, block signals, result/evidence mapping | Skill installation, capability grants, storage |
+| `TriggerFlow` | Branches, concurrency, waits, resume, runtime stream, save/load | Prompt or DAG task semantics |
+| `TaskContext` / `ContextReader` | Source binding and consumer/phase-bound information delivery | Source persistence or side effects |
+| `TaskWorkspace` | Task file boundary, mutation/readback, file refs | Records, memory, snapshots |
+| `RecordStore` | Records, retrieval indexes, links, checkpoints, snapshots/events | Task files or semantic decisions |
 
-## Intervention Points
+## Choose by problem shape
 
-| Layer | Use when you want to control | Avoid using it for |
-|---|---|---|
-| `ModelRequest` | Exact prompt, output schema, model settings, and one response | Tool routing, long task completion, workflow state |
-| `AgentExecution` | User-facing Agent run, route diagnostics, stream/meta/result, execution-local candidates | Custom graph validation internals or workflow persistence details |
-| `TaskDAG` | Graph schema, planner contract, validator rules, handlers, dependency data, semantic outputs | Human-facing task acceptance or full workflow lifecycle |
-| `Blocks` | ExecutionPlan lowering, PlanBlock/ExecutionBlock contracts, standard block signals, result/evidence mapping | Task lifecycle ownership, capability grants, or raw TriggerFlow dispatch |
-| `TriggerFlow` | Runtime state, signals, joins, concurrency, pause/resume, save/load | Model prompt/output behavior or DAG task semantics |
-| `Workspace` | Evidence records, checkpoints, context packs, recall into later steps | Planning, verification, or automatic memory decisions |
+| Business shape | Start from |
+|---|---|
+| One extraction, classification, rewrite, or answer | `ModelRequest` |
+| One Agent request using Actions or Skills | `AgentExecution` |
+| One business goal that must verify completion | `agent.create_task(...)` / AgentTask strategy |
+| Submitted or model-generated DAG data | `TaskDAG` / DynamicTask facade |
+| Stable workflow topology owned in source code | `TriggerFlow` |
+| Bounded information from several known sources | `TaskContext` + a consumer-bound `ContextReader` |
+| Existing project files must be read or changed | `TaskWorkspace` |
+| Durable memory, evidence records, or recovery | `RecordStore` |
 
-## Custom DAG Then AgentExecution Evidence
+Skills do not add another execution layer. `SkillLibrary` owns installed
+revisions; AgentExecution binds them to TaskContext; the selected execution
+owner performs the work.
 
-When a team wants high freedom, it can decompose the DAG path, customize each
-module, run it independently, and pass the snapshot into `AgentExecution` as
-evidence for a later agent step.
+TaskDAG is data; validate and resolve it before execution. Developer-owned
+stable topology can use TriggerFlow directly. The default TaskDAG executor uses
+TriggerFlow; `compile_blocks(...)` is opt-in when block lifecycle evidence is
+needed.
 
-```python
-from agently.builtins.plugins import AgentlyTaskDAGPlanner
-from agently.core import TaskDAGExecutor, TaskDAGResolver, TaskDAGValidator
-
-handlers = {
-    "fetch_handler": fetch_handler,
-    "analyze_handler": analyze_handler,
-    "render_handler": render_handler,
-}
-
-resolver = TaskDAGResolver(handlers)
-validator = TaskDAGValidator(resolver)
-planner = AgentlyTaskDAGPlanner(validator=validator)
-
-graph = await planner.async_plan(planner_agent, {"target": goal})
-validator.validate(graph, strict_schema_version=True)
-
-snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(
-    graph,
-    graph_input={"goal": goal},
-)
-
-execution = agent.create_execution()
-execution.input({"goal": goal, "dag_snapshot": snapshot})
-result = await execution.async_start()
-```
-
-The same separation works when the application already owns the executor:
-
-```python
-snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(
-    graph,
-    graph_input={"goal": goal},
-)
-
-execution = agent.create_execution()
-execution.input({"goal": goal, "dag_snapshot": snapshot})
-data = await execution.async_start()
-await execution.async_record_workspace(
-    collection="observations",
-    kind="dag_execution_evidence",
-    content={"dag_snapshot": snapshot, "agent_result": data},
-    checkpoint=True,
-)
-```
-
-In both shapes, the DAG result is evidence. It does not by itself mean a
-business goal is complete. Goal completion still belongs to AgentTask model
-verification plus host guards when goal pursuit is active.
-
-## Runtime Flow
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant AE as AgentExecution
-    participant DAG as TaskDAG
-    participant Blocks as Blocks
-    participant TF as TriggerFlow
-    participant WS as Workspace
-    participant V as Verifier/Guard
-
-    App->>AE: configure prompt, skills, actions, goal, effort
-    opt independent DAG evidence
-        App->>DAG: run submitted or customized DAG
-        DAG->>Blocks: validated DAG segment
-        Blocks->>TF: ExecutionBlockGraph
-        TF-->>Blocks: block signals, dependency results, snapshots
-        Blocks-->>DAG: DAG snapshot and result
-        DAG-->>AE: optional snapshot evidence
-    end
-    AE->>Blocks: bounded ExecutionPlan segment
-    Blocks->>TF: ExecutionBlockGraph
-    TF-->>Blocks: block signals, dependency results, snapshots
-    Blocks-->>AE: EvidenceEnvelope and result views
-    AE->>WS: optional evidence/checkpoint records
-    AE->>V: verify goal completion when Goal Pursuit is active
-    V-->>AE: accepted, blocked, replan, or partial
-    AE-->>App: AgentExecutionResult / stream / meta
-```
-
-## Practical Rules
-
-- Start at `AgentExecution` unless the problem clearly needs lower-level
-  ownership.
-- Use `ModelRequest` when the task is only one model call.
-- Use `AgentExecution.strategy("direct")` when an Agent run should stay on the
-  direct `model_request`/ActionLoop route. Use `.strategy("flat")` or
-  `.strategy("taskboard")` only when the host explicitly wants AgentTask. The
-  default `.strategy("auto")` keeps ordinary prompt/action runs direct and
-  enters AgentTask only from structural task signals such as goals, success
-  criteria, task options, or Skill selectors.
-- Use `TaskDAG` when the plan is data and needs validation, dependency
-  execution, handlers, and result collection.
-- Use [Blocks Lifecycle](blocks-lifecycle.md) for bounded AgentTask steps and
-  Skill activation, or when a TaskDAG caller explicitly chooses the Blocks
-  carrier to obtain `ExecutionBlockGraph` plus evidence/result mapping.
-- Use `TriggerFlow` when the application owns stable workflow topology,
-  waits, joins, concurrency, or durable execution.
-- Use `Workspace` to persist evidence and context, not to decide what to do.
-- Keep `DynamicTask` as a facade/compatibility entrypoint; do not introduce it
-  as a second task lifecycle in product-facing guidance.
-- When goal pursuit is active, DAG completion is evidence only. Final
-  acceptance still requires model verifier plus host guard.
+Use `context_read` only with a caller-bound ContextReader. Use TaskWorkspace
+Actions for file operations and RecordStore ports for persistence. Never use a
+readback from one owner as proof that a required capability owned by another
+owner executed.

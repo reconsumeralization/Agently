@@ -127,7 +127,7 @@ def create_task_agent(
 ) -> tuple[Any, ProviderName, Path]:
     workspace = default_workspace(workspace_prefix)
     workspace.mkdir(parents=True, exist_ok=True)
-    agent = Agently.create_agent(name).use_workspace(workspace, mode="read_write")
+    agent = Agently.create_agent(name).use_task_workspace(workspace, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=temperature)
     if language != "auto":
         agent.language(language)
@@ -137,12 +137,12 @@ def create_task_agent(
 def enable_coding_workspace(agent: Any) -> None:
     from agently.builtins.actions import RuntimePreflight
 
-    workspace = getattr(agent, "workspace", None)
-    if workspace is None:
-        raise RuntimeError("Coding examples require a Workspace-bound agent.")
-    root = Path(str(workspace.root)).resolve()
+    task_workspace = getattr(agent, "task_workspace", None)
+    if task_workspace is None:
+        raise RuntimeError("Coding examples require a TaskWorkspace-bound agent.")
+    root = Path(str(task_workspace.root)).resolve()
     RuntimePreflight().register_actions(agent.action, action_id="inspect_code_runtimes")
-    agent.enable_workspace_file_actions(
+    agent.enable_task_workspace_file_actions(
         root=root,
         read=True,
         write=True,
@@ -232,11 +232,11 @@ def install_local_skill(skill_dir: Path, *, registry_root: Path) -> str:
 
 
 def enable_workspace_report_actions(agent: Any) -> None:
-    workspace = getattr(agent, "workspace", None)
-    if workspace is None:
-        raise RuntimeError("Workspace report examples require a Workspace-bound agent.")
-    root = Path(str(workspace.root)).resolve()
-    agent.enable_workspace_file_actions(
+    task_workspace = getattr(agent, "task_workspace", None)
+    if task_workspace is None:
+        raise RuntimeError("Report examples require a TaskWorkspace-bound agent.")
+    root = Path(str(task_workspace.root)).resolve()
+    agent.enable_task_workspace_file_actions(
         root=root,
         read=True,
         write=True,
@@ -257,11 +257,18 @@ def stream_options() -> dict[str, Any]:
     return {"agent_task": {"stream_progress": True}}
 
 
-def run_and_print(execution: Any, *, provider: ProviderName, workspace: Path) -> dict[str, Any]:
-    return asyncio.run(async_run_and_print(execution, provider=provider, workspace=workspace))
+def run_and_print(execution: Any, *, provider: ProviderName, task_workspace: Path) -> dict[str, Any]:
+    return asyncio.run(
+        async_run_and_print(execution, provider=provider, task_workspace=task_workspace)
+    )
 
 
-async def async_run_and_print(execution: Any, *, provider: ProviderName, workspace: Path) -> dict[str, Any]:
+async def async_run_and_print(
+    execution: Any,
+    *,
+    provider: ProviderName,
+    task_workspace: Path,
+) -> dict[str, Any]:
     print("[DELTA_STREAM]")
     delta_text = ""
     async for chunk in execution.get_async_generator(type="delta"):
@@ -296,7 +303,7 @@ async def async_run_and_print(execution: Any, *, provider: ProviderName, workspa
         )
         or (task_refs.get("execution_strategy") if isinstance(task_refs, dict) else None)
         or (task_log.get("execution_strategy") if isinstance(task_log, dict) else None),
-        "workspace": str(workspace),
+        "task_workspace": str(task_workspace),
         "delta_chars": len(delta_text),
         "final_preview": compact_text(data.get("final_result") if isinstance(data, dict) else data),
     }

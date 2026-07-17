@@ -22,8 +22,17 @@ from .AgentExecution import (
 from .AgentTask import AgentTask
 from .Blocks import Blocks
 from .DynamicTask import ActionTaskAdapter, DynamicTask, SkillTaskAdapter
-from .SkillsManager import SkillsManager
 from .SkillsExecutor import SkillsExecutor
+from .SkillLibrary import (
+    SkillLibrary,
+    SkillBinding,
+    SkillBindingError,
+    SkillContextSource,
+    SkillPackageError,
+    SkillPackageRevision,
+    SkillResourceDescriptor,
+    SkillResourceRead,
+)
 
 __all__ = [
     "ActionTaskAdapter",
@@ -36,6 +45,13 @@ __all__ = [
     "DynamicTask",
     "RuntimeStageStallError",
     "SkillTaskAdapter",
+    "SkillLibrary",
+    "SkillBinding",
+    "SkillBindingError",
+    "SkillContextSource",
+    "SkillPackageError",
+    "SkillPackageRevision",
+    "SkillResourceDescriptor",
+    "SkillResourceRead",
     "SkillsExecutor",
-    "SkillsManager",
 ]

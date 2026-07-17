@@ -63,8 +63,8 @@ class Cmd:
             for prefix in self.allowed_cmd_prefixes
             if isinstance(prefix, str) and prefix.strip()
         ]
-        # No implicit process-cwd boundary: a Workspace-bound shell must inject
-        # the working directory through the direct Workspace root. Executors
+        # No implicit process-cwd boundary: a TaskWorkspace-bound shell must inject
+        # the working directory through the direct TaskWorkspace root. Executors
         # must not invent a fallback cwd.
         roots = allowed_workdir_roots if allowed_workdir_roots is not None else []
         self.allowed_workdir_roots = [Path(root).resolve() for root in roots]
@@ -89,7 +89,7 @@ class Cmd:
             desc=(
                 "Run a low-level allowlisted shell command with bounded stdout/stderr previews. "
                 "Prefer `agent.enable_shell(...)` for user-facing shell access, and prefer "
-                "Workspace file actions for reading, searching, editing, and writing files."
+                "TaskWorkspace file actions for reading, searching, editing, and writing files."
             ),
             kwargs={
                 "cmd": ("str | list[str]", "Command to run."),
@@ -151,7 +151,7 @@ class Cmd:
             return Path(workdir).resolve()
         if self.allowed_workdir_roots:
             return self.allowed_workdir_roots[0]
-        # No Workspace-issued boundary configured; do not fall back to cwd.
+        # No TaskWorkspace-issued boundary configured; do not fall back to cwd.
         return None
 
     async def run(
@@ -167,14 +167,14 @@ class Cmd:
                 "ok": False,
                 "status": "blocked",
                 "need_approval": True,
-                "reason": "workspace_boundary_required",
+                "reason": "task_workspace_boundary_required",
                 "detail": (
-                    "No Workspace-issued working directory. Bind a Workspace and enable a "
-                    "Workspace-bound shell (agent.use_workspace(...) + agent.enable_shell(...)) so "
-                    "the working directory is injected through the Workspace file boundary; "
+                    "No TaskWorkspace-issued working directory. Bind a TaskWorkspace and enable a "
+                    "TaskWorkspace-bound shell (agent.use_task_workspace(...) + agent.enable_shell(...)) so "
+                    "the working directory is injected through the TaskWorkspace file boundary; "
                     "executors do not fall back to the process cwd."
                 ),
-                "diagnostics": [{"code": "shell.workspace_boundary_required"}],
+                "diagnostics": [{"code": "shell.task_workspace_boundary_required"}],
             }
         if not self._is_workdir_allowed(workdir):
             return {

@@ -276,7 +276,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             for key in (
                 "evidence_to_use",
                 "requires_capability_ids",
-                "requires_workspace_refs",
+                "requires_task_workspace_refs",
                 "focus_item_ids",
                 "missing_criteria",
                 "next_step_requirements",
@@ -452,7 +452,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                 if compact_diagnostic:
                     diagnostics.append(compact_diagnostic)
             metadata = cls._compact_taskboard_card_metadata_for_prompt(raw_metadata)
-            workspace_operations = cls._taskboard_card_workspace_operations_for_prompt(
+            context_reads = cls._taskboard_card_context_reads_for_prompt(
                 diagnostics=diagnostics,
                 metadata=metadata,
             )
@@ -485,7 +485,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                     "file_refs_omitted": max(0, len(file_refs_source) - 8),
                     "source_refs": source_refs_source,
                     "source_refs_omitted": max(0, len(source_refs_sequence) - 8),
-                    "workspace_operations": workspace_operations,
+                    "context_reads": context_reads,
                     "diagnostics": diagnostics,
                     "metadata": metadata,
                 }
@@ -648,7 +648,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                 },
             },
             "output_policy": DataFormatter.sanitize(block_carrier.get("output_policy", {})),
-            "workspace_operations": cls._compact_taskboard_workspace_operations_for_carrier_meta(
+            "context_reads": cls._compact_taskboard_context_reads_for_carrier_meta(
                 block_carrier,
                 blocks,
             ),
@@ -656,7 +656,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
         }
 
     @classmethod
-    def _compact_taskboard_workspace_operations_for_carrier_meta(
+    def _compact_taskboard_context_reads_for_carrier_meta(
         cls,
         block_carrier: Mapping[str, Any],
         blocks: Any,
@@ -668,23 +668,23 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                     item for item in evidence.get("execution_block_results", []) if isinstance(item, Mapping)
                 ]
                 operations = [
-                    cls._compact_taskboard_workspace_operation(item)
+                    cls._compact_taskboard_context_read(item)
                     for item in execution_results
-                    if str(item.get("kind") or "") == "workspace_operation"
+                    if str(item.get("kind") or "") == "context_read"
                 ][:8]
                 if operations:
                     return operations
-        direct_operations = block_carrier.get("workspace_operations")
+        direct_operations = block_carrier.get("context_reads")
         if isinstance(direct_operations, Sequence) and not isinstance(direct_operations, (str, bytes, bytearray)):
             return [
-                cls._compact_taskboard_workspace_operation(item)
+                cls._compact_taskboard_context_read(item)
                 for item in list(direct_operations)[:8]
                 if isinstance(item, Mapping)
             ]
         return []
 
     @classmethod
-    def _compact_taskboard_workspace_operation(cls, item: Mapping[str, Any]) -> dict[str, Any]:
+    def _compact_taskboard_context_read(cls, item: Mapping[str, Any]) -> dict[str, Any]:
         output = item.get("output")
         output_summary: dict[str, Any] = {}
         if isinstance(output, Mapping):
@@ -705,21 +705,21 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                 output_summary["diagnostics"] = cls._model_hot_diagnostics(diagnostics)
             bounded = output.get("bounded")
             if isinstance(bounded, Mapping):
-                output_summary["bounded"] = cls._compact_taskboard_workspace_operation_bounded(bounded)
+                output_summary["bounded"] = cls._compact_taskboard_context_read_bounded(bounded)
             for output_key, source_key in (
                 ("first_locator_ref", "locator_refs"),
                 ("first_evidence_snippet", "evidence_snippets"),
             ):
                 max_chars = 1800 if output_key == "first_evidence_snippet" else 900
                 if output_key in output:
-                    output_summary[output_key] = cls._compact_taskboard_workspace_ref_or_snippet(
+                    output_summary[output_key] = cls._compact_taskboard_task_workspace_ref_or_snippet(
                         output.get(output_key),
                         max_chars=max_chars,
                     )
                     continue
                 source = output.get(source_key)
                 if isinstance(source, Sequence) and not isinstance(source, (str, bytes, bytearray)) and source:
-                    output_summary[output_key] = cls._compact_taskboard_workspace_ref_or_snippet(
+                    output_summary[output_key] = cls._compact_taskboard_task_workspace_ref_or_snippet(
                         source[0],
                         max_chars=max_chars,
                     )
@@ -733,14 +733,14 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
         } | ({"output": output_summary} if output_summary else {})
 
     @classmethod
-    def _compact_taskboard_workspace_operation_bounded(cls, bounded: Mapping[str, Any]) -> dict[str, Any]:
+    def _compact_taskboard_context_read_bounded(cls, bounded: Mapping[str, Any]) -> dict[str, Any]:
         keep_keys = (
             "operation",
             "query",
             "filters",
             "path",
             "pattern",
-            "search_surface",
+            "source_kinds",
             "retrieval_strategy",
             "retrieval_method",
             "retrieval_selection",
@@ -769,7 +769,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize(compact)
 
     @classmethod
-    def _compact_taskboard_workspace_ref_or_snippet(cls, value: Any, *, max_chars: int) -> Any:
+    def _compact_taskboard_task_workspace_ref_or_snippet(cls, value: Any, *, max_chars: int) -> Any:
         if not isinstance(value, Mapping):
             return cls._compact_verifier_prompt_value(value, max_chars=max_chars)
         compact: dict[str, Any] = {}
@@ -797,7 +797,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
         return cls._compact_verifier_prompt_value(compact or value, max_chars=max_chars)
 
     @classmethod
-    def _taskboard_card_workspace_operations_for_prompt(
+    def _taskboard_card_context_reads_for_prompt(
         cls,
         *,
         diagnostics: Sequence[Any],
@@ -810,13 +810,13 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             block_carrier = container.get("block_carrier")
             if not isinstance(block_carrier, Mapping):
                 continue
-            raw_operations = block_carrier.get("workspace_operations")
+            raw_operations = block_carrier.get("context_reads")
             if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, (str, bytes, bytearray)):
                 continue
             for operation in raw_operations:
                 if not isinstance(operation, Mapping):
                     continue
-                operations.append(cls._compact_taskboard_workspace_operation(operation))
+                operations.append(cls._compact_taskboard_context_read(operation))
                 if len(operations) >= 4:
                     return operations
         return operations

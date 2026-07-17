@@ -32,7 +32,7 @@ from copy import deepcopy
 from threading import RLock
 from typing import Any, cast
 
-from agently.types.data import ActionArtifact, ActionResult, WorkspaceFileRef
+from agently.types.data import ActionArtifact, ActionResult, TaskWorkspaceFileRef
 
 from .ActionNormalization import normalize_execution_record
 
@@ -391,8 +391,8 @@ class ActionArtifactManager:
         return "artifact"
 
     @classmethod
-    def _collect_file_refs(cls, record: ActionResult) -> list[WorkspaceFileRef]:
-        collected: list[WorkspaceFileRef] = []
+    def _collect_file_refs(cls, record: ActionResult) -> list[TaskWorkspaceFileRef]:
+        collected: list[TaskWorkspaceFileRef] = []
 
         def collect(value: Any):
             if isinstance(value, dict):
@@ -400,7 +400,7 @@ class ActionArtifactManager:
                 if isinstance(refs, list):
                     for ref in refs:
                         if isinstance(ref, dict):
-                            collected.append(cast(WorkspaceFileRef, dict(ref)))
+                            collected.append(cast(TaskWorkspaceFileRef, dict(ref)))
 
         collect(record)
         collect(record.get("data"))
@@ -408,7 +408,7 @@ class ActionArtifactManager:
         if result is not record.get("data"):
             collect(result)
 
-        deduped: list[WorkspaceFileRef] = []
+        deduped: list[TaskWorkspaceFileRef] = []
         seen: set[tuple[str, str, str]] = set()
         for ref in collected:
             key = (str(ref.get("path", "")), str(ref.get("sha256", "")), str(ref.get("role", "")))

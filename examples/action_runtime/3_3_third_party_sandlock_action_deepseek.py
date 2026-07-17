@@ -80,9 +80,9 @@ class SandLockActionExecutor:
         if not isinstance(fs_writable, list):
             fs_writable = [str(fs_writable)]
 
-        workspace_roots = policy.get("workspace_roots", [])
-        if isinstance(workspace_roots, list):
-            for path in workspace_roots:
+        task_workspace_roots = policy.get("task_workspace_roots", [])
+        if isinstance(task_workspace_roots, list):
+            for path in task_workspace_roots:
                 path_text = str(path)
                 if path_text not in fs_readable:
                     fs_readable.append(path_text)
@@ -138,7 +138,7 @@ if __name__ == "__main__":
             executor=agent.action.create_action_executor("SandLockActionExecutor"),
             default_policy={
                 "timeout_seconds": 10,
-                "workspace_roots": [],
+                "task_workspace_roots": [],
             },
             side_effect_level="exec",
             sandbox_required=True,

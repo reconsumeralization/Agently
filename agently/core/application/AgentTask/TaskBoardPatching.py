@@ -44,7 +44,7 @@ _TASKBOARD_WORKSPACE_REPLACE_NEW_KEYS = (
 
 class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
     @classmethod
-    def _taskboard_control_output_allows_workspace_delivery(cls, card_output: Any) -> bool:
+    def _taskboard_control_output_allows_task_workspace_delivery(cls, card_output: Any) -> bool:
         if not isinstance(card_output, Mapping):
             return True
         status = str(card_output.get("status") or "").strip().lower()
@@ -58,18 +58,18 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if cls._has_remaining_work(card_output.get("remaining_work")):
             manifest = card_output.get("artifact_manifest")
             manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
-            manifest_path = cls._workspace_artifact_manifest_path(manifest_dict)
-            content, _content_key = cls._select_workspace_artifact_content(
+            manifest_path = cls._task_workspace_artifact_manifest_path(manifest_dict)
+            content, _content_key = cls._select_task_workspace_artifact_content(
                 card_output,
                 manifest_dict,
-                deliverable_mode="workspace_artifact",
+                deliverable_mode="task_workspace_artifact",
                 manifest_path=manifest_path,
             )
             if not (
                 status == "completed"
                 and card_output.get("sufficient") is True
                 and next_action == "finalize"
-                and cls._workspace_artifact_content_is_complete_body(content)
+                and cls._task_workspace_artifact_content_is_complete_body(content)
             ):
                 return False
         if cls._has_remaining_work(card_output.get("gaps")):
@@ -86,7 +86,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
     ) -> dict[str, Any] | None:
         raw_patch = card_output.get("patch_proposal")
         if isinstance(raw_patch, Mapping):
-            if cls._taskboard_patch_proposal_is_workspace_patch(raw_patch):
+            if cls._taskboard_patch_proposal_is_task_workspace_patch(raw_patch):
                 return None
             try:
                 patch = TaskBoardPatch.from_value(raw_patch)
@@ -129,30 +129,30 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             target_refs=cls._taskboard_control_output_target_refs(card_output),
         )
 
-    async def _materialize_taskboard_workspace_patch(
+    async def _materialize_taskboard_task_workspace_patch(
         self,
         context: Any,
         card_output: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         raw_patch = card_output.get("patch_proposal")
-        if not isinstance(raw_patch, Mapping) or not self._taskboard_patch_proposal_is_workspace_patch(raw_patch):
+        if not isinstance(raw_patch, Mapping) or not self._taskboard_patch_proposal_is_task_workspace_patch(raw_patch):
             return card_output
         card_id = str(getattr(getattr(context, "card", None), "id", "") or "")
         grounding_repair_contract = self._taskboard_grounding_repair_contract(context)
         grounding_patch_paths = self._taskboard_grounding_patch_paths(context)
         if grounding_repair_contract:
-            scoped, reason = self._taskboard_grounding_workspace_patch_scope(
+            scoped, reason = self._taskboard_grounding_task_workspace_patch_scope(
                 raw_patch,
                 grounding_repair_contract,
                 allowed_patch_paths=grounding_patch_paths,
             )
             if not scoped:
                 patched_output = dict(card_output)
-                patched_output["workspace_patch_proposal"] = DataFormatter.sanitize(raw_patch)
+                patched_output["task_workspace_patch_proposal"] = DataFormatter.sanitize(raw_patch)
                 patched_output.pop("patch_proposal", None)
                 patched_output["status"] = "blocked"
                 patched_output["sufficient"] = False
-                patched_output["workspace_patch_delivery"] = {
+                patched_output["task_workspace_patch_delivery"] = {
                     "status": "failed",
                     "reason": reason,
                 }
@@ -165,7 +165,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                         "code": "taskboard.control.grounding_patch_out_of_scope",
                         "card_id": str(getattr(getattr(context, "card", None), "id", "") or ""),
                         "message": reason,
-                        "source": "agent_task.taskboard.workspace_patch",
+                        "source": "agent_task.taskboard.task_workspace_patch",
                     }
                 )
                 patched_output["diagnostics"] = DataFormatter.sanitize(diagnostics)
@@ -173,34 +173,34 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 if reason and reason not in remaining_work:
                     remaining_work.append(reason)
                 patched_output["remaining_work"] = remaining_work
-                self.diagnostics.setdefault("taskboard_workspace_patch_delivery", []).append(
-                    DataFormatter.sanitize(patched_output["workspace_patch_delivery"])
+                self.diagnostics.setdefault("taskboard_task_workspace_patch_delivery", []).append(
+                    DataFormatter.sanitize(patched_output["task_workspace_patch_delivery"])
                 )
                 return DataFormatter.sanitize(patched_output)
         patched_output = dict(card_output)
-        patched_output["workspace_patch_proposal"] = DataFormatter.sanitize(raw_patch)
+        patched_output["task_workspace_patch_proposal"] = DataFormatter.sanitize(raw_patch)
         patched_output.pop("patch_proposal", None)
         if grounding_repair_contract:
-            delivery = await self._apply_grounding_workspace_patch(
+            delivery = await self._apply_grounding_task_workspace_patch(
                 raw_patch,
                 grounding_repair_contract,
                 allowed_patch_paths=grounding_patch_paths,
-                source="agent_task.workspace_artifact.taskboard_patch",
+                source="agent_task.task_workspace_artifact.taskboard_patch",
             )
             delivery = {**delivery, "card_id": card_id}
         else:
-            delivery = await self._apply_taskboard_workspace_patch(raw_patch, card_id=card_id)
-        patched_output["workspace_patch_delivery"] = DataFormatter.sanitize(delivery)
+            delivery = await self._apply_taskboard_task_workspace_patch(raw_patch, card_id=card_id)
+        patched_output["task_workspace_patch_delivery"] = DataFormatter.sanitize(delivery)
         diagnostics = [dict(item) for item in self._taskboard_mapping_sequence(patched_output.get("diagnostics"))]
         if delivery.get("status") == "completed":
             diagnostics.append(
                 {
-                    "code": "taskboard.control.workspace_patch_applied",
+                    "code": "taskboard.control.task_workspace_patch_applied",
                     "card_id": card_id,
                     "path": delivery.get("path"),
                     "operation_count": delivery.get("operation_count", 0),
                     "replacement_count": delivery.get("replacement_count", 0),
-                    "source": "agent_task.taskboard.workspace_patch",
+                    "source": "agent_task.taskboard.task_workspace_patch",
                 }
             )
             file_refs = [dict(item) for item in self._taskboard_mapping_sequence(patched_output.get("file_refs"))]
@@ -214,22 +214,22 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         else:
             diagnostics.append(
                 {
-                    "code": "taskboard.control.workspace_patch_failed",
+                    "code": "taskboard.control.task_workspace_patch_failed",
                     "card_id": card_id,
                     "path": delivery.get("path"),
                     "reason": delivery.get("reason") or delivery.get("error"),
-                    "source": "agent_task.taskboard.workspace_patch",
+                    "source": "agent_task.taskboard.task_workspace_patch",
                 }
             )
             patched_output["status"] = "blocked"
             patched_output["sufficient"] = False
             remaining_work = self._normalize_string_list(patched_output.get("remaining_work"))
-            reason = str(delivery.get("reason") or "Workspace patch could not be applied.").strip()
+            reason = str(delivery.get("reason") or "TaskWorkspace patch could not be applied.").strip()
             if reason:
                 remaining_work.append(reason)
             patched_output["remaining_work"] = remaining_work
         patched_output["diagnostics"] = DataFormatter.sanitize(diagnostics)
-        self.diagnostics.setdefault("taskboard_workspace_patch_delivery", []).append(
+        self.diagnostics.setdefault("taskboard_task_workspace_patch_delivery", []).append(
             DataFormatter.sanitize(delivery)
         )
         return DataFormatter.sanitize(patched_output)
@@ -259,23 +259,23 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             and not isinstance(raw_paths, str | bytes | bytearray)
             else [raw_paths]
             if raw_paths is not None
-            else self._required_workspace_deliverables()
+            else self._required_task_workspace_deliverables()
         )
         paths: list[str] = []
         for item in candidates:
-            path = self._workspace_artifact_display_path(item)
+            path = self._task_workspace_artifact_display_path(item)
             if path and path not in paths:
                 paths.append(path)
         return paths
 
-    def _taskboard_grounding_workspace_patch_scope(
+    def _taskboard_grounding_task_workspace_patch_scope(
         self,
         patch_proposal: Mapping[str, Any],
         grounding_contract: Mapping[str, Any],
         *,
         allowed_patch_paths: Sequence[Any],
     ) -> tuple[bool, str]:
-        return self._grounding_workspace_patch_scope(
+        return self._grounding_task_workspace_patch_scope(
             patch_proposal,
             grounding_contract,
             allowed_patch_paths=allowed_patch_paths,
@@ -284,17 +284,17 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         )
 
     @classmethod
-    def _taskboard_patch_proposal_is_workspace_patch(cls, patch_proposal: Mapping[str, Any]) -> bool:
+    def _taskboard_patch_proposal_is_task_workspace_patch(cls, patch_proposal: Mapping[str, Any]) -> bool:
         if not isinstance(patch_proposal, Mapping):
             return False
-        if cls._taskboard_patch_proposal_is_workspace_file_copy(patch_proposal):
+        if cls._taskboard_patch_proposal_is_task_workspace_file_copy(patch_proposal):
             return True
         if any(str(patch_proposal.get(key) or "").strip() for key in ("file", "path", "target_file", "target_path")):
             return True
-        raw_operations = cls._taskboard_workspace_patch_raw_operations(patch_proposal)
+        raw_operations = cls._taskboard_task_workspace_patch_raw_operations(patch_proposal)
         if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, str | bytes | bytearray):
             return False
-        workspace_ops = {"replace", "insert", "delete", "append", "write"}
+        task_workspace_ops = {"replace", "insert", "delete", "append", "write"}
         taskboard_ops = {
             "add_card",
             "update_card",
@@ -306,21 +306,21 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "add_dependency",
             "remove_dependency",
         }
-        has_workspace_op = False
+        has_task_workspace_op = False
         for operation in raw_operations:
             if not isinstance(operation, Mapping):
                 continue
             op = str(operation.get("type") or operation.get("op") or operation.get("operation") or "").strip()
             if op in taskboard_ops:
                 return False
-            if op in workspace_ops:
-                has_workspace_op = True
-            elif cls._taskboard_workspace_patch_operation_has_replace_fields(operation):
-                has_workspace_op = True
-        return has_workspace_op
+            if op in task_workspace_ops:
+                has_task_workspace_op = True
+            elif cls._taskboard_task_workspace_patch_operation_has_replace_fields(operation):
+                has_task_workspace_op = True
+        return has_task_workspace_op
 
     @classmethod
-    def _taskboard_patch_proposal_is_workspace_file_copy(cls, patch_proposal: Mapping[str, Any]) -> bool:
+    def _taskboard_patch_proposal_is_task_workspace_file_copy(cls, patch_proposal: Mapping[str, Any]) -> bool:
         if not isinstance(patch_proposal, Mapping):
             return False
         kind = (
@@ -334,15 +334,15 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             .lower()
             .replace("-", "_")
         )
-        if kind not in {"workspace_file_copy", "file_copy", "copy_file", "copy"}:
+        if kind not in {"task_workspace_file_copy", "file_copy", "copy_file", "copy"}:
             return False
         return bool(
-            cls._taskboard_workspace_copy_source_path(patch_proposal)
-            and cls._taskboard_workspace_copy_target_path(patch_proposal)
+            cls._taskboard_task_workspace_copy_source_path(patch_proposal)
+            and cls._taskboard_task_workspace_copy_target_path(patch_proposal)
         )
 
     @staticmethod
-    def _taskboard_workspace_copy_source_path(patch_proposal: Mapping[str, Any]) -> str:
+    def _taskboard_task_workspace_copy_source_path(patch_proposal: Mapping[str, Any]) -> str:
         for key in ("source", "source_path", "source_file", "from", "from_path"):
             value = str(patch_proposal.get(key) or "").strip()
             if value:
@@ -350,48 +350,48 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         return ""
 
     @classmethod
-    def _taskboard_workspace_copy_target_path(cls, patch_proposal: Mapping[str, Any]) -> str:
+    def _taskboard_task_workspace_copy_target_path(cls, patch_proposal: Mapping[str, Any]) -> str:
         for key in ("target", "target_path", "target_file", "destination", "destination_path", "to", "to_path"):
             value = str(patch_proposal.get(key) or "").strip()
             if value:
                 return value
-        return cls._taskboard_workspace_patch_path(patch_proposal)
+        return cls._taskboard_task_workspace_patch_path(patch_proposal)
 
     @classmethod
-    def _taskboard_workspace_patch_path(
+    def _taskboard_task_workspace_patch_path(
         cls,
         patch_proposal: Mapping[str, Any],
         operation: Mapping[str, Any] | None = None,
     ) -> str:
         for source in (operation or {}, patch_proposal):
-            for key in ("file", "path", "target_file", "target_path", "workspace_path"):
+            for key in ("file", "path", "target_file", "target_path", "task_workspace_path"):
                 value = str(source.get(key) or "").strip()
                 if value:
                     return value
         return ""
 
-    async def _apply_taskboard_workspace_patch(
+    async def _apply_taskboard_task_workspace_patch(
         self,
         patch_proposal: Mapping[str, Any],
         *,
         card_id: str,
     ) -> dict[str, Any]:
-        if self._taskboard_patch_proposal_is_workspace_file_copy(patch_proposal):
-            return await self._apply_taskboard_workspace_file_copy_patch(patch_proposal, card_id=card_id)
+        if self._taskboard_patch_proposal_is_task_workspace_file_copy(patch_proposal):
+            return await self._apply_taskboard_task_workspace_file_copy_patch(patch_proposal, card_id=card_id)
 
-        raw_operations = self._taskboard_workspace_patch_raw_operations(patch_proposal)
+        raw_operations = self._taskboard_task_workspace_patch_raw_operations(patch_proposal)
         if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, str | bytes | bytearray):
-            write_content = self._taskboard_workspace_patch_content(patch_proposal)
+            write_content = self._taskboard_task_workspace_patch_content(patch_proposal)
             if not write_content:
                 return {
                     "status": "failed",
                     "card_id": card_id,
-                    "reason": "Workspace patch requires an operations list.",
+                    "reason": "TaskWorkspace patch requires an operations list.",
                 }
             raw_operations = [
                 {
                     "type": "write",
-                    "path": self._taskboard_workspace_patch_path(patch_proposal),
+                    "path": self._taskboard_task_workspace_patch_path(patch_proposal),
                     "content": write_content,
                 }
             ]
@@ -400,35 +400,35 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             return {
                 "status": "failed",
                 "card_id": card_id,
-                "reason": "Workspace patch has no valid operations.",
+                "reason": "TaskWorkspace patch has no valid operations.",
             }
-        path = self._taskboard_workspace_patch_path(patch_proposal, operations[0])
+        path = self._taskboard_task_workspace_patch_path(patch_proposal, operations[0])
         if not path:
             return {
                 "status": "failed",
                 "card_id": card_id,
-                "reason": "Workspace patch requires file/path.",
+                "reason": "TaskWorkspace patch requires file/path.",
             }
         try:
             first_op = str(
                 operations[0].get("type") or operations[0].get("op") or operations[0].get("operation") or ""
             ).strip().lower()
-            content = "" if first_op in {"write", "overwrite", "replace_file"} else await self._read_workspace_patch_text(path)
+            content = "" if first_op in {"write", "overwrite", "replace_file"} else await self._read_task_workspace_patch_text(path)
             operation_records: list[dict[str, Any]] = []
             replacement_count = 0
             for index, operation in enumerate(operations):
-                operation_path = self._taskboard_workspace_patch_path(patch_proposal, operation)
+                operation_path = self._taskboard_task_workspace_patch_path(patch_proposal, operation)
                 if operation_path != path:
-                    raise ValueError("Workspace patch operations must target one file per patch proposal.")
-                content, record = self._apply_taskboard_workspace_patch_operation(
+                    raise ValueError("TaskWorkspace patch operations must target one file per patch proposal.")
+                content, record = self._apply_taskboard_task_workspace_patch_operation(
                     content,
                     operation,
                     index=index,
                 )
                 replacement_count += int(record.get("replacement_count") or 0)
                 operation_records.append(record)
-            write_result = await self.workspace.write_file(path, content, append=False)
-            read_result = await self.workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+            write_result = await self.task_workspace.write_file(path, content, append=False)
+            read_result = await self.task_workspace.read_file(path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
         except Exception as error:
             return {
                 "status": "failed",
@@ -451,8 +451,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "content_kind": read_result.get("content_kind", "text"),
             "encoding": read_result.get("encoding"),
             "handler_id": read_result.get("handler_id"),
-            "role": "workspace_artifact",
-            "source": "agent_task.workspace_artifact.taskboard_patch",
+            "role": "task_workspace_artifact",
+            "source": "agent_task.task_workspace_artifact.taskboard_patch",
             "card_id": card_id,
             "read_bytes": int(read_result.get("read_bytes") or 0),
             "truncated": bool(read_result.get("truncated")),
@@ -481,35 +481,35 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "file_refs": [ref],
         }
 
-    async def _apply_taskboard_workspace_file_copy_patch(
+    async def _apply_taskboard_task_workspace_file_copy_patch(
         self,
         patch_proposal: Mapping[str, Any],
         *,
         card_id: str,
     ) -> dict[str, Any]:
-        source_path = self._taskboard_workspace_copy_source_path(patch_proposal)
-        target_path = self._taskboard_workspace_copy_target_path(patch_proposal)
+        source_path = self._taskboard_task_workspace_copy_source_path(patch_proposal)
+        target_path = self._taskboard_task_workspace_copy_target_path(patch_proposal)
         if not source_path or not target_path:
             return {
                 "status": "failed",
                 "card_id": card_id,
-                "reason": "Workspace file-copy patch requires source and target paths.",
+                "reason": "TaskWorkspace file-copy patch requires source and target paths.",
             }
         previous_sha = ""
         try:
-            source_target = self.workspace.resolve_file_path(source_path)
+            source_target = self.task_workspace.resolve_file_path(source_path)
             max_bytes = max(int(source_target.stat().st_size) + 1, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
-            source_read = await self.workspace.read_file(source_path, max_bytes=max_bytes)
+            source_read = await self.task_workspace.read_file(source_path, max_bytes=max_bytes)
             content = source_read.get("content")
             if not isinstance(content, str) or bool(source_read.get("truncated")):
-                raise ValueError("Workspace file-copy patch requires complete text readback.")
+                raise ValueError("TaskWorkspace file-copy patch requires complete text readback.")
             try:
-                previous_read = await self.workspace.read_file(target_path, max_bytes=1)
+                previous_read = await self.task_workspace.read_file(target_path, max_bytes=1)
                 previous_sha = str(previous_read.get("sha256") or "")
             except FileNotFoundError:
                 previous_sha = ""
-            write_result = await self.workspace.write_file(target_path, content, append=False)
-            read_result = await self.workspace.read_file(target_path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+            write_result = await self.task_workspace.write_file(target_path, content, append=False)
+            read_result = await self.task_workspace.read_file(target_path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
         except Exception as error:
             return {
                 "status": "failed",
@@ -534,8 +534,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "content_kind": read_result.get("content_kind", "text"),
             "encoding": read_result.get("encoding") or source_read.get("encoding"),
             "handler_id": read_result.get("handler_id"),
-            "role": "workspace_artifact",
-            "source": "agent_task.workspace_artifact.taskboard_patch",
+            "role": "task_workspace_artifact",
+            "source": "agent_task.task_workspace_artifact.taskboard_patch",
             "source_path": source_path,
             "card_id": card_id,
             "read_bytes": int(read_result.get("read_bytes") or 0),
@@ -574,7 +574,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         }
 
     @staticmethod
-    def _taskboard_workspace_patch_content(patch_proposal: Mapping[str, Any]) -> str:
+    def _taskboard_task_workspace_patch_content(patch_proposal: Mapping[str, Any]) -> str:
         for key in ("content", "markdown", "body", "text", "new", "replacement"):
             value = patch_proposal.get(key)
             if isinstance(value, str) and value:
@@ -582,28 +582,28 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         return ""
 
     @staticmethod
-    def _taskboard_workspace_patch_raw_operations(patch_proposal: Mapping[str, Any]) -> Any:
+    def _taskboard_task_workspace_patch_raw_operations(patch_proposal: Mapping[str, Any]) -> Any:
         for key in ("operations", "edits", "patches"):
             value = patch_proposal.get(key)
             if value is not None:
                 return value
         return None
 
-    async def _read_workspace_patch_text(self, path: str) -> str:
-        target = self.workspace.resolve_file_path(path)
+    async def _read_task_workspace_patch_text(self, path: str) -> str:
+        target = self.task_workspace.resolve_file_path(path)
         max_bytes = max(int(target.stat().st_size) + 1, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
-        read_result = await self.workspace.read_file(path, max_bytes=max_bytes)
+        read_result = await self.task_workspace.read_file(path, max_bytes=max_bytes)
         if not bool(read_result.get("ok")):
-            raise ValueError(f"Workspace file could not be read for patch: { path }")
+            raise ValueError(f"TaskWorkspace file could not be read for patch: { path }")
         if bool(read_result.get("truncated")):
-            raise ValueError(f"Workspace patch requires complete readback before editing: { path }")
+            raise ValueError(f"TaskWorkspace patch requires complete readback before editing: { path }")
         content = read_result.get("content")
         if not isinstance(content, str):
-            raise ValueError(f"Workspace patch requires text content: { path }")
+            raise ValueError(f"TaskWorkspace patch requires text content: { path }")
         return content
 
     @classmethod
-    def _apply_taskboard_workspace_patch_operation(
+    def _apply_taskboard_task_workspace_patch_operation(
         cls,
         content: str,
         operation: Mapping[str, Any],
@@ -611,25 +611,25 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         index: int,
     ) -> tuple[str, dict[str, Any]]:
         op = str(operation.get("type") or operation.get("op") or operation.get("operation") or "").strip().lower()
-        if not op and cls._taskboard_workspace_patch_operation_has_replace_fields(operation):
+        if not op and cls._taskboard_task_workspace_patch_operation_has_replace_fields(operation):
             op = "replace"
         if op in {"write", "overwrite", "replace_file"}:
-            new_content = cls._taskboard_workspace_patch_content(operation)
+            new_content = cls._taskboard_task_workspace_patch_content(operation)
             if not new_content:
-                raise ValueError("Workspace write patch requires non-empty content.")
+                raise ValueError("TaskWorkspace write patch requires non-empty content.")
             return new_content, {
                 "index": index,
                 "type": "write",
                 "replacement_count": 1 if content != new_content else 0,
             }
         if op != "replace":
-            raise ValueError(f"Unsupported Workspace patch operation '{ op or '<empty>' }'.")
+            raise ValueError(f"Unsupported TaskWorkspace patch operation '{ op or '<empty>' }'.")
         old = cls._first_present_patch_string(
             operation,
             _TASKBOARD_WORKSPACE_REPLACE_OLD_KEYS,
         )
         if not old:
-            raise ValueError("Workspace replace patch requires non-empty old/from/search text.")
+            raise ValueError("TaskWorkspace replace patch requires non-empty old/from/search text.")
         new = cls._first_present_patch_string(
             operation,
             _TASKBOARD_WORKSPACE_REPLACE_NEW_KEYS,
@@ -637,12 +637,12 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         )
         match_count = content.count(old)
         if match_count <= 0:
-            raise ValueError("Workspace replace patch old text was not found.")
+            raise ValueError("TaskWorkspace replace patch old text was not found.")
         replace_all = cls._normalize_bool(operation.get("replace_all"), default=False)
         occurrence = cls._coerce_positive_int(operation.get("occurrence"))
         if occurrence is not None:
             if occurrence > match_count:
-                raise ValueError("Workspace replace patch occurrence is greater than match count.")
+                raise ValueError("TaskWorkspace replace patch occurrence is greater than match count.")
             patched = cls._replace_nth(content, old, new, occurrence)
             replacement_count = 1
         elif replace_all:
@@ -653,7 +653,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             replacement_count = 1
         else:
             raise ValueError(
-                "Workspace replace patch matched multiple locations; set occurrence or replace_all explicitly."
+                "TaskWorkspace replace patch matched multiple locations; set occurrence or replace_all explicitly."
             )
         return patched, {
             "index": index,
@@ -686,7 +686,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         return "" if default is None else default
 
     @staticmethod
-    def _taskboard_workspace_patch_operation_has_replace_fields(operation: Mapping[str, Any]) -> bool:
+    def _taskboard_task_workspace_patch_operation_has_replace_fields(operation: Mapping[str, Any]) -> bool:
         return any(key in operation for key in _TASKBOARD_WORKSPACE_REPLACE_OLD_KEYS) and any(
             key in operation for key in _TASKBOARD_WORKSPACE_REPLACE_NEW_KEYS
         )
@@ -765,11 +765,11 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if "://" not in text:
             return False
         scheme = text.split("://", 1)[0].strip()
-        return scheme not in {"workspace", "content"}
+        return scheme not in {"task-workspace", "content"}
 
     @classmethod
     def _split_taskboard_target_refs(cls, refs: Sequence[str]) -> tuple[list[str], list[str]]:
-        workspace_refs: list[str] = []
+        task_workspace_refs: list[str] = []
         action_refs: list[str] = []
         for ref in refs:
             text = str(ref or "").strip()
@@ -778,26 +778,26 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             if cls._taskboard_target_ref_requires_action(text):
                 action_refs.append(text)
             else:
-                workspace_refs.append(text)
-        return workspace_refs, action_refs
+                task_workspace_refs.append(text)
+        return task_workspace_refs, action_refs
 
     @staticmethod
-    def _taskboard_workspace_target_ref_path(ref: str) -> str:
+    def _taskboard_task_workspace_target_ref_path(ref: str) -> str:
         text = str(ref or "").strip()
         lowered = text.lower()
-        for prefix in ("workspace://", "content://"):
+        for prefix in ("task-workspace://", "content://"):
             if lowered.startswith(prefix):
                 return text[len(prefix) :].lstrip("/")
         return text
 
     @classmethod
-    def _taskboard_workspace_target_ref_file_refs(cls, refs: Sequence[str]) -> list[dict[str, Any]]:
+    def _taskboard_task_workspace_target_ref_file_refs(cls, refs: Sequence[str]) -> list[dict[str, Any]]:
         file_refs: list[dict[str, Any]] = []
         seen: set[str] = set()
         for ref in refs:
             if cls._taskboard_target_ref_requires_action(str(ref or "")):
                 continue
-            path = cls._taskboard_workspace_target_ref_path(str(ref or ""))
+            path = cls._taskboard_task_workspace_target_ref_path(str(ref or ""))
             if not path or path in seen:
                 continue
             seen.add(path)
@@ -806,7 +806,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                     "path": path,
                     "source": "taskboard_target_ref",
                     "content_state": "ref_only",
-                    "readback_mode": "workspace_content",
+                    "readback_mode": "task_workspace_content",
                 }
             )
         return file_refs
@@ -886,8 +886,16 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             else:
                 next_limit = min(current_limit * 2, 12000)
             group["snippet_limit"] = next_limit
-            surface = str(group.get("search_surface") or "").strip()
-            if surface in {"workspace_files", "workspace_index_and_files"} or group.get("path") or group.get("pattern"):
+            raw_source_kinds = group.get("source_kinds")
+            if isinstance(raw_source_kinds, str):
+                source_kinds = {raw_source_kinds.strip()}
+            elif isinstance(raw_source_kinds, Sequence) and not isinstance(
+                raw_source_kinds, (str, bytes, bytearray)
+            ):
+                source_kinds = {str(value).strip() for value in raw_source_kinds}
+            else:
+                source_kinds = set()
+            if "task_workspace" in source_kinds or group.get("path") or group.get("pattern"):
                 current_context_lines = cls._positive_int(group.get("context_lines"), default=0)
                 group["context_lines"] = max(current_context_lines, 3)
             expanded_groups.append(DataFormatter.sanitize(group))
@@ -940,7 +948,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         current_id = str(getattr(card, "id", "") or "").strip()
         if not current_id:
             return None
-        workspace_target_refs, action_target_refs = cls._split_taskboard_target_refs(target_ref_list)
+        task_workspace_target_refs, action_target_refs = cls._split_taskboard_target_refs(target_ref_list)
         support_card_requires_action = bool(scoped_retrieval_plan or action_target_refs)
 
         def safe_id(raw: str) -> str:
@@ -1020,10 +1028,10 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 "Collect scoped evidence from the explicit external target refs required before continuing the "
                 f"setback control card. Target refs: {'; '.join(action_target_refs)}"
             )
-        elif workspace_target_refs:
+        elif task_workspace_target_refs:
             readback_objective = (
-                "Read bounded Workspace target refs required before continuing the setback control card. "
-                f"Target refs: {'; '.join(workspace_target_refs)}"
+                "Read bounded TaskWorkspace target refs required before continuing the setback control card. "
+                f"Target refs: {'; '.join(task_workspace_target_refs)}"
             )
         else:
             readback_objective = "Read scoped cold evidence required before continuing the setback control card."
@@ -1032,13 +1040,13 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         continuation_objective = str(getattr(card, "objective", "") or "Continue the setback TaskBoard card.").strip()
         if remaining_work:
             continuation_objective = f"{continuation_objective} Remaining work: {'; '.join(remaining_work[:3])}"
-        final_workspace_deliverables = cls._normalize_string_list(
-            current_metadata.get("final_workspace_deliverables")
+        final_task_workspace_deliverables = cls._normalize_string_list(
+            current_metadata.get("final_task_workspace_deliverables")
         )
-        if final_workspace_deliverables:
+        if final_task_workspace_deliverables:
             continuation_objective = (
-                f"{continuation_objective} Materialize required Workspace final deliverable path(s): "
-                f"{'; '.join(final_workspace_deliverables)}"
+                f"{continuation_objective} Materialize required TaskWorkspace final deliverable path(s): "
+                f"{'; '.join(final_task_workspace_deliverables)}"
             )
         evidence_metadata = {
             "evidence_scope": readback_dependencies,
@@ -1047,8 +1055,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         }
         if target_ref_list:
             evidence_metadata["target_refs"] = target_ref_list
-        if workspace_target_refs:
-            evidence_metadata["workspace_target_refs"] = workspace_target_refs
+        if task_workspace_target_refs:
+            evidence_metadata["task_workspace_target_refs"] = task_workspace_target_refs
         if action_target_refs:
             evidence_metadata["external_target_refs"] = action_target_refs
         if scoped_retrieval_plan:
@@ -1062,8 +1070,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         }
         if target_ref_list:
             continuation_metadata["target_refs"] = target_ref_list
-        if final_workspace_deliverables:
-            continuation_metadata["final_workspace_deliverables"] = final_workspace_deliverables
+        if final_task_workspace_deliverables:
+            continuation_metadata["final_task_workspace_deliverables"] = final_task_workspace_deliverables
         evidence_card = {
             "id": evidence_card_id,
             "objective": readback_objective,
@@ -1075,8 +1083,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 ["Evidence gathered from external target refs or diagnostics explaining inaccessible refs."]
                 if action_target_refs
                 else
-                ["Bounded Workspace target-ref readback previews or diagnostics explaining inaccessible refs."]
-                if workspace_target_refs
+                ["Bounded TaskWorkspace target-ref readback previews or diagnostics explaining inaccessible refs."]
+                if task_workspace_target_refs
                 else ["Bounded readback previews for verifier-visible cold evidence."]
             ),
             "allowed_execution_shape": "actions" if support_card_requires_action else "readback",
@@ -1113,7 +1121,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                         "readback_card_id": evidence_card_id,
                         "continuation_card_id": continuation_id,
                         "target_ref_count": len(target_ref_list),
-                        "workspace_target_ref_count": len(workspace_target_refs),
+                        "task_workspace_target_ref_count": len(task_workspace_target_refs),
                         "external_target_ref_count": len(action_target_refs),
                         "scoped_retrieval": bool(scoped_retrieval_plan),
                     },
@@ -1127,7 +1135,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                     "readback_card_id": evidence_card_id,
                     "continuation_card_id": continuation_id,
                     "target_ref_count": len(target_ref_list),
-                    "workspace_target_ref_count": len(workspace_target_refs),
+                    "task_workspace_target_ref_count": len(task_workspace_target_refs),
                     "external_target_ref_count": len(action_target_refs),
                     "scoped_retrieval": bool(scoped_retrieval_plan),
                 }
@@ -1272,21 +1280,21 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 )
                 return None
 
-        required_deliverables, _invalid_terminal_paths = self._taskboard_terminal_workspace_deliverables(
+        required_deliverables, _invalid_terminal_paths = self._taskboard_terminal_task_workspace_deliverables(
             effective_revision
         )
         grounding_patch_paths = [
-            self._workspace_artifact_display_path(item)
+            self._task_workspace_artifact_display_path(item)
             for item in required_deliverables
-            if self._workspace_artifact_display_path(item)
+            if self._task_workspace_artifact_display_path(item)
         ]
         repair_carrier = (
             self._terminal_carrier_for_repair_contract(grounding_repair_contract)
             if grounding_repair_contract is not None
             else None
         )
-        if repair_carrier is not None and repair_carrier.kind == "workspace_artifact":
-            candidate_path = self._workspace_artifact_display_path(repair_carrier.path)
+        if repair_carrier is not None and repair_carrier.kind == "task_workspace_artifact":
+            candidate_path = self._task_workspace_artifact_display_path(repair_carrier.path)
             if candidate_path and candidate_path not in grounding_patch_paths:
                 grounding_patch_paths.append(candidate_path)
 
@@ -1320,11 +1328,11 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if grounding_repair_contract is not None:
             if grounding_patch_mode:
                 required_outputs[0] = (
-                    "A bounded Workspace replace patch that changes only the structured grounding claim requirements."
+                    "A bounded TaskWorkspace replace patch that changes only the structured grounding claim requirements."
                 )
                 grounding_scope_instruction = (
                     " Change only the implicated claims named by the structured grounding repair contract and preserve "
-                    "all unrelated artifact text and facts exactly. Return a Workspace replace patch for the authorized "
+                    "all unrelated artifact text and facts exactly. Return a TaskWorkspace replace patch for the authorized "
                     "final deliverable. Do not return or rewrite the complete artifact body; do not introduce a new "
                     "factual clause outside the implicated claims."
                 )
@@ -1340,7 +1348,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 )
         if repair_deliverables:
             required_outputs.append(
-                "Trusted Workspace final deliverable path(s): " + ", ".join(repair_deliverables)
+                "Trusted TaskWorkspace final deliverable path(s): " + ", ".join(repair_deliverables)
             )
         repair_instruction = "Repair"
         if required_action_ids:
@@ -1379,7 +1387,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "generated_by": "agent_task.taskboard.final_verification_repair",
             "repair_source": "final_verification",
             "previous_revision_id": effective_revision.revision_id,
-            "final_workspace_deliverables": repair_deliverables,
+            "final_task_workspace_deliverables": repair_deliverables,
             "terminal_convergence_subject": "taskboard_final_verification",
         }
         if grounding_repair_contract is not None:

@@ -43,9 +43,9 @@ _SIMPLE_AGENT_EXECUTION_STREAM_KINDS = frozenset(
         "runtime_progress",
         "snapshot",
         "taskboard_control_request",
-        "workspace_artifact_draft",
-        "workspace_artifact_draft_public_replay_marker",
-        "workspace_artifact_draft_retry",
+        "task_workspace_artifact_draft",
+        "task_workspace_artifact_draft_public_replay_marker",
+        "task_workspace_artifact_draft_retry",
     }
 )
 _SIMPLE_EVENT_TYPES = {

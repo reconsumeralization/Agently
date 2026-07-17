@@ -141,9 +141,9 @@ class AgentTaskAcpRecoveryMixin(AgentTaskMixinBase):
                 },
                 "route_logs": {},
                 "errors": [],
-                "workspace_refs": {"acp_recovery": [recovery_ref] if recovery_ref else []},
+                "record_refs": {"acp_recovery": [recovery_ref] if recovery_ref else []},
             },
-            "workspace_refs": {"acp_recovery": [recovery_ref] if recovery_ref else []},
+            "record_refs": {"acp_recovery": [recovery_ref] if recovery_ref else []},
             "diagnostics": {
                 "acp_recovery": {
                     "action_id": action_id,
@@ -213,7 +213,7 @@ class AgentTaskAcpRecoveryMixin(AgentTaskMixinBase):
         plan: dict[str, Any],
         failed_execution_meta: dict[str, Any],
         acp_result: Any,
-    ) -> "WorkspaceRecordRef | None":
+    ) -> "RecordRef | None":
         _ = plan, failed_execution_meta, acp_result
         return self._memory_process_ref(
             "agent_task_acp_recovery", iteration=iteration_index, phase="acp_recovery"

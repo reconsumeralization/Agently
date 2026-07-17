@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from agently.types.data import WorkspaceRetentionTerminalStatus
+from agently.types.data import TaskWorkspaceTerminalStatus
 
 from .TaskShared import *
 
@@ -42,15 +42,15 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 await self._emit("agent_task.resumed", {"task_id": self.id, "terminal": True})
                 await self._ensure_final_reflection()
                 await self._emit("result", self.result)
-                await self._apply_terminal_workspace_retention(
+                await self._apply_terminal_task_workspace_retention(
                     status="completed" if self.status == "completed" else "failed"
                 )
                 self._release_terminal_action_artifact_scope()
                 await self._close_streams()
                 return self.result
             self.status = "running"
-            execution = self._flow.create_execution(auto_close=False, workspace=False)
-            terminal_retention_status: WorkspaceRetentionTerminalStatus | None = None
+            execution = self._flow.create_execution(auto_close=False, record_store=False)
+            terminal_retention_status: TaskWorkspaceTerminalStatus | None = None
             self._lifecycle_error = None
             try:
                 await self._record_phase(
@@ -147,7 +147,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 except Exception:
                     pass
                 if terminal_retention_status is not None:
-                    await self._apply_terminal_workspace_retention(
+                    await self._apply_terminal_task_workspace_retention(
                         status=terminal_retention_status
                     )
                     self._release_terminal_action_artifact_scope()

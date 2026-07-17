@@ -25,24 +25,30 @@ from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceP
 )
 
 
-def test_read_only_workspace_rejects_unenforceable_trusted_local_shell(tmp_path: Path) -> None:
-    agent = Agently.create_agent("read-only-local-shell").use_workspace(tmp_path)
+def test_read_only_task_workspace_rejects_unenforceable_trusted_local_shell(tmp_path: Path) -> None:
+    agent = Agently.create_agent("read-only-local-shell").use_task_workspace(
+        tmp_path,
+        mode="read_only",
+    )
 
-    with pytest.raises(ValueError, match="read-only Workspace"):
+    with pytest.raises(ValueError, match="read-only TaskWorkspace"):
         agent.enable_shell(sandbox="trusted_local")
 
     assert not (tmp_path / ".agently").exists()
 
 
-def test_read_only_workspace_shell_declares_ro_project_and_rw_execution_mounts(
+def test_read_only_task_workspace_shell_declares_ro_project_and_rw_execution_mounts(
     tmp_path: Path,
 ) -> None:
-    agent = Agently.create_agent("read-only-docker-shell").use_workspace(tmp_path)
-    workspace = agent.workspace
+    agent = Agently.create_agent("read-only-docker-shell").use_task_workspace(
+        tmp_path,
+        mode="read_only",
+    )
+    workspace = agent.task_workspace
 
-    agent.enable_shell(sandbox="docker", action_id="workspace_shell")
+    agent.enable_shell(sandbox="docker", action_id="task_workspace_shell")
 
-    spec = agent.action.action_registry.get_spec("workspace_shell")
+    spec = agent.action.action_registry.get_spec("task_workspace_shell")
     assert spec is not None
     requirements = spec.get("execution_resources")
     assert requirements
@@ -50,15 +56,15 @@ def test_read_only_workspace_shell_declares_ro_project_and_rw_execution_mounts(
     assert config is not None
     profile = config["runtime_profile"]
     fallback = tmp_path / ".agently" / "files" / workspace.execution_id
-    assert profile["workspace_mounts"] == [
+    assert profile["task_workspace_mounts"] == [
         {
             "host_path": str(tmp_path.resolve()),
-            "container_path": "/workspace",
+                "container_path": "/task_workspace",
             "mode": "ro",
         },
         {
             "host_path": str(fallback.resolve()),
-            "container_path": f"/workspace/.agently/files/{workspace.execution_id}",
+                "container_path": f"/task_workspace/.agently/files/{workspace.execution_id}",
             "mode": "rw",
         },
     ]
@@ -66,15 +72,15 @@ def test_read_only_workspace_shell_declares_ro_project_and_rw_execution_mounts(
     assert not (tmp_path / ".agently").exists()
 
 
-def test_explicit_read_write_workspace_allows_trusted_local_shell(tmp_path: Path) -> None:
-    agent = Agently.create_agent("writable-local-shell").use_workspace(
+def test_explicit_read_write_task_workspace_allows_trusted_local_shell(tmp_path: Path) -> None:
+    agent = Agently.create_agent("writable-local-shell").use_task_workspace(
         tmp_path,
         mode="read_write",
     )
 
-    agent.enable_shell(sandbox="trusted_local", action_id="workspace_shell")
+    agent.enable_shell(sandbox="trusted_local", action_id="task_workspace_shell")
 
-    spec = agent.action.action_registry.get_spec("workspace_shell")
+    spec = agent.action.action_registry.get_spec("task_workspace_shell")
     assert spec is not None
     requirements = spec.get("execution_resources")
     assert requirements
@@ -97,7 +103,7 @@ async def test_docker_shell_uses_declared_mount_modes(tmp_path: Path) -> None:
             "image": "bash:5",
             "allowed_cmd_prefixes": ["pwd"],
             "allowed_workdir_roots": [str(root)],
-            "workspace_mounts": [
+            "task_workspace_mounts": [
                 {"host_path": str(root), "container_path": "/workspace", "mode": "ro"},
                 {
                     "host_path": str(fallback),

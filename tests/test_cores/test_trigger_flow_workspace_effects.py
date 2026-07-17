@@ -20,12 +20,12 @@ import sys
 
 import pytest
 
-from agently import TriggerFlow, TriggerFlowRuntimeData
-from agently.core.Workspace import Workspace
+from agently import TaskWorkspace, TriggerFlow, TriggerFlowRuntimeData
+from agently.core.storage import RecordStore
 
 
 def _tables(root: Path) -> set[str]:
-    database = root / ".agently" / "workspace.db"
+    database = root / ".agently" / "records" / "records.db"
     if not database.exists():
         return set()
     with sqlite3.connect(database) as conn:
@@ -36,7 +36,7 @@ def _tables(root: Path) -> set[str]:
         }
 
 
-def test_triggerflow_default_workspace_is_direct_root_and_pure(
+def test_triggerflow_default_record_store_is_lazy_and_pure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -48,27 +48,27 @@ def test_triggerflow_default_workspace_is_direct_root_and_pure(
         raising=False,
     )
 
-    execution = TriggerFlow(name="direct-default-workspace").create_execution()
-    workspace = execution.require_runtime_resource("workspace")
+    execution = TriggerFlow(name="direct-default-record_store").create_execution()
+    record_store = execution.require_runtime_resource("record_store")
 
-    assert isinstance(workspace, Workspace)
-    assert workspace.root == entry_dir.resolve()
-    assert workspace.mode == "read_only"
-    assert workspace.execution_id == execution.id
-    assert not hasattr(workspace, "files_root")
+    assert isinstance(record_store, RecordStore)
+    assert record_store.root == entry_dir.resolve()
+    assert record_store.mode == "read_only"
+    assert record_store.execution_id == execution.id
+    assert not hasattr(record_store, "files_root")
     assert not entry_dir.exists()
 
 
 @pytest.mark.asyncio
-async def test_finite_triggerflow_workspace_read_creates_zero_private_state(
+async def test_finite_triggerflow_task_workspace_read_creates_zero_private_state(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "input.txt").write_text("direct project input", encoding="utf-8")
-    workspace = Workspace(tmp_path)
-    flow = TriggerFlow(name="finite-workspace-read")
+    task_workspace = TaskWorkspace(tmp_path)
+    flow = TriggerFlow(name="finite-record_store-read")
 
     async def read_input(data: TriggerFlowRuntimeData) -> None:
-        bound = data.require_resource("workspace")
+        bound = data.require_resource("task_workspace")
         read = await bound.read_file("input.txt")
         await data.async_set_state("body", read["content"])
 
@@ -76,7 +76,8 @@ async def test_finite_triggerflow_workspace_read_creates_zero_private_state(
     execution = flow.create_execution(
         auto_close=True,
         auto_close_timeout=0,
-        runtime_resources={"workspace": workspace},
+        runtime_resources={"task_workspace": task_workspace},
+        record_store=False,
     )
 
     result = await execution.async_start(None)
@@ -88,43 +89,40 @@ async def test_finite_triggerflow_workspace_read_creates_zero_private_state(
 
 
 @pytest.mark.asyncio
-async def test_finite_triggerflow_keeps_only_returned_fallback_product(tmp_path: Path) -> None:
-    workspace = Workspace(tmp_path)
-    flow = TriggerFlow(name="finite-workspace-product")
+async def test_finite_triggerflow_leaves_task_workspace_retention_to_its_owner(
+    tmp_path: Path,
+) -> None:
+    task_workspace = TaskWorkspace(tmp_path, mode="read_write")
+    flow = TriggerFlow(name="finite-record_store-product")
 
     async def produce(data: TriggerFlowRuntimeData) -> None:
-        bound = data.require_resource("workspace")
+        bound = data.require_resource("task_workspace")
         await bound.write_file("working/draft.md", "discard")
         final = await bound.write_file("deliverables/final.md", "retain")
-        await data.async_set_state("product", final["file_refs"][0])
+        await data.async_set_state("product", final.to_dict())
 
     flow.to(produce)
     execution = flow.create_execution(
         auto_close=True,
         auto_close_timeout=0,
-        runtime_resources={"workspace": workspace},
+        runtime_resources={"task_workspace": task_workspace},
+        record_store=False,
     )
 
     result = await execution.async_start(None)
 
     product = result["product"]
     assert (tmp_path / product["path"]).read_text(encoding="utf-8") == "retain"
-    execution_root = tmp_path / ".agently" / "files" / execution.id
-    assert sorted(
-        str(path.relative_to(execution_root))
-        for path in execution_root.rglob("*")
-        if path.is_file()
-    ) == ["deliverables/final.md"]
-    assert not (execution_root / "working" / "draft.md").exists()
-    assert not (tmp_path / ".agently" / "workspace.db").exists()
+    assert (tmp_path / "working" / "draft.md").read_text(encoding="utf-8") == "discard"
+    assert not (tmp_path / ".agently" / "records.db").exists()
 
 
 @pytest.mark.asyncio
-async def test_triggerflow_workspace_audit_is_persisted_only_when_explicitly_bound(
+async def test_triggerflow_record_store_audit_is_persisted_only_when_explicitly_bound(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace(tmp_path)
-    flow = TriggerFlow(name="explicit-workspace-audit")
+    record_store = RecordStore(tmp_path, mode="read_write")
+    flow = TriggerFlow(name="explicit-record_store-audit")
 
     async def remember(data: TriggerFlowRuntimeData) -> None:
         await data.async_set_state("value", "done")
@@ -134,13 +132,13 @@ async def test_triggerflow_workspace_audit_is_persisted_only_when_explicitly_bou
         auto_close=True,
         auto_close_timeout=0,
         runtime_resources={
-            "workspace": workspace,
-            "runtime_event_store": workspace,
+            "record_store": record_store,
+            "runtime_event_store": record_store,
         },
     )
 
     result = await execution.async_start(None)
-    events = await workspace.query_runtime_events(execution.id)
+    events = await record_store.query_runtime_events(execution.id)
 
     assert result["value"] == "done"
     assert events
@@ -148,11 +146,11 @@ async def test_triggerflow_workspace_audit_is_persisted_only_when_explicitly_bou
 
 
 @pytest.mark.asyncio
-async def test_triggerflow_pause_uses_workspace_snapshot_without_enabling_audit(
+async def test_triggerflow_pause_uses_record_store_snapshot_without_enabling_audit(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace(tmp_path)
-    flow = TriggerFlow(name="workspace-recovery-only")
+    record_store = RecordStore(tmp_path, mode="read_write")
+    flow = TriggerFlow(name="record_store-recovery-only")
 
     async def pause(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(
@@ -164,25 +162,25 @@ async def test_triggerflow_pause_uses_workspace_snapshot_without_enabling_audit(
     flow.to(pause)
     execution = flow.create_execution(
         auto_close=False,
-        runtime_resources={"workspace": workspace},
+        runtime_resources={"record_store": record_store},
     )
 
     await execution.async_start("draft")
 
     assert execution.get_status() == "waiting"
-    assert execution._snapshot_store is execution.require_runtime_resource("workspace")
+    assert execution._snapshot_store is execution.require_runtime_resource("record_store")
     assert execution._runtime_event_store is None
-    assert await workspace.latest_snapshot(execution.run_context.run_id) is not None
+    assert await record_store.latest_snapshot(execution.run_context.run_id) is not None
     assert _tables(tmp_path) == {"records", "checkpoints", "manifests"}
     await execution.async_close(pending_interrupts="cancel")
-    assert await workspace.latest_snapshot(execution.run_context.run_id) is None
-    assert not (tmp_path / ".agently" / "workspace.db").exists()
+    assert await record_store.latest_snapshot(execution.run_context.run_id) is None
+    assert not (tmp_path / ".agently" / "records" / "records.db").exists()
     private_files = {
         path.relative_to(tmp_path).as_posix()
         for path in (tmp_path / ".agently").rglob("*")
         if path.is_file()
     }
     assert private_files == {
-        ".agently/identity/state.json",
-        ".agently/identity/state.lock",
+        ".agently/records/identity/state.json",
+        ".agently/records/identity/state.lock",
     }

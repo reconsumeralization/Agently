@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from agently.core.Workspace.Errors import WorkspacePolicyError
+import uuid
 
 from .TaskShared import *
 
@@ -49,20 +49,8 @@ class AgentTaskLifecycleFlowMixin(AgentTaskMixinBase):
         *,
         prefix: str,
     ) -> str:
-        catalog = getattr(self.workspace.backend, "_identity_catalog", None)
-        allocate = getattr(catalog, "allocate", None)
-        if not callable(allocate):
-            raise WorkspacePolicyError(
-                "Workspace backend cannot allocate stable AgentTask lifecycle frame identities."
-            )
-        typed_allocate = cast(Callable[..., Awaitable[Any]], allocate)
-        identity = await typed_allocate(kind)
-        entity_id = str(getattr(identity, "entity_id", "") or "").strip()
-        if not entity_id.startswith(f"{prefix}_"):
-            raise WorkspacePolicyError(
-                f"Workspace returned an invalid AgentTask lifecycle {kind} identity."
-            )
-        return entity_id
+        _ = kind
+        return f"{prefix}_{uuid.uuid4().hex}"
 
     async def _allocate_lifecycle_frame_id(self) -> str:
         return await self._allocate_lifecycle_identity("frame", prefix="frm")

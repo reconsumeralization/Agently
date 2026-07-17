@@ -81,7 +81,7 @@ def build_task_board_evidence_view(
     """Build a bounded hot evidence view for verifier/replan/model prompts.
 
     The returned view intentionally preserves refs and metadata while bounding
-    previews. Full artifacts stay behind Workspace/Action refs.
+    previews. Full artifacts stay behind TaskWorkspace/Action refs.
     """
 
     if preview_chars <= 0:

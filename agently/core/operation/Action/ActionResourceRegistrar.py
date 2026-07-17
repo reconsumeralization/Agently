@@ -165,7 +165,7 @@ class ActionResourceRegistrar:
         roots_text = (
             ", ".join(str(Path(root)) for root in allowed_workdir_roots)
             if allowed_workdir_roots
-            else "no Workspace root configured"
+            else "no TaskWorkspace root configured"
         )
         policy_desc = (
             f"Allowed command prefixes: {command_text}. "
@@ -197,42 +197,54 @@ class ActionResourceRegistrar:
         transport = normalize_mcp_transport(transport, headers=headers)
         normalized_tags = action._normalize_tags(tags)
 
-        async with Client(transport) as client:  # type: ignore[arg-type]
-            tool_list = await client.list_tools()
-            for tool in tool_list:
-                tool_tags = []
-                if hasattr(tool, "_meta") and tool._meta:  # type: ignore[attr-defined]
-                    tool_tags = tool._meta.get("_fastmcp", {}).get("tags", [])  # type: ignore[index]
-                tool_tags.extend(normalized_tags)
-                action.register_action(
-                    action_id=tool.name,
-                    desc=tool.description,
-                    kwargs=DataFormatter.from_schema_to_kwargs_format(tool.inputSchema),
-                    returns=DataFormatter.from_schema_to_kwargs_format(tool.outputSchema),
-                    executor=action._create_executor(
-                        "MCPActionExecutor",
+        action_ids: list[str] = []
+        registration_snapshot: dict[str, dict[str, Any] | None] = {}
+        try:
+            async with Client(transport) as client:  # type: ignore[arg-type]
+                tool_list = await client.list_tools()
+                action_ids = [str(tool.name) for tool in tool_list]
+                registration_snapshot = action._snapshot_action_registration_batch(action_ids)
+                for tool in tool_list:
+                    tool_tags = []
+                    if hasattr(tool, "_meta") and tool._meta:  # type: ignore[attr-defined]
+                        tool_tags = tool._meta.get("_fastmcp", {}).get("tags", [])  # type: ignore[index]
+                    tool_tags.extend(normalized_tags)
+                    action.register_action(
                         action_id=tool.name,
-                        transport=transport,
-                    ),
-                    tags=tool_tags,
-                    default_policy=default_policy,
-                    side_effect_level=side_effect_level,
-                    approval_required=approval_required,
-                    sandbox_required=sandbox_required,
-                    replay_safe=replay_safe,
-                    expose_to_model=expose_to_model,
-                    execution_resources=cast(list[ExecutionResourceRequirement], [
-                        {
-                            "requirement_id": f"mcp:{ tool.name }",
-                            "kind": "mcp",
-                            "scope": "agent",
-                            "resource_key": tool.name,
-                            "config": {"transport": transport},
-                            "policy": cast(ExecutionResourcePolicy, default_policy or {}),
-                            "approval_required": approval_required,
-                        }
-                    ]),
-                )
+                        desc=tool.description,
+                        kwargs=DataFormatter.from_schema_to_kwargs_format(tool.inputSchema),
+                        returns=DataFormatter.from_schema_to_kwargs_format(tool.outputSchema),
+                        executor=action._create_executor(
+                            "MCPActionExecutor",
+                            action_id=tool.name,
+                            transport=transport,
+                        ),
+                        tags=tool_tags,
+                        default_policy=default_policy,
+                        side_effect_level=side_effect_level,
+                        approval_required=approval_required,
+                        sandbox_required=sandbox_required,
+                        replay_safe=replay_safe,
+                        expose_to_model=expose_to_model,
+                        execution_resources=cast(
+                            list[ExecutionResourceRequirement],
+                            [
+                                {
+                                    "requirement_id": f"mcp:{ tool.name }",
+                                    "kind": "mcp",
+                                    "scope": "agent",
+                                    "resource_key": tool.name,
+                                    "config": {"transport": transport},
+                                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
+                                    "approval_required": approval_required,
+                                }
+                            ],
+                        ),
+                    )
+        except BaseException:
+            if action_ids:
+                action._rollback_action_registration_batch(action_ids, registration_snapshot)
+            raise
         return action
 
     async def async_use_mcp(
@@ -337,7 +349,7 @@ class ActionResourceRegistrar:
         env: dict[str, str] | None = None,
         max_output_chars: int = 20000,
         output_artifact_dir: str | Path | None = None,
-        workspace_mounts: list[dict[str, str]] | None = None,
+        task_workspace_mounts: list[dict[str, str]] | None = None,
         sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
@@ -369,7 +381,7 @@ class ActionResourceRegistrar:
                         "env": env,
                         "max_output_chars": max_output_chars,
                         "output_artifact_dir": output_artifact_dir,
-                        "workspace_mounts": workspace_mounts,
+                        "task_workspace_mounts": task_workspace_mounts,
                     },
                     "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                 }
@@ -394,7 +406,7 @@ class ActionResourceRegistrar:
                         "env": env,
                         "max_output_chars": max_output_chars,
                         "output_artifact_dir": str(output_artifact_dir) if output_artifact_dir is not None else None,
-                        "workspace_mounts": [dict(item) for item in (workspace_mounts or [])],
+                        "task_workspace_mounts": [dict(item) for item in (task_workspace_mounts or [])],
                     },
                 )
             ]

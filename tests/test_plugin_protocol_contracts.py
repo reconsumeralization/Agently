@@ -31,9 +31,6 @@ from agently.builtins.plugins.ExecutionResourceProvider import (
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import AnthropicCompatible
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
 from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import OpenAIResponsesCompatible
-from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import AgentSkillsManagerContext
-from agently.builtins.plugins.SkillsManager import AgentlySkillsManager
-from agently.builtins.plugins.SkillsExecutor import AgentlySkillsExecutor
 from agently.types.plugins import (
     ActionExecutor,
     ActionFlow,
@@ -41,9 +38,6 @@ from agently.types.plugins import (
     AgentExecution,
     AgentOrchestrator,
     ExecutionResourceProvider,
-    SkillsManager,
-    SkillsExecutor,
-    SkillsRuntimeContext,
 )
 from agently.utils.Settings import Settings
 
@@ -54,45 +48,6 @@ def _method_names(protocol: type) -> list[str]:
         for name, value in protocol.__dict__.items()
         if not name.startswith("_") and inspect.isfunction(value)
     ]
-
-
-def test_builtin_skills_executor_matches_plugin_protocol():
-    plugin = AgentlySkillsExecutor(settings=Settings(name="protocol-test"))
-
-    assert isinstance(plugin, SkillsExecutor)
-    for method_name in _method_names(SkillsExecutor):
-        assert callable(getattr(plugin, method_name))
-
-
-def test_builtin_skills_manager_matches_plugin_protocol():
-    plugin = AgentlySkillsManager(settings=Settings(name="protocol-manager-test"))
-
-    assert isinstance(plugin, SkillsManager)
-    for method_name in _method_names(SkillsManager):
-        assert callable(getattr(plugin, method_name))
-
-
-def test_builtin_skills_executor_has_no_stage_action_defaults():
-    assert AgentlySkillsExecutor.DEFAULT_SETTINGS == {}
-
-
-def test_agent_skills_context_matches_runtime_protocol():
-    class FakeAgent:
-        settings = Settings(name="fake-skills-agent")
-
-        def input(self, *_args, **_kwargs):  # pragma: no cover - protocol shape only
-            raise AssertionError("not used")
-
-        class action:
-            action_registry = None
-
-            @staticmethod
-            async def async_execute_action(*_args, **_kwargs):  # pragma: no cover - protocol shape only
-                return {"status": "success"}
-
-    context = AgentSkillsManagerContext(FakeAgent())
-
-    assert isinstance(context, SkillsRuntimeContext)
 
 
 def test_builtin_execution_resource_providers_match_protocol():
@@ -233,24 +188,3 @@ def test_model_requester_runtime_handler_contract_imports_and_ownership():
     for source_file in source_files:
         source = source_file.read_text(encoding="utf-8")
         assert [term for term in forbidden_terms if term in source] == []
-
-
-def test_skills_executor_does_not_embed_business_case_mappings():
-    plugin_root = Path(__file__).resolve().parents[1] / "agently" / "builtins" / "plugins" / "SkillsExecutor"
-    source = "\n".join(path.read_text(encoding="utf-8").lower() for path in plugin_root.glob("*.py"))
-
-    forbidden_terms = [
-        "stock",
-        "investment",
-        "earnings",
-        "travel",
-        "itinerary",
-        "rain-day",
-        "lesson",
-        "education",
-        "retrieval_practice",
-        "webapp",
-        "playwright_trace",
-        "wanderlog",
-    ]
-    assert [term for term in forbidden_terms if term in source] == []

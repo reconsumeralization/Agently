@@ -1056,14 +1056,14 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 closed_event_payload = terminal_retention["closed_event_payload"]
                 if closed_event_payload is None:
                     self._closed_at = time.time()
-                    workspace_configured = (
-                        self._get_runtime_resource("workspace", None) is not None
+                    record_store_configured = (
+                        self._get_runtime_resource("record_store", None) is not None
                     )
                     prepared_result = terminal_retention["result"]
                     retention_status = (
                         str(prepared_result["status"])
                         if prepared_result is not None
-                        else ("pending" if workspace_configured else "not_configured")
+                        else ("pending" if record_store_configured else "not_configured")
                     )
                     closed_event_payload = {
                         "reason": reason,
@@ -1112,9 +1112,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 retention_result = terminal_retention["result"]
                 if retention_result is not None:
                     retention_event_type = (
-                        "triggerflow.workspace_retention_applied"
+                        "triggerflow.execution_retention_applied"
                         if retention_result["status"] in {"applied", "noop"}
-                        else "triggerflow.workspace_retention_deferred"
+                        else "triggerflow.execution_retention_deferred"
                     )
                     try:
                         await self._emit_runtime_event(
@@ -1125,14 +1125,18 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                                 else "WARNING"
                             ),
                             message=(
-                                f"TriggerFlow execution '{self.id}' terminal Workspace retention "
+                                f"TriggerFlow execution '{self.id}' terminal retention "
                                 f"finished with status '{retention_result['status']}'."
                             ),
                             payload={
                                 "execution_id": self.id,
                                 "status": retention_result["status"],
-                                "retained_bytes": retention_result["retained_bytes"],
-                                "deleted_bytes": retention_result["deleted_bytes"],
+                                "retained_ref_count": len(
+                                    retention_result["retained_refs"]
+                                ),
+                                "recovery_snapshot_status": retention_result[
+                                    "recovery_snapshot_status"
+                                ],
                                 "diagnostics": retention_result["diagnostics"],
                             },
                             persist=False,
@@ -1660,7 +1664,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         durable_provider = self._get_runtime_resource("durable_provider")
         if durable_provider is not None:
             return durable_provider
-        return self._get_runtime_resource("workspace")
+        return self._get_runtime_resource("record_store")
 
     def _activate_recovery_durability(self, *, reason: str) -> Any | None:
         provider = self._recovery_provider_candidate()
@@ -1708,7 +1712,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             self._bind_runtime_event_store(runtime_event_store)
 
     def _bind_durable_provider_resource(self, key: str, value: Any):
-        if key == "workspace":
+        if key == "record_store":
             return
         if key in {"durable_provider", "snapshot_store", "runtime_event_store"}:
             self._bind_configured_durability_resources()

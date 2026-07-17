@@ -52,7 +52,7 @@ async def main() -> None:
     trace_path.parent.mkdir(parents=True, exist_ok=True)
 
     progress_language = os.getenv("AGENTLY_PROGRESS_LANGUAGE", "zh-CN")
-    agent = Agently.create_agent("goal-effort-public-stream").use_workspace(workspace_dir)
+    agent = Agently.create_agent("goal-effort-public-stream").use_task_workspace(workspace_dir)
     provider = configure_agent_model_pool(agent, temperature=0.0)
     agent.settings.set("agent_task.progress.language", progress_language)
     if os.getenv("AGENTLY_DEBUG_DETAIL", "").strip().lower() in {"1", "true", "yes"}:
@@ -97,7 +97,7 @@ async def main() -> None:
         .strategy(
             "flat",
             task_id="goal_effort_public_stream",
-            workspace=workspace_dir,
+            task_workspace=workspace_dir,
             limits={"max_model_requests": 10, "max_seconds": 180, "max_no_progress_seconds": 80},
             options={
                 "agent_task": {
@@ -222,4 +222,4 @@ if __name__ == "__main__":
 # host_checks.progress_language_observed=true
 # host_checks.final_result_uses_incident_id=true
 # workspace_refs.reflections count=2
-# stream_trace_file points to outputs/goal_effort_public_stream.jsonl under the Workspace
+# stream_trace_file points to outputs/goal_effort_public_stream.jsonl under the TaskWorkspace

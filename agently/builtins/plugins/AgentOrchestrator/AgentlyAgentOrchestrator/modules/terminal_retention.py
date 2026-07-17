@@ -8,7 +8,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any, TYPE_CHECKING, cast
 
-from agently.types.data import WorkspaceFileRef, WorkspaceRetentionResult, WorkspaceRetentionTerminalStatus
+from agently.types.data import TaskWorkspaceFileRef, TaskWorkspaceRetentionResult, TaskWorkspaceTerminalStatus
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ def _file_ref_key(ref: Mapping[str, Any]) -> tuple[str, str, str, int, str]:
     raw_size = ref.get("size")
     size = raw_size if isinstance(raw_size, int) and not isinstance(raw_size, bool) else -1
     return (
-        str(ref.get("workspace_id") or ""),
+        str(ref.get("task_workspace_id") or ""),
         str(ref.get("execution_id") or ""),
         str(ref.get("path") or ""),
         size,
@@ -56,10 +56,10 @@ def _file_ref_key(ref: Mapping[str, Any]) -> tuple[str, str, str, int, str]:
 
 
 def _looks_like_trusted_file_ref(value: Mapping[str, Any]) -> bool:
-    workspace_id, execution_id, path, size, digest = _file_ref_key(value)
+    task_workspace_id, execution_id, path, size, digest = _file_ref_key(value)
     return bool(
         value.get("type") == "file"
-        and workspace_id
+        and task_workspace_id
         and execution_id
         and path
         and size >= 0
@@ -128,15 +128,15 @@ def _project_terminal_value(value: Any) -> Any:
 
 
 async def _verify_owner_file_ref(owner: "AgentExecution", ref: Mapping[str, Any]) -> bool:
-    workspace = owner.workspace
-    if workspace is None:
+    task_workspace = owner.task_workspace
+    if task_workspace is None:
         return False
-    if str(ref.get("workspace_id") or "") != workspace.workspace_id:
+    if str(ref.get("task_workspace_id") or "") != task_workspace.task_workspace_id:
         return False
-    if str(ref.get("execution_id") or "") != workspace.execution_id:
+    if str(ref.get("execution_id") or "") != task_workspace.execution_id:
         return False
     try:
-        readback = await workspace.read_file(str(ref.get("path") or ""), max_bytes=1)
+        readback = await task_workspace.read_file(str(ref.get("path") or ""), max_bytes=1)
     except Exception:
         return False
     return (
@@ -159,8 +159,8 @@ def _compact_file_backed_result(result: Any, refs: Sequence[Mapping[str, Any]]) 
 
 async def prepare_agent_execution_terminal_retention(
     owner: "AgentExecution",
-) -> tuple[Any, list[WorkspaceFileRef]]:
-    """Prepare a bounded terminal event without materializing Workspace storage."""
+) -> tuple[Any, list[TaskWorkspaceFileRef]]:
+    """Prepare a bounded terminal event without materializing RecordStore state."""
 
     result = _terminal_result_value(owner)
     task_handoff = [
@@ -185,7 +185,7 @@ async def prepare_agent_execution_terminal_retention(
             continue
         seen.add(key)
         retained.append(ref)
-        if owner.workspace is not None and str(ref.get("execution_id") or "") == owner.workspace.execution_id:
+        if str(ref.get("execution_id") or "") == owner.task_workspace.execution_id:
             owner_retained.append(ref)
 
     projected_result = _project_terminal_value(result)
@@ -200,25 +200,23 @@ async def prepare_agent_execution_terminal_retention(
             "kind": "agent_execution_terminal_result_omitted",
             "reason": "Terminal event projection exceeded the inline log limit; the caller still receives the full result.",
         }
-    return event_result, cast(list[WorkspaceFileRef], retained)
+    return event_result, cast(list[TaskWorkspaceFileRef], retained)
 
 
 async def apply_agent_execution_terminal_retention(
     owner: "AgentExecution",
     *,
-    status: WorkspaceRetentionTerminalStatus,
-) -> WorkspaceRetentionResult | None:
+    status: TaskWorkspaceTerminalStatus,
+) -> TaskWorkspaceRetentionResult | None:
     """Delete only unretained files in this execution's private fallback area."""
 
-    if owner.workspace is None:
-        return None
     close_status = "completed" if status == "completed" else "cancelled" if status == "cancelled" else "failed"
-    closed = await owner.workspace._close_execution_files(
+    closed = await owner.task_workspace._close_execution_files(
         retained_refs=cast(Any, list(owner._terminal_retained_refs)),
         status=close_status,
     )
-    result = cast(WorkspaceRetentionResult, closed)
-    owner.diagnostics["workspace_retention"] = {
+    result = cast(TaskWorkspaceRetentionResult, closed)
+    owner.diagnostics["task_workspace_retention"] = {
         "status": result["status"],
         "retained_bytes": result["retained_bytes"],
         "deleted_bytes": result["deleted_bytes"],

@@ -69,7 +69,7 @@ flow.set_flow_data("counter", 0, no_warning=True)   # 静默
 snapshot。加载该 snapshot 时会清空并恢复所属 flow 对象的共享 `flow_data`，可能覆盖
 更新后的值或干扰并发 execution；save/load 不会为它增加隔离、CAS 或 merge 语义。
 不要把 `flow_data` 当作恢复边界。单次运行的数据放 execution `state`；需要持久共享的
-数据放入具有相应一致性策略的宿主或 Workspace provider。
+数据放入具有相应一致性策略的宿主或 RecordStore provider。
 
 API（不传 `no_warning=True` 都发 warning）：
 

@@ -12,6 +12,7 @@ from agently.builtins.tools import Browse as LegacyBrowse
 from agently.builtins.tools import Cmd as LegacyCmd
 from agently.builtins.tools import Search as LegacySearch
 from agently.core.application.AgentExecution.Context import AgentExecutionContext
+from agently.core import TaskWorkspace
 from agently.core.runtime.RuntimeContext import bind_runtime_context
 
 
@@ -93,18 +94,18 @@ def test_mcp_and_acp_optional_dependencies_wait_for_explicit_use(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cmd_without_workspace_boundary_fails_closed_no_cwd_fallback(tmp_path):
-    # Without a Workspace-issued working directory, Cmd must refuse instead of
+async def test_cmd_without_task_workspace_boundary_fails_closed_no_cwd_fallback(tmp_path):
+    # Without a TaskWorkspace-issued working directory, Cmd must refuse instead of
     # silently running in the process cwd (spec sections 8.6 / 9).
     cmd = Cmd(allowed_cmd_prefixes=["pwd"])
     assert cmd.allowed_workdir_roots == []
     result = await cmd.run("pwd")
     assert result["ok"] is False
-    assert result["reason"] == "workspace_boundary_required"
+    assert result["reason"] == "task_workspace_boundary_required"
 
 
 @pytest.mark.asyncio
-async def test_cmd_with_workspace_boundary_runs_in_injected_root(tmp_path):
+async def test_cmd_with_task_workspace_boundary_runs_in_injected_root(tmp_path):
     cmd = Cmd(allowed_cmd_prefixes=["pwd"], allowed_workdir_roots=[str(tmp_path)])
     result = await cmd.run("pwd")
     assert result["ok"] is True
@@ -164,7 +165,7 @@ class FakeACPProvider:
 
 
 def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
-    agent = Agently.create_agent().use_workspace(tmp_path / "workspace")
+    agent = Agently.create_agent().use_task_workspace(tmp_path / "task_workspace")
     provider = FakeACPProvider(
         [
             {"agent_id": "codex", "name": "Codex", "status": "ready", "endpoint": "local"},
@@ -190,9 +191,9 @@ def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
     assert run_result.get("status") == "success"
     assert run_result.get("agent_id") == "codex"
     assert run_result.get("data", {}).get("output") == "codex: inspect the current branch"
-    assert provider.runs[0]["root"] == str(agent.workspace.root)
-    assert provider.runs[0]["working_dir"] == str(agent.workspace.root)
-    assert not (agent.workspace.root / ".agently").exists()
+    assert provider.runs[0]["root"] == str(agent.task_workspace.root)
+    assert provider.runs[0]["working_dir"] == str(agent.task_workspace.root)
+    assert not (agent.task_workspace.root / ".agently").exists()
 
 
 def test_agent_use_acp_skips_missing_or_failed_agents(tmp_path):
@@ -325,6 +326,37 @@ def test_agent_use_actions_accepts_search_package():
     result = agent.action.execute_action("search", {"query": "Agently", "max_results": 2})
     assert result.get("status") == "success"
     assert result.get("data") == [{"title": "Agently", "href": "https://example.com", "body": "limit=2"}]
+
+
+def test_search_batch_registration_rolls_back_and_restores_host_action_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    agent = Agently.create_agent()
+    agent.action.register_action(
+        action_id="search",
+        desc="Host-owned search Action.",
+        kwargs={"query": (str, "query")},
+        func=lambda query: {"host": query},
+    )
+    original_register = agent.action.register_action
+    registration_count = 0
+
+    def fail_second_registration(**kwargs: Any):
+        nonlocal registration_count
+        registration_count += 1
+        if registration_count == 2:
+            raise RuntimeError("search batch registration failed")
+        return original_register(**kwargs)
+
+    monkeypatch.setattr(agent.action, "register_action", fail_second_registration)
+
+    with pytest.raises(RuntimeError, match="search batch registration failed"):
+        agent.use_actions(Search(timeout=1))
+
+    restored = agent.action.action_registry.get_spec("search")
+    assert restored is not None
+    assert restored.get("desc") == "Host-owned search Action."
+    assert not agent.action.action_registry.has("search_news")
 
 
 def test_agent_language_policy_updates_builtin_search_default_region():
@@ -715,7 +747,7 @@ async def test_browse_falls_back_from_curl_to_jina_reader_with_diagnostics():
 
 @pytest.mark.asyncio
 async def test_browse_curl_backend_materializes_remote_file_to_workspace(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "browse-curl-workspace")
+    task_workspace = TaskWorkspace(tmp_path / "browse-curl-workspace", mode="read_write")
     browse = Browse(
         fallback_order=("curl",),
         enable_playwright=False,
@@ -738,12 +770,16 @@ async def test_browse_curl_backend_materializes_remote_file_to_workspace(tmp_pat
 
     browse._curl_browse = fake_curl  # type: ignore[method-assign]
 
-    result = await browse._execute_action_method("browse", url="https://example.com/syllabus.pdf", workspace=workspace)
+    result = await browse._execute_action_method(
+        "browse",
+        url="https://example.com/syllabus.pdf",
+        task_workspace=task_workspace,
+    )
 
     assert result["status"] in {"success", "partial_success"}
     assert result["data"]["kind"] == "remote_file"
     assert "downloads/syllabus-" in result["file_refs"][0]["path"]
-    assert (workspace.root / result["file_refs"][0]["path"]).is_file()
+    assert (task_workspace.root / result["file_refs"][0]["path"]).is_file()
 
 
 def test_browse_action_failure_is_structured_error_not_success_text():
@@ -971,7 +1007,7 @@ async def test_browse_rejects_waf_shell_and_continues_protocol_candidates():
 
 @pytest.mark.asyncio
 async def test_browse_materializes_remote_file_to_workspace(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "browse-workspace")
+    task_workspace = TaskWorkspace(tmp_path / "browse-workspace", mode="read_write")
     browse = Browse(
         fallback_order=("bs4",),
         enable_playwright=False,
@@ -995,22 +1031,26 @@ async def test_browse_materializes_remote_file_to_workspace(tmp_path):
 
     browse._bs4_browse = fake_bs4  # type: ignore[method-assign]
 
-    result = await browse._execute_action_method("browse", url="https://example.com/syllabus.pdf", workspace=workspace)
+    result = await browse._execute_action_method(
+        "browse",
+        url="https://example.com/syllabus.pdf",
+        task_workspace=task_workspace,
+    )
 
     assert result["success"] is True
     assert result["status"] in {"success", "partial_success"}
     assert result["data"]["kind"] == "remote_file"
     assert result["data"]["media_type"] == "application/pdf"
     assert "downloads/syllabus-" in result["file_refs"][0]["path"]
-    assert (workspace.root / result["file_refs"][0]["path"]).is_file()
+    assert (task_workspace.root / result["file_refs"][0]["path"]).is_file()
     assert result["data"]["read_preview"]["path"] == result["file_refs"][0]["path"]
     assert "content_bytes" not in str(result)
 
 
-def test_browse_action_executor_uses_settings_workspace_for_remote_file(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "browse-action-workspace")
+def test_browse_action_executor_uses_settings_task_workspace_for_remote_file(tmp_path):
+    task_workspace = TaskWorkspace(tmp_path / "browse-action-workspace", mode="read_write")
     agent = Agently.create_agent()
-    cast(Any, agent.settings).set("action.workspace", workspace)
+    cast(Any, agent.settings).set("action.task_workspace", task_workspace)
     browse = Browse(
         fallback_order=("bs4",),
         enable_playwright=False,
@@ -1040,11 +1080,11 @@ def test_browse_action_executor_uses_settings_workspace_for_remote_file(tmp_path
     file_refs = result.get("file_refs", [])
     assert isinstance(file_refs, list)
     assert "downloads/syllabus-" in file_refs[0]["path"]
-    assert (workspace.root / file_refs[0]["path"]).is_file()
+    assert (task_workspace.root / file_refs[0]["path"]).is_file()
 
 
 @pytest.mark.asyncio
-async def test_browse_remote_file_without_workspace_fails_closed():
+async def test_browse_remote_file_without_task_workspace_fails_closed():
     browse = Browse(
         fallback_order=("bs4",),
         enable_playwright=False,
@@ -1071,7 +1111,7 @@ async def test_browse_remote_file_without_workspace_fails_closed():
 
     assert result["success"] is False
     assert result["status"] == "blocked"
-    assert result["diagnostics"][0]["code"] == "browse.remote_file.workspace_required"
+    assert result["diagnostics"][0]["code"] == "browse.remote_file.task_workspace_required"
     assert "content_bytes" not in str(result)
 
 

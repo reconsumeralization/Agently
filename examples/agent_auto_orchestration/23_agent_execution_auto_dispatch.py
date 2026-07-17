@@ -41,8 +41,8 @@ Expected key output from one real DeepSeek run on 2026-07-08:
     Auto-dispatched route: agent_task (selected by execution_strategy, strategy: task)
     Task status: completed
     GitHub fetch action called: yes
-    Workspace observations recorded: yes
-    Workspace artifact readback: yes
+    TaskWorkspace observations recorded: yes
+    TaskWorkspace artifact readback: yes
     Task refs include task id: yes
 """
 
@@ -327,7 +327,7 @@ def task_artifact_text(data: dict[str, Any], runtime_root: Path, task_id: str, p
                 collect_file_refs(nested)
 
     collect_file_refs(data.get("artifact_refs", []))
-    match = re.search(r"Workspace artifact delivered at ([^;]+)", pointer)
+    match = re.search(r"TaskWorkspace artifact delivered at ([^;]+)", pointer)
     if match:
         artifact_paths.append(match.group(1).strip())
     artifact_paths.append("final.md")
@@ -419,7 +419,7 @@ async def main() -> None:
     if RUNTIME_ROOT.exists():
         shutil.rmtree(RUNTIME_ROOT)
 
-    agent = Agently.create_agent("agent-execution-auto-dispatch").use_workspace(RUNTIME_ROOT)
+    agent = Agently.create_agent("agent-execution-auto-dispatch").use_task_workspace(RUNTIME_ROOT)
     agent.define(
         prompt={
             "rule": (
@@ -466,8 +466,8 @@ async def main() -> None:
     )
     print(f"Task status: {auto_full_data.get('status')}")
     print(f"GitHub fetch action called: {'yes' if fetch_called else 'no'}")
-    print(f"Workspace observations recorded: {'yes' if observations_recorded else 'no'}")
-    print(f"Workspace artifact readback: {'yes' if artifact_text else 'no'}")
+    print(f"TaskWorkspace observations recorded: {'yes' if observations_recorded else 'no'}")
+    print(f"TaskWorkspace artifact readback: {'yes' if artifact_text else 'no'}")
     print(f"Task refs include task id: {'yes' if refs_include_task_id else 'no'}")
 
 

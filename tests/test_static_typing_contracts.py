@@ -43,7 +43,7 @@ from agently.types.data import (
     TaskBoardGraph,
     TaskBoardRevision,
 )
-from agently.types.plugins import AgentExecution, SkillsPlanningContext
+from agently.types.plugins import AgentExecution
 
 
 def test_agent_execution_and_model_response_streaming_type_contracts():
@@ -109,16 +109,6 @@ def test_agent_execution_stream_protocol_contract():
         assert_type(execution.get_async_generator(type="instant"), AsyncGenerator[AgentExecutionStreamData, None])
         assert_type(execution.get_generator(), Generator[str, None, None])
         assert_type(execution.get_generator(type="instant"), Generator[AgentExecutionStreamData, None, None])
-
-
-def test_skills_planning_context_model_stream_handler_contract():
-    if TYPE_CHECKING:
-        context = cast(SkillsPlanningContext, object())
-
-        async def handler(item: StreamingData) -> None:
-            assert_type(item, StreamingData)
-
-        _result = context.async_request_model(prompt="hello", stream_handler=handler)
 
 
 def test_common_types_are_available_from_package_root():

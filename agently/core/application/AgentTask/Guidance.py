@@ -14,93 +14,193 @@
 
 from __future__ import annotations
 
+from agently.core.context import ModelRequestContextSelector
+from agently.types.data import ContextBudget, ContextConsumption, ContextReadIntent
+
 from .TaskShared import *
 
 _GUIDANCE_PREVIEW_CHARS = 800
 
 
 class AgentTaskGuidanceMixin(AgentTaskMixinBase):
-    async def _context_pack_with_task_context(self, context_pack: Any) -> "WorkspaceContextPackage":
-        context_with_skills = await self._context_pack_with_required_skill_context(context_pack)
-        return self._context_pack_with_guidance(context_with_skills)
-
-    async def _context_pack_with_required_skill_context(self, context_pack: Any) -> "WorkspaceContextPackage":
-        if not isinstance(context_pack, Mapping):
-            return cast("WorkspaceContextPackage", context_pack)
-        skill_ids, skill_pack_ids = self._required_skill_context_selectors()
-        if not skill_ids and not skill_pack_ids:
-            return cast("WorkspaceContextPackage", context_pack)
-
-        context = dict(context_pack)
-        diagnostics = context.get("diagnostics")
-        diagnostics = dict(diagnostics) if isinstance(diagnostics, Mapping) else {}
-        build_pack = getattr(self.agent, "async_build_skills_context_pack", None)
-        if not callable(build_pack):
-            diagnostics.setdefault("skills_context_pack", {})
-            diagnostics["skills_context_pack"] = {
-                "status": "unavailable",
-                "reason": "agent_skills_context_pack_builder_missing",
-                "required_skill_ids": skill_ids,
-                "required_skill_pack_ids": skill_pack_ids,
-            }
-            context["diagnostics"] = DataFormatter.sanitize(diagnostics)
-            return cast("WorkspaceContextPackage", DataFormatter.sanitize(context))
-
-        typed_build_pack = cast("Callable[..., Awaitable[Any]]", build_pack)
+    def _task_context_reader(self, *, phase: str, consumer_id: str) -> Any:
+        key = (str(consumer_id), str(phase))
+        reader = self.context_readers.get(key)
+        if reader is not None:
+            return reader
+        request_factory = getattr(self.agent, "create_temp_request", None)
+        selector = (
+            ModelRequestContextSelector(request_factory)
+            if callable(request_factory)
+            else None
+        )
+        raw_chars = self.context_budget.get("chars", 6000)
         try:
-            skill_context_pack = await typed_build_pack(
-                task=self.goal,
-                skill_ids=skill_ids or None,
-                skills_packs=skill_pack_ids or None,
-                include_guidance=True,
-                include_examples="auto",
-                include_references="auto",
-                include_assets=False,
-                include_public_lookup=False,
-                actionize_scripts=True,
-                budget_chars=self._skills_context_budget_chars(),
-                max_resource_chars=self._skills_context_max_resource_chars(),
-            )
-        except Exception as error:
-            diagnostics["skills_context_pack"] = {
-                "status": "failed",
-                "reason": "skills_context_pack_build_failed",
-                "required_skill_ids": skill_ids,
-                "required_skill_pack_ids": skill_pack_ids,
-                "error": {
-                    "type": error.__class__.__name__,
-                    "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                },
-            }
-            context["diagnostics"] = DataFormatter.sanitize(diagnostics)
-            return cast("WorkspaceContextPackage", DataFormatter.sanitize(context))
+            max_chars = max(1, int(raw_chars))
+        except (TypeError, ValueError):
+            max_chars = 6000
+        reader = self.task_context.reader(
+            consumer=consumer_id,
+            phase=phase,
+            budget=ContextBudget(
+                max_chars=max_chars,
+                max_blocks=64,
+                max_block_chars=min(max_chars, 6000),
+            ),
+            semantic_selector=selector,
+        )
+        self.context_readers[key] = reader
+        return reader
 
-        loaded_skill_ids = self._skills_context_pack_skill_ids(skill_context_pack)
-        context["skills_context_pack"] = self._compact_skills_context_pack_for_agent_task(skill_context_pack)
-        diagnostics["skills_context_pack"] = {
-            "status": "loaded" if loaded_skill_ids else "empty",
-            "required_skill_ids": skill_ids,
-            "required_skill_pack_ids": skill_pack_ids,
-            "loaded_skill_ids": loaded_skill_ids,
-            "used_chars": (
-                skill_context_pack.get("used_chars")
-                if isinstance(skill_context_pack, Mapping)
-                else None
-            ),
-            "citation_count": (
-                len(skill_context_pack.get("citations", []))
-                if isinstance(skill_context_pack, Mapping)
-                and isinstance(skill_context_pack.get("citations", []), Sequence)
-                and not isinstance(skill_context_pack.get("citations", []), str | bytes | bytearray)
-                else 0
-            ),
+    async def _context_pack_with_task_context(self, context_pack: Any) -> "TaskContextView":
+        projected, _package = await self._read_task_context_view(
+            phase="planning",
+            consumer_id=f"agent_task:{self.id}:planner",
+        )
+        if isinstance(context_pack, Mapping):
+            projected["legacy_input_diagnostics"] = DataFormatter.sanitize(
+                context_pack.get("diagnostics", {})
+            )
+        return cast("TaskContextView", projected)
+
+    async def _read_task_context_view(
+        self,
+        *,
+        phase: str,
+        consumer_id: str,
+        intent: str | None = None,
+    ) -> tuple[dict[str, Any], Any]:
+        """Read and project one package for one concrete consumer boundary."""
+
+        package = await self._read_task_context_package(
+            phase=phase,
+            consumer_id=consumer_id,
+            intent=intent,
+        )
+        projected = self._context_pack_with_guidance(
+            cast("TaskContextView", self._project_task_context_package(package))
+        )
+        return dict(projected), package
+
+    async def _read_task_context_package(
+        self,
+        *,
+        phase: str,
+        consumer_id: str,
+        intent: str | None = None,
+    ) -> Any:
+        reader = self._task_context_reader(phase=phase, consumer_id=consumer_id)
+        if not reader.is_current:
+            reader.refresh()
+        package = await reader.async_read(
+            ContextReadIntent(
+                query=str(intent or self.goal),
+                metadata={"exclude_already_in_prompt": True},
+            )
+        )
+        if any(omission.required for omission in package.omissions):
+            raise RuntimeError(
+                f"Required TaskContext content is incompatible with {consumer_id!r}."
+            )
+        self.context_packages.append(package)
+        return package
+
+    def _record_task_context_consumption(
+        self,
+        package: Any,
+        *,
+        request_id: str,
+    ) -> ContextConsumption:
+        consumption = ContextConsumption(
+            consumption_id=f"context_consumption:{uuid.uuid4().hex}",
+            package_id=package.package_id,
+            request_id=str(request_id),
+            consumer_id=package.consumer_id,
+            phase=package.phase,
+            block_ids=tuple(block.block_id for block in package.blocks),
+        )
+        self.context_consumptions.append(consumption)
+        return consumption
+
+    @staticmethod
+    def _project_task_context_package(package: Any) -> dict[str, Any]:
+        items = [
+            {
+                "id": block.block_id,
+                "role": block.role,
+                "content": DataFormatter.sanitize(block.content),
+                "source_ref": block.source_ref,
+                "completeness": block.completeness,
+                "required": block.required,
+            }
+            for block in package.blocks
+        ]
+        skills: dict[str, dict[str, Any]] = {}
+        for block in package.blocks:
+            skill_id = str(block.metadata.get("skill_id") or "").strip()
+            if not skill_id:
+                continue
+            target = skills.setdefault(
+                skill_id,
+                {
+                    "skill_id": skill_id,
+                    "binding_id": str(block.metadata.get("skill_binding_id") or ""),
+                    "revision_ref": str(block.metadata.get("revision_ref") or ""),
+                    "mode": str(block.metadata.get("skill_mode") or "model_decision"),
+                    "guidance": None,
+                    "selected_resources": [],
+                    "action_candidates": [],
+                },
+            )
+            resource_path = str(block.metadata.get("resource_path") or "")
+            if resource_path == "SKILL.md":
+                target["guidance"] = {
+                    "excerpt": DataFormatter.sanitize(block.content),
+                    "completeness": block.completeness,
+                }
+            elif resource_path and resource_path != "resource-index":
+                target["selected_resources"].append(
+                    {
+                        "path": resource_path,
+                        "content": DataFormatter.sanitize(block.content),
+                        "completeness": block.completeness,
+                        "source_ref": block.source_ref,
+                    }
+                )
+        return {
+            "schema_version": "agently.context_package.agent_task.v2",
+            "package_id": package.package_id,
+            "task_context_id": package.task_context_id,
+            "context_revision": package.context_revision,
+            "profile": "task_context",
+            "items": items,
+            "omitted": [item.to_dict() for item in package.omissions],
+            "diagnostics": [item.to_dict() for item in package.diagnostics],
+            "used_chars": package.used_chars,
+            "skill_projection": {
+                "schema_version": "agently.context_package.skill_projection.v2",
+                "skills": list(skills.values()),
+                "required_skill_ids": [
+                    skill_id
+                    for skill_id, item in skills.items()
+                    if item.get("mode") == "required"
+                ],
+                "used_chars": sum(
+                    block.content_chars
+                    for block in package.blocks
+                    if block.metadata.get("skill_id")
+                ),
+                "usable": True,
+                "diagnostics": [],
+            },
         }
-        context["diagnostics"] = DataFormatter.sanitize(diagnostics)
-        return cast("WorkspaceContextPackage", DataFormatter.sanitize(context))
+
+    async def _context_pack_with_required_skill_context(self, context_pack: Any) -> "TaskContextView":
+        return cast("TaskContextView", context_pack)
 
     @classmethod
-    def _compact_skills_context_pack_for_agent_task(cls, skill_context_pack: Any) -> dict[str, Any]:
-        if not isinstance(skill_context_pack, Mapping):
+    def _compact_skill_projection_for_agent_task(cls, skill_projection: Any) -> dict[str, Any]:
+        if not isinstance(skill_projection, Mapping):
             return {}
         compact: dict[str, Any] = {}
         for key in (
@@ -113,10 +213,12 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
             "citations",
             "public_sources",
             "diagnostics",
+            "usable",
+            "required_skill_ids",
         ):
-            if key in skill_context_pack:
-                compact[key] = DataFormatter.sanitize(skill_context_pack.get(key))
-        raw_skills = skill_context_pack.get("skills")
+            if key in skill_projection:
+                compact[key] = DataFormatter.sanitize(skill_projection.get(key))
+        raw_skills = skill_projection.get("skills")
         skills: list[dict[str, Any]] = []
         if isinstance(raw_skills, Sequence) and not isinstance(raw_skills, str | bytes | bytearray):
             for item in raw_skills:
@@ -129,6 +231,12 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
                     "guidance",
                     "selected_resources",
                     "action_candidates",
+                    "resource_index",
+                    "binding_id",
+                    "revision_ref",
+                    "skill_key",
+                    "mode",
+                    "allocation",
                 ):
                     if key in item:
                         skill_item[key] = DataFormatter.sanitize(item.get(key))
@@ -137,10 +245,249 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         compact["skills"] = skills
         compact["resource_policy"] = {
             "skills_citations_are_already_loaded": True,
-            "do_not_use_citations_as_workspace_paths": True,
+            "do_not_use_citations_as_task_workspace_paths": True,
             "cold_source_paths_hidden": True,
         }
         return DataFormatter.sanitize(compact)
+
+    def _required_skill_context_blocker(
+        self,
+        context_pack: Any,
+    ) -> dict[str, Any] | None:
+        required_skill_ids, required_skill_pack_ids = self._required_skill_context_selectors()
+        if not required_skill_ids and not required_skill_pack_ids:
+            return None
+        if not isinstance(context_pack, Mapping):
+            return {
+                "reason_code": "required_skill_context_unavailable",
+                "reason": "Required Skill context preparation returned no structured context pack.",
+                "required_skill_ids": required_skill_ids,
+                "required_skill_pack_ids": required_skill_pack_ids,
+                "missing_skill_ids": required_skill_ids,
+            }
+
+        context_diagnostics = context_pack.get("diagnostics")
+        skills_diagnostic = (
+            context_diagnostics.get("skill_projection") if isinstance(context_diagnostics, Mapping) else None
+        )
+        skills_pack = context_pack.get("skill_projection")
+        if not isinstance(skills_pack, Mapping):
+            return {
+                "reason_code": "required_skill_context_unavailable",
+                "reason": "Required Skill context could not be built before business planning.",
+                "required_skill_ids": required_skill_ids,
+                "required_skill_pack_ids": required_skill_pack_ids,
+                "missing_skill_ids": required_skill_ids,
+                "diagnostics": DataFormatter.sanitize(skills_diagnostic or {}),
+            }
+
+        raw_skills = skills_pack.get("skills")
+        skills = (
+            [item for item in raw_skills if isinstance(item, Mapping)]
+            if isinstance(raw_skills, Sequence)
+            and not isinstance(
+                raw_skills,
+                str | bytes | bytearray,
+            )
+            else []
+        )
+        skill_by_id = {
+            str(item.get("skill_id") or "").strip(): item for item in skills if str(item.get("skill_id") or "").strip()
+        }
+        missing_skill_ids = [skill_id for skill_id in required_skill_ids if skill_id not in skill_by_id]
+        empty_guidance_skill_ids: list[str] = []
+        context_required_ids = set(self._normalize_string_list(skills_pack.get("required_skill_ids")))
+        context_required_ids.update(required_skill_ids)
+        if required_skill_pack_ids:
+            context_required_ids.update(skill_by_id)
+        for skill_id in sorted(context_required_ids):
+            item = skill_by_id.get(skill_id)
+            if not isinstance(item, Mapping):
+                continue
+            guidance = item.get("guidance")
+            excerpt = str(guidance.get("excerpt") or "").strip() if isinstance(guidance, Mapping) else ""
+            allocation = item.get("allocation")
+            raw_guidance_chars = allocation.get("guidance_chars") if isinstance(allocation, Mapping) else len(excerpt)
+            try:
+                guidance_chars = int(raw_guidance_chars or 0)
+            except (TypeError, ValueError):
+                guidance_chars = 0
+            if not excerpt or guidance_chars <= 0:
+                empty_guidance_skill_ids.append(skill_id)
+
+        status = str(skills_diagnostic.get("status") or "") if isinstance(skills_diagnostic, Mapping) else ""
+        unusable = skills_pack.get("usable") is False or status in {
+            "unavailable",
+            "failed",
+            "empty",
+            "unusable",
+        }
+        if not (unusable or missing_skill_ids or empty_guidance_skill_ids):
+            return None
+        return {
+            "reason_code": "required_skill_context_unavailable",
+            "reason": (
+                "Required Skill context was not installed and bound with non-empty "
+                "guidance before business planning."
+            ),
+            "required_skill_ids": required_skill_ids,
+            "required_skill_pack_ids": required_skill_pack_ids,
+            "missing_skill_ids": missing_skill_ids,
+            "empty_guidance_skill_ids": empty_guidance_skill_ids,
+            "diagnostics": DataFormatter.sanitize(skills_diagnostic or {}),
+            "pack_diagnostics": DataFormatter.sanitize(skills_pack.get("diagnostics", [])),
+        }
+
+    async def _terminate_required_skill_context_blocked(
+        self,
+        iteration_index: int,
+        blocker: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        self.status = "blocked"
+        required_skill_ids = self._normalize_string_list(blocker.get("required_skill_ids"))
+        required_skill_pack_ids = self._normalize_string_list(blocker.get("required_skill_pack_ids"))
+        missing_skill_ids = self._merge_string_lists(
+            self._normalize_string_list(blocker.get("missing_skill_ids")),
+            self._normalize_string_list(blocker.get("empty_guidance_skill_ids")),
+        )
+        missing_criteria = [
+            f"required_skill_context:{skill_id}" for skill_id in (missing_skill_ids or required_skill_ids)
+        ]
+        missing_criteria.extend(f"required_skill_pack_context:{pack_id}" for pack_id in required_skill_pack_ids)
+        missing_criteria = self._merge_string_lists(missing_criteria)
+        reason = str(blocker.get("reason") or "Required Skill context is unavailable.")
+        reason_code = str(blocker.get("reason_code") or "required_skill_context_unavailable")
+        self.diagnostics["required_skill_context"] = DataFormatter.sanitize(dict(blocker))
+        self.diagnostics["terminal_reason"] = reason_code
+        self.result = {
+            "status": "blocked",
+            "accepted": False,
+            "artifact_status": "blocked",
+            "task_id": self.id,
+            "execution_strategy": self.execution_strategy,
+            "effective_execution_strategy": self.effective_execution_strategy,
+            "reason_code": reason_code,
+            "reason": reason,
+            "final_response": self._agent_task_user_final_response(
+                accepted=False,
+                artifact_status="blocked",
+                status="blocked",
+                reason=reason,
+            ),
+            "final_result": "",
+            "artifact_refs": [],
+            "missing_criteria": missing_criteria,
+            "required_skill_context": DataFormatter.sanitize(dict(blocker)),
+        }
+        await self._record_phase(
+            "terminal",
+            iteration=iteration_index,
+            diagnostics={
+                "status": "blocked",
+                "reason_code": reason_code,
+                "missing_criteria": missing_criteria,
+            },
+        )
+        await self._emit("agent_task.blocked", self.result)
+        return {
+            "terminal": True,
+            "status": "blocked",
+            "reason_code": reason_code,
+            "missing_criteria": missing_criteria,
+        }
+
+    async def _emit_required_skill_context_bound(
+        self,
+        context_pack: Any,
+        *,
+        request_id: str,
+        phase: str,
+    ) -> None:
+        required_skill_ids, required_skill_pack_ids = self._required_skill_context_selectors()
+        if not required_skill_ids and not required_skill_pack_ids:
+            return
+        if not isinstance(context_pack, Mapping):
+            return
+        skills_pack = context_pack.get("skill_projection")
+        if not isinstance(skills_pack, Mapping) or skills_pack.get("usable") is False:
+            return
+        raw_skills = skills_pack.get("skills")
+        if not isinstance(raw_skills, Sequence) or isinstance(
+            raw_skills,
+            str | bytes | bytearray,
+        ):
+            return
+        required_set = set(required_skill_ids)
+        bindings: list[dict[str, Any]] = []
+        for item in raw_skills:
+            if not isinstance(item, Mapping):
+                continue
+            skill_id = str(item.get("skill_id") or "").strip()
+            mode = str(item.get("mode") or "")
+            if skill_id not in required_set and mode != "required" and not required_skill_pack_ids:
+                continue
+            guidance = item.get("guidance")
+            excerpt = str(guidance.get("excerpt") or "") if isinstance(guidance, Mapping) else ""
+            allocation = item.get("allocation")
+            allocation = allocation if isinstance(allocation, Mapping) else {}
+            selected_resources = item.get("selected_resources")
+            selected_resources = (
+                list(selected_resources)
+                if isinstance(selected_resources, Sequence)
+                and not isinstance(selected_resources, str | bytes | bytearray)
+                else []
+            )
+            selected_resource_keys = self._normalize_string_list(allocation.get("selected_resource_keys"))
+            if not selected_resource_keys:
+                selected_resource_keys = [
+                    str(resource.get("selection_key") or "")
+                    for resource in selected_resources
+                    if isinstance(resource, Mapping) and str(resource.get("selection_key") or "")
+                ]
+            bindings.append(
+                {
+                    "binding_id": str(item.get("binding_id") or ""),
+                    "canonical_skill_id": skill_id,
+                    "mode": mode or "required",
+                    "guidance_chars": int(allocation.get("guidance_chars") or len(excerpt)),
+                    "resource_chars": int(allocation.get("resource_chars") or 0),
+                    "selected_resource_keys": selected_resource_keys,
+                    "truncated": bool(
+                        allocation.get("truncated") or (isinstance(guidance, Mapping) and guidance.get("truncated"))
+                    ),
+                }
+            )
+        if not bindings:
+            return
+        emitted = getattr(self, "_emitted_skill_context_binding_request_ids", None)
+        if not isinstance(emitted, set):
+            emitted = set()
+            setattr(self, "_emitted_skill_context_binding_request_ids", emitted)
+        if request_id in emitted:
+            return
+        emitted.add(request_id)
+        self._lifecycle_state.record_skill_context_binding(
+            request_id=request_id,
+            phase=phase,
+            bindings=bindings,
+        )
+        await self._emit(
+            "skills.context.bound",
+            {
+                "task_id": self.id,
+                "request_id": request_id,
+                "phase": phase,
+                "binding_ids": [item["binding_id"] for item in bindings],
+                "canonical_skill_ids": [item["canonical_skill_id"] for item in bindings],
+                "bindings": bindings,
+            },
+            meta={
+                "task_id": self.id,
+                "request_id": request_id,
+                "phase": phase,
+                "stream_kind": "skills_context_binding",
+            },
+        )
 
     def _required_skill_context_selectors(self) -> tuple[list[str], list[str]]:
         skill_ids: list[str] = []
@@ -178,10 +525,10 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         return skill_ids, skill_pack_ids
 
     @classmethod
-    def _skills_context_pack_skill_ids(cls, skill_context_pack: Any) -> list[str]:
-        if not isinstance(skill_context_pack, Mapping):
+    def _skill_projection_skill_ids(cls, skill_projection: Any) -> list[str]:
+        if not isinstance(skill_projection, Mapping):
             return []
-        raw_skills = skill_context_pack.get("skills")
+        raw_skills = skill_projection.get("skills")
         if not isinstance(raw_skills, Sequence) or isinstance(raw_skills, str | bytes | bytearray):
             return []
         skill_ids: list[str] = []
@@ -311,9 +658,9 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         )
         return applied
 
-    def _context_pack_with_guidance(self, context_pack: Any) -> "WorkspaceContextPackage":
+    def _context_pack_with_guidance(self, context_pack: Any) -> "TaskContextView":
         if not isinstance(context_pack, Mapping):
-            return cast("WorkspaceContextPackage", context_pack)
+            return cast("TaskContextView", context_pack)
         context = dict(context_pack)
         projection = self._guidance_context_projection()
         if projection:
@@ -323,7 +670,7 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
             diagnostics["guidance_count"] = len(projection)
             diagnostics["guidance_ids"] = [item["id"] for item in projection]
             context["diagnostics"] = DataFormatter.sanitize(diagnostics)
-        return cast("WorkspaceContextPackage", DataFormatter.sanitize(context))
+        return cast("TaskContextView", DataFormatter.sanitize(context))
 
     def _guidance_context_projection(
         self,
@@ -349,8 +696,8 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
             status = str(item.get("status") or "")
             if status in {"ignored", "received_after_terminal"}:
                 continue
-            workspace_ref = item.get("workspace_ref")
-            workspace_ref_id = workspace_ref.get("id") if isinstance(workspace_ref, Mapping) else None
+            task_workspace_ref = item.get("task_workspace_ref")
+            task_workspace_ref_id = task_workspace_ref.get("id") if isinstance(task_workspace_ref, Mapping) else None
             projection.append(
                 DataFormatter.sanitize(
                     {
@@ -359,7 +706,7 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
                         "status": status,
                         "target": item.get("target", "task"),
                         "content_preview": item.get("content_preview"),
-                        "workspace_ref": workspace_ref_id,
+                        "task_workspace_ref": task_workspace_ref_id,
                         "applied_iteration": item.get("applied_iteration"),
                         "applied_boundary": item.get("applied_boundary"),
                     }
@@ -426,7 +773,7 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
                 "status": guidance_ref.get("status"),
                 "target": guidance_ref.get("target"),
                 "content_preview": guidance_ref.get("content_preview"),
-                "workspace_ref": guidance_ref.get("workspace_ref"),
+                "task_workspace_ref": guidance_ref.get("task_workspace_ref"),
                 "checkpoint_ref": guidance_ref.get("checkpoint_ref"),
             }
         )

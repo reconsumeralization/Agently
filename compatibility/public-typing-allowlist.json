@@ -25,6 +25,60 @@
   "required_typed_callables": [],
   "any_allowlist": [
     {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.use_skills",
+      "positions": [
+        "param:skills"
+      ],
+      "owner": "AgentExecution",
+      "reason": "Skill selectors intentionally accept one selector or a host-defined collection/projection accepted by SkillLibrary resolution.",
+      "narrowing_plan": "Introduce a public recursive SkillSelectorInput alias after installed-package selector forms are finalized.",
+      "expires": "review-before-4.2"
+    },
+    {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.require_skills",
+      "positions": [
+        "param:skills"
+      ],
+      "owner": "AgentExecution",
+      "reason": "Required Skill selectors share the extensible SkillLibrary selector boundary used by use_skills.",
+      "narrowing_plan": "Adopt the same public SkillSelectorInput alias as use_skills when selector forms are finalized.",
+      "expires": "review-before-4.2"
+    },
+    {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.use_skills_packs",
+      "positions": [
+        "param:skills_packs"
+      ],
+      "owner": "AgentExecution",
+      "reason": "Skill pack selectors intentionally accept one selector or a host-defined collection/projection accepted by SkillLibrary resolution.",
+      "narrowing_plan": "Introduce a public recursive SkillPackSelectorInput alias after pack selector forms are finalized.",
+      "expires": "review-before-4.2"
+    },
+    {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.async_record_data",
+      "positions": [
+        "param:content",
+        "param:scope",
+        "param:source",
+        "param:meta",
+        "param:checkpoint_state"
+      ],
+      "owner": "AgentExecution",
+      "reason": "RecordStore writes preserve application-defined record payloads and metadata without constraining their serializable domain shape.",
+      "narrowing_plan": "Replace metadata dictionaries with named record projection types while retaining a generic serializable content parameter.",
+      "expires": "review-before-4.2"
+    },
+    {
+      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.record_data",
+      "positions": [
+        "param:kwargs"
+      ],
+      "owner": "AgentExecution",
+      "reason": "The synchronous RecordStore adapter forwards the typed async_record_data keyword contract.",
+      "narrowing_plan": "Mirror the explicit async_record_data signature when the sync adapter is next revised.",
+      "expires": "review-before-4.2"
+    },
+    {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.input",
       "positions": [
         "param:args",
@@ -242,16 +296,6 @@
       "expires": "review-before-4.2"
     },
     {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.async_record_workspace",
-      "positions": [
-        "param:*"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.get_async_generator",
       "positions": [
         "return",
@@ -287,16 +331,6 @@
     },
     {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.get_text",
-      "positions": [
-        "param:kwargs"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.record_workspace",
       "positions": [
         "param:kwargs"
       ],
@@ -801,16 +835,6 @@
       "symbol": "agently.base.AgentlyMain.create_trigger_flow",
       "positions": [
         "return"
-      ],
-      "owner": "AgentlyMain",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.base.AgentlyMain.create_workspace",
-      "positions": [
-        "param:*"
       ],
       "owner": "AgentlyMain",
       "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",

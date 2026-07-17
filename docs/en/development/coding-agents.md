@@ -28,7 +28,7 @@ Skills are **not** just documentation. They're structured for coding agents: eac
 Keep these separate:
 
 - `Agently-Skills` companion repo: skill bundles for external coding agents
-- Agently runtime Skills: framework capability owned internally by SkillsManager,
+- Agently runtime Skills: framework guidance packages owned by SkillLibrary and bound by AgentExecution,
   with `SkillsExecutor` retained as a compatibility facade
 
 The companion repo does not become a runtime dependency of your Agently app. It remains a guidance package for coding agents.
@@ -198,16 +198,19 @@ When you audit or author guidance for Agently `4.1+`, these are the defaults cod
   result cards. Avoid bare `${ref_id}` because `${...}` is already Agently
   placeholder syntax; do not ask the model to reproduce URLs or full retrieval
   metadata.
-- Required Skill availability: resolve and materialize every required remote
-  Skill selector before AgentTask business work. Continue only with canonical
-  installed ids after discovery, installation, and inspection succeed; otherwise
-  fail closed as blocked. Authorization such as `auto_allow=True` does not waive
-  availability, and producing an artifact without the required Skill is not a
-  valid fallback.
-- Task execution quality: when a goal-pursuit task must use a particular capability (an Action, Skill, or Skill pack), do not lean on a strong instruction in the prompt or a business-specific special case to force or check it. Express the requirement as framework contract: make capabilities visible to the planner (`planner_capabilities`), bound action steps with structured `step_scope` that reaches the ActionRuntime boundary, and require completion evidence with a structured `capability_evidence_requirements` entry. For Skills steps that may produce long artifact text, configure the Skills route output format instead of forcing large raw content through JSON streaming. If a Skills step needs file writes, reads, shell calls, HTTP calls, or other side effects, explicitly grant the action/tool scope through route/effort configuration, declare required side-effect actions when the React strategy should stop after they succeed, and require `action_succeeded` evidence for the host actions; Skills provide guidance, while ActionRuntime owns callable execution and evidence. Prior-step Workspace context must preserve action evidence before bulky execution metadata. TaskDAG / DynamicTask is not an AgentTask bounded-step strategy; use TaskDAG / DynamicTask separately when the application or visual automation surface owns the submitted graph. The AgentTask host guard checks requirements deterministically against execution evidence; the prompt is explanatory, not the guarantee. Keep scenario-specific checks (visual fingerprints, domain names, source choices) in examples and tests, never in framework paths.
+- Required Skill availability: authorized host code materializes remote sources,
+  then SkillLibrary installs immutable local revisions before AgentTask business
+  work. Continue only with canonical revision bindings; otherwise fail closed.
+- Task execution quality: express required Actions, Skills, and Skill packs as
+  framework contracts, not prompt-only wishes or business-specific checks.
+  AgentExecution binds Skills into TaskContext. ActionRuntime owns callable
+  side effects and evidence; TaskWorkspace owns file mutation/readback;
+  RecordStore owns durable records. A Skill never grants those capabilities.
+  TaskDAG / DynamicTask remains separate submitted-DAG data, not an AgentTask
+  bounded-step strategy. Keep scenario-specific checks in examples and tests.
   Missing required `action_succeeded` evidence may schedule a TaskBoard
   Action-shaped repair only from the authored structured requirement; do not
-  parse verifier prose, special-case Action names, or let Workspace readback
+  parse verifier prose, special-case Action names, or let TaskWorkspace readback
   satisfy an Action requirement. Model-visible Action results may offer the
   host-issued `action_call_id`; validate that offered key and resolve canonical
   evidence identity in host code. Give each TaskBoard Action card one card-local

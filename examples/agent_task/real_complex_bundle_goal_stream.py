@@ -16,9 +16,7 @@ Environment:
     AGENT_TASK_MODEL_PROVIDER=ollama for local Ollama.
     AMAP_API_KEY is required for the real AMap MCP branch.
 
-This is the top-level companion to
-`examples/blocks/07_real_complex_bundle_stream.py`. The Blocks example proves
-the lower-level lifecycle substrate. This script proves the public task API:
+This script proves the public task API:
 
     agent.use_actions(...)
     await agent.async_use_mcp(...)
@@ -34,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -70,7 +69,6 @@ OUTPUT_SUMMARY = "outputs/real_complex_bundle_goal_summary.json"
 COCOON_SKILL_SOURCE = "Cocoon-AI/architecture-diagram-generator"
 COCOON_SKILL_SUBPATH = "architecture-diagram"
 COCOON_SKILL_ID = "architecture-diagram"
-SKILLS_ARTIFACT_EFFORT = "real_complex_bundle_artifact_react"
 
 SOURCE_PATHS = [
     "spec/implemented/architecture/COMPLEX_TASK_EXECUTION_LIFECYCLE_BLOCKS_PLUGIN_SPEC.md",
@@ -96,7 +94,7 @@ JUDGE_RULES = [
     "The daily report separates completed work, evidence, risks, and next actions.",
     "The travelogue grounds factual location, weather, POI, or route claims in AMap MCP evidence.",
     "The architecture deliverable is a single-file HTML/SVG artifact and uses repository evidence for Agently ownership boundaries.",
-    "The result describes capability evidence from Search, AMap MCP, and the installed architecture-diagram Skill.",
+    "The result describes Action evidence and consumed context from the installed architecture-diagram Skill.",
     "The result avoids unsupported factual claims beyond the supplied task brief, repository sources, Search results, AMap MCP results, or Skill guidance.",
 ]
 
@@ -151,41 +149,37 @@ def print_stream_item(item: Any) -> None:
 
 
 def install_cocoon_skill(registry_root: Path) -> dict[str, Any]:
+    checkout = registry_root.parent / "skill_sources" / "architecture-diagram-generator"
+    checkout.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", f"https://github.com/{COCOON_SKILL_SOURCE}.git", str(checkout)],
+        check=True,
+    )
+    source_commit = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     Agently.skills_executor.configure(
         registry_root=str(registry_root),
-        allowed_trust_levels=["local", "remote"],
+        allowed_trust_levels=["local"],
     )
-    record = Agently.skills_executor.install_skills_pack(
-        source=COCOON_SKILL_SOURCE,
-        subpath=COCOON_SKILL_SUBPATH,
-        fetch=True,
-        trust_level="remote",
+    contract = Agently.skills_executor.install_skills(
+        checkout / COCOON_SKILL_SUBPATH,
+        trust_level="local",
         update=True,
     )
-    installed_skills = record.get("installed_skills", []) if isinstance(record, dict) else []
+    record = {
+        "installed_skills": [contract["skill_id"]],
+        "contracts": [contract],
+        "source_commit": source_commit,
+        "source_checkout": str(checkout),
+    }
+    installed_skills = record["installed_skills"]
     if COCOON_SKILL_ID not in installed_skills:
         raise RuntimeError(f"CocoonAI Skill install did not register {COCOON_SKILL_ID!r}: {installed_skills!r}")
     return record
-
-
-def configure_skills_stage_models(agent: Any) -> None:
-    configured_pool = agent.settings.get("model_pool", {}) or {}
-    model_pool = cast(dict[str, Any], dict(configured_pool) if isinstance(configured_pool, dict) else {})
-    task_profile = model_pool.get(TASK_MODEL_KEY)
-    if task_profile is None:
-        return
-    for stage_key in (
-        "planner",
-        "research",
-        "reason",
-        "reason_fast",
-        "executor",
-        "verifier",
-        "reflector",
-        "finalizer",
-    ):
-        model_pool.setdefault(stage_key, task_profile)
-    agent.settings.set("model_pool", model_pool)
 
 
 def line_excerpt(text: str, *, max_chars: int = 5200) -> str:
@@ -223,37 +217,17 @@ async def main() -> None:
     progress_language = os.getenv("AGENTLY_PROGRESS_LANGUAGE", "zh-CN")
     install_record = install_cocoon_skill(workspace_dir / "skills_registry")
 
-    agent = Agently.create_agent("real-complex-bundle-goal-stream").use_workspace(workspace_dir)
+    agent = Agently.create_agent("real-complex-bundle-goal-stream").use_task_workspace(workspace_dir).use_record_store(workspace_dir, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=0.0)
-    configure_skills_stage_models(agent)
     agent.settings.set("agent_task.progress.language", progress_language)
     agent.set_settings("action.stage_idle_timeout", 240)
     agent.set_settings("tool.stage_idle_timeout", 240)
 
-    raw_effort_presets = agent.settings.get("effort_presets", {})
-    effort_presets = cast(dict[str, Any], dict(raw_effort_presets) if isinstance(raw_effort_presets, dict) else {})
-    effort_presets[SKILLS_ARTIFACT_EFFORT] = {
-        "strategy": "react",
-        "step_budget": 4,
-        "artifact_inline_limit": 180000,
-        "action_concurrency": 1,
-        "allowed_actions": ["write_file", "read_file"],
-        "required_actions": ["write_file", "read_file"],
-    }
-    agent.set_settings("effort_presets", effort_presets)
-
     agent.use_actions(Search(timeout=20, backend="auto", region="us-en"), always=True)
     with sanitized_proxy_env():
         await agent.async_use_mcp(amap_transport())
-    agent.enable_workspace_file_actions(read=True, write=True, expose_to_model=True)
+    agent.enable_task_workspace_file_actions(read=True, write=True, expose_to_model=True)
     agent.use_skills([COCOON_SKILL_ID], mode="required", always=True)
-    agent.configure_skill_capabilities(
-        auto_load={
-            "web_search": "allow",
-            "web_browse": "allow",
-            "http_request": "allow",
-        }
-    )
 
     @agent.action_func
     def fetch_agently_architecture_sources() -> dict[str, Any]:
@@ -279,7 +253,7 @@ async def main() -> None:
                 "AgentExecution owns the public task-facing run surface.",
                 "AgentTaskLoop owns bounded complex-task plan, execute, observe, verify, and replan behavior.",
                 "Blocks are the internal lifecycle lowering substrate, not the public business API.",
-                "Actions, MCP tools, Skills, and Workspace file actions are capability adapters attached to the task run.",
+                "Actions, MCP tools, and TaskWorkspace file actions are capabilities; Skills provide TaskContext guidance.",
             ],
         }
 
@@ -287,10 +261,9 @@ async def main() -> None:
     agent.require_actions(REQUIRED_ACTIONS, always=True)
     agent.require_skills([COCOON_SKILL_ID], always=True)
 
-    workspace = agent.workspace
-    if workspace is None:
-        raise RuntimeError("Workspace was not initialized.")
-    await workspace.put(
+    task_workspace = agent.task_workspace
+    record_store = agent.record_store
+    await record_store.put(
         content={
             "task": TASK_ID,
             "outputs": {
@@ -306,7 +279,7 @@ async def main() -> None:
         collection="observations",
         kind="real_complex_bundle_task_brief",
         summary="High-level Goal Pursuit task brief using Search, AMap MCP, and CocoonAI Skill.",
-        scope={"task_id": TASK_ID},
+        scope={"task_id": TASK_ID, "execution_id": TASK_ID},
         source={"type": "example_script", "name": "real_complex_bundle_goal_stream"},
     )
 
@@ -331,7 +304,7 @@ async def main() -> None:
             "search": "Use public Search for framework and skill context.",
             "amap_mcp": "Use AMap MCP for Hangzhou weather, POI, geocode, and transit route evidence.",
             "architecture_skill": "Use the installed CocoonAI architecture-diagram Skill for the HTML/SVG diagram style and artifact guidance.",
-            "workspace": "Write the three deliverables to Workspace files and read them back before finalizing.",
+            "workspace": "Write the three deliverables to TaskWorkspace files and read them back before finalizing.",
         },
     }
 
@@ -339,14 +312,14 @@ async def main() -> None:
         "Produce a real complex task bundle for an operator: an execution daily report, "
         "a Hangzhou business travelogue, and an Agently Blocks lifecycle architecture diagram. "
         "Use the mounted Search action, AMap MCP tools, repository-source action, workspace file actions, "
-        f"and the installed `{COCOON_SKILL_ID}` Skill. Write the deliverables to the requested Workspace files "
+        f"and the installed `{COCOON_SKILL_ID}` Skill. Write the deliverables to the requested TaskWorkspace files "
         "and return a concise final summary with source trace and any unresolved risks."
     )
     success_criteria = [
         f"The daily report is written to `{OUTPUT_DAILY_REPORT}` and separates completed work, evidence, risks, and next actions.",
         f"The travelogue is written to `{OUTPUT_TRAVELOGUE}` and grounds factual location, weather, POI, or route claims in AMap MCP evidence.",
         f"The architecture diagram is written to `{OUTPUT_ARCHITECTURE}` as single-file HTML with inline SVG.",
-        "The architecture diagram uses repository evidence for AgentExecution, AgentTaskLoop, Blocks, Actions, MCP, Skills, and Workspace boundaries.",
+        "The architecture diagram uses repository evidence for AgentExecution, AgentTaskLoop, Blocks, Actions, MCP, Skills, and TaskWorkspace boundaries.",
         "Execution evidence includes Search, AMap MCP, repository-source collection, workspace write/readback, and architecture-diagram Skill usage.",
         "The final summary calls out unsupported or incomplete external evidence instead of filling gaps with invented facts.",
     ]
@@ -365,9 +338,9 @@ async def main() -> None:
         .input(task_input)
         .output(
             {
-                "daily_report_file": (str, "Workspace-relative daily report path.", True),
-                "travelogue_file": (str, "Workspace-relative travelogue path.", True),
-                "architecture_file": (str, "Workspace-relative architecture diagram path.", True),
+                "daily_report_file": (str, "TaskWorkspace-relative daily report path.", True),
+                "travelogue_file": (str, "TaskWorkspace-relative travelogue path.", True),
+                "architecture_file": (str, "TaskWorkspace-relative architecture diagram path.", True),
                 "source_trace": ([str], "Concise source trace across Search, AMap MCP, repository evidence, and Skill usage.", True),
                 "risks": ([str], "Unresolved external-data or artifact risks.", True),
             },
@@ -376,7 +349,7 @@ async def main() -> None:
         .strategy(
             "task",
             task_id=TASK_ID,
-            workspace=workspace_dir,
+            task_workspace=workspace_dir,
             limits={"max_model_requests": 30, "max_seconds": 900, "max_no_progress_seconds": 240},
             options={
                 "agent_task": {
@@ -389,7 +362,6 @@ async def main() -> None:
                 },
                 "routes": {
                     "model_request": {"action_loop": {"max_rounds": 10}},
-                    "skills": {"effort": SKILLS_ARTIFACT_EFFORT, "output_format": "yaml_literal"},
                 },
                 "capability_evidence_requirements": [
                     {"capability_id": "search", "capability_kind": "action", "kind": "action_succeeded"},
@@ -400,7 +372,6 @@ async def main() -> None:
                     {"capability_id": "fetch_agently_architecture_sources", "capability_kind": "action", "kind": "action_succeeded"},
                     {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"},
                     {"capability_id": "read_file", "capability_kind": "action", "kind": "action_succeeded"},
-                    {"capability_id": COCOON_SKILL_ID, "capability_kind": "skill", "kind": "capability_used"},
                 ],
             },
         )
@@ -438,9 +409,9 @@ async def main() -> None:
     )
 
     output_files = {
-        "daily_report": resolve_result_artifact_path(workspace, result, OUTPUT_DAILY_REPORT),
-        "travelogue": resolve_result_artifact_path(workspace, result, OUTPUT_TRAVELOGUE),
-        "architecture": resolve_result_artifact_path(workspace, result, OUTPUT_ARCHITECTURE),
+        "daily_report": resolve_result_artifact_path(task_workspace, result, OUTPUT_DAILY_REPORT),
+        "travelogue": resolve_result_artifact_path(task_workspace, result, OUTPUT_TRAVELOGUE),
+        "architecture": resolve_result_artifact_path(task_workspace, result, OUTPUT_ARCHITECTURE),
     }
     registered_actions = action_ids(agent)
     required_skill_ids = execution.required_skill_ids()
@@ -498,7 +469,7 @@ async def main() -> None:
         "stream_trace_file": str(trace_path),
         "final_result": final_text,
     }
-    summary_path = workspace.root / OUTPUT_SUMMARY
+    summary_path = task_workspace.root / OUTPUT_SUMMARY
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_summary(summary)

@@ -12,7 +12,7 @@ pytestmark = pytest.mark.asyncio
 
 
 def _task(tmp_path, name: str, *, required_deliverables=None) -> AgentTask:
-    agent = Agently.create_agent(name).use_workspace(tmp_path / name)
+    agent = Agently.create_agent(name).use_task_workspace(tmp_path / name)
     options = (
         {"required_deliverables": list(required_deliverables)}
         if required_deliverables is not None
@@ -43,16 +43,16 @@ async def _materialize(
     return await task._current_terminal_candidate()
 
 
-async def test_terminal_carriers_replace_changed_workspace_content_with_new_identity(tmp_path):
+async def test_terminal_carriers_replace_changed_task_workspace_content_with_new_identity(tmp_path):
     task = _task(tmp_path, "terminal-carrier-changed-path", required_deliverables=["final.md"])
-    first_write = await task.workspace.write_file("final.md", "first version\n")
+    first_write = await task.task_workspace.write_file("final.md", "first version\n")
     first = await _materialize(
         task,
         execution_result={"file_refs": first_write["file_refs"], "final_result": "final.md"},
     )
     first_carrier = first["carriers"][0]
 
-    await task.workspace.write_file("final.md", "second version\n")
+    await task.task_workspace.write_file("final.md", "second version\n")
     second = await _materialize(
         task,
         execution_result={"file_refs": first_write["file_refs"], "final_result": "final.md"},
@@ -75,13 +75,13 @@ async def test_terminal_carriers_replace_changed_workspace_content_with_new_iden
 
 async def test_terminal_carriers_do_not_reintroduce_obsolete_cumulative_readback_body(tmp_path):
     task = _task(tmp_path, "terminal-carrier-current-readback")
-    first_write = await task.workspace.write_file("final.md", "obsolete body\n")
+    first_write = await task.task_workspace.write_file("final.md", "obsolete body\n")
     stale_ref = {
         **first_write["file_refs"][0],
-        "role": "workspace_artifact",
+        "role": "task_workspace_artifact",
         "readback": {"content": "obsolete body\n", "truncated": False},
     }
-    await task.workspace.write_file("final.md", "current body\n")
+    await task.task_workspace.write_file("final.md", "current body\n")
 
     candidate = await _materialize(
         task,
@@ -93,9 +93,9 @@ async def test_terminal_carriers_do_not_reintroduce_obsolete_cumulative_readback
     assert "obsolete body" not in candidate["text"]
 
 
-async def test_terminal_carriers_keep_workspace_and_inline_results_independent(tmp_path):
+async def test_terminal_carriers_keep_task_workspace_and_inline_results_independent(tmp_path):
     task = _task(tmp_path, "terminal-carrier-independent", required_deliverables=["final.md"])
-    write_result = await task.workspace.write_file("final.md", "file result\n")
+    write_result = await task.task_workspace.write_file("final.md", "file result\n")
 
     candidate = await _materialize(
         task,
@@ -106,16 +106,16 @@ async def test_terminal_carriers_keep_workspace_and_inline_results_independent(t
     )
 
     assert [carrier["kind"] for carrier in candidate["carriers"]] == [
-        "workspace_artifact",
+        "task_workspace_artifact",
         "inline_final_result",
     ]
     assert len({carrier["carrier_id"] for carrier in candidate["carriers"]}) == 2
     assert all(carrier["required"] is True for carrier in candidate["carriers"])
 
 
-async def test_terminal_carriers_exclude_workspace_pointer_from_inline_inventory(tmp_path):
+async def test_terminal_carriers_exclude_task_workspace_pointer_from_inline_inventory(tmp_path):
     task = _task(tmp_path, "terminal-carrier-pointer", required_deliverables=["final.md"])
-    write_result = await task.workspace.write_file("final.md", "file result\n")
+    write_result = await task.task_workspace.write_file("final.md", "file result\n")
 
     candidate = await _materialize(
         task,
@@ -125,17 +125,17 @@ async def test_terminal_carriers_exclude_workspace_pointer_from_inline_inventory
         },
     )
 
-    assert [carrier["kind"] for carrier in candidate["carriers"]] == ["workspace_artifact"]
+    assert [carrier["kind"] for carrier in candidate["carriers"]] == ["task_workspace_artifact"]
 
 
 async def test_verifier_claim_projection_contains_only_current_inventory_content(tmp_path):
     task = _task(tmp_path, "terminal-carrier-verifier-projection", required_deliverables=["final.md"])
-    first_write = await task.workspace.write_file("final.md", "old\n")
+    first_write = await task.task_workspace.write_file("final.md", "old\n")
     await _materialize(
         task,
         execution_result={"file_refs": first_write["file_refs"], "final_result": "final.md"},
     )
-    await task.workspace.write_file("final.md", "new\n")
+    await task.task_workspace.write_file("final.md", "new\n")
     current = await _materialize(
         task,
         execution_result={"file_refs": first_write["file_refs"], "final_result": "final.md"},
@@ -148,7 +148,7 @@ async def test_verifier_claim_projection_contains_only_current_inventory_content
         {
             "claim_key": "claim_1",
             "text": "new",
-            "delivery_kind": "workspace_artifact",
+            "delivery_kind": "task_workspace_artifact",
             "path": "final.md",
         }
     ]
@@ -165,7 +165,7 @@ async def test_shared_terminal_verification_rejects_complete_verdict_for_rejecte
     monkeypatch,
 ):
     task = _task(tmp_path, "terminal-shared-rejected", required_deliverables=["final.md"])
-    write_result = await task.workspace.write_file("final.md", "Unsupported factual claim.\n")
+    write_result = await task.task_workspace.write_file("final.md", "Unsupported factual claim.\n")
     candidate = await _materialize(
         task,
         execution_result={"file_refs": write_result["file_refs"], "final_result": "final.md"},
@@ -204,7 +204,7 @@ async def test_shared_terminal_verification_rejects_complete_verdict_for_rejecte
     monkeypatch.setattr(task, "_request_verification", request_verification)
     transition = await task._run_terminal_verification(
         1,
-        plan={"deliverable_mode": "workspace_artifact"},
+        plan={"deliverable_mode": "task_workspace_artifact"},
         execution_result={"file_refs": write_result["file_refs"], "final_result": "final.md"},
         execution_meta={"execution_id": "work_A", "logs": {}},
         context_pack={
@@ -230,7 +230,7 @@ async def test_shared_terminal_verification_projects_exact_current_accepted_carr
     monkeypatch,
 ):
     task = _task(tmp_path, "terminal-shared-accepted", required_deliverables=["final.md"])
-    write_result = await task.workspace.write_file("final.md", "Full report body.\n")
+    write_result = await task.task_workspace.write_file("final.md", "Full report body.\n")
     candidate = await _materialize(
         task,
         execution_result={
@@ -255,7 +255,7 @@ async def test_shared_terminal_verification_projects_exact_current_accepted_carr
     monkeypatch.setattr(task, "_request_verification", request_verification)
     transition = await task._run_terminal_verification(
         1,
-        plan={"deliverable_mode": "workspace_artifact"},
+        plan={"deliverable_mode": "task_workspace_artifact"},
         execution_result={
             "file_refs": write_result["file_refs"],
             "candidate_final_result": "Separate concise summary.",
@@ -275,7 +275,7 @@ async def test_shared_terminal_verification_projects_exact_current_accepted_carr
     assert transition["rejected_carrier_ids"] == []
     assert transition["terminal_result"]["carrier_ids"] == current_ids
     assert transition["terminal_result"]["final_result"].startswith(
-        "Workspace artifact delivered at final.md"
+        "TaskWorkspace artifact delivered at final.md"
     )
     assert "Full report body" not in transition["terminal_result"]["final_result"]
     inventory = task._lifecycle_state.carrier_inventory

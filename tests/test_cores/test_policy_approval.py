@@ -125,12 +125,14 @@ async def test_policy_approval_triggerflow_gate_pending_and_resume():
 
 
 @pytest.mark.asyncio
-async def test_policy_approval_gate_loads_from_workspace_provider_snapshot(tmp_path):
+async def test_policy_approval_gate_loads_from_record_store_provider_snapshot(tmp_path):
     Agently.configure_policy_approval(handler="fail_closed")
     try:
-        agent = Agently.create_agent("policy-approval-provider-snapshot").use_workspace(tmp_path / "run")
-        workspace = agent.workspace
-        assert workspace is not None
+        agent = Agently.create_agent("policy-approval-provider-snapshot").use_record_store(
+            tmp_path / "run",
+            mode="read_write",
+        )
+        record_store = agent.record_store
         flow = TriggerFlow(name="policy-approval-provider-snapshot")
 
         async def gate(data: TriggerFlowRuntimeData):
@@ -152,29 +154,29 @@ async def test_policy_approval_gate_loads_from_workspace_provider_snapshot(tmp_p
         execution = flow.create_execution(
             auto_close=False,
             runtime_resources={
-                "workspace": workspace,
-                "runtime_event_store": workspace,
+                "record_store": record_store,
+                "runtime_event_store": record_store,
             },
         )
         await execution.async_start(None)
         assert "policy:provider-approval" in execution.get_pending_interrupts()
 
         snapshot_ref = await execution.async_save(step_id="policy-pending")
-        snapshot_state = await workspace.get_data(snapshot_ref)
+        snapshot_state = await record_store.get_data(snapshot_ref)
         assert snapshot_state["interrupts"]["policy:provider-approval"]["status"] == "waiting"
 
         restored = flow.create_execution(
             auto_close=False,
             runtime_resources={
-                "workspace": workspace,
-                "runtime_event_store": workspace,
+                "record_store": record_store,
+                "runtime_event_store": record_store,
             },
         )
         load = await restored.async_load(
             snapshot_state,
             runtime_resources={
-                "workspace": workspace,
-                "runtime_event_store": workspace,
+                "record_store": record_store,
+                "runtime_event_store": record_store,
             },
         )
         assert load["ready"] is True
@@ -186,8 +188,8 @@ async def test_policy_approval_gate_loads_from_workspace_provider_snapshot(tmp_p
         )
         snapshot = await restored.async_close()
         resumed_ref = await restored.async_save(step_id="policy-approved")
-        resumed_state = await workspace.get_data(resumed_ref)
-        runtime_events = await workspace.query_runtime_events(restored.id)
+        resumed_state = await record_store.get_data(resumed_ref)
+        runtime_events = await record_store.query_runtime_events(restored.id)
         event_types = [event["event_type"] for event in runtime_events]
 
         assert snapshot["policy_decision"]["approved"] is True

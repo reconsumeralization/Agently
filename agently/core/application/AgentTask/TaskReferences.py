@@ -17,12 +17,33 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from agently.core.Workspace.Errors import WorkspaceError, WorkspacePolicyError
-from agently.core.Workspace.Identity.Encoding import decode_base62, encode_base62
 from agently.utils import DataFormatter
+
+
+_BASE62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def encode_base62(value: int) -> str:
+    if value < 0:
+        raise ValueError("Base62 values cannot be negative.")
+    if value == 0:
+        return _BASE62_ALPHABET[0]
+    encoded = ""
+    current = value
+    while current:
+        current, remainder = divmod(current, len(_BASE62_ALPHABET))
+        encoded = _BASE62_ALPHABET[remainder] + encoded
+    return encoded
+
+
+def decode_base62(value: str) -> int:
+    decoded = 0
+    for character in value:
+        decoded = decoded * len(_BASE62_ALPHABET) + _BASE62_ALPHABET.index(character)
+    return decoded
 
 
 TASK_REFERENCE_CATALOG_SCHEMA_VERSION = "agent_task_reference_catalog/v1"
@@ -49,7 +70,7 @@ class TaskReferenceCatalog:
 
     One monotonically increasing sequence is shared by evidence, reference,
     and binding records. The catalog is in memory until an existing recovery
-    or retention seam explicitly activates a Workspace-backed lease.
+    or retention seam explicitly activates a RecordStore-backed lease.
     """
 
     def __init__(self, task_id: str):
@@ -63,7 +84,7 @@ class TaskReferenceCatalog:
         self._bindings: dict[str, dict[str, Any]] = {}
         self._fingerprints: dict[str, str] = {}
         self._leased_capacity = 0
-        self._workspace_leases: list[dict[str, int]] = []
+        self._task_workspace_leases: list[dict[str, int]] = []
 
     @property
     def high_water(self) -> int:
@@ -205,7 +226,7 @@ class TaskReferenceCatalog:
     def offered_references(
         self,
         *,
-        eligible_roles: Sequence[str] = ("action", "source", "workspace_readback"),
+        eligible_roles: Sequence[str] = ("action", "source", "task_workspace_readback"),
     ) -> dict[str, dict[str, Any]]:
         roles = {str(role).strip() for role in eligible_roles if str(role).strip()}
         offered: dict[str, dict[str, Any]] = {}
@@ -301,22 +322,6 @@ class TaskReferenceCatalog:
             )
         )
 
-    async def activate_persistence(self, workspace: Any, *, reserve: int = 256) -> None:
-        required_capacity = max(self._high_water, 1)
-        if self._leased_capacity >= required_capacity:
-            return
-        catalog = getattr(workspace.backend, "_identity_catalog", None)
-        lease = getattr(catalog, "lease_task_range", None)
-        if not callable(lease):
-            raise WorkspacePolicyError("Workspace backend cannot persist the private task reference catalog.")
-        lease_size = max(int(reserve), required_capacity - self._leased_capacity)
-        typed_lease = cast(Callable[..., Awaitable[tuple[int, int]]], lease)
-        start, end = await typed_lease(self.task_id, size=lease_size)
-        if end < start or (end - start + 1) != lease_size:
-            raise WorkspaceError("Workspace returned an invalid task identity lease.")
-        self._workspace_leases.append({"start": int(start), "end": int(end)})
-        self._leased_capacity += lease_size
-
     def snapshot(self) -> dict[str, Any]:
         persistent_evidence = {
             evidence_id: {
@@ -332,7 +337,7 @@ class TaskReferenceCatalog:
                     "task_id": self.task_id,
                     "high_water": str(self._high_water),
                     "leased_capacity": str(self._leased_capacity),
-                    "workspace_leases": self._workspace_leases,
+                    "task_workspace_leases": self._task_workspace_leases,
                     "evidence": persistent_evidence,
                     "references": self._references,
                     "bindings": self._bindings,
@@ -359,10 +364,10 @@ class TaskReferenceCatalog:
         if not isinstance(fingerprints, Mapping):
             raise ValueError("Task reference catalog fingerprint index is invalid.")
         catalog._fingerprints = {str(key): str(item) for key, item in fingerprints.items()}
-        leases = value.get("workspace_leases", [])
+        leases = value.get("task_workspace_leases", [])
         if not isinstance(leases, Sequence) or isinstance(leases, str | bytes | bytearray):
             raise ValueError("Task reference catalog lease list is invalid.")
-        catalog._workspace_leases = [
+        catalog._task_workspace_leases = [
             {"start": int(cast(Mapping[str, Any], lease)["start"]), "end": int(cast(Mapping[str, Any], lease)["end"])}
             for lease in leases
             if isinstance(lease, Mapping)
@@ -470,19 +475,19 @@ class TaskReferenceCatalog:
             or "verifier_readback" in kind
             or (
                 kind in {"taskboard_ref", "taskboard_evidence_ref"}
-                and declared_role == "workspace_artifact"
+                and declared_role == "task_workspace_artifact"
                 and (
                     (
                         source.startswith("agent_task.taskboard.card.")
-                        and source.endswith(".workspace_artifact")
+                        and source.endswith(".task_workspace_artifact")
                     )
-                    or source.startswith("agent_task.workspace_artifact.")
+                    or source.startswith("agent_task.task_workspace_artifact.")
                 )
             )
         ):
             return "transport"
         if "readback" in kind:
-            return "workspace_readback"
+            return "task_workspace_readback"
         return "source"
 
     @staticmethod

@@ -115,7 +115,7 @@ python examples/execution_resource/09_action_common_code_runtime_local.py
 Notes:
 
 - Execution Resource declarations are lazy; a declaration does not start a sandbox or transport.
-- Business examples should prefer `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_workspace_file_actions(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and `agent.enable_sqlite(...)` over direct manager/provider APIs. Python, shell, Node.js, and common-language code runtime helpers default to Docker-backed runtime profiles; use `sandbox="trusted_local"` only for trusted local compatibility.
+- Business examples should prefer `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_task_workspace_file_actions(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and `agent.enable_sqlite(...)` over direct manager/provider APIs. Python, shell, Node.js, and common-language code runtime helpers default to Docker-backed runtime profiles; use `sandbox="trusted_local"` only for trusted local compatibility.
 - Built-in providers currently cover MCP, Bash, Python, Node, Docker, Browser, and SQLite. Search is intentionally not an Execution Resource provider; configure proxy, timeout, backend, and region on `agently.builtins.actions.Search(...)`.
 - Ready handles are health-checked before reuse. Unhealthy handles emit `execution_resource.unhealthy`, are released, and are replaced with fresh handles.
 - `enable_*` helpers provide default action descriptions, so `desc=` is optional. By default `desc=` appends extra guidance; `desc_mode="override"` replaces the default description only when you need full control.

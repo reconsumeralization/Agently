@@ -4,7 +4,7 @@
 
 1. [Coding Agents](coding-agents.md)：用 Agently-Skills companion repo 帮 Codex、Claude Code、Cursor 等工具获得当前 Agently 指引。
 2. [Skills Compatibility](skills-executor.md)：框架内通过 Agent API、plan、Actions 和 legacy SkillsExecutor facade 消费 runtime skills。
-3. [Agently 4.1.4.2 开发说明](release-notes-4.1.4.2.md)：当前破坏式 Workspace direct-root、懒私有状态和终态清理工作。
+3. [Agently 4.1.4.2 开发说明](release-notes-4.1.4.2.md)：TaskContext、TaskWorkspace、RecordStore 与 SkillLibrary 所有权收敛的破坏式更新。
 4. [Agently 4.1.4.1 Release Notes](release-notes-4.1.4.1.md)：AgentExecutionResult 业务数据和完整数据 reader 兼容性。
 5. [Agently 4.1.4 Development Notes](release-notes-4.1.4.md)：TaskBoard 增量验收和 verifier cache 优化。
 5. [Agently 4.1.3.9 Release Notes](release-notes-4.1.3.9.md)：Workspace retrieval、SessionMemory、AgentTask scoped retrieval、向量索引接缝和公开 typing 加固。

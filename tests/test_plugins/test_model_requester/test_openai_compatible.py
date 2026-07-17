@@ -8,7 +8,7 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv())
 
-from typing import cast
+from typing import Any, cast
 from agently import Agently
 from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.model.Prompt import Prompt
@@ -756,7 +756,10 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
     async for event, payload in plugin.request_model(request_data):
         events.append((event, payload))
     elapsed_seconds = asyncio.get_running_loop().time() - started_at
-    cleanup_tasks = tuple(getattr(plugin, "_stream_cleanup_tasks", ()))
+    cleanup_tasks = cast(
+        tuple[asyncio.Task[Any], ...],
+        tuple(getattr(plugin, "_stream_cleanup_tasks", ())),
+    )
     if cleanup_tasks:
         await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 

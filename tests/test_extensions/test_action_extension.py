@@ -142,9 +142,9 @@ def test_action_extension_set_tool_loop_config():
     agent = Agently.create_agent()
     assert agent.action is agent.tool
     assert callable(agent.use_actions)
-    assert callable(agent.enable_workspace_file_actions)
+    assert callable(agent.enable_task_workspace_file_actions)
     assert callable(agent.enable_coding_agent_actions)
-    assert callable(agent.use_workspace_file_actions)
+    assert callable(agent.use_task_workspace_file_actions)
     assert callable(agent.action_func)
     agent.set_tool_loop(
         enabled=True,
@@ -429,7 +429,7 @@ def test_action_extension_enable_shell_registers_run_bash_action(tmp_path):
     assert f"Allowed working directory roots: {tmp_path}" in spec_desc
     assert "Timeout: 20 seconds." in spec_desc
     assert "Output preview limit: 20000 characters per stream." in spec_desc
-    assert "Prefer dedicated Workspace actions" in spec_desc
+    assert "Prefer dedicated TaskWorkspace actions" in spec_desc
 
     result = agent.action.execute_action(
         "test_run_bash",
@@ -563,7 +563,7 @@ def test_action_extension_enable_shell_persists_large_output_artifacts(tmp_path)
     source_path = tmp_path / "big.txt"
     source_text = "x" * 80
     source_path.write_text(source_text, encoding="utf-8")
-    agent = Agently.create_agent().use_workspace(tmp_path, mode="read_write")
+    agent = Agently.create_agent().use_task_workspace(tmp_path, mode="read_write")
     agent.enable_shell(
         root=tmp_path,
         commands=["cat"],
@@ -586,7 +586,7 @@ def test_action_extension_enable_shell_persists_large_output_artifacts(tmp_path)
     artifact_path = artifacts[0]["path"]
     assert artifacts[0]["stream"] == "stdout"
     assert artifacts[0]["relative_path"].startswith(
-        f".agently/files/{agent.workspace.execution_id}/shell-output/"
+        f".agently/files/{agent.task_workspace.execution_id}/shell-output/"
     )
     assert os.path.exists(artifact_path)
     with open(artifact_path, encoding="utf-8") as handle:
@@ -737,18 +737,18 @@ def test_action_extension_enable_nodejs_trusted_local_keeps_legacy_resource(tmp_
     assert requirement["config"]["cwd"] == str(tmp_path)
 
 
-def test_action_extension_enable_workspace_file_actions_registers_file_actions(tmp_path):
+def test_action_extension_enable_task_workspace_file_actions_registers_file_actions(tmp_path):
     agent = Agently.create_agent()
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes" / "todo.txt").write_text("fix runtime docs\nship examples\n", encoding="utf-8")
 
-    agent.enable_workspace_file_actions(root=tmp_path, write=True, desc="Project notes workspace.")
+    agent.enable_task_workspace_file_actions(root=tmp_path, write=True, desc="Project notes task_workspace.")
 
     spec = agent.action.action_registry.get_spec("read_file")
     assert spec is not None
     spec_desc = str(spec.get("desc", ""))
-    assert "registered Workspace file IO handlers" in spec_desc
-    assert "Project notes workspace." in spec_desc
+    assert "registered TaskWorkspace file IO handlers" in spec_desc
+    assert "Project notes task_workspace." in spec_desc
     assert agent.action.action_registry.get_spec("export_file") is None
 
     listed = agent.action.execute_action("list_files", {"path": "notes"})
@@ -768,7 +768,7 @@ def test_action_extension_enable_workspace_file_actions_registers_file_actions(t
     binary_read = agent.action.execute_action("read_file", {"path": "notes/payload.bin"})
     assert binary_read.get("status") == "success"
     assert binary_read.get("data", {}).get("readable") is False
-    assert binary_read.get("data", {}).get("diagnostics", [])[0]["code"] == "workspace.file.no_read_handler"
+    assert binary_read.get("data", {}).get("diagnostics", [])[0]["code"] == "task_workspace.file.no_read_handler"
 
     written = agent.action.execute_action("write_file", {"path": "notes/out.txt", "content": "ok"})
     assert written.get("status") == "success"
@@ -778,7 +778,7 @@ def test_action_extension_enable_workspace_file_actions_registers_file_actions(t
     assert outside.get("status") == "error"
 
 
-def test_action_extension_workspace_file_actions_export_flag_and_idempotent_user_action(tmp_path):
+def test_action_extension_task_workspace_file_actions_export_flag_and_idempotent_user_action(tmp_path):
     agent = Agently.create_agent()
     (tmp_path / "input.md").write_text("# Hello\n", encoding="utf-8")
     agent.register_action(
@@ -788,7 +788,7 @@ def test_action_extension_workspace_file_actions_export_flag_and_idempotent_user
         func=lambda path: {"user_action": path},
     )
 
-    agent.enable_workspace_file_actions(root=tmp_path, write=True, export=True)
+    agent.enable_task_workspace_file_actions(root=tmp_path, write=True, export=True)
 
     assert agent.action.execute_action("read_file", {"path": "input.md"}).get("data") == {"user_action": "input.md"}
     assert agent.action.action_registry.get_spec("export_file") is not None
@@ -802,19 +802,19 @@ def test_action_extension_workspace_file_actions_export_flag_and_idempotent_user
     )
     assert export_result.get("status") == "success"
     assert export_result.get("data", {}).get("exported") is False
-    assert export_result.get("data", {}).get("diagnostics", [])[0]["code"] == "workspace.file.no_export_handler"
+    assert export_result.get("data", {}).get("diagnostics", [])[0]["code"] == "task_workspace.file.no_export_handler"
 
 
 def test_action_extension_enable_coding_agent_actions_registers_guarded_file_tools(tmp_path):
-    agent = Agently.create_agent("coding-agent-actions").use_workspace(
+    agent = Agently.create_agent("coding-agent-actions").use_task_workspace(
         tmp_path / "run",
         mode="read_write",
     )
-    workspace = agent.workspace
-    assert workspace is not None
-    (workspace.root / "src").mkdir(parents=True)
-    (workspace.root / "src" / "app.py").write_text("print('old')\n", encoding="utf-8")
-    (workspace.root / "src" / "notes.md").write_text("Project Atlas\n", encoding="utf-8")
+    task_workspace = agent.task_workspace
+    assert task_workspace is not None
+    (task_workspace.root / "src").mkdir(parents=True)
+    (task_workspace.root / "src" / "app.py").write_text("print('old')\n", encoding="utf-8")
+    (task_workspace.root / "src" / "notes.md").write_text("Project Atlas\n", encoding="utf-8")
 
     agent.enable_coding_agent_actions()
 
@@ -847,9 +847,9 @@ def test_action_extension_enable_coding_agent_actions_registers_guarded_file_too
         },
     )
     assert edited.get("status") == "success"
-    assert "print('new')" in (workspace.root / "src" / "app.py").read_text(encoding="utf-8")
+    assert "print('new')" in (task_workspace.root / "src" / "app.py").read_text(encoding="utf-8")
 
-    (workspace.root / "src" / "app.py").write_text("print('user change')\n", encoding="utf-8")
+    (task_workspace.root / "src" / "app.py").write_text("print('user change')\n", encoding="utf-8")
     stale_edit = agent.action.execute_action(
         "edit_file",
         {
@@ -882,24 +882,24 @@ def test_action_extension_enable_coding_agent_actions_registers_guarded_file_too
         {"patch": patch, "expected_files": ["src/app.py"]},
     )
     assert patched.get("status") == "success"
-    assert "print('patched')" in (workspace.root / "src" / "app.py").read_text(encoding="utf-8")
+    assert "print('patched')" in (task_workspace.root / "src" / "app.py").read_text(encoding="utf-8")
 
     outside = agent.action.execute_action("edit_file", {"path": "../outside.py", "old_string": "", "new_string": "x"})
     assert outside.get("status") == "error"
 
 
-def test_action_extension_enable_workspace_file_actions_inherits_foundation_workspace(tmp_path):
-    agent = Agently.create_agent().use_workspace(tmp_path / "run")
-    workspace = agent.workspace
-    assert workspace is not None
-    (workspace.root / "notes").mkdir(parents=True)
-    (workspace.root / "notes" / "todo.txt").write_text("use foundation workspace\n", encoding="utf-8")
+def test_action_extension_enable_task_workspace_file_actions_inherits_foundation_workspace(tmp_path):
+    agent = Agently.create_agent().use_task_workspace(tmp_path / "run")
+    task_workspace = agent.task_workspace
+    assert task_workspace is not None
+    (task_workspace.root / "notes").mkdir(parents=True)
+    (task_workspace.root / "notes" / "todo.txt").write_text("use foundation task_workspace\n", encoding="utf-8")
 
-    agent.enable_workspace_file_actions()
+    agent.enable_task_workspace_file_actions()
 
     spec = agent.action.action_registry.get_spec("read_file")
     assert spec is not None
-    assert spec.get("meta", {}).get("root") == str(workspace.root)
+    assert spec.get("meta", {}).get("root") == str(task_workspace.root)
 
     listed = agent.action.execute_action("list_files", {"path": "notes"})
     assert listed.get("status") == "success"
@@ -910,54 +910,51 @@ def test_action_extension_enable_workspace_file_actions_inherits_foundation_work
     assert read.get("data", {}).get("path") == "notes/todo.txt"
 
 
-def test_action_extension_enable_workspace_file_actions_uses_default_workspace_without_private_state(
+def test_action_extension_enable_task_workspace_file_actions_uses_isolated_default_root(
     tmp_path,
     monkeypatch,
 ):
     monkeypatch.chdir(tmp_path)
     agent = Agently.create_agent()
-    workspace = agent.workspace
+    task_workspace = agent.task_workspace
 
-    agent.enable_workspace_file_actions()
-
-    spec = agent.action.action_registry.get_spec("read_file")
-    assert spec is not None
-    assert spec.get("meta", {}).get("root") == str(workspace.root)
-    assert workspace.root == tmp_path.resolve()
-    assert not (workspace.root / ".agently").exists()
-
-
-def test_action_extension_enable_workspace_compat_alias_warns(tmp_path):
-    agent = Agently.create_agent().use_workspace(tmp_path / "run")
-    workspace = agent.workspace
-    assert workspace is not None
-
-    with pytest.warns(DeprecationWarning, match="enable_workspace_file_actions"):
-        agent.enable_workspace()
+    agent.enable_task_workspace_file_actions()
 
     spec = agent.action.action_registry.get_spec("read_file")
     assert spec is not None
-    assert spec.get("meta", {}).get("root") == str(workspace.root)
+    assert spec.get("meta", {}).get("root") == str(task_workspace.root)
+    assert task_workspace.root == (
+        tmp_path / ".agently" / "task_workspaces" / agent.id
+    ).resolve()
+    assert not (task_workspace.root / ".agently").exists()
+
+
+def test_action_extension_removes_ambiguous_task_workspace_aliases():
+    agent = Agently.create_agent()
+
+    assert not hasattr(agent, "enable_workspace")
+    assert not hasattr(agent, "enable_workspace_file_actions")
+    assert not hasattr(agent, "use_workspace_file_actions")
 
 
 def test_action_extension_shell_and_nodejs_inherit_foundation_workspace(tmp_path):
-    agent = Agently.create_agent().use_workspace(tmp_path / "run")
-    workspace = agent.workspace
-    assert workspace is not None
-    agent.enable_shell(commands=["pwd"], action_id="workspace_shell")
-    agent.enable_nodejs(action_id="workspace_node")
+    agent = Agently.create_agent().use_task_workspace(tmp_path / "run")
+    task_workspace = agent.task_workspace
+    assert task_workspace is not None
+    agent.enable_shell(commands=["pwd"], action_id="task_workspace_shell")
+    agent.enable_nodejs(action_id="task_workspace_node")
 
-    shell_spec = agent.action.action_registry.get_spec("workspace_shell")
+    shell_spec = agent.action.action_registry.get_spec("task_workspace_shell")
     assert shell_spec is not None
     shell_req = shell_spec.get("execution_resources", [])[0]
     shell_profile = shell_req.get("config", {}).get("runtime_profile", {})
-    assert shell_profile.get("allowed_workdir_roots") == [str(workspace.root)]
+    assert shell_profile.get("allowed_workdir_roots") == [str(task_workspace.root)]
 
-    node_spec = agent.action.action_registry.get_spec("workspace_node")
+    node_spec = agent.action.action_registry.get_spec("task_workspace_node")
     assert node_spec is not None
     node_req = node_spec.get("execution_resources", [])[0]
     node_profile = node_req.get("config", {}).get("runtime_profile", {})
-    assert node_profile.get("cwd") == str(workspace.root)
+    assert node_profile.get("cwd") == str(task_workspace.root)
 
 
 @pytest.mark.asyncio

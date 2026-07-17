@@ -118,7 +118,7 @@ Expected shape:
 ```python
 agent.enable_python(...)
 agent.enable_shell(...)
-agent.enable_workspace_file_actions(...)
+agent.enable_task_workspace_file_actions(...)
 agent.enable_nodejs(...)
 agent.enable_code_runtime(...)
 agent.enable_sqlite(...)
@@ -155,10 +155,10 @@ appropriate only when the capability is genuinely small and splitting it would
 be over-design.
 
 Landed examples include `core/Action`, `core/TriggerFlow`,
-`core/orchestration/TaskDAG`, `core/Workspace`,
-`builtins/plugins/ExecutionResourceProvider`, and
-`builtins/plugins/SkillsManager`; `builtins/plugins/SkillsExecutor` is retained
-as a compatibility facade. Keep public imports stable through package
+`core/orchestration/TaskDAG`, `core/context`, `core/TaskWorkspace`,
+`core/storage`, `builtins/plugins/ExecutionResourceProvider`, and
+`core/application/SkillLibrary`. `core/application/SkillsExecutor` is a thin
+compatibility facade, not an execution plugin. Keep public imports stable through package
 `__init__.py` files and top-level re-exports.
 
 ## Action And ExecutionResource

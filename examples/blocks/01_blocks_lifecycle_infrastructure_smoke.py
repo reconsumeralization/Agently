@@ -1,148 +1,80 @@
-# Copyright 2023-2026 AgentEra(Agently.Tech)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Blocks lifecycle infrastructure smoke.
-
-This example is intentionally scoped to the Blocks compiler/runtime substrate,
-not to model-owned planning or final business acceptance. The mocked ticket
-lookup is the external business-system boundary; Skill activation, Blocks
-compilation, TriggerFlow execution, Workspace evidence, ResultAdapter, and
-EvidenceEnvelope are real framework paths.
-
-Run this as a quick substrate check before business examples. The script prints
-the observed evidence fields from the actual run; those values are process
-evidence, not a canned natural-language answer.
-"""
-
 from __future__ import annotations
 
 import asyncio
 
 from agently import Agently
-from agently.core.application.SkillsExecutor import DictSkillSource, SkillCapabilityAdapter
-
-
-def build_skill_adapter() -> SkillCapabilityAdapter:
-    return SkillCapabilityAdapter(
-        DictSkillSource(
-            {
-                "incident-review": {
-                    "skill_id": "incident-review",
-                    "card": {
-                        "name": "Incident Review",
-                        "description": "Guidance for incident ticket evidence review.",
-                    },
-                    "guidance": {
-                        "body": (
-                            "Use ticket lookup records, write Workspace evidence, "
-                            "and validate readback before reporting status."
-                        )
-                    },
-                    "resource_index": {
-                        "references/evidence.md": {
-                            "kind": "reference",
-                            "summary": "Evidence and readback checklist",
-                            "size": 64,
-                        }
-                    },
-                }
-            }
-        )
-    )
+from agently.core.context import TaskContext
+from agently.types.data import ContextBudget, ContextConsumer
 
 
 async def main() -> None:
-    workspace = Agently.create_workspace()
+    task_context = TaskContext("blocks-context-smoke")
+    task_context.put(
+        role="instruction",
+        content="Escalate refunds above USD 1000 to finance approval.",
+        source_ref="policy/refunds",
+        required=True,
+    )
+    reader = task_context.reader(
+        consumer=ContextConsumer("blocks:refund-review"),
+        phase="execution",
+        budget=ContextBudget(max_chars=2000, max_blocks=8, max_block_chars=1000),
+    )
+
     graph = Agently.blocks.compile(
         {
-            "plan_id": "blocks-incident-review",
+            "plan_id": "blocks-context-read-smoke",
             "plan_blocks": [
                 {
-                    "id": "activate",
-                    "plan_block_id": "skill_activation",
-                    "kind": "skill_activation",
+                    "id": "policy_context",
+                    "plan_block_id": "context_read",
+                    "kind": "context_read",
+                    "intent": "Read the refund approval policy.",
                     "bound_inputs": {
-                        "skill_id": "incident-review",
-                        "task": "review ticket INC-42 evidence",
+                        "operation": "read",
+                        "query": "refund approval policy",
+                        "explicit_refs": ["policy/refunds"],
                     },
                 },
                 {
-                    "id": "lookup_ticket",
-                    "plan_block_id": "action_call",
-                    "kind": "action_call",
-                    "runtime_preferences": {"handler": "ticket_lookup"},
-                },
-                {
-                    "id": "store_evidence",
-                    "plan_block_id": "workspace_operation",
-                    "kind": "workspace_operation",
-                    "bound_inputs": {
-                        "operation": "ingest",
-                        "collection": "observations",
-                        "kind": "incident_ticket_evidence",
-                        "summary": "Incident ticket lookup evidence",
-                    },
-                },
-                {
-                    "id": "validate",
+                    "id": "validate_context",
                     "plan_block_id": "validation",
                     "kind": "validation",
-                    "evidence_contract": {"requires_workspace_ref": True},
+                    "runtime_preferences": {"handler": "validate_context"},
                 },
             ],
-            "edges": [
-                {"from": "activate", "to": "lookup_ticket"},
-                {"from": "lookup_ticket", "to": "store_evidence"},
-                {"from": "store_evidence", "to": "validate"},
-            ],
+            "edges": [{"from": "policy_context", "to": "validate_context"}],
         }
     )
 
-    async def ticket_lookup(context):
+    async def validate_context(context):
+        results = context["state"].get("execution_block_results", [])
+        package = results[-1]["output"]["context_package"] if results else {}
+        blocks = package.get("blocks", [])
         return {
-            "system": "mock_ticket_system",
-            "ticket_id": "INC-42",
-            "status": "open",
-            "customer": "ACME",
-            "readback": "lookup confirmed by mock_ticket_system",
-            "input_seen": bool(context["input"]),
+            "ok": bool(blocks and "USD 1000" in str(blocks[0].get("content"))),
+            "context_block_count": len(blocks),
         }
 
-    flow = Agently.blocks.bind_runtime(graph)
-    execution = flow.create_execution(
+    execution = Agently.blocks.bind_runtime(graph).create_execution(
         auto_close=False,
-        workspace=workspace,
+        record_store=False,
         runtime_resources={
-            "skills.capability_adapter": build_skill_adapter(),
-            "blocks.handlers": {"ticket_lookup": ticket_lookup},
+            "context_reader": reader,
+            "blocks.handlers": {"validate_context": validate_context},
         },
     )
-    await execution.async_start({"ticket_id": "INC-42"})
+    await execution.async_start({"case": "refund-review"})
     snapshot = await execution.async_close(timeout=5)
-
-    evidence = Agently.blocks.map_evidence(graph, snapshot)
     result = Agently.blocks.map_result(graph, snapshot)
-    action_output = evidence.action_evidence[0]["output"]
-    validation_output = result["semantic_outputs"]["validate:validation"]
-
-    print(f"plan_id={evidence.plan_id}")
-    print(f"skill_evidence_kind={evidence.skill_evidence[0]['evidence_kind']}")
-    print(f"skill_proves_side_effect={evidence.skill_evidence[0]['proves_side_effect']}")
-    print(f"ticket_status={action_output['status']}")
-    print(f"workspace_ref_count={len(evidence.workspace_refs)}")
-    print(f"validation_ok={validation_output['ok']}")
+    terminal = list(result["semantic_outputs"].values())[-1]
+    print(terminal)
+    assert terminal == {"ok": True, "context_block_count": 1}
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# `context_read` consumes one caller-bound ContextReader. It never installs or
+# executes Skills and never performs file or persistence side effects.

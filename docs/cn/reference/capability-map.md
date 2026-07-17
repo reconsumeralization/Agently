@@ -16,12 +16,12 @@ keywords: Agently, 能力地图, 学习路径, request, TaskDAG, Dynamic Task, T
 |---|---|---|
 | 1. 单次请求 | 我能不能从模型拿到一个结构化答案？ | [快速开始](../start/quickstart.md)、[Requests 概览](../requests/overview.md) |
 | 2. 稳定输出 | 我每次都能拿到期望的字段吗？ | [Schema as Prompt](../requests/schema-as-prompt.md)、[输出控制](../requests/output-control.md) |
-| 3. 响应与记忆 | 我能复用一次响应、延续受控窗口对话，或跨 turn 保存任务 records 吗？ | [模型响应](../requests/model-response.md)、[会话记忆](../requests/session-memory.md)、[Workspace](../requests/workspace.md) |
+| 3. 响应、上下文与记忆 | 我能复用响应、组织任务信息、延续对话或持久化 records 吗？ | [模型响应](../requests/model-response.md)、[会话记忆](../requests/session-memory.md)、[任务上下文、文件与记录](../requests/workspace.md) |
 | 4. Action 与执行资源 | 模型是否需要调用函数、MCP server 或带托管执行资源的沙箱命令？ | [Actions 概览](../actions/overview.md)、[Action Runtime](../actions/action-runtime.md)、[ExecutionResource](../actions/execution-environment.md) |
 | 5. 知识与服务 | 是否需要检索、HTTP、SSE 或 WebSocket 暴露？ | [知识库](../knowledge/knowledge-base.md)、[FastAPI 服务封装](../services/fastapi.md) |
 | 6. 观测与开发 | 是否需要 observation event、DevTools 或 coding-agent 指引？ | [观测概览](../observability/overview.md)、[Coding Agents](../development/coding-agents.md) |
 | 7. Agent 自动编排 | 是否需要一次 Agent turn 在模型响应、Actions 或 Skills 中选择路线？ | [Agent 自动编排](../start/auto-orchestration.md) |
-| 8. AgentTask strategy | 是否需要一个业务任务经过计划、有边界执行、Workspace 证据、验证和 replan？ | [Agent 自动编排](../start/auto-orchestration.md#agenttask-策略) |
+| 8. AgentTask strategy | 是否需要一个业务任务经过计划、有边界执行、证据、验证和 replan？ | [Agent 自动编排](../start/auto-orchestration.md#agenttask-策略) |
 | 9. TaskDAG / DAG substrate | 是否需要让模型或应用提交、校验、定制并执行 DAG？ | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |
 | 10. 编排 | 分支、并发、暂停恢复、持久化 | [TriggerFlow 概览](../triggerflow/overview.md) |
 
@@ -36,10 +36,10 @@ keywords: Agently, 能力地图, 学习路径, request, TaskDAG, Dynamic Task, T
 | 想要字段级流式 UX | [Async First](../start/async-first.md) → [输出控制](../requests/output-control.md) |
 | 一次响应想多种方式复用 | [模型响应](../requests/model-response.md) |
 | 多轮对话且要控制窗口 | [会话记忆](../requests/session-memory.md) |
-| 多轮任务需要持久 observations、artifacts、decisions 或 checkpoints | [Workspace](../requests/workspace.md) |
-| 显式 workflow loop 需要持久结构化状态、record links、execution snapshot 查询和 recall | [TriggerFlow 概览](../triggerflow/overview.md) + [Workspace](../requests/workspace.md)；见 `examples/workspace/workspace_loop_foundation.py` |
+| 任务需要文件、持久 records 或多来源有界上下文 | [任务上下文、文件与记录](../requests/workspace.md) |
+| 显式 workflow loop 需要 records、links、snapshots 与文件交付物 | [TriggerFlow 概览](../triggerflow/overview.md) + [任务上下文、文件与记录](../requests/workspace.md)；见 `examples/task_workspace/task_context_loop_foundation.py` |
 | 模型要调工具 / MCP | [Action Runtime](../actions/action-runtime.md) |
-| 需要常见 Python / shell / workspace / Node.js / 常用语言代码 / SQLite 能力 | [Action Runtime](../actions/action-runtime.md)，优先从 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)`、`agent.enable_nodejs(...)`、`agent.enable_code_runtime(...)` 或 `agent.enable_sqlite(...)` 开始 |
+| 需要常见 Python / shell / TaskWorkspace / Node.js / 常用语言代码 / SQLite 能力 | [Action Runtime](../actions/action-runtime.md)，优先从 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_task_workspace_file_actions(...)`、`agent.enable_nodejs(...)`、`agent.enable_code_runtime(...)` 或 `agent.enable_sqlite(...)` 开始 |
 | 需要 web search 或页面 browse | [Action Runtime](../actions/action-runtime.md)，使用 `from agently.builtins.actions import Search, Browse` 和 `agent.use_actions(...)` |
 | 执行前需要托管 MCP/sandbox/process/browser/SQLite 生命周期 | [ExecutionResource](../actions/execution-environment.md)，通常面向 action/plugin 开发者 |
 | 判断新扩展应该放在哪一层 | [扩展边界](../architecture/extension-boundaries.md) |
@@ -58,15 +58,15 @@ keywords: Agently, 能力地图, 学习路径, request, TaskDAG, Dynamic Task, T
 ## 决策捷径
 
 - 「我需要 TriggerFlow 吗？」——只在有明确的阶段、分支、并发或暂停恢复时才需要。带重试的单次请求不需要 TriggerFlow。
-- 「应该介入哪一层？」——当问题是该从 ModelRequest、AgentExecution、TaskDAG、TriggerFlow 还是 Workspace 入手时，看 [执行层选择](execution-layer-selection.md)。
+- 「应该介入哪一层？」——需要区分执行、上下文、文件和持久化 owner 时，看 [执行层选择](execution-layer-selection.md)。
 - 「TaskDAG、Dynamic Task 还是 TriggerFlow？」——当图本身是提交上来的数据，需要规划、校验、裁剪、解析 handler、定制并执行时，用 TaskDAG 模块；普通应用代码想要紧凑兼容入口时，用 DynamicTask facade；当你在代码里掌握稳定工作流拓扑时，直接用 TriggerFlow。
 - 「Blocks 放在哪里？」——Blocks 把 `ExecutionPlan` / `PlanBlock` instances
   降低为 TriggerFlow-backed `ExecutionBlockGraph`。已校验 TaskDAG nodes 只有显式
   调用 `compile_blocks(...)` / `async_run_blocks(...)` 才走该 bridge；默认 TaskDAG
   路径直接进入 TriggerFlow。见 [Blocks 生命周期](blocks-lifecycle.md)。
 - 「Sync 还是 async？」——脚本和 demo 用 sync。服务、流式 UI 与 TriggerFlow 用 async。见 [Async First](../start/async-first.md)。
-- 「Action 还是 tool API？」——新代码：`Agently.action` / `agent.use_actions(...)`、来自 `agently.builtins.actions` 的内置 package，以及 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_workspace_file_actions(...)` 等场景 helper。已有的 `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` 仍可用，但定位为兼容入口；见 [Action Runtime](../actions/action-runtime.md)。
-- 「Agent start 还是显式 API？」——模型/Action/Skills 候选驱动的自动编排用 `agent.start()`；需要路线诊断或过程流式输出时，用 `agent.create_execution()`。当应用或可视化自动化界面拥有提交式 DAG 时，直接使用 TaskDAG / DynamicTask。
+- 「Action 还是 tool API？」——新代码：`Agently.action` / `agent.use_actions(...)`、来自 `agently.builtins.actions` 的内置 package，以及 `agent.enable_python(...)`、`agent.enable_shell(...)`、`agent.enable_task_workspace_file_actions(...)` 等场景 helper。已有的 `tool_func` / `use_tools` / `use_mcp` / `use_sandbox` 仍可用，但定位为兼容入口；见 [Action Runtime](../actions/action-runtime.md)。
+- 「Agent start 还是显式 API？」——带可选 Skill Context 的模型/Action 候选驱动自动编排用 `agent.start()`；需要路线诊断或过程流式输出时，用 `agent.create_execution()`。当应用或可视化自动化界面拥有提交式 DAG 时，直接使用 TaskDAG / DynamicTask。
 - 「AgentTask 还是 TriggerFlow？」——当模型拥有单个业务任务的计划、验证和 replan loop 时，用 `agent.create_task(...)`；它返回 task-strategy `AgentExecution`，因此通过 AgentExecution result facade 读取 result/meta/stream/task refs。当应用掌握明确阶段、分支和暂停恢复拓扑时，直接用 TriggerFlow。
 - 「Executor 还是 ExecutionResource？」——Executor 负责一次调用；ExecutionResource 在调用前准备可复用或受 policy 约束的依赖；见 [ExecutionResource](../actions/execution-environment.md)。
 - 「Core API 还是语法糖？」——应用开发者应优先使用 built-in actions 和 Agent Component helpers。Core manager 与 provider 面向框架、action、plugin 开发者；见 [扩展边界](../architecture/extension-boundaries.md)。

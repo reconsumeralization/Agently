@@ -53,7 +53,6 @@ async def main() -> None:
 
     options = stream_options()
     options["capability_evidence_requirements"] = [
-        {"capability_id": skill_id, "capability_kind": "skill", "kind": "capability_used"},
         {"capability_id": "get_portfolio_mandate", "capability_kind": "action", "kind": "action_succeeded"},
         {"capability_id": "equity_market_snapshot", "capability_kind": "action", "kind": "action_succeeded"},
         {"capability_id": "equity_news_digest", "capability_kind": "action", "kind": "action_succeeded"},
@@ -65,7 +64,7 @@ async def main() -> None:
             "Prepare a portfolio-facing semiconductor risk brief. "
             "Use get_portfolio_mandate, the local MCP equity market and news digest tools, "
             "and the installed equity-risk-reviewer Skill guidance. "
-            "Write the brief to final.md in the Workspace and return a compact final summary. "
+            "Write the brief to final.md in the TaskWorkspace and return a compact final summary. "
             "Treat MCP market data as example non-live data, not investment advice.",
             success_criteria=[
                 "The brief covers NVDA, AMD, and AVGO.",
@@ -77,7 +76,7 @@ async def main() -> None:
         )
         .strategy("auto", options=options)
     )
-    await async_run_and_print(execution, provider=provider, workspace=workspace)
+    await async_run_and_print(execution, provider=provider, task_workspace=workspace)
 
 
 if __name__ == "__main__":

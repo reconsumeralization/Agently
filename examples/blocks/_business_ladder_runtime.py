@@ -36,7 +36,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agently import Agently
-from agently.core.application.SkillsExecutor import DictSkillSource, SkillCapabilityAdapter
 
 
 MODEL_TIMEOUT_SECONDS = float(os.getenv("BLOCKS_COMPLEXITY_MODEL_TIMEOUT_SECONDS", "120"))
@@ -52,7 +51,6 @@ class RequiredBusinessCase(TypedDict):
 
 
 class BusinessCase(RequiredBusinessCase, total=False):
-    skill_contracts: Mapping[str, Mapping[str, Any]]
     runtime_resources: Mapping[str, Any]
     needs_model: bool
 
@@ -95,10 +93,6 @@ def configure_model() -> str:
 
     Agently.set_settings("agent_task.progress.language", os.getenv("AGENTLY_PROGRESS_LANGUAGE", "auto"))
     return provider
-
-
-def build_skill_adapter(skill_contracts: Mapping[str, Mapping[str, Any]]) -> SkillCapabilityAdapter:
-    return SkillCapabilityAdapter(DictSkillSource({key: dict(value) for key, value in skill_contracts.items()}))
 
 
 async def emit(context: Mapping[str, Any], item: Mapping[str, Any]) -> None:
@@ -153,7 +147,7 @@ async def generate_model_artifact(
         .instruct(
             [
                 *instructions,
-                "Use only the supplied business context and any activated Skill guidance.",
+                "Use only the supplied business context and caller-provided TaskContext guidance.",
                 "Do not invent hidden external facts, approvals, receipts, metrics, or tool results.",
             ]
         )
@@ -273,7 +267,6 @@ async def run_case(
     graph: Any,
     *,
     handlers: Mapping[str, Callable[..., Any]],
-    skill_contracts: Mapping[str, Mapping[str, Any]] | None = None,
     extra_runtime_resources: Mapping[str, Any] | None = None,
     input_payload: Any | None = None,
 ) -> dict[str, Any]:
@@ -282,14 +275,11 @@ async def run_case(
     print("=" * 72)
     flow = Agently.blocks.bind_runtime(graph)
     runtime_resources: dict[str, Any] = {"blocks.handlers": dict(handlers)}
-    if skill_contracts:
-        runtime_resources["skills.capability_adapter"] = build_skill_adapter(skill_contracts)
-        runtime_resources["business.skill_contracts"] = {key: dict(value) for key, value in skill_contracts.items()}
     if extra_runtime_resources:
         runtime_resources.update(dict(extra_runtime_resources))
     execution = flow.create_execution(
         auto_close=False,
-        workspace=Agently.create_workspace(),
+        record_store=False,
         concurrency=4,
         runtime_resources=runtime_resources,
     )
@@ -327,7 +317,6 @@ async def run_business_case(case: BusinessCase) -> dict[str, Any]:
         case["title"],
         case["graph"],
         handlers=case["handlers"],
-        skill_contracts=case.get("skill_contracts"),
         extra_runtime_resources=case.get("runtime_resources"),
     )
 

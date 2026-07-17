@@ -43,13 +43,13 @@ def main() -> None:
     ]
     execution = agent.create_task(
         goal=(
-            "Write and run a tiny stdlib-only reconciliation program in the Workspace. "
+            "Write and run a tiny stdlib-only reconciliation program in the TaskWorkspace. "
             "The framework runtime preflight has already inspected Python, Node.js, Go, and C++ before this task. "
             f"Use the selected runtime facts: runtime_id={selected_runtime_id}, language={selected_language}, "
             f"source_file={source_file}, run_command={run_command}. "
             f"Create {source_file} with write_file, without reading it first because this run starts with no source file. "
             f"Execute exactly `{run_command}` with run_bash. "
-            "Deliver the compact final report to final.md as a Workspace artifact. "
+            "Deliver the compact final report to final.md as a TaskWorkspace artifact. "
             "The final report must include the selected runtime, implementation file path, run command, output summary, payment mismatches, refund impact, and validation notes. "
             "Do not install runtimes, compilers, package managers, or third-party packages. "
             "Do not run runtime version checks or environment installation commands.\n\n"
@@ -58,15 +58,15 @@ def main() -> None:
         ),
         success_criteria=[
             "The generated program uses the preflight-selected runtime, source file, and run command.",
-            "The reconciliation logic is written to a Workspace source file with write_file.",
+            "The reconciliation logic is written to a TaskWorkspace source file with write_file.",
             "The generated program is executed successfully with run_bash.",
-            "The final report is written to final.md in the Workspace.",
+            "The final report is written to final.md in the TaskWorkspace.",
             "The final report cites the selected runtime, implementation file path, and command output.",
             "The reported totals are consistent with executed program output.",
         ],
         options=options,
     )
-    run_and_print(execution, provider=provider, workspace=workspace)
+    run_and_print(execution, provider=provider, task_workspace=workspace)
 
 
 if __name__ == "__main__":
@@ -75,5 +75,5 @@ if __name__ == "__main__":
 # Expected key output:
 # prints a [DELTA_STREAM] section from get_async_generator(type="delta");
 # status is completed, accepted is true, execution_strategy is selected by
-# AgentTask auto, and the delta stream shows the Workspace source file, run
+# AgentTask auto, and the delta stream shows the TaskWorkspace source file, run
 # command, payment mismatch findings, refund impact, and final.md delivery.

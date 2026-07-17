@@ -236,7 +236,7 @@ async def test_standalone_action_flows_release_success_scope(
     ]
     assert len(action_loop_executions) == 1
     execution = action_loop_executions[0]
-    internal_workspace = execution._get_runtime_resource("workspace", None)
+    internal_workspace = execution._get_runtime_resource("task_workspace", None)
     stored_content_bytes = 0
     stored_records: list[dict[str, Any]] = []
     if internal_workspace is not None:
@@ -259,8 +259,8 @@ async def test_standalone_action_flows_release_success_scope(
         assert len(state_bytes) <= 16000, {
             "state_key": state_key,
             "state_bytes": len(state_bytes),
-            "workspace_record_kinds": [record.get("kind") for record in stored_records],
-            "workspace_terminal_bytes": stored_content_bytes,
+            "task_workspace_record_kinds": [record.get("kind") for record in stored_records],
+            "task_workspace_terminal_bytes": stored_content_bytes,
         }
         assert output_marker.encode("utf-8") not in state_bytes
     assert internal_workspace is None, {
@@ -354,7 +354,7 @@ async def test_standalone_action_flows_bound_large_instruction_before_state_and_
         carrier_bytes = json.dumps(carrier, ensure_ascii=False, default=str).encode("utf-8")
         assert len(carrier_bytes) <= 16000, (name, len(carrier_bytes))
         assert marker.encode("utf-8") not in carrier_bytes
-    internal_workspace = execution._get_runtime_resource("workspace", None)
+    internal_workspace = execution._get_runtime_resource("task_workspace", None)
     stored_content_bytes = 0
     if internal_workspace is not None:
         for stored_ref in await internal_workspace.search():
@@ -613,8 +613,8 @@ async def test_artifacts_only_terminal_carrier_discards_transient_selection_with
         prepare_agent_execution_terminal_retention,
     )
 
-    agent: Any = Agently.create_agent("artifacts-only-terminal-carrier").use_workspace(
-        tmp_path / "workspace"
+    agent: Any = Agently.create_agent("artifacts-only-terminal-carrier").use_task_workspace(
+        tmp_path / "task_workspace"
     )
     execution = agent.input("Return the selected artifact.").create_execution().strategy("direct")
     execution.status = "success"
@@ -642,7 +642,7 @@ async def test_artifacts_only_terminal_carrier_discards_transient_selection_with
     assert canonical_ref["artifact_id"] not in terminal_json
     assert canonical_ref["action_call_id"] not in terminal_json
     assert "artifact_scope" not in terminal_json
-    assert not (tmp_path / "workspace" / ".agently" / "workspace.db").exists()
+    assert not (tmp_path / "task_workspace" / ".agently" / "workspace.db").exists()
 
 
 @pytest.mark.asyncio
@@ -653,7 +653,7 @@ async def test_selected_action_artifact_run_scope_release_is_concurrent_and_smal
         _finalize_terminal_execution,
     )
 
-    agent: Any = Agently.create_agent("action-artifact-retention-run-scope").use_workspace(tmp_path / "run")
+    agent: Any = Agently.create_agent("action-artifact-retention-run-scope").use_task_workspace(tmp_path / "run")
     action_id = "produce_scoped_large_action_output"
     agent.action.register_action(
         action_id=action_id,
@@ -735,7 +735,7 @@ async def test_custom_action_execution_handler_callback_binds_agent_execution_ar
         _finalize_terminal_execution,
     )
 
-    agent: Any = Agently.create_agent("action-artifact-custom-handler-scope").use_workspace(tmp_path / "run")
+    agent: Any = Agently.create_agent("action-artifact-custom-handler-scope").use_task_workspace(tmp_path / "run")
     action_id = "produce_custom_handler_large_output"
     action_tag = f"agent-{agent.name}"
     agent.action.register_action(
@@ -855,7 +855,7 @@ async def test_standalone_agent_task_releases_exact_action_artifact_scope_at_ter
     monkeypatch,
     terminal_mode: str,
 ) -> None:
-    agent: Any = Agently.create_agent(f"standalone-task-artifact-{terminal_mode}").use_workspace(
+    agent: Any = Agently.create_agent(f"standalone-task-artifact-{terminal_mode}").use_task_workspace(
         tmp_path / terminal_mode
     )
     action_id = f"standalone_task_large_output_{terminal_mode}"
@@ -946,7 +946,7 @@ async def test_custom_triggerflow_handler_bounds_every_agent_execution_consumer(
     from agently.core.runtime import bind_runtime_context
 
     marker = "CUSTOM_HANDLER_RAW_TAIL_MUST_STAY_PRIVATE"
-    agent: Any = Agently.create_agent("custom-handler-all-consumers").use_workspace(tmp_path / "workspace")
+    agent: Any = Agently.create_agent("custom-handler-all-consumers").use_task_workspace(tmp_path / "task_workspace")
     action_id = "custom_handler_large_output"
     agent.action.register_action(
         action_id=action_id,
@@ -1067,7 +1067,7 @@ async def test_custom_triggerflow_handler_bounds_every_agent_execution_consumer(
         for key in ("data", "result", "model_digest")
     ) <= 1
 
-    internal_workspace = action_loop_execution._get_runtime_resource("workspace", None)
+    internal_workspace = action_loop_execution._get_runtime_resource("task_workspace", None)
     stored_content_bytes = 0
     if internal_workspace is not None:
         for stored_ref in await internal_workspace.search():
@@ -1093,7 +1093,7 @@ async def test_action_flow_observations_bound_and_redact_every_delivery_path(
     input_marker = f"{flow_name}_OBSERVATION_INPUT_TAIL"
     output_marker = f"{flow_name}_OBSERVATION_OUTPUT_TAIL"
     secret_value = f"{flow_name}-secret-value"
-    agent: Any = Agently.create_agent(f"observation-bounds-{flow_name}").use_workspace(
+    agent: Any = Agently.create_agent(f"observation-bounds-{flow_name}").use_task_workspace(
         tmp_path / flow_name
     )
     action_id = f"observation_bounds_{flow_name}"
@@ -1218,7 +1218,7 @@ async def test_action_flow_observations_bound_and_redact_every_delivery_path(
 @pytest.mark.asyncio
 async def test_triggerflow_failure_convergence_callback_receives_bounded_records(tmp_path) -> None:
     marker = "FAILURE_CONVERGENCE_RAW_RECORD_TAIL"
-    agent: Any = Agently.create_agent("failure-convergence-bounded").use_workspace(tmp_path / "workspace")
+    agent: Any = Agently.create_agent("failure-convergence-bounded").use_task_workspace(tmp_path / "task_workspace")
     action_id = "failure_convergence_action"
     flow = agent.action._flow_controller.create_named_action_flow("TriggerFlowActionFlow")
     observations: list[dict[str, Any]] = []
@@ -1286,7 +1286,7 @@ async def test_action_flow_failure_bounds_complete_error_observation_carriers(
     secret_value = f"{flow_name}-error-secret"
     opaque_message = secret_value + ("u" * (1024 * 1024)) + message_tail
     body_probe = "u" * 128 if error_shape == "opaque_string" else "m" * 128
-    agent: Any = Agently.create_agent(f"error-observation-{flow_name}-{error_shape}").use_workspace(
+    agent: Any = Agently.create_agent(f"error-observation-{flow_name}-{error_shape}").use_task_workspace(
         tmp_path / flow_name / error_shape
     )
     flow = agent.action._flow_controller.create_named_action_flow(flow_name)
@@ -1412,7 +1412,7 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
         _finalize_terminal_execution,
     )
 
-    agent: Any = Agently.create_agent(f"action-artifact-release-{failure_stage}").use_workspace(tmp_path / failure_stage)
+    agent: Any = Agently.create_agent(f"action-artifact-release-{failure_stage}").use_task_workspace(tmp_path / failure_stage)
     action_id = f"produce_release_failure_{failure_stage}"
     agent.action.register_action(
         action_id=action_id,
@@ -1471,7 +1471,7 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
         async def fail_promotion(*_args: Any, **_kwargs: Any) -> Any:
             raise RuntimeError("promotion unavailable " + "p" * 500)
 
-        monkeypatch.setattr(owner.workspace, "put_artifact_ref", fail_promotion)
+        monkeypatch.setattr(owner.record_store, "put_artifact_ref", fail_promotion)
     else:
         owner._ensure_agent_execution_run_context()
 
@@ -1489,7 +1489,7 @@ async def test_action_artifact_terminal_failure_still_releases_only_owner_scope(
     assert release_diagnostic["status"] == "released"
     assert release_diagnostic["scope"] == {"kind": "agent_execution", "id": owner.id}
     assert release_diagnostic["preserved_artifact_ids"] == []
-    retention_diagnostics = owner.diagnostics["workspace_retention"]["diagnostics"]
+    retention_diagnostics = owner.diagnostics["task_workspace_retention"]["diagnostics"]
     if failure_stage == "terminal_event":
         assert retention_diagnostics
         assert retention_diagnostics[0]["code"] == "agent_execution.retention.terminal_event_delivery_failed"

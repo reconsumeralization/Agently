@@ -52,12 +52,14 @@ async def main() -> None:
     provider = configure_model()
     Agently.set_settings("debug", False)
 
-    workspace_root = Path(".agently/examples/session_workspace_memory").resolve()
-    if workspace_root.exists():
-        shutil.rmtree(workspace_root)
-    workspace = Agently.create_workspace(workspace_root)
+    record_store_root = Path(".example_runtime/session_record_store_memory").resolve()
+    if record_store_root.exists():
+        shutil.rmtree(record_store_root)
 
-    agent = Agently.create_agent("session-memory-demo").use_workspace(workspace)
+    agent = Agently.create_agent("session-memory-demo").use_record_store(
+        record_store_root,
+        mode="read_write",
+    )
     agent.set_agent_prompt(
         "system",
         "You are a concise support assistant. Use retrieved memory when it is relevant.",
@@ -91,7 +93,7 @@ async def main() -> None:
         "What project name and presentation style should you remember for my updates?"
     ).async_get_text()
 
-    refs = await workspace.grep(None, filters={"collection": "memory"})
+    refs = await agent.record_store.grep(None, filters={"collection": "memory"})
     scopes = sorted({
         str(ref["scope"]["memory_scope"])
         for ref in refs

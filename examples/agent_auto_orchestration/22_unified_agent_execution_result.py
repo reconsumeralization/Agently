@@ -104,7 +104,7 @@ async def run_quick_prompt(agent: Any) -> tuple[dict[str, Any], AgentExecutionMe
 async def run_task_strategy(agent: Any) -> tuple[dict[str, Any], AgentExecutionMeta, list[str]]:
     workspace = getattr(agent, "workspace", None)
     if workspace is None:
-        raise RuntimeError("Workspace is required for task-loop strategy examples.")
+        raise RuntimeError("TaskWorkspace is required for task-loop strategy examples.")
     await workspace.put(
         content=ACCOUNT_SIGNAL,
         collection="observations",
@@ -127,7 +127,7 @@ async def run_task_strategy(agent: Any) -> tuple[dict[str, Any], AgentExecutionM
                 "The result cites at least two facts from the account signal.",
                 "The result gives one concrete account-manager next action.",
             ],
-            workspace=RUNTIME_ROOT,
+            task_workspace=RUNTIME_ROOT,
             max_iterations=2,
             limits={"max_model_requests": 8, "max_seconds": 240, "max_no_progress_seconds": 120},
             options={"agent_task": {"stream_snapshots": True, "request_timeout_seconds": 90}},
@@ -150,7 +150,7 @@ async def main() -> None:
     if RUNTIME_ROOT.exists():
         shutil.rmtree(RUNTIME_ROOT)
 
-    agent = Agently.create_agent("unified-agent-execution-result").use_workspace(RUNTIME_ROOT)
+    agent = Agently.create_agent("unified-agent-execution-result").use_task_workspace(RUNTIME_ROOT)
     agent.define(
         prompt={
             "rule": (

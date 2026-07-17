@@ -20,12 +20,12 @@ async def test_shared_example_summary_uses_terminal_envelope_for_task_status(
         "artifact_status": "degraded",
         "missing_criteria": [],
         "execution_strategy": "taskboard",
-        "final_result": "Workspace artifact delivered at final.md",
+        "final_result": "TaskWorkspace artifact delivered at final.md",
     }
 
     class FakeResult:
         async def async_get_data(self) -> str:
-            return "Workspace artifact delivered at final.md"
+            return "TaskWorkspace artifact delivered at final.md"
 
         async def async_get_full_data(self) -> dict[str, Any]:
             return terminal_result
@@ -49,7 +49,7 @@ async def test_shared_example_summary_uses_terminal_envelope_for_task_status(
     summary = await async_run_and_print(
         FakeExecution(),
         provider="deepseek",
-        workspace=tmp_path,
+        task_workspace=tmp_path,
     )
 
     assert summary["status"] == "completed"
@@ -57,5 +57,5 @@ async def test_shared_example_summary_uses_terminal_envelope_for_task_status(
     assert summary["artifact_status"] == "degraded"
     assert summary["missing_criteria"] == []
     assert summary["execution_strategy"] == "taskboard"
-    assert summary["final_preview"] == "Workspace artifact delivered at final.md"
+    assert summary["final_preview"] == "TaskWorkspace artifact delivered at final.md"
     assert '"status": "completed"' in capsys.readouterr().out

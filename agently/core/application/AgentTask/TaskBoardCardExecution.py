@@ -202,7 +202,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         spec = get_spec(str(action_id or "").strip())
         return spec if isinstance(spec, Mapping) else None
 
-    def _taskboard_workspace_write_action_ids(self, action_ids: Iterable[Any]) -> list[str]:
+    def _taskboard_task_workspace_write_action_ids(self, action_ids: Iterable[Any]) -> list[str]:
         matched: list[str] = []
         for action_id in self._normalize_string_list(list(action_ids)):
             spec = self._taskboard_registered_action_spec(action_id)
@@ -210,7 +210,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             kwargs = spec.get("kwargs") if isinstance(spec, Mapping) else None
             if (
                 isinstance(meta, Mapping)
-                and str(meta.get("component") or "") == "workspace"
+                and str(meta.get("component") or "") == "task_workspace"
                 and meta.get("write") is True
                 and isinstance(kwargs, Mapping)
                 and {"path", "content"}.issubset(kwargs)
@@ -218,7 +218,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 matched.append(action_id)
         return matched
 
-    def _taskboard_workspace_read_action_ids(self, action_ids: Iterable[Any]) -> list[str]:
+    def _taskboard_task_workspace_read_action_ids(self, action_ids: Iterable[Any]) -> list[str]:
         matched: list[str] = []
         for action_id in self._normalize_string_list(list(action_ids)):
             spec = self._taskboard_registered_action_spec(action_id)
@@ -231,7 +231,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             )
             if (
                 isinstance(meta, Mapping)
-                and str(meta.get("component") or "") == "workspace"
+                and str(meta.get("component") or "") == "task_workspace"
                 and side_effect_level == "read"
                 and isinstance(kwargs, Mapping)
                 and "path" in kwargs
@@ -239,14 +239,14 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 matched.append(action_id)
         return matched
 
-    async def _try_taskboard_workspace_artifact_action_transfer(
+    async def _try_taskboard_task_workspace_artifact_action_transfer(
         self,
         context: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        """Lower an exact Workspace artifact handoff to direct Action calls.
+        """Lower an exact TaskWorkspace artifact handoff to direct Action calls.
 
-        This path is intentionally structural: one upstream Workspace file, one
-        exact final path, and registered Workspace write/read Actions. It does
+        This path is intentionally structural: one upstream TaskWorkspace file, one
+        exact final path, and registered TaskWorkspace write/read Actions. It does
         not infer paths or choose among competing source artifacts.
         """
 
@@ -256,17 +256,17 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         metadata = getattr(card, "metadata", None)
         if not isinstance(metadata, Mapping):
             return None
-        target_paths = self._normalize_string_list(metadata.get("final_workspace_deliverables"))
+        target_paths = self._normalize_string_list(metadata.get("final_task_workspace_deliverables"))
         if len(target_paths) != 1:
             return None
         target_path = target_paths[0]
         try:
-            self.workspace.resolve_file_path(target_path)
+            self.task_workspace.resolve_file_path(target_path)
         except Exception:
             return None
 
         required_card_action_ids = self._taskboard_card_required_action_ids(card)
-        write_action_ids = self._taskboard_workspace_write_action_ids(required_card_action_ids)
+        write_action_ids = self._taskboard_task_workspace_write_action_ids(required_card_action_ids)
         if len(write_action_ids) != 1:
             return None
 
@@ -290,9 +290,9 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         source_path = source_paths[0]
 
         try:
-            source_info = self.workspace.inspect_file(source_path)
+            source_info = self.task_workspace.inspect_file(source_path)
             source_size = int(source_info.get("size") or source_info.get("bytes") or 0)
-            source_read = await self.workspace.read_file(
+            source_read = await self.task_workspace.read_file(
                 source_path,
                 max_bytes=max(source_size + 1, 1),
             )
@@ -311,7 +311,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 source_path=source_path,
                 target_path=target_path,
                 action_logs=[],
-                error=RuntimeError("The source Workspace artifact is not a complete text body."),
+                error=RuntimeError("The source TaskWorkspace artifact is not a complete text body."),
             )
 
         write_action_id = write_action_ids[0]
@@ -332,7 +332,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
 
         task_required_action_ids = self._task_contract_required_action_ids()
 
-        read_action_ids = sorted(self._taskboard_workspace_read_action_ids(task_required_action_ids))
+        read_action_ids = sorted(self._taskboard_task_workspace_read_action_ids(task_required_action_ids))
         write_succeeded = self._taskboard_direct_action_succeeded(write_result)
         if write_succeeded:
             read_records = await self.agent.action._async_execute_action_calls(
@@ -365,16 +365,16 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 source_path=source_path,
                 target_path=target_path,
                 action_logs=action_logs,
-                error=RuntimeError("A required Workspace artifact Action did not succeed."),
+                error=RuntimeError("A required TaskWorkspace artifact Action did not succeed."),
             )
 
-        target_info = dict(self.workspace.inspect_file(target_path))
-        target_info.update({"path": target_path, "role": "workspace_artifact", "available": True})
+        target_info = dict(self.task_workspace.inspect_file(target_path))
+        target_info.update({"path": target_path, "role": "task_workspace_artifact", "available": True})
         execution_id = f"{self.id}:taskboard:{getattr(card, 'id', 'card')}:action-call"
         return (
             {
                 "status": "completed",
-                "answer": f"Workspace artifact materialized at {target_path} and read back.",
+                "answer": f"TaskWorkspace artifact materialized at {target_path} and read back.",
                 "artifact_manifest": {"path": target_path},
                 "file_refs": [DataFormatter.sanitize(target_info)],
                 "evidence": [f"Action {record.get('action_id')} succeeded." for record in action_logs],
@@ -388,7 +388,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "logs": {"action_logs": action_logs, "route_logs": {}, "errors": []},
                 "diagnostics": [
                     {
-                        "execution_kind": "taskboard_workspace_artifact_action_transfer",
+                        "execution_kind": "taskboard_task_workspace_artifact_action_transfer",
                         "source_path": source_path,
                         "target_path": target_path,
                         "action_planning_model_requests": 0,
@@ -416,40 +416,40 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         action_logs.extend(dict(record) for record in records if isinstance(record, Mapping))
         logs["action_logs"] = action_logs
 
-    async def _try_taskboard_control_workspace_artifact_actions(
+    async def _try_taskboard_control_task_workspace_artifact_actions(
         self,
         context: Any,
         card_output: Mapping[str, Any],
         *,
         execution_meta: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Materialize a control-card body through explicitly required Workspace Actions."""
+        """Materialize a control-card body through explicitly required TaskWorkspace Actions."""
 
         required_action_ids = self._task_contract_required_action_ids()
-        write_action_ids = self._taskboard_workspace_write_action_ids(required_action_ids)
+        write_action_ids = self._taskboard_task_workspace_write_action_ids(required_action_ids)
         if len(write_action_ids) != 1:
             return None
-        read_action_ids = sorted(self._taskboard_workspace_read_action_ids(required_action_ids))
+        read_action_ids = sorted(self._taskboard_task_workspace_read_action_ids(required_action_ids))
 
         card = getattr(context, "card", None)
         metadata = getattr(card, "metadata", None)
         if not isinstance(metadata, Mapping):
             return None
-        target_paths = self._normalize_string_list(metadata.get("final_workspace_deliverables"))
+        target_paths = self._normalize_string_list(metadata.get("final_task_workspace_deliverables"))
         if len(target_paths) != 1:
             return None
         target_path = target_paths[0]
         try:
-            self.workspace.resolve_file_path(target_path)
+            self.task_workspace.resolve_file_path(target_path)
         except Exception:
             return None
 
         manifest = card_output.get("artifact_manifest")
         manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {"path": target_path}
-        content, content_key = self._select_workspace_artifact_content(
+        content, content_key = self._select_task_workspace_artifact_content(
             card_output,
             manifest_dict,
-            deliverable_mode="workspace_artifact",
+            deliverable_mode="task_workspace_artifact",
             manifest_path=target_path,
         )
         if not content:
@@ -505,7 +505,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             self._taskboard_direct_action_succeeded(record) for record in action_logs
         )
         diagnostic = {
-            "execution_kind": "taskboard_control_workspace_artifact_actions",
+            "execution_kind": "taskboard_control_task_workspace_artifact_actions",
             "target_path": target_path,
             "content_key": content_key,
             "required_action_ids": [write_action_id, *read_action_ids],
@@ -518,7 +518,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "content_key": content_key,
                 "diagnostic": diagnostic,
             }
-        diagnostic["error"] = "A required Workspace artifact Action did not succeed."
+        diagnostic["error"] = "A required TaskWorkspace artifact Action did not succeed."
         return {
             "status": "failed",
             "path": target_path,
@@ -549,7 +549,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         execution_id = f"{self.id}:taskboard:{card_id or 'card'}:action-call"
         diagnostic = {
-            "execution_kind": "taskboard_workspace_artifact_action_transfer",
+            "execution_kind": "taskboard_task_workspace_artifact_action_transfer",
             "source_path": source_path,
             "target_path": target_path,
             "action_planning_model_requests": 0,
@@ -571,7 +571,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             },
         )
 
-    async def _run_taskboard_card(self, context: Any, context_pack: "WorkspaceContextPackage") -> TaskBoardCardResult:
+    async def _run_taskboard_card(self, context: Any, context_pack: "TaskContextView") -> TaskBoardCardResult:
         if self._taskboard_card_uses_readback(context.card):
             result = await self._run_taskboard_readback_card(context, context_pack)
         elif self._taskboard_card_uses_control_request(context.card):
@@ -676,7 +676,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "recovered": recovered_ok,
                 "original_status": original.status,
                 "route": DataFormatter.sanitize(route),
-                "workspace_refs": DataFormatter.sanitize(recovered_meta.get("workspace_refs", {})),
+                "record_refs": DataFormatter.sanitize(recovered_meta.get("record_refs", {})),
             },
         ]
         preview = {
@@ -708,7 +708,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         )
 
     async def _run_taskboard_agent_card(
-        self, context: Any, context_pack: "WorkspaceContextPackage"
+        self, context: Any, context_pack: "TaskContextView"
     ) -> TaskBoardCardResult:
         evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
         try:
@@ -718,14 +718,6 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             ).to_dict()
         except ValueError:
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
-        skill_context_readbacks = self._taskboard_skill_context_readbacks(
-            context.card,
-            context_pack,
-        )
-        skill_readback_evidence_items = self._taskboard_skill_context_readback_evidence_items(
-            skill_context_readbacks,
-            card_id=str(getattr(context.card, "id", "") or ""),
-        )
         raw_evidence_items = evidence_view.get("evidence_items", [])
         combined_evidence_view = {
             "evidence_items": [
@@ -735,7 +727,6 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     and not isinstance(raw_evidence_items, str | bytes | bytearray)
                     else []
                 ),
-                *skill_readback_evidence_items,
             ]
         }
         evidence_ledger = self._stable_evidence_ledger_view(combined_evidence_view, max_items=80, body_chars=1800)
@@ -836,12 +827,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
                 "evidence_ledger": prompt_evidence_ledger,
                 "dependency_readbacks": dependency_readbacks,
-                "skill_context_readbacks": DataFormatter.sanitize(skill_context_readbacks),
                 "available_readback": self._taskboard_available_readback(evidence_view),
                 "source_ref_policy": self._taskboard_source_ref_policy(),
                 "scoped_retrieval": self._taskboard_card_scoped_retrieval(context.card),
                 "retrieval_policy": scoped_retrieval_policy(),
-                "workspace_delivery_policy": self._taskboard_workspace_delivery_policy(context),
+                "task_workspace_delivery_policy": self._taskboard_task_workspace_delivery_policy(context),
                 "source_refs": source_refs,
                 "previous_attempt_errors": previous_errors,
                 "attempt": {
@@ -862,16 +852,16 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "business fact, incident date, deployment date, publication date, approval date, or validation date "
                 "unless the goal or verifier-visible evidence explicitly provides it. "
                 "taskboard_evidence_view is the compact evidence summary; request full content only through available "
-                "Workspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
+                "TaskWorkspace or Action refs when needed. If previous_attempt_errors is non-empty, avoid repeating "
                 "the same failing source or method when a bounded fallback can satisfy the card. dependency_readbacks "
                 "contains bounded readback previews for dependency Action artifacts that were "
                 "structurally truncated or marked full_value_available; inspect those before declaring dependency "
-                "evidence missing. skill_context_readbacks contains only the already-loaded Skill guidance and "
-                "resources selected for this card; apply that context directly without treating its citations as "
-                "Workspace paths. If available_readback lists Action artifact refs and the prefetched previews are "
+                "evidence missing. context_pack.skill_projection contains the Skill guidance independently disclosed "
+                "for this card; apply it as task procedure, not as business evidence or TaskWorkspace paths. "
+                "If available_readback lists Action artifact refs and the prefetched previews are "
                 "still insufficient, call read_action_artifact with the host-issued selection_key before blocking "
                 "on missing evidence. If scoped_retrieval_results is present, those are already executed bounded "
-                "Workspace search facts; use visible evidence_snippet content only within the excerpt, and treat "
+                "TaskWorkspace search facts; use visible evidence_snippet content only within the excerpt, and treat "
                 "locator_ref records as targets for later readback/search rather than source-content proof. "
                 "Treat evidence_ledger as the authoritative grounding ledger for dependency evidence. Use only an "
                 "exact offered evidence_ledger.items[].reference_id in evidence_use.evidence_ids; no other prompt "
@@ -900,7 +890,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "ids/titles, brief section intent, and source/evidence refs to use; artifact_manifest is not itself "
                 "the deliverable body or proof of completion. Do not include full section content in "
                 "artifact_manifest, and do not self-declare trusted file_refs for deliverables. Apply "
-                "workspace_delivery_policy: when this card is authorized to write required "
+                "task_workspace_delivery_policy: when this card is authorized to write required "
                 "final deliverable paths, use the required path in artifact_manifest.path instead of a working/evidence path. "
                 "For file-backed deliverables, return acceptance_points with expected headings or exact anchors for "
                 "critical verification points; do not invent line numbers or trusted file refs. "
@@ -944,12 +934,12 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 ),
                 "artifact_manifest": (
                     dict,
-                    "Preferred Workspace artifact manifest for sectioned or file-backed deliverables",
+                    "Preferred TaskWorkspace artifact manifest for sectioned or file-backed deliverables",
                     False,
                 ),
                 "file_refs": (
                     [dict],
-                    "Existing evidence refs only; deliverable refs are trusted only when backed by verifier-visible Workspace/readback evidence",
+                    "Existing evidence refs only; deliverable refs are trusted only when backed by verifier-visible TaskWorkspace/readback evidence",
                     False,
                 ),
                 "evidence": ([str], "Evidence produced or used by this card", False),
@@ -1045,7 +1035,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
 
             async def run_card_work_unit(_context: Mapping[str, Any]) -> Mapping[str, Any]:
                 carrier_output_policy = self._carrier_output_policy_from_block_context(_context)
-                direct_artifact_transfer = await self._try_taskboard_workspace_artifact_action_transfer(context)
+                direct_artifact_transfer = await self._try_taskboard_task_workspace_artifact_action_transfer(context)
                 if direct_artifact_transfer is not None:
                     direct_result, direct_meta = direct_artifact_transfer
                     return {
@@ -1158,16 +1148,16 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     execution_id=execution_id,
                     child_meta=child_meta,
                 )
-            card_output, delivery_plan = self._prepare_taskboard_workspace_artifact_delivery(
+            card_output, delivery_plan = self._prepare_taskboard_task_workspace_artifact_delivery(
                 card_output,
                 context,
-                deliverable_mode=self._workspace_artifact_delivery_mode(card_output),
+                deliverable_mode=self._task_workspace_artifact_delivery_mode(card_output),
             )
-            card_output = await self._deliver_workspace_artifact(
+            card_output = await self._deliver_task_workspace_artifact(
                 card_output,
                 plan=delivery_plan,
                 execution_meta=cast(dict[str, Any], execution_meta),
-                source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
+                source=f"agent_task.taskboard.card.{context.card.id}.task_workspace_artifact",
                 context_pack=context_pack,
                 card_context=context,
             )
@@ -1356,7 +1346,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         )
 
     async def _run_taskboard_control_card(
-        self, context: Any, context_pack: "WorkspaceContextPackage"
+        self, context: Any, context_pack: "TaskContextView"
     ) -> TaskBoardCardResult:
         evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
         try:
@@ -1380,7 +1370,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         preflight_diagnostics = task_board_preflight_diagnostics(
             context.revision,
             mounted_capabilities=self._planner_capabilities(),
-            workspace_refs=self.workspace_refs.get("artifacts", []) if isinstance(self.workspace_refs, Mapping) else [],
+            task_workspace_refs=self.record_refs.get("artifacts", []) if isinstance(self.record_refs, Mapping) else [],
         )
         acceptance_index = build_task_board_acceptance_index(
             context.revision,
@@ -1435,7 +1425,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "dependency_readbacks": dependency_readbacks,
             "available_readback": self._taskboard_available_readback(evidence_view),
             "source_ref_policy": self._taskboard_source_ref_policy(),
-            "workspace_delivery_policy": self._taskboard_workspace_delivery_policy(context),
+            "task_workspace_delivery_policy": self._taskboard_task_workspace_delivery_policy(context),
             "source_refs": source_refs,
             "context_pack": DataFormatter.sanitize(context_pack),
             "execution_prompt": self._execution_prompt_context(),
@@ -1473,7 +1463,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "deliverables. If the task is source-grounded, include "
             "the concrete source URLs, file paths, or evidence refs used by the deliverable in the deliverable body; "
             "do not mention a source title without its verifier-visible URL/path when such a ref exists. "
-            "Apply workspace_delivery_policy: when this card is authorized to write required final deliverable paths, "
+            "Apply task_workspace_delivery_policy: when this card is authorized to write required final deliverable paths, "
             "use the required path in artifact_manifest.path instead of a working/evidence path. "
             "Preserve task-provided facts exactly. Do not add concrete times, dates, publication states, validation "
             "states, numbers, source headings, or status details unless they are visible in the goal, dependency "
@@ -1501,9 +1491,9 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         )
         if grounding_patch_mode:
             control_instruction += (
-                " This is a grounding-only Workspace repair. Do not return candidate_final_result, final_result, "
+                " This is a grounding-only TaskWorkspace repair. Do not return candidate_final_result, final_result, "
                 "artifact_markdown, or a complete artifact body. Set next_board_action='patch' and return only a "
-                "Workspace patch_proposal for an authorized final deliverable path. Return exactly one replace operation "
+                "TaskWorkspace patch_proposal for an authorized final deliverable path. Return exactly one replace operation "
                 "for every material_claim_repair_contract requirement and copy that requirement's claim_key into the operation. "
                 "Each requirement's artifact_quote is a host-validated exact span from its immutable segment_id; treat it "
                 "as present in the contracted content version and use it to construct old_string without guessing from claim prose. "
@@ -1541,12 +1531,12 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 ),
             "artifact_manifest": (
                 dict,
-                "Preferred Workspace artifact manifest proposal for sectioned or file-backed deliverables",
+                "Preferred TaskWorkspace artifact manifest proposal for sectioned or file-backed deliverables",
                 False,
             ),
             "file_refs": (
                 [dict],
-                "Existing evidence refs only; model-declared deliverable refs are untrusted without verifier-visible Workspace/readback evidence",
+                "Existing evidence refs only; model-declared deliverable refs are untrusted without verifier-visible TaskWorkspace/readback evidence",
                 False,
             ),
             "sufficient": (bool, "True when this card has enough evidence to satisfy its objective", False),
@@ -1595,7 +1585,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "diagnostics": ([dict], "Optional control-card diagnostics", False),
             "patch_proposal": (
                 {
-                    "path": (str, "Authorized Workspace file path to patch", True),
+                    "path": (str, "Authorized TaskWorkspace file path to patch", True),
                     "operations": (
                         [
                             {
@@ -1624,10 +1614,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 if grounding_patch_mode
                 else dict,
                 (
-                    "Grounding-only Workspace replace patch using path and operations with exact "
+                    "Grounding-only TaskWorkspace replace patch using path and operations with exact "
                     "old_string/new_string fields"
                     if grounding_patch_mode
-                    else "Optional TaskBoardPatch or Workspace text patch proposal when next_board_action is patch"
+                    else "Optional TaskBoardPatch or TaskWorkspace text patch proposal when next_board_action is patch"
                 ),
                 False,
             ),
@@ -1678,9 +1668,15 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
 
         async def run_control_work_unit(_context: Mapping[str, Any]) -> Mapping[str, Any]:
             carrier_output_policy = self._carrier_output_policy_from_block_context(_context)
+            request_context_pack, context_package = await self._read_task_context_view(
+                phase="card",
+                consumer_id=f"agent_task:{self.id}:taskboard-control:{context.card.id}",
+                intent=f"Execute TaskBoard control card {context.card.id}: {context.card.objective}",
+            )
             request = self.agent.create_temp_request()
             self._apply_language_policy_to_request(request, language_policy)
             request_payload = dict(control_input_payload)
+            request_payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
             if isinstance(carrier_output_policy, Mapping):
                 request_payload["carrier_output_policy"] = DataFormatter.sanitize(dict(carrier_output_policy))
             request.input(request_payload)
@@ -1698,6 +1694,15 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 self._consume_taskboard_control_request(context.card.id, result_handle),
                 card_id=context.card.id,
                 stage="control",
+            )
+            self._record_task_context_consumption(
+                context_package,
+                request_id=result_handle.id,
+            )
+            await self._emit_required_skill_context_bound(
+                request_context_pack,
+                request_id=result_handle.id,
+                phase="work.execute.taskboard",
             )
             control_status = self._taskboard_control_card_status(control_output)
             return {
@@ -1740,21 +1745,21 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 error=error,
                 execution_id=None,
             )
-        required_deliverables = self._required_workspace_deliverables()
-        allow_workspace_delivery = (
+        required_deliverables = self._required_task_workspace_deliverables()
+        allow_task_workspace_delivery = (
             not grounding_patch_mode
-            and self._taskboard_control_output_allows_workspace_delivery(card_output)
+            and self._taskboard_control_output_allows_task_workspace_delivery(card_output)
         )
-        deliverable_mode = self._workspace_artifact_delivery_mode(card_output) if allow_workspace_delivery else None
+        deliverable_mode = self._task_workspace_artifact_delivery_mode(card_output) if allow_task_workspace_delivery else None
         prefer_stream_draft = False
         if (
-            allow_workspace_delivery
+            allow_task_workspace_delivery
             and not deliverable_mode
             and required_deliverables
             and self._taskboard_context_card_is_leaf(context)
             and isinstance(card_output, Mapping)
         ):
-            deliverable_mode = "sectioned_workspace_artifact"
+            deliverable_mode = "sectioned_task_workspace_artifact"
             prefer_stream_draft = True
             card_output = dict(card_output)
             if not isinstance(card_output.get("artifact_manifest"), Mapping):
@@ -1768,28 +1773,28 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                         }
                     ],
                 }
-        if allow_workspace_delivery:
-            card_output, delivery_plan = self._prepare_taskboard_workspace_artifact_delivery(
+        if allow_task_workspace_delivery:
+            card_output, delivery_plan = self._prepare_taskboard_task_workspace_artifact_delivery(
                 card_output,
                 context,
                 deliverable_mode=deliverable_mode,
                 prefer_stream_draft=prefer_stream_draft,
             )
-            workspace_action_delivery = (
-                await self._try_taskboard_control_workspace_artifact_actions(
+            task_workspace_action_delivery = (
+                await self._try_taskboard_control_task_workspace_artifact_actions(
                     context,
                     card_output,
                     execution_meta=cast(dict[str, Any], execution_meta),
                 )
             )
             if (
-                isinstance(workspace_action_delivery, Mapping)
-                and workspace_action_delivery.get("status") == "failed"
+                isinstance(task_workspace_action_delivery, Mapping)
+                and task_workspace_action_delivery.get("status") == "failed"
             ):
                 card_output = dict(card_output)
                 card_output["status"] = "blocked"
                 remaining_work = self._normalize_string_list(card_output.get("remaining_work"))
-                remaining_work.append("A required Workspace artifact Action did not succeed.")
+                remaining_work.append("A required TaskWorkspace artifact Action did not succeed.")
                 card_output["remaining_work"] = self._merge_string_lists(remaining_work)
                 raw_diagnostics = card_output.get("diagnostics")
                 diagnostics = (
@@ -1798,21 +1803,21 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     and not isinstance(raw_diagnostics, str | bytes | bytearray)
                     else []
                 )
-                diagnostic = workspace_action_delivery.get("diagnostic")
+                diagnostic = task_workspace_action_delivery.get("diagnostic")
                 if isinstance(diagnostic, Mapping):
                     diagnostics.append(dict(diagnostic))
                 card_output["diagnostics"] = diagnostics
             else:
-                card_output = await self._deliver_workspace_artifact(
+                card_output = await self._deliver_task_workspace_artifact(
                     card_output,
                     plan=delivery_plan,
                     execution_meta=cast(dict[str, Any], execution_meta),
-                    source=f"agent_task.taskboard.card.{context.card.id}.workspace_artifact",
+                    source=f"agent_task.taskboard.card.{context.card.id}.task_workspace_artifact",
                     context_pack=context_pack,
                     card_context=context,
                 )
         if isinstance(card_output, Mapping):
-            card_output = await self._materialize_taskboard_workspace_patch(context, card_output)
+            card_output = await self._materialize_taskboard_task_workspace_patch(context, card_output)
         self._append_execution_meta_evidence_items(
             cast(dict[str, Any], execution_meta),
             self._taskboard_dependency_readback_evidence_items(dependency_readbacks),
@@ -2368,13 +2373,13 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         if isinstance(card_output, Mapping):
             status = str(card_output.get("status") or "completed").strip().lower()
             next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
-            workspace_patch_delivery = card_output.get("workspace_patch_delivery")
+            task_workspace_patch_delivery = card_output.get("task_workspace_patch_delivery")
             if (
                 next_action == "patch"
                 and status in {"completed", "skipped"}
                 and card_output.get("sufficient") is not False
-                and isinstance(workspace_patch_delivery, Mapping)
-                and str(workspace_patch_delivery.get("status") or "").strip().lower() == "completed"
+                and isinstance(task_workspace_patch_delivery, Mapping)
+                and str(task_workspace_patch_delivery.get("status") or "").strip().lower() == "completed"
             ):
                 return status
             if next_action in {"readback", "needs_readback", "repair", "patch"}:
@@ -2400,7 +2405,6 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
     @classmethod
     def _taskboard_card_uses_readback(cls, card: Any) -> bool:
         return cls._taskboard_card_execution_shape(card) in _TASKBOARD_READBACK_CARD_SHAPES
-
 
 
 __all__ = ["AgentTaskTaskBoardCardExecutionMixin"]

@@ -23,7 +23,7 @@ from .base import AgentlyPlugin
 class SessionMemory(AgentlyPlugin, Protocol):
     """Pluggable long-term memory behavior attached to one Session."""
 
-    def bind_workspace(self, workspace: Any) -> None: ...
+    def bind_memory_store(self, memory_store: Any) -> None: ...
 
     async def prepare_request(
         self,

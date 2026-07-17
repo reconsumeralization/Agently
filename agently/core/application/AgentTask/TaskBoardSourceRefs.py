@@ -23,7 +23,7 @@ _TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION = (
     "source content has been read. Use it as content support only after a bounded readback/content preview is "
     "available. If the deliverable depends on unread source content, request readback with target_refs or call "
     "the available readback action; otherwise label the ref as discovered-only and do not claim facts from it. "
-    "When target refs point at Workspace/repository/file evidence, prefer scoped search/readback that returns "
+    "When target refs point at TaskWorkspace/repository/file evidence, prefer scoped search/readback that returns "
     "locator_ref or evidence_snippet before requesting broad content. "
 )
 
@@ -49,8 +49,8 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
                 "Keep downloads, webpage snapshots, notes, generated code, and extracted text as cold refs unless "
                 "a later block needs scoped content.",
                 "Do not claim source contents from ref_only records.",
-                "Use scoped retrieval query groups for Workspace/repository/file evidence before broad reads when it can reduce prompt input.",
-                "Use search_surface='workspace_index' for Workspace SQLite/FTS records, 'workspace_files' for bounded file search, or 'workspace_index_and_files' when both bounded surfaces are justified; for workspace_index records, put collection names in filters.collection, do not put collection names in path, and use filters.kind only when the exact record kind is provided; never infer a generic kind such as note. For workspace_files, query is content text or an exact phrase, path is the directory/file scope, and pattern is one file glob such as *.md, * or **. Do not put list/read/search commands in query.",
+                "Use scoped retrieval query groups for TaskWorkspace/repository/file evidence before broad reads when it can reduce prompt input.",
+                "Use source_kinds=['record_store'] for durable structured records, source_kinds=['task_workspace'] for bounded task-file search, or list both when both sources are justified. For record_store records, put collection names in filters.collection, do not put collection names in path, and use filters.kind only when the exact record kind is provided; never infer a generic kind such as note. For task_workspace files, query is content text or an exact phrase, path is the directory/file scope, and pattern is one file glob such as *.md, * or **. Do not put list/read/search commands in query.",
                 "Treat truncated evidence snippets as partial facts; downstream consumers decide whether to request wider scoped retrieval, readback, or continuation.",
                 "Treat local search results as bounded facts, not as semantic acceptance.",
                 "When unread source content is required, return next_board_action=readback with concrete "
@@ -87,7 +87,7 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
             "bounded_preview",
             "file_readbacks",
             "readbacks",
-            "workspace_readback",
+            "task_workspace_readback",
             "artifact_readback",
         )
         for key in readback_keys:

@@ -8,7 +8,7 @@ keywords: Agently, ExecutionResource, Action, TriggerFlow, sandbox, MCP, runtime
 
 > Languages: **English** · [中文](../../cn/actions/execution-environment.md)
 
-> Renamed in the 4.1.3.8 Workspace/ActionRuntime boundary refactor: the managed
+> Renamed in the 4.1.3.8 TaskWorkspace/ActionRuntime boundary refactor: the managed
 > live-resource seam is now **ExecutionResource** (`ExecutionResourceManager`,
 > `ExecutionResourceProvider`, `Agently.execution_resource`). The previous
 > `ExecutionEnvironment*` names are removed. This page keeps its URL for link

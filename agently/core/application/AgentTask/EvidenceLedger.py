@@ -600,7 +600,7 @@ def validate_evidence_use(evidence_use: Any, ledger_value: Any) -> dict[str, Any
     )
 
 
-def workspace_artifacts_from_ledger(ledger_value: Any, *, max_artifacts: int = 4) -> list[dict[str, Any]]:
+def task_workspace_artifacts_from_ledger(ledger_value: Any, *, max_artifacts: int = 4) -> list[dict[str, Any]]:
     ledger = (
         ledger_value
         if isinstance(ledger_value, Mapping) and ledger_value.get("schema_version") == EVIDENCE_LEDGER_VIEW_SCHEMA_VERSION
@@ -617,7 +617,7 @@ def workspace_artifacts_from_ledger(ledger_value: Any, *, max_artifacts: int = 4
         kind = str(item.get("kind") or "")
         provenance = item.get("provenance")
         source = str(provenance.get("source") or item.get("source") or "") if isinstance(provenance, Mapping) else ""
-        if "artifact" not in kind and "readback" not in kind and "workspace" not in source:
+        if "artifact" not in kind and "readback" not in kind and "task_workspace" not in source:
             continue
         key = f"{path}|{item.get('id')}"
         if key in seen:

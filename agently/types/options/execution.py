@@ -17,17 +17,21 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 
 from agently.types.config import AgentlyConfigModel
-
-from .routes import SkillsRouteOptions
-
 
 class AgentExecutionRouteOptions(AgentlyConfigModel):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
-    skills: SkillsRouteOptions | None = None
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_skills_route(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and "skills" in value:
+            raise ValueError(
+                "routes.skills was removed; bind Skills through AgentExecution.use_skills(...)."
+            )
+        return value
 
 
 class AgentExecutionLifecycleOptions(AgentlyConfigModel):

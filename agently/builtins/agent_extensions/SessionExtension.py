@@ -98,7 +98,7 @@ class SessionExtension(BaseAgent):
         if session_id is not None and session_id in self.sessions:
             self.activated_session = self.sessions[session_id]
             self.activated_session.plugin_manager = self.plugin_manager
-            self.activated_session._workspace_provider = lambda: getattr(self, "workspace", None)
+            self.activated_session._memory_store_provider = lambda: getattr(self, "record_store", None)
         else:
             if session_id is None:
                 session_id = uuid4().hex
@@ -107,16 +107,16 @@ class SessionExtension(BaseAgent):
                 auto_resize=True,
                 settings=self.settings,
                 plugin_manager=self.plugin_manager,
-                workspace_provider=lambda: getattr(self, "workspace", None),
+                memory_store_provider=lambda: getattr(self, "record_store", None),
             )
             self.sessions[session_id] = self.activated_session
 
         self.__bind_session_resize_pipeline(self.activated_session)
         self.settings.set("runtime.session_id", self.activated_session.id)
-        refresh_workspace = getattr(self, "_refresh_default_workspace_binding", None)
-        if callable(refresh_workspace):
-            refresh_workspace()
-        self._bind_activated_session_memory_workspace()
+        refresh_store = getattr(self, "_refresh_default_record_store_binding", None)
+        if callable(refresh_store):
+            refresh_store()
+        self._bind_activated_session_memory_store()
         self._emit_session_runtime_observation(
             "activated",
             message=f"Session '{ self.activated_session.id }' activated.",
@@ -127,20 +127,20 @@ class SessionExtension(BaseAgent):
         )
         return self._refill_agent_chat_history_with_session()
 
-    def _bind_activated_session_memory_workspace(self) -> None:
+    def _bind_activated_session_memory_store(self) -> None:
         if self.activated_session is None or self.activated_session.memory is None:
             return
-        workspace = getattr(self, "workspace", None)
-        if workspace is not None:
-            self.activated_session.bind_memory_workspace(workspace)
+        memory_store = getattr(self, "record_store", None)
+        if memory_store is not None:
+            self.activated_session.bind_memory_store(memory_store)
 
     def deactivate_session(self) -> Self:
         previous_session_id = self.activated_session.id if self.activated_session is not None else None
         self.activated_session = None
         self.settings.set("runtime.session_id", None)
-        refresh_workspace = getattr(self, "_refresh_default_workspace_binding", None)
-        if callable(refresh_workspace):
-            refresh_workspace()
+        refresh_store = getattr(self, "_refresh_default_record_store_binding", None)
+        if callable(refresh_store):
+            refresh_store()
         if "chat_history" in self.agent_prompt:
             del self.agent_prompt["chat_history"]
         self.agent_prompt.set("chat_history", [])

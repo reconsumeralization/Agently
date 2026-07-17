@@ -2,7 +2,7 @@
 
 Agently 4.1.3 makes `agent.start()` the default user-layer entrypoint for an
 Agent turn. It keeps returning the business result, while the Agent can route
-through ordinary model response, Actions, or SkillsManager-backed Skills
+through ordinary model response, Actions, or SkillLibrary-backed Skills
 execution when those capabilities were explicitly injected.
 
 ```python
@@ -27,7 +27,7 @@ the graph shape and wants to run that graph explicitly.
 
 Quick prompt chains create execution-scoped drafts. The Agent can be kept as a
 service singleton for shared settings, model activation, Actions, Skills,
-Workspace, and `define(...)` / `always=True` prompt, while `.input(...)`,
+TaskWorkspace, and `define(...)` / `always=True` prompt, while `.input(...)`,
 `.system(...)`, `.output(...)`, attachments, and per-execution options in one
 chain are written to an isolated `AgentExecution` draft:
 
@@ -56,17 +56,14 @@ for execution prompt accumulation. Use `always=True`,
 the lower-level request-builder surface.
 
 Accepted development-line routing is candidate-driven and deterministic-first.
-Required Skills express mandatory guidance and capability evidence; when
-ordinary Actions are also available, they can run through the normal
-`model_request` AgentExecution action loop with full required Skill guidance
-bound into the prompt and recorded as prompt-bound Skill evidence. When several
-optional candidates are present, such as model-decision Skills and ordinary
-Actions, the model chooses the route by default. If there is only one optional
-candidate, that route is selected directly.
+Required Skills bind immutable guidance into `TaskContext`; concrete
+model-response consumption is recorded separately from executable capability
+evidence. Ordinary Actions run through the normal `model_request`
+AgentExecution action loop. Skills never create a route or planner capability.
 
 The public Agent API stays in core, but route planning and execution are owned
 by the active `AgentOrchestrator` plugin through the `AgentOrchestrator`
-protocol. This keeps Skills, the DAG substrate, and future route
+protocol. This keeps Skill context, the DAG substrate, and future route
 implementations replaceable without teaching core about builtin plugin
 internals.
 
@@ -160,7 +157,7 @@ The retained runtime is one TriggerFlow lifecycle graph with visible nodes:
 `transition.decide`. Stage events carry only `task_id`, monotonic
 `state_version`, `frame_id`, `iteration`, and phase-specific `plan_id`,
 `work_result_id`, or `evidence_ref` values. Prompt bodies, artifact bodies, and
-full evidence objects stay in their owning request, Workspace, or host frame.
+full evidence objects stay in their owning request, TaskWorkspace, or host frame.
 Every consumer rejects stale versions and cross-task signals. A terminal stage
 result emits directly to `transition.decide`; it does not traverse unexecuted
 stages. AgentTask seals and gracefully drains the execution before reading the
@@ -196,7 +193,7 @@ While a task-strategy `AgentExecution` is still running, host code may add
 non-blocking operator context with `await execution.async_add_guidance(...)` or
 `execution.add_guidance(...)`. Guidance is recorded immediately in running task
 memory, surfaced through runtime events and `guidance_items`, and applied at the
-next safe Flat or TaskBoard boundary. It does not create a Workspace record by
+next safe Flat or TaskBoard boundary. It does not create a RecordStore record by
 default, pause execution, mutate non-task route prompts, or count as completion
 evidence.
 
@@ -241,7 +238,7 @@ real dependency, parallelism, readback, or recovery value. Explicit
 `execution="taskboard"` still preserves TaskBoard. TaskBoard may also promote a
 completed terminal candidate directly to verification instead of paying for a
 second final synthesis request. These optimizations only remove redundant model
-calls; final acceptance still requires the canonical evidence ledger, Workspace
+calls; final acceptance still requires the canonical evidence ledger, TaskWorkspace
 readback evidence, deterministic host guards, and model-owned terminal
 verification.
 
@@ -289,13 +286,13 @@ task_refs = result.task_refs
 
 AgentTask process state stays in memory and runtime logs by default. Planning,
 observations, verification, evidence links, reflections, and TaskBoard
-checkpoints do not materialize Workspace records merely because a task runs.
+checkpoints do not materialize RecordStore records merely because a task runs.
 The next iteration receives a bounded in-process ContextPackage, while trusted
-file products still use Workspace write/readback and terminal retention.
+file products still use TaskWorkspace write/readback and terminal retention.
 
-Set `options={"agent_task": {"workspace_recovery": True}}` only when the host
+Set `options={"agent_task": {"record_store_recovery": True}}` only when the host
 needs restart-safe continuation. That option persists a compact resumable
-snapshot; it does not turn Workspace into a complete process-event or audit
+snapshot; it does not turn TaskWorkspace into a complete process-event or audit
 archive.
 
 TaskBoard checkpoints also include bounded orientation projections for long
@@ -339,7 +336,7 @@ narration and does not wait for progress narration to finish.
 Progress narrator failures are side-channel diagnostics and warning-level
 runtime events; they do not turn the main execution into `model.request_failed`.
 Model progress narration receives an operator-safe snapshot; developer
-diagnostics such as low-level Workspace/SQLite fallback details remain in
+diagnostics such as low-level TaskWorkspace/SQLite fallback details remain in
 snapshots and `task.meta()["diagnostics"]`, but are omitted from the progress
 model input.
 
@@ -372,9 +369,9 @@ card-state changes instead of reprinting the whole table. TaskBoard state is
 summarized as not started, in progress, completed, failed, or degraded;
 completion and quality still come from verifier and host-guard facts, not from
 the projected text. Emoji are redundant visual labels paired with explicit
-words; they do not change task state. Long results stay in Workspace/Action
+words; they do not change task state. Long results stay in TaskWorkspace/Action
 artifacts. Delta renders at most three compact links only when AgentTask has
-verified a Workspace file by path, bytes, digest, and physical readback; an
+verified a TaskWorkspace file by path, bytes, digest, and physical readback; an
 unverified or model-declared path is never rendered as an openable link.
 Use `type="instant"` when the UI needs the original structured event payloads
 with `path`, `value`, `delta`, `is_complete`, and `meta`. When a structured
@@ -412,7 +409,7 @@ and still satisfies the user goal, TaskBoard reports `accepted=True` with
 `artifact_status="degraded"` and includes a `final_response` that explains the
 degradation. This is not a quality shortcut: semantic acceptance still comes
 from the verifier and host guards. `max_iterations` can still leave a useful
-Workspace file or checkpoint, but it is a partial artifact (`accepted=False`,
+TaskWorkspace file or checkpoint, but it is a partial artifact (`accepted=False`,
 `artifact_status="partial"`), not a completed business result. Partial and
 blocked results include `final_response` so callers can show what was produced,
 what stopped, and which requirements remain unmet. `get_text()` /
@@ -433,7 +430,7 @@ guards.
 
 AgentTask has one semantic terminal-verification request for a fitting current
 candidate. Before that request, the host builds one versioned terminal-carrier
-inventory. A Workspace carrier is identified by its host-issued carrier id,
+inventory. A TaskWorkspace carrier is identified by its host-issued carrier id,
 physical path, content-version id, and digest; a compact inline result has its
 own carrier id and digest. Replacing file contents or inline contents creates a
 new carrier identity. Historical carriers remain cold audit records and are not
@@ -514,7 +511,7 @@ revision, evidence-ledger, and artifact-draft dependency views are separately
 bounded, so cold execution metadata is not recursively multiplied through the
 next ActionRuntime or artifact-body request.
 
-Workspace artifact delivery also derives body-light locators from the actual
+TaskWorkspace artifact delivery also derives body-light locators from the actual
 parsed Markdown section headings. The verifier can therefore request bounded
 middle/tail section readbacks directly instead of scheduling a model repair
 whose only purpose is to restate an exact heading. A material-claim repair
@@ -527,12 +524,12 @@ working artifacts remain cold evidence instead of competing with the delivered
 file by byte size. When the caller has not supplied a stronger structured
 required-deliverable contract, the unique completed leaf's structured
 `artifact_manifest.path` becomes its TaskBoard terminal delivery target. The
-host joins that target to trusted Workspace readback by exact normalized full
+host joins that target to trusted TaskWorkspace readback by exact normalized full
 path; a same-named file under another directory is not equivalent. The
 framework-internal `working/` namespace remains intermediate evidence and cannot
 become a terminal target merely because the model declares it; only an explicit
 caller-owned structured required-deliverable contract can authorize such a
-path. Once a required Workspace path exists, it is the only Workspace carrier
+path. Once a required TaskWorkspace path exists, it is the only TaskWorkspace carrier
 offered to terminal verification; other trusted working files remain cold
 evidence instead of competing as alternate terminal products. The verifier
 returns only the selected `claim_key`; the host reconstructs its exact
@@ -541,7 +538,7 @@ request map before producing a repair contract. The model returns bounded replac
 and the host patch owner applies them;
 full-file writes, replace-all operations, unauthorized paths, and old text
 outside the named claims fail closed. This removes complete-body copying from
-the repair model. The operation shape reuses the Workspace edit contract's
+the repair model. The operation shape reuses the TaskWorkspace edit contract's
 `old_string` and `new_string` fields, with exactly one operation keyed by each
 host-issued `claim_key`. Before writing, the host rejoins the operation to its
 immutable `segment_id` and verifies that the current promoted
@@ -549,9 +546,9 @@ immutable `segment_id` and verifies that the current promoted
 version, duplicate/unknown claim key, ambiguous exact match, or unrelated path
 fails closed. Successful readback creates a new content version. Scope
 comparison ignores paired Markdown emphasis around artifact labels,
-while patch application still requires `old_string` to match the Workspace text
+while patch application still requires `old_string` to match the TaskWorkspace text
 exactly. Inline candidates retain the bounded corrected-result path when no
-trusted Workspace candidate exists.
+trusted TaskWorkspace candidate exists.
 
 Control-card `remaining_work` is local to that card's objective and completion
 condition. Work already assigned to a downstream card does not keep an upstream
@@ -564,12 +561,12 @@ stops scheduling further work. Only the explicit card status or
 `next_board_action=block` makes that control result blocked.
 
 TaskBoard artifact/file evidence projections retain their producer `role` and
-`source`. A generated Workspace artifact remains a transport record even when
+`source`. A generated TaskWorkspace artifact remains a transport record even when
 the same bytes are copied to another path or content version; those copies
 include host-applied material-claim patch readbacks under
 `agent_task.workspace_artifact.*` and cannot become independent sources that
 support the carrier itself. Independent
-Action, source, and Workspace-readback evidence keeps its normal eligibility.
+Action, source, and TaskWorkspace-readback evidence keeps its normal eligibility.
 
 Repeated terminal repair is counted by the exact
 `(gate_kind, issue_code, contract_subject)` key. Different issue codes do not
@@ -605,7 +602,7 @@ retained in board history does not advance the counter while unrelated work
 runs. Structured unrecoverable capability or policy failures still fail closed
 immediately through their owning gate.
 
-For a required Workspace deliverable, terminal finalization makes the current
+For a required TaskWorkspace deliverable, terminal finalization makes the current
 physical locator/content-version readback authoritative. Older content versions
 remain available as cold audit identity but cannot replace the current file by
 being a longer historical candidate. Flat and TaskBoard keep the artifact body,
@@ -617,24 +614,24 @@ planner selected `inline_final`. Terminal verification then keeps that current
 or cumulative trusted file carrier throughout repair instead of
 silently switching to an inline-summary hash.
 
-A file-backed terminal result carries a concise Workspace pointer when no
+A file-backed terminal result carries a concise TaskWorkspace pointer when no
 separate explicit answer exists. If the execution returns a non-empty compact
 `candidate_final_result` or `final_result` in addition to `final.md`, AgentTask
 preserves that bounded answer alongside the trusted file refs instead of
-replacing it with a pointer. File bodies remain in Workspace. Unknown or
+replacing it with a pointer. File bodies remain in TaskWorkspace. Unknown or
 duplicate verifier claim keys and unknown evidence ids fail closed. Exact
 carrier identity and quote scope are reconstructed from the immutable host
 claim map before a structured material-claim repair contract is created.
 
 When a bounded step or TaskBoard card returns a short `artifact_markdown` body
 or a sectioned `artifact_manifest`, AgentTask writes the deliverable through the
-bound Workspace and immediately reads it back. The cold evidence records
+bound TaskWorkspace and immediately reads it back. The cold evidence records
 `path`, `bytes`, `sha256`, bounded preview, and `file_refs`; model-hot verifier
 input uses path/ref handles, bounded content or preview, and truncation status.
 For long, sectioned, or prose-heavy
 deliverables, choose the content carrier deliberately. A single freeform
 document can draft as natural Markdown/plain text with no `.output()` contract.
-AgentTask's Workspace artifact writer consumes AgentExecution stream facts:
+AgentTask's TaskWorkspace artifact writer consumes AgentExecution stream facts:
 natural body text comes from raw delta items, and retry boundaries come from
 `$status` when the provider reports it. This natural-text path does not require
 the draft request to use `.output()`. If the public `type="delta"` replay marker
@@ -646,7 +643,7 @@ If a bounded work unit already returned a complete Markdown artifact body in
 structured `evidence`, AgentTask only treats it as a deliverable body when the
 evidence item is explicitly labeled as artifact/body/deliverable/Markdown or
 tied to the manifest path. Untyped source content and source excerpts remain
-evidence snippets, not file bodies. After Workspace write/readback succeeds,
+evidence snippets, not file bodies. After TaskWorkspace write/readback succeeds,
 remaining artifact-write intent is handed to terminal verification instead of
 forcing another iteration just to write the same file.
 For a completed and sufficient TaskBoard leaf that already carries a complete
@@ -660,11 +657,11 @@ When the caller needs separately addressable fields, use Agently
 that format fits the payload instead of forcing the long body into compact JSON
 fields. Keep status, evidence, and verification in separate compact
 judgment/readback contracts. When AgentTask must deliver a trusted file
-artifact, use `artifact_manifest.sections` plus Workspace readback.
+artifact, use `artifact_manifest.sections` plus TaskWorkspace readback.
 Model-declared `file_refs` are diagnostics only until the framework has
-produced this Workspace readback evidence, preserving a real `final.md` or other
+produced this TaskWorkspace readback evidence, preserving a real `final.md` or other
 deliverable for host-side review.
-TaskBoard finalization keeps file-backed deliverable bodies in Workspace; the
+TaskBoard finalization keeps file-backed deliverable bodies in TaskWorkspace; the
 returned `final_result` should stay a concise summary or path/ref pointer rather
 than a second copy of the file body. A completed terminal leaf's explicit
 `final_result` is the summary/answer carrier and survives together with the
@@ -672,11 +669,11 @@ artifact ref; absence of that field falls back to the path/ref pointer.
 
 The same ref-backed path is also valid for intermediate work. A step may
 download a file, save a webpage snapshot, write generated code, keep search
-notes or memory-like task notes, or persist large extracted text as Workspace or Action artifact refs.
+notes or memory-like task notes, or persist large extracted text as TaskWorkspace or Action artifact refs.
 Hot prompts should carry compact refs and bounded previews; later blocks can
 open scoped snippets with `read_file(max_bytes=..., offset=...)` or artifact
 readback when they need the content. Readback work-unit hot payloads use the
-same compact refs; complete refs remain in cold Workspace/Blocks evidence for
+same compact refs; complete refs remain in cold TaskWorkspace/Blocks evidence for
 programmatic readback and audit. These intermediate refs are execution evidence,
 not final deliverable proof. A discovered URL, path, download, or
 snapshot ref is also not evidence that the content has been read; it remains
@@ -685,9 +682,9 @@ snapshot ref is also not evidence that the content has been read; it remains
 visible excerpt, not for the whole file.
 Source-grounded deliverables should either request structured `target_refs`
 readback for unread refs or label them as discovered-only rather than claiming
-facts from them. If an Action artifact readback exposes Workspace `file_refs`
+facts from them. If an Action artifact readback exposes TaskWorkspace `file_refs`
 for a materialized download, TaskBoard readback promotes those nested refs to
-card-level `file_refs` so later work can use Workspace readback instead of
+card-level `file_refs` so later work can use TaskWorkspace readback instead of
 relying on a buried JSON preview. When a non-final
 TaskBoard card proposes a required final path such as `final.md`, AgentTask
 relocates that intermediate artifact to `working/taskboard/<card-id>/...` and
@@ -713,14 +710,14 @@ source-boundary handling; it must not be used as a business fact by itself and
 does not set model-call, tool-call, node-count, iteration, or wall-clock caps.
 
 TaskBoard readback cards can inspect both Action artifact refs and trusted
-Workspace file refs with bounded cold readback previews. Framework-generated
+TaskWorkspace file refs with bounded cold readback previews. Framework-generated
 readback cards scope evidence to direct dependencies plus upstream evidence
 cards, so a control-card readback can still inspect Action refs produced by
 earlier evidence-gathering cards. If a generated continuation card still
 reports that the same readback is insufficient, the framework does not
 recursively synthesize another readback/continuation chain; the card must
 propose different executable work or remain in setback/blocked diagnostics.
-For scoped Workspace retrieval, `evidence_snippet` records include whether the
+For scoped TaskWorkspace retrieval, `evidence_snippet` records include whether the
 bounded snippet was `truncated`. AgentTask now carries these retrieval facts
 through the canonical `EvidenceEnvelope.evidence_items` ledger and injects a
 model-hot `evidence_ledger` view into Flat and TaskBoard work units. The older
@@ -734,19 +731,19 @@ turns that local insufficiency into an action-capable evidence card with an
 expanded bounded retrieval plan plus a continuation card. The search result is
 still only factual context; the continuation card decides whether it is enough.
 When the missing evidence is a new concrete URL, path, or ref rather than an
-existing Action/Workspace ref, the control card should return
+existing Action/TaskWorkspace ref, the control card should return
 `next_board_action="readback"` plus structured `target_refs`. AgentTask turns
 that compact intent into an action-capable evidence card that can download,
 snapshot, or otherwise materialize the target before the continuation card
 runs. URLs mentioned only inside `gaps` prose are diagnostics; they are not
 parsed as executable targets.
-When a control card instead returns `next_board_action="patch"` with a Workspace
-text patch proposal, AgentTask applies the patch to the bound Workspace file,
+When a control card instead returns `next_board_action="patch"` with a TaskWorkspace
+text patch proposal, AgentTask applies the patch to the bound TaskWorkspace file,
 writes it back, and returns trusted `file_refs` after readback. This is a
 materialization step only: final completion still belongs to terminal
 acceptance and host guards.
 For completed and sufficient control outputs, non-fatal `gaps` do not prevent
-Workspace artifact materialization. A completed and sufficient leaf may also
+TaskWorkspace artifact materialization. A completed and sufficient leaf may also
 materialize its complete artifact before handing `remaining_work` to terminal
 verification; on other control outputs, `remaining_work`, setback/blocked
 status, repair, or readback still prevent delivery. Writing the artifact only
@@ -765,7 +762,7 @@ acceptance, evidence/artifact boundary audit, contradictions, or high-risk
 review.
 When a terminal verifier returns an incomplete result, its compact
 `repair_context` is carried into the next Flat work unit and into the dedicated
-Workspace artifact draft request when the next deliverable body is file-backed.
+TaskWorkspace artifact draft request when the next deliverable body is file-backed.
 This keeps exact `acceptance_delta`, repair constraints, next-step
 requirements, and available evidence anchors visible to the consumer that
 actually rewrites or reads the artifact, without putting cold integrity metadata
@@ -775,7 +772,7 @@ For TaskBoard, an authored required `action_succeeded` capability requirement
 also owns repair dispatch. If that exact Action evidence is missing and the
 capability is mounted, TaskBoard schedules an Action-shaped repair carrying the
 same capability id and kind. Verifier prose does not select the Action, and a
-Workspace readback cannot satisfy an Action requirement. If the capability is
+TaskWorkspace readback cannot satisfy an Action requirement. If the capability is
 unavailable, repair fails closed instead of substituting a different operation.
 The repair card keeps that exact requirement through its card contract,
 `WorkUnitIntent`, Blocks capability resolution, and the TaskBoard Action
@@ -798,7 +795,7 @@ card results, one narrow structured request returns only the bounded
 dispatch. Every model-authored command is checked against the mounted Action's
 declared input keys before dispatch. An invalid initial-plan command is removed
 and re-planned once through that authoritative narrow contract; an invalid
-narrow response fails closed without reaching ActionRuntime. Exact Workspace final-artifact handoff is likewise lowered to the
+narrow response fails closed without reaching ActionRuntime. Exact TaskWorkspace final-artifact handoff is likewise lowered to the
 required write/readback Actions. Unknown Action ids, missing required ids, and
 invalid arguments fail closed. The ordinary multi-round ActionLoop remains for
 open-ended Agent execution where later Action choices genuinely depend on
@@ -811,12 +808,12 @@ with synthesis after dispatch. If an initial card combines non-delivery Action
 commands with `final_workspace_deliverables`, AgentTask separates it into an
 upstream Action card and a dependent control card before board validation. A
 final-delivery card without an exact command batch is treated as a control card,
-while an already complete, schema-valid Workspace write command remains an
+while an already complete, schema-valid TaskWorkspace write command remains an
 Action card. The dependent control request receives the collected evidence and
-owns synthesis. When the task contract explicitly requires Workspace write and
+owns synthesis. When the task contract explicitly requires TaskWorkspace write and
 read Actions, the synthesized body is then materialized and read back through
 those Actions before normal artifact adoption. This keeps Action success,
-Workspace readback, and final content ownership on one visible value/event
+TaskWorkspace readback, and final content ownership on one visible value/event
 chain instead of relying on a later repair loop. Control-card Action records use
 the same execution-summary carrier as ordinary Action cards, so terminal
 capability checks observe the completed write/read events instead of scheduling
@@ -858,7 +855,7 @@ When the write succeeds and readback is trusted, verifier input carries one
 bounded body-bearing evidence ledger, including the relevant readback content
 or preview, plus body-light acceptance-locator, artifact, and overflow ref/state
 indexes. Raw evidence and integrity metadata remain available for scoped
-Workspace readback and audit instead of being copied into every hot summary.
+TaskWorkspace readback and audit instead of being copied into every hot summary.
 When one claim cites both valid content evidence and structurally incompatible
 auxiliary ids (for example failed or `ref_only` records as positive support),
 binding repair may remove only the incompatible ids and only after the retained
@@ -870,13 +867,13 @@ because the evidence chain was omitted. If readback fails or lacks trusted
 `path` / `bytes` / `sha256` evidence, diagnostics use
 `agent_task.workspace_artifact.readback_failed` or
 `agent_task.workspace_artifact.readback_insufficient` so the problem is reported
-as Workspace artifact readback missing/insufficient, not as a generic budget or
+as TaskWorkspace artifact readback missing/insufficient, not as a generic budget or
 iteration shortfall.
 
 If the structured task input or output contract declares required deliverables,
-AgentTask host guards require those Workspace files to exist and read back before
+AgentTask host guards require those TaskWorkspace files to exist and read back before
 accepting completion. A verifier response that says a file exists is not enough
-unless Workspace readback confirms the declared final path. That caller-owned
+unless TaskWorkspace readback confirms the declared final path. That caller-owned
 contract is authoritative. Without one, a unique completed TaskBoard leaf's
 structured `artifact_manifest.path` supplies the narrower execution-local
 delivery target; terminal acceptance still requires exact-path readback and
@@ -909,7 +906,7 @@ and verification. `examples/agent_task/goal_pursuit_acceptance_matrix.py`
 remains a smaller matrix script for accepted and non-accepted terminal states.
 
 `examples/agent_task/real_complex_bundle_goal_stream.py` is the high-level real
-complex proof for the same path. It mounts Search, AMap MCP, Workspace file
+complex proof for the same path. It mounts Search, AMap MCP, TaskWorkspace file
 actions, and the CocoonAI `architecture-diagram` Skill through public Agent
 capability APIs, then asks the task loop to produce an operator daily report, a
 Hangzhou business travelogue, and an HTML/SVG architecture diagram while
@@ -926,7 +923,7 @@ design-document experiment for the same path. It keeps the legacy
 probe, not as the recommended selector for new code. New code should use
 `.strategy("direct")` for the ordinary model_request/ActionLoop route, or
 `.strategy("flat")` / `.strategy("taskboard")` when the host explicitly wants
-AgentTask. The example also uses a repository-source Action, Workspace file
+AgentTask. The example also uses a repository-source Action, TaskWorkspace file
 Actions, and an independent Agently model judge to produce and review a readable
 Agently architecture diagram.
 
@@ -934,7 +931,7 @@ Agently architecture diagram.
 the core AgentTask experiment scenarios: stock-risk briefing, Agent engineering
 weekly, LMCC mock exam generation, repository reading, and multi-runtime code
 execution. The same folder also includes mixed capability examples that combine
-native Actions, real MCP registration, local Skills, Workspace file actions,
+native Actions, real MCP registration, local Skills, TaskWorkspace file actions,
 and delta streaming for travel planning, equity risk analysis, and market-entry
 analysis. These examples deliberately rely on `agent.create_task(...)`
 defaults, including `execution="auto"`, so the example code stays close to
@@ -953,14 +950,14 @@ lifecycle.
 
 ### Resume a task after a crash
 
-Workspace recovery is opt-in. Create the original task with a stable `task_id`
-and `workspace_recovery=True` when a crash must be resumable:
+RecordStore recovery is opt-in. Create the original task with a stable `task_id`
+and `record_store_recovery=True` when a crash must be resumable:
 
 ```python
 execution = agent.create_task(
     task_id="issue-123",
     goal="Repair the issue and verify the result.",
-    options={"agent_task": {"workspace_recovery": True}},
+    options={"agent_task": {"record_store_recovery": True}},
 )
 await execution.async_start()
 ```
@@ -976,7 +973,7 @@ result = await execution.async_start()              # continues from iteration N
 meta = await execution.async_get_meta()
 ```
 
-Resume reads the task's latest snapshot from the Workspace, restores its
+Resume reads the task's latest snapshot from the RecordStore, restores its
 iteration history and cumulative required-capability progress, and raises
 `ValueError` if no resumable snapshot exists. An iteration that was in flight at
 crash time is re-planned, so non-replay-safe step side effects are the host's
@@ -1058,7 +1055,7 @@ execution = agent.input("Try one bounded fix step.").create_execution(
 
 This is still one AgentExecution, not a multi-turn loop. `lineage` provides
 stable correlation, while `limits` provides shared model-request budget counting
-across direct model routes and Skills model stages.
+across direct model and AgentTask requests.
 Use `None` for an unlimited budget.
 
 If a bounded execution exceeds its model-request budget, Agently raises
@@ -1073,7 +1070,7 @@ wall-clock budget and returns a task `timed_out` result with task metadata; othe
 routes surface the hard deadline as `RuntimeStageStallError`, available from the
 root `agently.core` export or from `agently.core.application.AgentExecution`.
 `limits.max_no_progress_seconds` is an idle stall boundary: any accepted runtime
-progress from route selection, model streaming, Skills, or ActionRuntime
+progress from route selection, model streaming, Context reading, or ActionRuntime
 refreshes the timer. `async_get_meta()` remains inspectable and records
 `status="timed_out"` or `status="stalled"` with `diagnostics["timeouts"]` /
 `diagnostics["stalls"]` and the last progress event.
@@ -1124,7 +1121,7 @@ AgentExecution stream APIs stay raw. Event Center outlet summaries include
 to summary delivery.
 
 `async_get_meta()` includes `lineage`, `limits`,
-`route`, `route_plan`, `logs`, `diagnostics`, and `workspace_refs`. `logs` is
+`route`, `route_plan`, `logs`, `diagnostics`, and `task_workspace_refs`. `logs` is
 the route-independent place to inspect runtime
 facts such as model response ids, ActionRuntime action records, and artifact
 refs:
@@ -1141,7 +1138,7 @@ When a `model_request` route uses Actions, the execution exposes the action
 records through both meta and stream events such as `actions.<action_id>`.
 Hosts that need to persist business evidence should read the framework action
 record or artifact, then explicitly write the selected observation to
-Workspace. Do not ask the model to copy raw action stdout just to make the host
+RecordStore. Do not ask the model to copy raw action stdout just to make the host
 able to store it.
 
 Every process-stream item also receives correlation metadata:
@@ -1151,27 +1148,27 @@ item.meta["execution_id"]
 item.meta["lineage"]["task_id"]
 ```
 
-Default Agents carry a lazy Workspace binding, and `agent.use_workspace(...)`
-can override it with an explicit root or provider before `create_execution()`.
-AgentExecution still does not decide what becomes memory automatically; persist
-explicitly from the execution side:
+Default Agents carry separate lazy TaskWorkspace and RecordStore bindings.
+`agent.use_task_workspace(...)` selects the file root;
+`agent.use_record_store(...)` selects persistence. AgentExecution still does
+not decide what becomes memory automatically; persist explicitly:
 
 ```python
-workspace_record = await execution.async_record_workspace(
+record_ref = await execution.record_store.put(
     collection="observations",
     kind="agent_execution_observation",
     content={"result": data},
-    checkpoint=True,
+)
+checkpoint_ref = await execution.record_store.checkpoint(
+    execution.lineage["task_id"],
+    {"result": data, "record_ref": record_ref},
 )
 ```
 
-This writes through the execution's bound Workspace provider surface. When a
-checkpoint is requested, the helper uses the checkpoint-store port and records
-an evidence link between the AgentExecution record and the checkpoint. The
-record id, checkpoint id, and evidence link id are visible under
-`meta["workspace_refs"]`. Workspace remains the durable substrate and does not
-need to know AgentExecution strategy semantics. Call `workspace.build_context(...)`
-for the next step.
+This writes through the execution-scoped RecordStore view. Attach a
+`RecordStoreContextSource` to TaskContext, or use
+`execution.async_read_task_context(...)`, for the next bounded read.
+TaskWorkspace continues to own file artifacts and their readback refs.
 
 For development diagnostics, attach an EventCenter observation hook or
 temporarily enable console details:
@@ -1221,30 +1218,20 @@ snapshot = await task.async_run(graph_input={"ticket": "TICKET-OK"})
 ```
 
 If an AgentExecution needs the result, pass the snapshot as ordinary evidence in
-`input(...)`, `info(...)`, or a Workspace record. The DAG snapshot does not by
+`input(...)`, `info(...)`, or a RecordStore record. The DAG snapshot does not by
 itself mean the broader business goal is complete.
 
 ## Skills Semantics
 
-`agent.use_skills(...)` and `agent.use_skills_packs(...)` register route
-candidates. `mode="model_decision"` keeps them as candidates and does not
-inject full guidance into the ordinary model request by default. `mode="required"`
-means the Skill guidance must be applied: if the execution uses the ordinary
-`model_request` route with Actions, Agently injects the required SKILL.md
-guidance into that AgentExecution and records prompt-bound Skill evidence for
-AgentTask capability checks. A selected Skills route or `run_skills_task(...)`
-still runs the Skills compatibility execution path.
+`agent.use_skills(...)` and `agent.use_skills_packs(...)` register binding
+intent on an AgentExecution. `mode="model_decision"` uses a structured semantic
+selector over installed revisions; `mode="required"` binds the selected
+SKILL.md guidance fail-closed. The ordinary `model_request` or explicit
+AgentTask strategy then consumes that guidance through TaskContext.
 
-For AgentTask routes, a required remote selector is resolved and installed
-before business planning. AgentTask continues with the canonical installed
-Skill id only after discovery, installation, and inspection succeed. Otherwise
-the execution fails closed as `blocked`; it does not continue producing an
-answer that could never satisfy the required-Skill gate. Selector-level
-`auto_allow=True` controls capability authorization only and cannot turn an
-unavailable Skill into an available one.
-
-Use `agent.run_skills_task(...)` or an explicit route policy when a caller must
-force the standalone Skills compatibility route.
+`run_skills_task(...)` is only a released result-shaped adapter over the same
+AgentExecution path. SkillLibrary installs local materialized sources; remote
+fetching belongs to authorized host code before installation.
 
 ## Process Stream
 

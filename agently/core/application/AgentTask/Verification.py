@@ -38,8 +38,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         """Bounded, low-noise iteration history for plan/verify prompts.
 
         Full iteration records (including execution_meta) stay in self.iterations
-        and the Workspace; prompts receive only step intent, the verification
-        outcome, and Workspace refs so context does not grow unboundedly with the
+        and the TaskWorkspace; prompts receive only step intent, the verification
+        outcome, and TaskWorkspace refs so context does not grow unboundedly with the
         full execution metadata of every prior step.
         """
         limit = self._iterations_prompt_limit()
@@ -163,8 +163,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "required_actions": self._normalize_string_list(execution_evidence_summary.get("required_actions")),
             "required_skills": self._normalize_string_list(execution_evidence_summary.get("required_skills")),
             "current_action_ids": self._normalize_string_list(execution_evidence_summary.get("action_ids")),
-            "current_selected_skill_ids": self._normalize_string_list(
-                execution_evidence_summary.get("selected_skill_ids")
+            "current_consumed_skill_ids": self._normalize_string_list(
+                execution_evidence_summary.get("consumed_skill_ids")
             ),
             "current_capabilities_used": self._normalize_string_list(
                 execution_evidence_summary.get("capabilities_used")
@@ -634,7 +634,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     def _shape_for_route(route: str) -> str:
         return {
             "model_request": "direct",
-            "skills": "skills",
             "dynamic_task": "dynamic_task",
             "agent_task": "dynamic_task",
         }.get(str(route or "").strip(), "direct")
@@ -1015,7 +1014,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         plan: dict[str, Any],
         execution_result: Any,
         execution_meta: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
     ) -> dict[str, Any]:
         language_policy = self._language_policy()
         raw_execution_evidence_summary = self._execution_log_summary(execution_meta)
@@ -1023,7 +1022,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
         initial_evidence_use = collect_evidence_use(execution_result)
         initial_guard = validate_evidence_use(initial_evidence_use, evidence_ledger)
-        await self._ensure_workspace_artifact_targeted_readback_evidence(
+        await self._ensure_task_workspace_artifact_targeted_readback_evidence(
             execution_meta,
             evidence_ledger,
             evidence_use=initial_guard.get("normalized_evidence_use"),
@@ -1095,7 +1094,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if candidate_guard.get("valid") is True:
                 normalized_execution_result = candidate_execution_result
                 grounding_guard = candidate_guard
-        trusted_workspace_artifacts = self._workspace_artifact_index_for_verifier(evidence_ledger)
+        trusted_task_workspace_artifacts = self._task_workspace_artifact_index_for_verifier(evidence_ledger)
         evidence_summary = self._compact_verifier_evidence_summary(
             raw_execution_evidence_summary,
             include_body_previews=False,
@@ -1105,7 +1104,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             include_body_previews=False,
         )
         capability_evidence_requirements = self._capability_evidence_requirements(raw_cumulative_evidence_summary)
-        verifier_execution_result = self._workspace_artifact_execution_result_for_verifier(normalized_execution_result)
+        verifier_execution_result = self._task_workspace_artifact_execution_result_for_verifier(normalized_execution_result)
         candidate_final_result = self._candidate_final_result_from_execution_result(normalized_execution_result)
         await self._replace_terminal_carriers(
             execution_result=normalized_execution_result,
@@ -1142,6 +1141,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 iteration=iteration_index,
             )
             return convergence_preflight
+        verification_context_pack, context_package = await self._read_task_context_view(
+            phase="verification",
+            consumer_id=f"agent_task:{self.id}:verifier:iteration:{iteration_index}",
+            intent=f"Verify iteration {iteration_index}: {self.goal}",
+        )
         request = self.agent.create_temp_request()
         self._apply_language_policy_to_request(request, language_policy)
         model_evidence_ledger = self._model_evidence_ledger_projection(
@@ -1205,9 +1209,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 evidence_ledger
             ),
             "grounding_guard": self._compact_grounding_guard_for_verifier(grounding_guard),
-            "trusted_workspace_artifacts": trusted_workspace_artifacts,
+            "trusted_task_workspace_artifacts": trusted_task_workspace_artifacts,
             "capability_evidence_requirements": capability_evidence_requirements,
-            "context_pack": self._compact_context_pack_for_verifier(context_pack),
+            "context_pack": self._compact_context_pack_for_verifier(
+                cast("TaskContextView", verification_context_pack)
+            ),
             "execution_prompt": self._execution_prompt_context(),
             "previous_iterations": self._iteration_prompt_summaries(),
             "reflection_summaries": self._reflection_prompt_summaries(),
@@ -1245,7 +1251,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "Treat evidence_ledger as the single authoritative model-visible grounding ledger. Each item exposes exactly "
             "one host-issued reference_id; use only exact offered items[].reference_id values in criterion_checks.evidence_ids. "
             "Canonical ids and aliases remain host-side. Other summaries and indexes are body-light projections. "
-            "Use acceptance_locator_view as a body-light verifier readback index for Workspace artifacts: locator items show "
+            "Use acceptance_locator_view as a body-light verifier readback index for TaskWorkspace artifacts: locator items show "
             "where to inspect an artifact, not whether the content is semantically correct. It deliberately exposes no "
             "selection ids. Prefer bounded readback "
             "items produced from those locators when checking long artifact sections. A locator with "
@@ -1319,18 +1325,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "Decide final_result_required from the goal and success criteria: set it true when the task demands a "
             "concrete final deliverable (answer, file, report, artifact, or similar) and false when the work is "
             "purely an action or side effect with no expected returned deliverable. "
-            "For non-file deliverables, final_result should contain the returned answer body. For trusted Workspace "
-            "artifact deliverables, the body remains in Workspace and trusted_workspace_artifacts plus file_refs/readback "
+            "For non-file deliverables, final_result should contain the returned answer body. For trusted TaskWorkspace "
+            "artifact deliverables, the body remains in TaskWorkspace and trusted_task_workspace_artifacts plus file_refs/readback "
             "are the completion evidence; final_result may be a concise path/ref summary and must not copy the full "
-            "artifact body only to satisfy a structured field. trusted_workspace_artifacts is a body-light Workspace "
+            "artifact body only to satisfy a structured field. trusted_task_workspace_artifacts is a body-light TaskWorkspace "
             "location/status index with no selection identity, and the index itself does not prove artifact content. "
-            "For source-grounded Workspace artifacts, verify the artifact "
+            "For source-grounded TaskWorkspace artifacts, verify the artifact "
             "body in evidence_ledger readback and targeted-readback items "
             "against visible source_refs, Action evidence, "
             "URLs, paths, and refs; a final_result path pointer alone is not enough to satisfy citation or provenance "
-            "requirements. For long artifacts, also inspect workspace_artifact.targeted_readback ledger items for bounded "
+            "requirements. For long artifacts, also inspect task_workspace_artifact.targeted_readback ledger items for bounded "
             "section, tail, source-list, risk, reference, or coverage snippets before concluding a required section is "
-            "missing. Treat long Workspace artifact verification as an acceptance-point evidence review, not a "
+            "missing. Treat long TaskWorkspace artifact verification as an acceptance-point evidence review, not a "
             "whole-document editorial review: judge whether verifier-visible bounded snippets, required locators, "
             "targeted readbacks, and cited source/action evidence cover the required structure and material claims. "
             "Do not require risk, uncertainty, limitation, or caveat sections unless the user task, output contract, "
@@ -1338,12 +1344,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "Do not require full-artifact reading merely to assert general overall quality unless the success criteria "
             "explicitly require whole-document proofreading, style review, or exhaustive line-by-line audit. If all "
             "required acceptance points and material claims are supported by verifier-visible evidence, accept without "
-            "requesting broader readback. Do not ask a later step to read a Workspace artifact solely to paste its full content into "
+            "requesting broader readback. Do not ask a later step to read a TaskWorkspace artifact solely to paste its full content into "
             "final_result. If trusted artifact refs or readback are missing or too scoped to verify a material claim, "
             "keep is_complete=false and ask for scoped artifact readback or repair. "
             "When candidate_final_result contains a complete answer/report/artifact body that satisfies the criteria, "
-            "use it as final_result. When the plan or success criteria require a Workspace artifact, accept only "
-            "trusted Workspace write/readback refs from execution evidence; model-declared file_refs are diagnostics. "
+            "use it as final_result. When the plan or success criteria require a TaskWorkspace artifact, accept only "
+            "trusted TaskWorkspace write/readback refs from execution evidence; model-declared file_refs are diagnostics. "
             "If evidence is incomplete, set is_complete=false and explain failure_analysis and acceptance_delta: "
             "why the task is not accepted, which acceptance facts are missing or weak, and what evidence boundary "
             "blocked verification. The verifier does not choose tools, routes, execution shapes, or exact methods. "
@@ -1458,7 +1464,20 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             },
             format="json",
         )
-        verification = await self._await_task_request(request.async_get_data(), stage="verify")
+        result_handle = request.get_result()
+        verification = await self._await_task_request(
+            result_handle.async_get_data(),
+            stage="verify",
+        )
+        self._record_task_context_consumption(
+            context_package,
+            request_id=result_handle.id,
+        )
+        await self._emit_required_skill_context_bound(
+            verification_context_pack,
+            request_id=result_handle.id,
+            phase="terminal.verify",
+        )
         if not isinstance(verification, dict):
             verification = {
                 "is_complete": False,
@@ -1494,7 +1513,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         )
         return normalized
 
-    async def _ensure_workspace_artifact_targeted_readback_evidence(
+    async def _ensure_task_workspace_artifact_targeted_readback_evidence(
         self,
         execution_meta: Mapping[str, Any],
         evidence_ledger: Mapping[str, Any],
@@ -1508,7 +1527,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         for item in evidence_ledger.get("items", []) if isinstance(evidence_ledger, Mapping) else []:
             if not isinstance(item, Mapping):
                 continue
-            if str(item.get("kind") or "") != "workspace_artifact.targeted_readback":
+            if str(item.get("kind") or "") != "task_workspace_artifact.targeted_readback":
                 continue
             path = str(item.get("path") or "").strip()
             provenance = item.get("provenance")
@@ -1529,13 +1548,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 continue
             if str(locator.get("status") or "") != "ok":
                 continue
-            readback = await self._workspace_artifact_acceptance_locator_readback(locator)
+            readback = await self._task_workspace_artifact_acceptance_locator_readback(locator)
             if readback is not None:
-                evidence_items.append(self._workspace_artifact_targeted_readback_evidence_item(locator, readback))
+                evidence_items.append(self._task_workspace_artifact_targeted_readback_evidence_item(locator, readback))
                 existing_locator_readbacks.add(locator_id)
 
         claim_queries = self._evidence_use_verifier_target_queries(evidence_use)
-        for artifact in workspace_artifacts_from_ledger(evidence_ledger):
+        for artifact in task_workspace_artifacts_from_ledger(evidence_ledger):
             path = str(artifact.get("path") or "").strip()
             if not path or path in existing_generic_paths:
                 continue
@@ -1544,13 +1563,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if str(artifact.get("body_state") or "") != "truncated":
                 continue
             try:
-                read_result = await self.workspace.read_file(
+                read_result = await self.task_workspace.read_file(
                     path,
-                    max_bytes=self._workspace_artifact_verifier_readback_bytes(artifact),
+                    max_bytes=self._task_workspace_artifact_verifier_readback_bytes(artifact),
                 )
             except Exception as error:
                 evidence_items.append(
-                    self._workspace_artifact_targeted_readback_evidence_item(
+                    self._task_workspace_artifact_targeted_readback_evidence_item(
                         artifact,
                         {
                             "kind": "verifier_readback",
@@ -1564,16 +1583,16 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     )
                 )
                 continue
-            for readback in await self._trusted_workspace_artifact_targeted_readbacks(
+            for readback in await self._trusted_task_workspace_artifact_targeted_readbacks(
                 artifact,
                 read_result,
                 queries=claim_queries,
             ):
-                evidence_items.append(self._workspace_artifact_targeted_readback_evidence_item(artifact, readback))
+                evidence_items.append(self._task_workspace_artifact_targeted_readback_evidence_item(artifact, readback))
         self._append_execution_meta_evidence_items(execution_meta, evidence_items)
 
     @classmethod
-    def _workspace_artifact_targeted_readback_evidence_item(
+    def _task_workspace_artifact_targeted_readback_evidence_item(
         cls,
         artifact: Mapping[str, Any],
         readback: Mapping[str, Any],
@@ -1594,27 +1613,27 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             or artifact.get("id")
             or "unversioned"
         ).strip()
-        evidence_id = cls._workspace_artifact_evidence_id(
-            "workspace_artifact_targeted_readback",
+        evidence_id = cls._task_workspace_artifact_evidence_id(
+            "task_workspace_artifact_targeted_readback",
             path,
             f"{snapshot_key}:{kind}:{locator}",
         )
         item: dict[str, Any] = {
             "id": evidence_id,
-            "kind": "workspace_artifact.targeted_readback",
+            "kind": "task_workspace_artifact.targeted_readback",
             "status": status,
             "raw_status": raw_status,
             "body_state": "ref_only" if status == "failed" else ("truncated" if readback.get("truncated") else "bounded"),
             "path": path,
-            "aliases": cls._workspace_artifact_targeted_readback_aliases(
+            "aliases": cls._task_workspace_artifact_targeted_readback_aliases(
                 path=path,
                 query=query,
                 readback=readback,
                 artifact=artifact,
             ),
-            "source": "agent_task.workspace_artifact.targeted_readback",
+            "source": "agent_task.task_workspace_artifact.targeted_readback",
             "provenance": {
-                "source": "agent_task.workspace_artifact.targeted_readback",
+                "source": "agent_task.task_workspace_artifact.targeted_readback",
                 "source_evidence_id": readback.get("source_evidence_id") or artifact.get("id"),
                 "path": path,
                 "kind": kind,
@@ -1644,15 +1663,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if status == "failed":
             item["diagnostics"] = [
                 {
-                    "code": "agent_task.workspace_artifact.targeted_readback_failed",
-                    "message": "Workspace artifact targeted readback failed before verifier request.",
+                    "code": "agent_task.task_workspace_artifact.targeted_readback_failed",
+                    "message": "TaskWorkspace artifact targeted readback failed before verifier request.",
                     "error": DataFormatter.sanitize(readback.get("error") or {}),
                 }
             ]
         return DataFormatter.sanitize(item)
 
     @classmethod
-    def _workspace_artifact_targeted_readback_aliases(
+    def _task_workspace_artifact_targeted_readback_aliases(
         cls,
         *,
         path: str,
@@ -1666,7 +1685,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             text = str(value or "").strip()
             if text and text not in aliases:
                 aliases.append(text)
-            slug = cls._workspace_artifact_readback_alias_slug(text)
+            slug = cls._task_workspace_artifact_readback_alias_slug(text)
             if slug and slug not in aliases:
                 aliases.append(slug)
 
@@ -1682,14 +1701,14 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return aliases[:24]
 
     @staticmethod
-    def _workspace_artifact_readback_alias_slug(value: str) -> str:
+    def _task_workspace_artifact_readback_alias_slug(value: str) -> str:
         text = str(value or "").strip().lower().replace("_", " ")
         if not text:
             return ""
         slug = "-".join(re.findall(r"[a-z0-9]+", text))
         return slug[:160]
 
-    async def _workspace_artifact_acceptance_locator_readback(
+    async def _task_workspace_artifact_acceptance_locator_readback(
         self,
         locator: Mapping[str, Any],
     ) -> dict[str, Any] | None:
@@ -1704,7 +1723,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             max_bytes = min(max(byte_end - offset, 800), max_bytes)
         if offset > 0 or byte_end > 0:
             try:
-                read_result = await self.workspace.read_file(path, max_bytes=max_bytes, offset=offset)
+                read_result = await self.task_workspace.read_file(path, max_bytes=max_bytes, offset=offset)
             except Exception as error:
                 return {
                     "kind": "acceptance_locator_readback",
@@ -1732,7 +1751,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "content": self._truncate_prompt_text(str(read_result.get("content") or ""), max_bytes),
             }
         for query in self._acceptance_locator_search_queries(locator):
-            match = await self._workspace_artifact_search_readback(
+            match = await self._task_workspace_artifact_search_readback(
                 path,
                 query,
                 max_file_bytes=5_000_000,
@@ -2392,7 +2411,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             evidence_id = str(ref.get("reference_id") or ref.get("id") or "").strip()
             if not evidence_id or (candidate_ids and evidence_id not in candidate_ids):
                 continue
-            if str(ref.get("kind") or "").strip().lower() != "workspace_artifact.acceptance_coverage":
+            if str(ref.get("kind") or "").strip().lower() != "task_workspace_artifact.acceptance_coverage":
                 continue
             if str(ref.get("status") or "").strip().lower() != "ok":
                 continue
@@ -2420,7 +2439,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             return []
         evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
         query_specs = [(query, False) for query in cls._evidence_binding_body_match_queries(evidence_id_text)]
-        if not evidence_id_text or cls._evidence_binding_id_looks_like_workspace_locator(evidence_id_text):
+        if not evidence_id_text or cls._evidence_binding_id_looks_like_task_workspace_locator(evidence_id_text):
             allow_partial_claim_match = not evidence_id_text
             query_specs.extend(
                 (query, allow_partial_claim_match)
@@ -2461,9 +2480,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         unique_matches = cls._unique_evidence_binding_ref_ids(matches)
         if len(unique_matches) <= 1:
             return unique_matches
-        coalesced_workspace_match = cls._coalesced_workspace_body_text_candidate(matches)
-        if coalesced_workspace_match:
-            return [coalesced_workspace_match]
+        coalesced_task_workspace_match = cls._coalesced_task_workspace_body_text_candidate(matches)
+        if coalesced_task_workspace_match:
+            return [coalesced_task_workspace_match]
         return unique_matches
 
     @staticmethod
@@ -2547,11 +2566,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return deduped
 
     @classmethod
-    def _evidence_binding_id_looks_like_workspace_locator(cls, evidence_id: str) -> bool:
+    def _evidence_binding_id_looks_like_task_workspace_locator(cls, evidence_id: str) -> bool:
         text = str(evidence_id or "").strip().lower()
         return (
             not text
-            or "workspace_artifact" in text
+            or "task_workspace_artifact" in text
             or "artifact_locator" in text
             or "acceptance_locator" in text
             or "readback" in text
@@ -2594,7 +2613,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "source",
             "targeted",
             "the",
-            "workspace",
+            "task_workspace",
         }
         seen: set[str] = set()
         result: list[str] = []
@@ -2645,9 +2664,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         unique_readable_matches = cls._unique_evidence_binding_ref_ids(readable_matches)
         if len(unique_readable_matches) == 1:
             return unique_readable_matches[0]
-        coalesced_workspace_match = cls._coalesced_workspace_body_text_candidate(readable_matches)
-        if coalesced_workspace_match:
-            return coalesced_workspace_match
+        coalesced_task_workspace_match = cls._coalesced_task_workspace_body_text_candidate(readable_matches)
+        if coalesced_task_workspace_match:
+            return coalesced_task_workspace_match
         return ""
 
     @classmethod
@@ -2687,31 +2706,31 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         action_id = str(ref.get("action_id") or "").strip().lower()
         return (
             "readback" in kind
-            or kind == "workspace_artifact.readback"
-            or kind == "workspace_artifact.targeted_readback"
+            or kind == "task_workspace_artifact.readback"
+            or kind == "task_workspace_artifact.targeted_readback"
             or action_id in {"read_file", "grep_files", "search_files"}
         )
 
     @classmethod
-    def _coalesced_workspace_body_text_candidate(cls, refs: Sequence[Mapping[str, Any]]) -> str:
-        workspace_refs: list[Mapping[str, Any]] = []
+    def _coalesced_task_workspace_body_text_candidate(cls, refs: Sequence[Mapping[str, Any]]) -> str:
+        task_workspace_refs: list[Mapping[str, Any]] = []
         for ref in refs:
             kind = str(ref.get("kind") or "").strip().lower()
-            if kind not in {"workspace_artifact.readback", "workspace_artifact.targeted_readback"}:
+            if kind not in {"task_workspace_artifact.readback", "task_workspace_artifact.targeted_readback"}:
                 continue
             path = str(ref.get("path") or "").strip()
             evidence_id = str(ref.get("id") or "").strip()
             if path and evidence_id:
-                workspace_refs.append(ref)
-        if not workspace_refs:
+                task_workspace_refs.append(ref)
+        if not task_workspace_refs:
             return ""
-        paths = {str(ref.get("path") or "").strip() for ref in workspace_refs}
+        paths = {str(ref.get("path") or "").strip() for ref in task_workspace_refs}
         if len(paths) != 1:
             return ""
         targeted_refs = [
-            ref for ref in workspace_refs if str(ref.get("kind") or "").strip().lower() == "workspace_artifact.targeted_readback"
+            ref for ref in task_workspace_refs if str(ref.get("kind") or "").strip().lower() == "task_workspace_artifact.targeted_readback"
         ]
-        selected_pool = targeted_refs or workspace_refs
+        selected_pool = targeted_refs or task_workspace_refs
         return str(selected_pool[-1].get("id") or "").strip()
 
     @classmethod
@@ -2740,7 +2759,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 continue
             if (
                 "readback" not in kind
-                and "workspace_artifact" not in kind
+                and "task_workspace_artifact" not in kind
                 and kind != "agent_task.action.result"
             ):
                 continue
@@ -2847,19 +2866,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             merged.append(DataFormatter.sanitize(replacement if replacement is not None else item))
         return merged
 
-    async def _trusted_workspace_artifacts_for_verifier(
+    async def _trusted_task_workspace_artifacts_for_verifier(
         self,
         evidence_summary: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         artifacts: list[dict[str, Any]] = []
-        for ref in self._trusted_workspace_artifact_refs_from_summary(evidence_summary):
-            artifact = self._trusted_workspace_artifact_ref_summary(ref)
+        for ref in self._trusted_task_workspace_artifact_refs_from_summary(evidence_summary):
+            artifact = self._trusted_task_workspace_artifact_ref_summary(ref)
             path = str(ref.get("path") or "").strip()
             if path:
                 try:
-                    read_result = await self.workspace.read_file(
+                    read_result = await self.task_workspace.read_file(
                         path,
-                        max_bytes=self._workspace_artifact_verifier_readback_bytes(ref),
+                        max_bytes=self._task_workspace_artifact_verifier_readback_bytes(ref),
                     )
                 except Exception as error:
                     artifact["readback"] = {
@@ -2881,7 +2900,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                             else ""
                         ),
                     }
-                    targeted_readbacks = await self._trusted_workspace_artifact_targeted_readbacks(ref, read_result)
+                    targeted_readbacks = await self._trusted_task_workspace_artifact_targeted_readbacks(ref, read_result)
                     if targeted_readbacks:
                         artifact["targeted_readbacks"] = targeted_readbacks
             artifacts.append(artifact)
@@ -2889,7 +2908,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 break
         return DataFormatter.sanitize(artifacts)
 
-    async def _trusted_workspace_artifact_targeted_readbacks(
+    async def _trusted_task_workspace_artifact_targeted_readbacks(
         self,
         ref: Mapping[str, Any],
         read_result: Mapping[str, Any],
@@ -2910,7 +2929,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if byte_count > read_bytes > 0:
             offset = max(0, byte_count - max_snippet_bytes)
             try:
-                tail = await self.workspace.read_file(path, max_bytes=max_snippet_bytes, offset=offset)
+                tail = await self.task_workspace.read_file(path, max_bytes=max_snippet_bytes, offset=offset)
             except Exception as error:
                 readbacks.append(
                     {
@@ -2937,24 +2956,24 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 )
 
         max_file_bytes = max(byte_count, _VERIFIER_PROMPT_VALUE_CHARS)
-        for query in [*list(queries or ()), *self._workspace_artifact_verifier_target_queries()]:
+        for query in [*list(queries or ()), *self._task_workspace_artifact_verifier_target_queries()]:
             if len(readbacks) >= 8:
                 break
-            match = await self._workspace_artifact_search_readback(path, query, max_file_bytes=max_file_bytes)
+            match = await self._task_workspace_artifact_search_readback(path, query, max_file_bytes=max_file_bytes)
             if match is not None:
                 readbacks.append(match)
         return DataFormatter.sanitize(readbacks)
 
-    async def _workspace_artifact_search_readback(
+    async def _task_workspace_artifact_search_readback(
         self,
         path: str,
         query: str,
         *,
         max_file_bytes: int,
     ) -> dict[str, Any] | None:
-        for search_query in self._workspace_artifact_query_variants(query):
+        for search_query in self._task_workspace_artifact_query_variants(query):
             try:
-                matches = await self.workspace.search_files(
+                matches = await self.task_workspace.search_files(
                     search_query,
                     path=path,
                     max_results=1,
@@ -2979,7 +2998,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             }
         return None
 
-    def _workspace_artifact_verifier_target_queries(self) -> list[str]:
+    def _task_workspace_artifact_verifier_target_queries(self) -> list[str]:
         queries: list[str] = []
 
         def add(value: Any) -> None:
@@ -3059,7 +3078,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return queries[:12]
 
     @staticmethod
-    def _workspace_artifact_query_variants(query: str) -> list[str]:
+    def _task_workspace_artifact_query_variants(query: str) -> list[str]:
         variants: list[str] = []
         for value in (query, query.title(), query.lower(), query.upper()):
             text = str(value or "").strip()
@@ -3068,19 +3087,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return variants
 
     @classmethod
-    def _workspace_artifact_verifier_readback_bytes(cls, ref: Mapping[str, Any]) -> int:
+    def _task_workspace_artifact_verifier_readback_bytes(cls, ref: Mapping[str, Any]) -> int:
         declared_bytes = cls._coerce_non_negative_int(ref.get("bytes"))
         if declared_bytes > 0 and declared_bytes < _VERIFIER_PROMPT_VALUE_CHARS:
             return declared_bytes + 1
         return max(_WORKSPACE_ARTIFACT_PREVIEW_BYTES, _VERIFIER_PROMPT_VALUE_CHARS)
 
     @classmethod
-    def _trusted_workspace_artifact_refs_from_summary(cls, evidence_summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _trusted_task_workspace_artifact_refs_from_summary(cls, evidence_summary: Mapping[str, Any]) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []
 
         def collect(value: Any) -> None:
             if isinstance(value, Mapping):
-                if cls._is_trusted_workspace_artifact_ref(value) and str(value.get("path") or "").strip():
+                if cls._is_trusted_task_workspace_artifact_ref(value) and str(value.get("path") or "").strip():
                     refs.append(dict(value))
                 return
             if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
@@ -3088,9 +3107,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     collect(item)
 
         collect(evidence_summary.get("artifact_refs"))
-        workspace_refs = evidence_summary.get("workspace_refs")
-        if isinstance(workspace_refs, Mapping):
-            collect(workspace_refs)
+        task_workspace_refs = evidence_summary.get("task_workspace_refs")
+        if isinstance(task_workspace_refs, Mapping):
+            collect(task_workspace_refs)
 
         deduped: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
@@ -3103,7 +3122,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return deduped
 
     @classmethod
-    def _trusted_workspace_artifact_refs_have_readback(cls, refs: Sequence[Mapping[str, Any]]) -> bool:
+    def _trusted_task_workspace_artifact_refs_have_readback(cls, refs: Sequence[Mapping[str, Any]]) -> bool:
         for ref in refs:
             if not isinstance(ref, Mapping):
                 continue
@@ -3120,7 +3139,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 return True
             file_refs = ref.get("file_refs")
             if isinstance(file_refs, Sequence) and not isinstance(file_refs, str | bytes | bytearray):
-                if cls._trusted_workspace_artifact_refs_have_readback(
+                if cls._trusted_task_workspace_artifact_refs_have_readback(
                     [item for item in file_refs if isinstance(item, Mapping)]
                 ):
                     return True
@@ -3134,7 +3153,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         execution_evidence_summary: Mapping[str, Any],
         verification: Mapping[str, Any],
         normalized: Mapping[str, Any],
-        trusted_workspace_artifact_refs: Sequence[Mapping[str, Any]],
+        trusted_task_workspace_artifact_refs: Sequence[Mapping[str, Any]],
         grounding_guard: Mapping[str, Any] | None,
         final_result_required: bool,
         non_blocking_action_ids: Sequence[str] | None = None,
@@ -3163,9 +3182,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             diagnostic_code = str(error.get("code") or "").strip()
             return diagnostic_code == "action_loop.max_rounds_reached" and "action_loop" in non_blocking_actions
 
-        if not final_result_required or not trusted_workspace_artifact_refs:
+        if not final_result_required or not trusted_task_workspace_artifact_refs:
             return None
-        if not cls._trusted_workspace_artifact_refs_have_readback(trusted_workspace_artifact_refs):
+        if not cls._trusted_task_workspace_artifact_refs_have_readback(trusted_task_workspace_artifact_refs):
             return None
         if normalized.get("is_complete") is not True or normalized.get("requires_block") is True:
             return None
@@ -3906,7 +3925,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         normalized["next_step_requirements"] = [normalized["replan_instruction"]]
 
     @classmethod
-    def _trusted_workspace_artifact_ref_summary(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
+    def _trusted_task_workspace_artifact_ref_summary(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
         summary = {
             "path": str(ref.get("path") or ""),
             "role": str(ref.get("role") or ""),
@@ -3926,16 +3945,16 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize(summary)
 
     @classmethod
-    def _workspace_artifact_execution_result_for_verifier(cls, execution_result: Any) -> Any:
+    def _task_workspace_artifact_execution_result_for_verifier(cls, execution_result: Any) -> Any:
         if not isinstance(execution_result, Mapping):
             return execution_result
-        return cls._workspace_artifact_hot_value(
+        return cls._task_workspace_artifact_hot_value(
             execution_result,
             omit_embedded_evidence=True,
         )
 
     @classmethod
-    def _workspace_artifact_hot_value(
+    def _task_workspace_artifact_hot_value(
         cls,
         value: Any,
         *,
@@ -3953,18 +3972,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 if key_text in {"sha256", "bytes", "read_bytes", "size", "media_type", "content_kind", "handler_id"}:
                     continue
                 if key_text == "artifact_manifest" and isinstance(item, Mapping):
-                    compact[key_text] = cls._workspace_artifact_manifest_for_verifier(
+                    compact[key_text] = cls._task_workspace_artifact_manifest_for_verifier(
                         item,
                         omit_embedded_evidence=omit_embedded_evidence,
                     )
                     continue
-                if key_text == "workspace_artifact_delivery" and isinstance(item, Mapping):
-                    compact[key_text] = cls._workspace_artifact_delivery_for_verifier(
+                if key_text == "task_workspace_artifact_delivery" and isinstance(item, Mapping):
+                    compact[key_text] = cls._task_workspace_artifact_delivery_for_verifier(
                         item,
                         omit_embedded_evidence=omit_embedded_evidence,
                     )
                     continue
-                compact[key_text] = cls._workspace_artifact_hot_value(
+                compact[key_text] = cls._task_workspace_artifact_hot_value(
                     item,
                     key_context=key_text,
                     omit_embedded_evidence=omit_embedded_evidence,
@@ -3972,7 +3991,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             return compact
         if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
             return [
-                cls._workspace_artifact_hot_value(
+                cls._task_workspace_artifact_hot_value(
                     item,
                     key_context=key_context,
                     omit_embedded_evidence=omit_embedded_evidence,
@@ -3982,12 +4001,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return value
 
     @classmethod
-    def _workspace_artifact_index_for_verifier(
+    def _task_workspace_artifact_index_for_verifier(
         cls,
         evidence_ledger: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         index: list[dict[str, Any]] = []
-        for artifact in workspace_artifacts_from_ledger(evidence_ledger):
+        for artifact in task_workspace_artifacts_from_ledger(evidence_ledger):
             if not isinstance(artifact, Mapping):
                 continue
             item: dict[str, Any] = {
@@ -4007,7 +4026,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return index
 
     @classmethod
-    def _workspace_artifact_manifest_for_verifier(
+    def _task_workspace_artifact_manifest_for_verifier(
         cls,
         manifest: Mapping[str, Any],
         *,
@@ -4021,13 +4040,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if key_text in {"sha256", "bytes", "read_bytes", "size", "media_type", "content_kind", "handler_id"}:
                 continue
             if key_text == "file_refs":
-                compact[key_text] = cls._workspace_artifact_hot_value(
+                compact[key_text] = cls._task_workspace_artifact_hot_value(
                     item,
                     key_context=key_text,
                     omit_embedded_evidence=omit_embedded_evidence,
                 )
                 continue
-            compact[key_text] = cls._workspace_artifact_hot_value(
+            compact[key_text] = cls._task_workspace_artifact_hot_value(
                 item,
                 key_context=key_text,
                 omit_embedded_evidence=omit_embedded_evidence,
@@ -4035,7 +4054,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return compact
 
     @classmethod
-    def _workspace_artifact_delivery_for_verifier(
+    def _task_workspace_artifact_delivery_for_verifier(
         cls,
         delivery: Mapping[str, Any],
         *,
@@ -4063,7 +4082,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 compact["file_refs"].append({"omitted": len(file_refs) - 8, "reason": "prompt_budget"})
         diagnostics = delivery.get("diagnostics")
         if diagnostics:
-            compact["diagnostics"] = cls._workspace_artifact_hot_value(
+            compact["diagnostics"] = cls._task_workspace_artifact_hot_value(
                 diagnostics,
                 key_context="diagnostics",
                 omit_embedded_evidence=omit_embedded_evidence,
@@ -4078,7 +4097,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return compact
 
     @classmethod
-    def _workspace_artifact_display_path(cls, path: Any) -> str:
+    def _task_workspace_artifact_display_path(cls, path: Any) -> str:
         """Project a private fallback carrier back to its requested logical path."""
 
         normalized = str(path or "").strip()
@@ -4088,24 +4107,24 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return normalized
 
     @classmethod
-    def _workspace_artifact_final_result_from_refs(cls, refs: Sequence[Mapping[str, Any]]) -> str:
+    def _task_workspace_artifact_final_result_from_refs(cls, refs: Sequence[Mapping[str, Any]]) -> str:
         paths = [
-            cls._workspace_artifact_display_path(ref.get("path"))
+            cls._task_workspace_artifact_display_path(ref.get("path"))
             for ref in refs
             if str(ref.get("path") or "").strip()
         ]
         if not paths:
             return ""
         if len(paths) == 1:
-            return f"Workspace artifact delivered at {paths[0]}; full content is available through file_refs/readback."
+            return f"TaskWorkspace artifact delivered at {paths[0]}; full content is available through file_refs/readback."
         return (
-            "Workspace artifacts delivered at "
+            "TaskWorkspace artifacts delivered at "
             + ", ".join(paths)
             + "; full content is available through file_refs/readback."
         )
 
     @classmethod
-    def _final_result_is_workspace_artifact_pointer(
+    def _final_result_is_task_workspace_artifact_pointer(
         cls,
         final_result: str,
         refs: Sequence[Mapping[str, Any]],
@@ -4113,7 +4132,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         text = str(final_result or "").strip()
         if not text:
             return False
-        if cls._looks_like_workspace_artifact_placeholder(text):
+        if cls._looks_like_task_workspace_artifact_placeholder(text):
             return True
         for ref in refs:
             path = str(ref.get("path") or "").strip()
@@ -4136,7 +4155,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     candidates.append(value.strip())
             manifest = execution_result.get("artifact_manifest")
             if isinstance(manifest, Mapping):
-                manifest_content = cls._workspace_artifact_manifest_content(manifest)
+                manifest_content = cls._task_workspace_artifact_manifest_content(manifest)
                 if manifest_content.strip():
                     candidates.append(manifest_content.strip())
             keys: tuple[str, ...] = ("artifact_markdown", "artifact_html")
@@ -4256,12 +4275,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return pinned
 
     @staticmethod
-    def _workspace_artifact_hot_path(item: Mapping[str, Any]) -> str:
+    def _task_workspace_artifact_hot_path(item: Mapping[str, Any]) -> str:
         path = str(item.get("path") or "").strip().replace("\\", "/")
         return PurePosixPath(path).as_posix() if path else ""
 
     @staticmethod
-    def _workspace_artifact_hot_source(item: Mapping[str, Any]) -> str:
+    def _task_workspace_artifact_hot_source(item: Mapping[str, Any]) -> str:
         provenance = item.get("provenance")
         if isinstance(provenance, Mapping):
             source = str(provenance.get("source") or "").strip()
@@ -4270,18 +4289,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return str(item.get("source") or "").strip()
 
     @classmethod
-    def _is_workspace_artifact_hot_item(cls, item: Mapping[str, Any]) -> bool:
+    def _is_task_workspace_artifact_hot_item(cls, item: Mapping[str, Any]) -> bool:
         kind = str(item.get("kind") or "").strip()
-        if kind.startswith("workspace_artifact."):
+        if kind.startswith("task_workspace_artifact."):
             return True
         if kind != "artifact_ref":
             return False
         role = str(item.get("role") or "").strip()
-        source = cls._workspace_artifact_hot_source(item)
-        return role == "workspace_artifact" or source.startswith("agent_task.")
+        source = cls._task_workspace_artifact_hot_source(item)
+        return role == "task_workspace_artifact" or source.startswith("agent_task.")
 
     @staticmethod
-    def _workspace_artifact_hot_identity(item: Mapping[str, Any]) -> tuple[str, str]:
+    def _task_workspace_artifact_hot_identity(item: Mapping[str, Any]) -> tuple[str, str]:
         provenance = item.get("provenance")
 
         def value(field: str) -> str:
@@ -4295,7 +4314,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         version = value("content_version_id") or value("snapshot_id")
         return version, value("sha256")
 
-    def _current_workspace_artifact_hot_items(
+    def _current_task_workspace_artifact_hot_items(
         self,
         items: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
@@ -4303,13 +4322,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
 
         current_by_path: dict[str, tuple[str, str]] = {}
         for item in items:
-            if not self._is_workspace_artifact_hot_item(item):
+            if not self._is_task_workspace_artifact_hot_item(item):
                 continue
             kind = str(item.get("kind") or "").strip()
-            if kind not in {"artifact_ref", "workspace_artifact.readback"}:
+            if kind not in {"artifact_ref", "task_workspace_artifact.readback"}:
                 continue
-            path = self._workspace_artifact_hot_path(item)
-            version, digest = self._workspace_artifact_hot_identity(item)
+            path = self._task_workspace_artifact_hot_path(item)
+            version, digest = self._task_workspace_artifact_hot_identity(item)
             if path and (version or digest) and path not in current_by_path:
                 current_by_path[path] = (version, digest)
 
@@ -4317,15 +4336,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         filtered: list[dict[str, Any]] = []
         for item in items:
             candidate = dict(item)
-            if not self._is_workspace_artifact_hot_item(candidate):
+            if not self._is_task_workspace_artifact_hot_item(candidate):
                 projected.append(candidate)
                 continue
-            path = self._workspace_artifact_hot_path(candidate)
+            path = self._task_workspace_artifact_hot_path(candidate)
             current = current_by_path.get(path)
             if current is None:
                 projected.append(candidate)
                 continue
-            version, digest = self._workspace_artifact_hot_identity(candidate)
+            version, digest = self._task_workspace_artifact_hot_identity(candidate)
             current_version, current_digest = current
             matches = bool(
                 (version and current_version and version == current_version)
@@ -4345,7 +4364,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                         "current_sha256": current_digest,
                     }
                 )
-        self.diagnostics["verifier_workspace_artifact_projection"] = {
+        self.diagnostics["verifier_task_workspace_artifact_projection"] = {
             "current": {
                 path: {"content_version_id": identity[0], "sha256": identity[1]}
                 for path, identity in current_by_path.items()
@@ -4377,15 +4396,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     @staticmethod
     def _verifier_evidence_item_priority(item: Mapping[str, Any]) -> int:
         kind = str(item.get("kind") or "").strip().lower()
-        if kind == "workspace_artifact.targeted_readback":
+        if kind == "task_workspace_artifact.targeted_readback":
             return 0
-        if kind == "workspace_artifact.acceptance_coverage":
+        if kind == "task_workspace_artifact.acceptance_coverage":
             return 0
-        if kind == "workspace_artifact.readback":
+        if kind == "task_workspace_artifact.readback":
             return 1
-        if kind == "workspace_artifact.acceptance_locator":
+        if kind == "task_workspace_artifact.acceptance_locator":
             return 2
-        if kind.startswith("workspace_artifact."):
+        if kind.startswith("task_workspace_artifact."):
             return 3
         return 10
 
@@ -4594,7 +4613,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if evidence_id:
                 seen.add(evidence_id)
             deduped.append(item)
-        hot_items = self._current_workspace_artifact_hot_items(deduped)
+        hot_items = self._current_task_workspace_artifact_hot_items(deduped)
         ledger = self._stable_evidence_ledger_view(
             {
                 "evidence_items": self._prioritized_verifier_evidence_items(
@@ -4636,9 +4655,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "required_actions": [],
             "capability_evidence_requirements": [],
             "missing_required_actions": [],
-            "selected_skill_ids": [],
+            "consumed_skill_ids": [],
             "required_skills": [],
-            "missing_required_skills": [],
+            "missing_required_skill_context": [],
             "capabilities_used": [],
             "capability_evidence": {
                 "actions": {"succeeded": [], "failed": []},
@@ -4647,7 +4666,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "validations": {"passed": [], "failed": []},
             },
             "artifact_refs": [],
-            "workspace_refs": {},
+            "task_workspace_refs": {},
             "errors": [],
             "replan_signals": [],
             "current_replan_signals": [],
@@ -4671,9 +4690,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             replan_signals = summary.get("replan_signals")
             if isinstance(replan_signals, list):
                 combined["replan_signals"].extend(replan_signals)
-            workspace_refs = summary.get("workspace_refs")
-            if isinstance(workspace_refs, Mapping):
-                self._merge_workspace_ref_summary(combined["workspace_refs"], workspace_refs)
+            task_workspace_refs = summary.get("task_workspace_refs")
+            if isinstance(task_workspace_refs, Mapping):
+                self._merge_task_workspace_ref_summary(combined["task_workspace_refs"], task_workspace_refs)
             for key in (
                 "action_ids",
                 "failed_actions",
@@ -4682,9 +4701,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "required_actions",
                 "capability_evidence_requirements",
                 "missing_required_actions",
-                "selected_skill_ids",
+                "consumed_skill_ids",
                 "required_skills",
-                "missing_required_skills",
+                "missing_required_skill_context",
                 "capabilities_used",
             ):
                 if key == "capability_evidence_requirements":
@@ -4733,7 +4752,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize(combined)
 
     @staticmethod
-    def _merge_workspace_ref_summary(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    def _merge_task_workspace_ref_summary(target: dict[str, Any], source: Mapping[str, Any]) -> None:
         for key, value in source.items():
             key_text = str(key)
             if isinstance(value, list):
@@ -4758,7 +4777,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 bucket[str(field)] = cls._merge_string_lists(bucket.get(str(field)), items)
 
     @classmethod
-    def _compact_context_pack_for_verifier(cls, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
+    def _compact_context_pack_for_verifier(cls, context_pack: "TaskContextView") -> dict[str, Any]:
         compact = cls._compact_verifier_prompt_value(
             cls._context_pack_for_verifier_hot_path(context_pack),
             max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
@@ -4823,16 +4842,16 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                         {"omitted": len(value) - 24, "reason": "prompt_budget"}
                     )
                 continue
-            if not include_body_previews and key in {"artifact_refs", "workspace_refs"}:
+            if not include_body_previews and key in {"artifact_refs", "task_workspace_refs"}:
                 continue
             if key == "artifact_refs" and isinstance(value, list):
                 compact[key] = [cls._compact_artifact_ref_for_verifier(ref) for ref in value[:24]]
                 if len(value) > 24:
                     compact[key].append({"omitted": len(value) - 24, "reason": "prompt_budget"})
                 continue
-            if key == "workspace_refs" and isinstance(value, Mapping):
+            if key == "task_workspace_refs" and isinstance(value, Mapping):
                 compact[key] = cls._compact_verifier_prompt_value(
-                    cls._workspace_artifact_hot_value(value),
+                    cls._task_workspace_artifact_hot_value(value),
                     max_chars=2400,
                 )
                 continue
@@ -5242,7 +5261,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     messages,
                 )
         final_result_required = self._normalize_bool(verification.get("final_result_required"), default=False)
-        trusted_workspace_artifact_refs = self._trusted_workspace_artifact_refs_from_summary(execution_evidence_summary)
+        trusted_task_workspace_artifact_refs = self._trusted_task_workspace_artifact_refs_from_summary(execution_evidence_summary)
         risky_actions, non_blocking_failed_actions = self._execution_risk_actions(execution_evidence_summary)
         if non_blocking_failed_actions:
             normalized["non_blocking_failed_actions"] = non_blocking_failed_actions
@@ -5262,7 +5281,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 execution_evidence_summary=execution_evidence_summary,
                 verification=verification,
                 normalized=normalized,
-                trusted_workspace_artifact_refs=trusted_workspace_artifact_refs,
+                trusted_task_workspace_artifact_refs=trusted_task_workspace_artifact_refs,
                 grounding_guard=grounding_guard,
                 final_result_required=final_result_required,
                 non_blocking_action_ids=non_blocking_failed_actions,
@@ -5392,11 +5411,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if normalized["is_complete"] and final_result_required and not normalized["final_result"].strip():
             if candidate_final_result.strip():
                 normalized["final_result"] = candidate_final_result.strip()
-            elif trusted_workspace_artifact_refs:
-                normalized["final_result"] = self._workspace_artifact_final_result_from_refs(
-                    trusted_workspace_artifact_refs
+            elif trusted_task_workspace_artifact_refs:
+                normalized["final_result"] = self._task_workspace_artifact_final_result_from_refs(
+                    trusted_task_workspace_artifact_refs
                 )
-                normalized["final_result_via_workspace_artifact"] = True
+                normalized["final_result_via_task_workspace_artifact"] = True
             else:
                 normalized["is_complete"] = False
                 guard_reasons.append("final_result_missing")
@@ -5410,9 +5429,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 )
         if normalized["is_complete"]:
             final_result_text = normalized["final_result"].strip()
-            final_result_is_artifact_pointer = self._final_result_is_workspace_artifact_pointer(
+            final_result_is_artifact_pointer = self._final_result_is_task_workspace_artifact_pointer(
                 final_result_text,
-                trusted_workspace_artifact_refs,
+                trusted_task_workspace_artifact_refs,
             )
             if final_result_text and not final_result_is_artifact_pointer:
                 output_contract = self._parse_final_result_output_contract(final_result_text)
@@ -5459,8 +5478,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                             "fallback": output_contract.get("fallback"),
                         }
                     )
-            elif final_result_is_artifact_pointer and trusted_workspace_artifact_refs:
-                normalized["final_result_via_workspace_artifact"] = True
+            elif final_result_is_artifact_pointer and trusted_task_workspace_artifact_refs:
+                normalized["final_result_via_task_workspace_artifact"] = True
         continuation = self._untried_read_action_continuation(execution_evidence_summary)
         if normalized["requires_block"] and continuation:
             normalized["requires_block"] = False

@@ -25,25 +25,33 @@ TASK_BOARD_COMPLETION_NOTES_SCHEMA_VERSION = "task_board_completion_notes/v1"
 class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
     """TaskBoard final synthesis, terminal verification, and final repair routing."""
 
-    def _taskboard_final_capability_logs(
+    def _taskboard_final_evidence_logs(
         self,
         revision: Any,
-        *,
-        context_pack: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         effective_revision = TaskBoardRevision.from_value(revision)
         action_logs: list[dict[str, Any]] = []
-        selected_skill_ids: list[str] = []
+        skill_context_consumptions: list[dict[str, Any]] = []
 
-        def add_skill_ids(values: Any) -> None:
-            for skill_id in self._normalize_string_list(values):
-                if skill_id and skill_id not in selected_skill_ids:
-                    selected_skill_ids.append(skill_id)
-
-        if isinstance(context_pack, Mapping):
-            skill_context_pack = context_pack.get("skills_context_pack")
-            skill_ids_from_pack = self._skills_context_pack_skill_ids(skill_context_pack)
-            add_skill_ids(skill_ids_from_pack)
+        def add_consumptions(values: Any) -> None:
+            if not isinstance(values, Sequence) or isinstance(values, str | bytes | bytearray):
+                return
+            existing = {
+                (str(item.get("skill_id") or ""), str(item.get("request_id") or ""))
+                for item in skill_context_consumptions
+            }
+            for item in values:
+                if not isinstance(item, Mapping):
+                    continue
+                normalized = dict(DataFormatter.sanitize(item))
+                key = (
+                    str(normalized.get("skill_id") or ""),
+                    str(normalized.get("request_id") or ""),
+                )
+                if not all(key) or key in existing:
+                    continue
+                existing.add(key)
+                skill_context_consumptions.append(normalized)
 
         for result in effective_revision.card_results.values():
             if not isinstance(getattr(result, "diagnostics", None), Sequence):
@@ -57,50 +65,24 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 raw_actions = summary.get("actions")
                 if isinstance(raw_actions, Sequence) and not isinstance(raw_actions, str | bytes | bytearray):
                     action_logs.extend(dict(item) for item in raw_actions if isinstance(item, Mapping))
-                add_skill_ids(summary.get("selected_skill_ids"))
-                capability_evidence = summary.get("capability_evidence")
-                if isinstance(capability_evidence, Mapping):
-                    skills = capability_evidence.get("skills")
+                context_evidence = summary.get("context_evidence")
+                if isinstance(context_evidence, Mapping):
+                    skills = context_evidence.get("skills")
                     if isinstance(skills, Mapping):
-                        add_skill_ids(skills.get("selected"))
+                        add_consumptions(skills.get("consumptions"))
 
-        prompt_bound_skills = [
-            {
-                "skill_id": skill_id,
-                "mode": "required",
-                "binding": "context_pack",
-                "source": "skills_manager",
-            }
-            for skill_id in selected_skill_ids
-        ]
+        consumed_skill_ids = list(
+            dict.fromkeys(
+                str(item.get("skill_id") or "")
+                for item in skill_context_consumptions
+                if str(item.get("skill_id") or "")
+            )
+        )
         return {
             "action_logs": self._dedupe_action_records(action_logs),
-            "route_logs": {
-                "prompt_bound_skills": prompt_bound_skills,
-            },
-            "selected_skill_ids": selected_skill_ids,
+            "skill_context_consumptions": skill_context_consumptions,
+            "consumed_skill_ids": consumed_skill_ids,
         }
-
-    def _taskboard_verification_options(self) -> dict[str, Any]:
-        options = dict(DataFormatter.sanitize(self.options))
-        if "capability_evidence_requirements" not in options:
-            requirements = [
-                {
-                    "capability_id": str(item.get("id") or ""),
-                    "capability_kind": str(item.get("kind") or "capability"),
-                    "kind": "capability_used",
-                    "required": True,
-                    "source": "taskboard_required_capability",
-                }
-                for item in self._planner_capabilities()
-                if isinstance(item, Mapping)
-                and str(item.get("mode") or "").strip() == "required"
-                and str(item.get("kind") or "").strip() in {"skill", "skill_pack"}
-                and str(item.get("id") or "").strip()
-            ]
-            if requirements:
-                options["capability_evidence_requirements"] = requirements
-        return options
 
     @classmethod
     def _taskboard_final_refs_from_evidence_view(cls, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -125,18 +107,18 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         return cls._dedupe_ref_records(refs)
 
     def _prioritize_taskboard_final_refs(self, refs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        required_paths = {str(path or "").strip() for path in self._required_workspace_deliverables()}
+        required_paths = {str(path or "").strip() for path in self._required_task_workspace_deliverables()}
 
         def priority(item: tuple[int, Mapping[str, Any]]) -> tuple[int, int]:
             index, ref = item
-            path = self._taskboard_workspace_path_key(ref.get("path"))
+            path = self._taskboard_task_workspace_path_key(ref.get("path"))
             required_path_keys = {
-                self._taskboard_workspace_path_key(required_path)
+                self._taskboard_task_workspace_path_key(required_path)
                 for required_path in required_paths
             }
             if path and path in required_path_keys:
                 return (0, index)
-            if self._is_trusted_workspace_artifact_ref(ref):
+            if self._is_trusted_task_workspace_artifact_ref(ref):
                 return (1, index)
             return (2, index)
 
@@ -150,7 +132,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
     ) -> list[dict[str, Any]]:
         """Project terminal refs from the unique leaf deliverable owner.
 
-        Intermediate Workspace artifacts remain in the TaskBoard evidence view,
+        Intermediate TaskWorkspace artifacts remain in the TaskBoard evidence view,
         but they must not compete with the leaf delivery card for strict
         grounding merely because their byte size is equal or larger.
         """
@@ -164,32 +146,32 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         if len(sources) != 1:
             return current_refs
         required_path_keys = {
-            self._taskboard_workspace_path_key(path)
-            for path in self._required_workspace_deliverables()
-            if self._taskboard_workspace_path_key(path)
+            self._taskboard_task_workspace_path_key(path)
+            for path in self._required_task_workspace_deliverables()
+            if self._taskboard_task_workspace_path_key(path)
         }
         if required_path_keys:
             return self._dedupe_ref_records(
                 [
                     ref
                     for ref in current_refs
-                    if self._taskboard_workspace_path_key(ref.get("path")) in required_path_keys
+                    if self._taskboard_task_workspace_path_key(ref.get("path")) in required_path_keys
                 ]
             )
 
         declared_path_keys = {
-            self._taskboard_workspace_path_key(path)
-            for path in self._normalize_string_list(sources[0].get("declared_workspace_paths"))
-            if self._taskboard_workspace_path_key(path)
-            and not self._taskboard_workspace_path_is_internal_working(path)
+            self._taskboard_task_workspace_path_key(path)
+            for path in self._normalize_string_list(sources[0].get("declared_task_workspace_paths"))
+            if self._taskboard_task_workspace_path_key(path)
+            and not self._taskboard_task_workspace_path_is_internal_working(path)
         }
-        raw_declared_paths = self._normalize_string_list(sources[0].get("declared_workspace_paths"))
+        raw_declared_paths = self._normalize_string_list(sources[0].get("declared_task_workspace_paths"))
         if raw_declared_paths:
             return self._dedupe_ref_records(
                 [
                     ref
                     for ref in current_refs
-                    if self._taskboard_workspace_path_key(ref.get("path")) in declared_path_keys
+                    if self._taskboard_task_workspace_path_key(ref.get("path")) in declared_path_keys
                 ]
             )
 
@@ -203,14 +185,14 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             item
             for item in raw_source_refs
             if isinstance(item, Mapping)
-            and not self._taskboard_workspace_path_is_internal_working(item.get("path"))
+            and not self._taskboard_task_workspace_path_is_internal_working(item.get("path"))
         ]
         if not source_refs:
             return []
 
         def matches(ref: Mapping[str, Any], source_ref: Mapping[str, Any]) -> bool:
-            path = self._taskboard_workspace_path_key(ref.get("path"))
-            source_path = self._taskboard_workspace_path_key(source_ref.get("path"))
+            path = self._taskboard_task_workspace_path_key(ref.get("path"))
+            source_path = self._taskboard_task_workspace_path_key(source_ref.get("path"))
             if not path or path != source_path:
                 return False
             digest = str(ref.get("sha256") or "").strip()
@@ -238,29 +220,29 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         return self._collect_taskboard_source_refs(evidence_view, max_refs=32)
 
     @classmethod
-    def _taskboard_workspace_path_key(cls, path: Any) -> str:
-        text = cls._workspace_artifact_display_path(path)
+    def _taskboard_task_workspace_path_key(cls, path: Any) -> str:
+        text = cls._task_workspace_artifact_display_path(path)
         if not text:
             return ""
         return PurePosixPath(text).as_posix()
 
     @classmethod
-    def _taskboard_workspace_path_name(cls, path: Any) -> str:
-        path_key = cls._taskboard_workspace_path_key(path)
+    def _taskboard_task_workspace_path_name(cls, path: Any) -> str:
+        path_key = cls._taskboard_task_workspace_path_key(path)
         if not path_key:
             return ""
         return PurePosixPath(path_key).name
 
     @classmethod
-    def _taskboard_workspace_path_is_internal_working(cls, path: Any) -> bool:
-        path_key = cls._taskboard_workspace_path_key(path)
+    def _taskboard_task_workspace_path_is_internal_working(cls, path: Any) -> bool:
+        path_key = cls._taskboard_task_workspace_path_key(path)
         if not path_key:
             return False
         parts = PurePosixPath(path_key).parts
         return bool(parts and parts[0] == "working")
 
     @classmethod
-    def _taskboard_declared_workspace_paths_from_preview(cls, preview: Any) -> list[str]:
+    def _taskboard_declared_task_workspace_paths_from_preview(cls, preview: Any) -> list[str]:
         if not isinstance(preview, Mapping):
             return []
         manifest = preview.get("artifact_manifest")
@@ -269,10 +251,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         paths: list[str] = []
 
         def add_path(value: Any) -> None:
-            path = cls._workspace_artifact_display_path(value)
+            path = cls._task_workspace_artifact_display_path(value)
             if (
                 path
-                and cls._workspace_artifact_candidate_path_is_local(path)
+                and cls._task_workspace_artifact_candidate_path_is_local(path)
                 and path not in paths
             ):
                 paths.append(path)
@@ -289,14 +271,14 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     add_path(item.get("path") or item.get("output_path") or item.get("file_path"))
         return paths
 
-    def _taskboard_terminal_workspace_deliverables(
+    def _taskboard_terminal_task_workspace_deliverables(
         self,
         revision: Any,
     ) -> tuple[list[str], list[str]]:
         required_paths = [
-            self._workspace_artifact_display_path(path)
-            for path in self._required_workspace_deliverables()
-            if self._workspace_artifact_display_path(path)
+            self._task_workspace_artifact_display_path(path)
+            for path in self._required_task_workspace_deliverables()
+            if self._task_workspace_artifact_display_path(path)
         ]
         if required_paths:
             return self._normalize_string_list(required_paths), []
@@ -304,25 +286,25 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         sources = self._taskboard_promotable_deliverable_sources(revision)
         if len(sources) != 1:
             return [], []
-        declared_paths = self._normalize_string_list(sources[0].get("declared_workspace_paths"))
+        declared_paths = self._normalize_string_list(sources[0].get("declared_task_workspace_paths"))
         valid_paths: list[str] = []
         invalid_internal_paths: list[str] = []
         for path in declared_paths:
-            if self._taskboard_workspace_path_is_internal_working(path):
+            if self._taskboard_task_workspace_path_is_internal_working(path):
                 invalid_internal_paths.append(path)
             else:
                 valid_paths.append(path)
         return valid_paths, invalid_internal_paths
 
-    async def _missing_taskboard_terminal_workspace_deliverables(
+    async def _missing_taskboard_terminal_task_workspace_deliverables(
         self,
         revision: Any,
     ) -> list[str]:
-        required_paths, _invalid_internal_paths = self._taskboard_terminal_workspace_deliverables(revision)
+        required_paths, _invalid_internal_paths = self._taskboard_terminal_task_workspace_deliverables(revision)
         missing: list[str] = []
         for path in required_paths:
             try:
-                read_result = await self.workspace.read_file(path, max_bytes=1)
+                read_result = await self.task_workspace.read_file(path, max_bytes=1)
                 byte_count = int(read_result.get("bytes") or 0)
             except Exception:
                 missing.append(path)
@@ -339,7 +321,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         target_refs: Sequence[Mapping[str, Any]],
         missing_required: bool,
     ) -> dict[str, Any] | None:
-        target_name = self._taskboard_workspace_path_name(target_path_key)
+        target_name = self._taskboard_task_workspace_path_name(target_path_key)
         if not target_name:
             return None
         if not target_refs and not missing_required:
@@ -354,12 +336,12 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         fallback_candidates: list[tuple[int, str, str, Mapping[str, Any], str]] = []
         repair_candidates: list[tuple[int, str, str, Mapping[str, Any], str]] = []
         for ref in current_refs:
-            if not self._is_trusted_workspace_artifact_ref(ref):
+            if not self._is_trusted_task_workspace_artifact_ref(ref):
                 continue
-            path_key = self._taskboard_workspace_path_key(ref.get("path"))
+            path_key = self._taskboard_task_workspace_path_key(ref.get("path"))
             if not path_key or path_key == target_path_key:
                 continue
-            if not self._workspace_artifact_candidate_path_is_local(path_key):
+            if not self._task_workspace_artifact_candidate_path_is_local(path_key):
                 continue
             byte_count = self._coerce_non_negative_int(ref.get("bytes"))
             sha256 = str(ref.get("sha256") or "").strip()
@@ -376,7 +358,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             fallback_candidates.append(candidate)
             if reason == "final_verification_repair_source":
                 repair_candidates.append(candidate)
-            if self._taskboard_workspace_path_name(path_key) == target_name:
+            if self._taskboard_task_workspace_path_name(path_key) == target_name:
                 same_name_candidates.append(candidate)
         same_name_candidates = self._taskboard_unique_final_deliverable_promotion_candidates(same_name_candidates)
         fallback_candidates = self._taskboard_unique_final_deliverable_promotion_candidates(fallback_candidates)
@@ -488,20 +470,20 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         current_refs = await self._taskboard_materialize_promotion_candidate_refs(current_refs)
         required_paths = [
             str(path).strip()
-            for path in self._required_workspace_deliverables()
+            for path in self._required_task_workspace_deliverables()
             if str(path or "").strip()
         ]
         required_by_key = {
-            self._taskboard_workspace_path_key(path): path
+            self._taskboard_task_workspace_path_key(path): path
             for path in required_paths
-            if self._taskboard_workspace_path_key(path)
+            if self._taskboard_task_workspace_path_key(path)
         }
         if not required_by_key:
             return self._prioritize_taskboard_final_refs(current_refs)
 
         missing_required_keys = {
-            self._taskboard_workspace_path_key(path)
-            for path in await self._missing_required_workspace_deliverables()
+            self._taskboard_task_workspace_path_key(path)
+            for path in await self._missing_required_task_workspace_deliverables()
         }
         if len(required_by_key) != 1:
             self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
@@ -519,7 +501,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         target_refs = [
             ref
             for ref in current_refs
-            if self._taskboard_workspace_path_key(ref.get("path")) == target_path_key
+            if self._taskboard_task_workspace_path_key(ref.get("path")) == target_path_key
         ]
         source_ref = self._taskboard_select_required_final_deliverable_source_ref(
             target_path_key=target_path_key,
@@ -534,9 +516,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 [
                     ref
                     for ref in current_refs
-                    if self._is_trusted_workspace_artifact_ref(ref)
-                    and self._taskboard_workspace_path_key(ref.get("path"))
-                    and self._taskboard_workspace_path_key(ref.get("path")) != target_path_key
+                    if self._is_trusted_task_workspace_artifact_ref(ref)
+                    and self._taskboard_task_workspace_path_key(ref.get("path"))
+                    and self._taskboard_task_workspace_path_key(ref.get("path")) != target_path_key
                 ]
             )
             self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
@@ -552,18 +534,18 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             return self._prioritize_taskboard_final_refs(current_refs)
 
         source_path = str(source_ref.get("path") or "").strip()
-        if self._taskboard_workspace_path_key(source_path) == self._taskboard_workspace_path_key(target_path):
+        if self._taskboard_task_workspace_path_key(source_path) == self._taskboard_task_workspace_path_key(target_path):
             return self._prioritize_taskboard_final_refs(current_refs)
 
         try:
-            source_target = self.workspace.resolve_file_path(source_path)
+            source_target = self.task_workspace.resolve_file_path(source_path)
             max_bytes = max(int(source_target.stat().st_size) + 1, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
-            source_read = await self.workspace.read_file(source_path, max_bytes=max_bytes)
+            source_read = await self.task_workspace.read_file(source_path, max_bytes=max_bytes)
             content = source_read.get("content")
             if not isinstance(content, str) or bool(source_read.get("truncated")):
-                raise ValueError("Workspace artifact promotion requires complete text readback.")
-            write_result = await self.workspace.write_file(target_path, content, append=False)
-            target_read = await self.workspace.read_file(target_path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
+                raise ValueError("TaskWorkspace artifact promotion requires complete text readback.")
+            write_result = await self.task_workspace.write_file(target_path, content, append=False)
+            target_read = await self.task_workspace.read_file(target_path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
         except Exception as error:
             self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
                 DataFormatter.sanitize(
@@ -594,8 +576,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             "content_kind": str(target_read.get("content_kind") or source_ref.get("content_kind") or "text"),
             "encoding": target_read.get("encoding") or source_ref.get("encoding"),
             "handler_id": target_read.get("handler_id") or source_ref.get("handler_id"),
-            "role": "workspace_artifact",
-            "source": "agent_task.workspace_artifact.taskboard_final_deliverable_promotion",
+            "role": "task_workspace_artifact",
+            "source": "agent_task.task_workspace_artifact.taskboard_final_deliverable_promotion",
             "source_path": source_path,
             "read_bytes": int(target_read.get("read_bytes") or 0),
             "truncated": bool(target_read.get("truncated")),
@@ -622,13 +604,13 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
 
         required_paths = [
             str(path or "").strip()
-            for path in self._required_workspace_deliverables()
+            for path in self._required_task_workspace_deliverables()
             if str(path or "").strip()
         ]
         required_by_key = {
-            self._taskboard_workspace_path_key(path): path
+            self._taskboard_task_workspace_path_key(path): path
             for path in required_paths
-            if self._taskboard_workspace_path_key(path)
+            if self._taskboard_task_workspace_path_key(path)
         }
         if not required_by_key:
             return self._prioritize_taskboard_final_refs(refs)
@@ -637,11 +619,11 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         refreshed_path_keys: set[str] = set()
         for path_key, path in required_by_key.items():
             try:
-                identity_ref = await self.workspace._promote_file_identity(
+                identity_ref = await self.task_workspace._promote_file_identity(
                     path,
-                    role="workspace_artifact",
+                    role="task_workspace_artifact",
                 )
-                read_result = await self.workspace.read_file(
+                read_result = await self.task_workspace.read_file(
                     path,
                     max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES,
                 )
@@ -676,8 +658,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 ),
                 "encoding": read_result.get("encoding"),
                 "handler_id": read_result.get("handler_id"),
-                "role": "workspace_artifact",
-                "source": "agent_task.workspace_artifact.taskboard_current_final_deliverable",
+                "role": "task_workspace_artifact",
+                "source": "agent_task.task_workspace_artifact.taskboard_current_final_deliverable",
                 "read_bytes": int(read_result.get("read_bytes") or 0),
                 "truncated": bool(read_result.get("truncated")),
                 "preview": str(read_result.get("content") or ""),
@@ -691,7 +673,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             dict(DataFormatter.sanitize(ref))
             for ref in refs
             if isinstance(ref, Mapping)
-            and self._taskboard_workspace_path_key(ref.get("path")) not in refreshed_path_keys
+            and self._taskboard_task_workspace_path_key(ref.get("path")) not in refreshed_path_keys
         ]
         self.diagnostics.setdefault("taskboard_current_final_deliverable", []).extend(
             {
@@ -714,22 +696,22 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         materialized_refs: list[dict[str, Any]] = []
         for ref in refs:
             current_ref = dict(DataFormatter.sanitize(ref))
-            if self._workspace_artifact_ref_has_trusted_readback(current_ref):
+            if self._task_workspace_artifact_ref_has_trusted_readback(current_ref):
                 materialized_refs.append(current_ref)
                 continue
 
             role = str(current_ref.get("role") or "").strip().lower()
             path = str(current_ref.get("path") or "").strip()
-            if not self._is_trusted_workspace_artifact_ref(current_ref):
+            if not self._is_trusted_task_workspace_artifact_ref(current_ref):
                 materialized_refs.append(current_ref)
                 continue
-            if role not in {"workspace_artifact", "artifact"} or not self._workspace_artifact_candidate_path_is_local(path):
+            if role not in {"task_workspace_artifact", "artifact"} or not self._task_workspace_artifact_candidate_path_is_local(path):
                 materialized_refs.append(current_ref)
                 continue
 
             materialized_ref, _content, failure_item = await self._taskboard_materialize_final_artifact_ref(
                 current_ref,
-                source="agent_task.workspace_artifact.taskboard_final_deliverable_source_readback",
+                source="agent_task.task_workspace_artifact.taskboard_final_deliverable_source_readback",
             )
             if failure_item is not None:
                 self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
@@ -870,7 +852,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         self,
         revision: Any,
         *,
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
         previous_acceptance_index: Mapping[str, Any] | None = None,
         prepared_outputs: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -1029,7 +1011,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             final = self._normalize_taskboard_final_result(
                 final,
                 effective_candidate_final_result,
-                fallback_final_result=self._workspace_artifact_final_result_from_refs(trusted_final_refs),
+                fallback_final_result=self._task_workspace_artifact_final_result_from_refs(trusted_final_refs),
             )
         final_artifact_evidence_items = self._dedupe_taskboard_final_evidence_items(
             [
@@ -1082,9 +1064,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         accepted = self._normalize_bool(final.get("accepted"), default=bool(final.get("final_result")))
         final_verification: dict[str, Any] | None = None
         terminal_transition: dict[str, Any] | None = None
-        missing_deliverables = await self._missing_taskboard_terminal_workspace_deliverables(revision)
+        missing_deliverables = await self._missing_taskboard_terminal_task_workspace_deliverables(revision)
         _terminal_deliverables, invalid_internal_terminal_paths = (
-            self._taskboard_terminal_workspace_deliverables(revision)
+            self._taskboard_terminal_task_workspace_deliverables(revision)
         )
         should_verify_final = (
             accepted
@@ -1095,14 +1077,11 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         if should_verify_final:
             verifier_final_result = str(final.get("final_result") or "").strip()
             if not verifier_final_result and trusted_final_refs:
-                verifier_final_result = self._workspace_artifact_final_result_from_refs(trusted_final_refs)
+                verifier_final_result = self._task_workspace_artifact_final_result_from_refs(trusted_final_refs)
             if not verifier_final_result:
                 verifier_final_result = str(effective_candidate_final_result or "").strip()
-            taskboard_capability_logs = self._taskboard_final_capability_logs(
-                revision,
-                context_pack=context_pack if isinstance(context_pack, Mapping) else None,
-            )
-            verification_options = self._taskboard_verification_options()
+            taskboard_evidence_logs = self._taskboard_final_evidence_logs(revision)
+            verification_options = dict(DataFormatter.sanitize(self.options))
             final_source_refs = self._taskboard_final_source_refs_from_evidence_view(evidence_view)
             final_execution_result = {
                 "status": "completed",
@@ -1128,9 +1107,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "logs": {
                     "artifact_refs": final_refs,
                     "source_refs": final_source_refs,
-                    **DataFormatter.sanitize(taskboard_capability_logs),
+                    **DataFormatter.sanitize(taskboard_evidence_logs),
                 },
-                "workspace_refs": {"agent_task_artifacts": final_refs},
+                "task_workspace_refs": {"agent_task_artifacts": final_refs},
                 "blocks": {
                     "evidence": {
                         # Readback-state reuse: the dirty-acceptance projection
@@ -1154,7 +1133,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     "taskboard_acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
                     "taskboard_explicit_state_facts": explicit_state_facts,
                     "taskboard_blocking_state_facts": blocking_state_facts,
-                    "taskboard_capability_logs": DataFormatter.sanitize(taskboard_capability_logs),
+                    "taskboard_evidence_logs": DataFormatter.sanitize(taskboard_evidence_logs),
                 },
             }
             # The acceptance index is a projection/cache for dirty-item
@@ -1170,7 +1149,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 )
                 terminal_guard_issues.append(
                     {
-                        "code": "taskboard_terminal_workspace_delivery_invalid",
+                        "code": "taskboard_terminal_task_workspace_delivery_invalid",
                         "reason": invalid_message,
                         "requires_block": True,
                     }
@@ -1208,8 +1187,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     plan={
                         "execution_shape": "taskboard",
                         "effective_execution_shape": "taskboard",
-                        "deliverable_mode": "workspace_artifact",
-                        "expected_evidence": "Current TaskBoard terminal carriers and trusted Workspace refs",
+                        "deliverable_mode": "task_workspace_artifact",
+                        "expected_evidence": "Current TaskBoard terminal carriers and trusted TaskWorkspace refs",
                     },
                     execution_result=final_execution_result,
                     execution_meta=final_execution_meta,
@@ -1235,7 +1214,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     "acceptance_delta": ["TaskBoard final verification must return structured completion status."],
                     "missing_criteria": ["TaskBoard final verification did not produce a valid structured result."],
                     "replan_instruction": "Run a continuation step that produces verifier-readable final evidence.",
-                    "repair_constraints": ["Preserve trusted Workspace refs and final deliverable evidence."],
+                    "repair_constraints": ["Preserve trusted TaskWorkspace refs and final deliverable evidence."],
                     "next_step_requirements": ["Return structured verification fields."],
                     "final_result_required": True,
                     "final_result": "",
@@ -1524,7 +1503,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             path = str(ref.get("path") or "").strip()
             if not path:
                 continue
-            source = str(ref.get("source") or "agent_task.taskboard.final_verification.workspace_artifact").strip()
+            source = str(ref.get("source") or "agent_task.taskboard.final_verification.task_workspace_artifact").strip()
             materialized_ref, content_for_locator, failure_item = await self._taskboard_materialize_final_artifact_ref(
                 ref,
                 source=source,
@@ -1532,13 +1511,13 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             if failure_item is not None:
                 items.append(failure_item)
                 continue
-            items.append(self._workspace_artifact_readback_evidence_item(materialized_ref))
+            items.append(self._task_workspace_artifact_readback_evidence_item(materialized_ref))
             manifest = self._taskboard_final_artifact_manifest(
                 materialized_ref,
                 final=final,
                 source=source,
             )
-            locator_items = await self._workspace_artifact_acceptance_locator_evidence_items(
+            locator_items = await self._task_workspace_artifact_acceptance_locator_evidence_items(
                 ref=materialized_ref,
                 result=final,
                 manifest=manifest,
@@ -1546,7 +1525,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 content=content_for_locator,
             )
             targeted_readback_items = await self._taskboard_acceptance_locator_targeted_readback_items(locator_items)
-            coverage_item = self._workspace_artifact_acceptance_coverage_evidence_item(
+            coverage_item = self._task_workspace_artifact_acceptance_coverage_evidence_item(
                 path=path,
                 source=source,
                 locator_items=locator_items,
@@ -1568,10 +1547,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 continue
             if str(locator.get("status") or "").strip().lower() != "ok":
                 continue
-            readback = await self._workspace_artifact_acceptance_locator_readback(locator)
+            readback = await self._task_workspace_artifact_acceptance_locator_readback(locator)
             if readback is None:
                 continue
-            items.append(self._workspace_artifact_targeted_readback_evidence_item(locator, readback))
+            items.append(self._task_workspace_artifact_targeted_readback_evidence_item(locator, readback))
         return self._dedupe_taskboard_final_evidence_items(items)
 
     async def _taskboard_materialize_final_artifact_ref(
@@ -1582,7 +1561,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
     ) -> tuple[dict[str, Any], str, dict[str, Any] | None]:
         path = str(ref.get("path") or "").strip()
         materialized = dict(DataFormatter.sanitize(ref))
-        materialized.setdefault("role", "workspace_artifact")
+        materialized.setdefault("role", "task_workspace_artifact")
         materialized["source"] = source
         if not path:
             return materialized, "", None
@@ -1590,7 +1569,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         has_preview = bool(str(materialized.get("preview") or ""))
         needs_readback = (
             bool(materialized.get("truncated"))
-            or not self._workspace_artifact_ref_has_trusted_readback(materialized)
+            or not self._task_workspace_artifact_ref_has_trusted_readback(materialized)
             or not has_preview
         )
         if not needs_readback:
@@ -1604,12 +1583,12 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             max_read_bytes = max(_WORKSPACE_ARTIFACT_PREVIEW_BYTES, _VERIFIER_PROMPT_VALUE_CHARS)
 
         try:
-            read_result = await self.workspace.read_file(path, max_bytes=max_read_bytes)
+            read_result = await self.task_workspace.read_file(path, max_bytes=max_read_bytes)
         except Exception as error:
             return (
                 materialized,
                 "",
-                self._workspace_artifact_failure_evidence_item(
+                self._task_workspace_artifact_failure_evidence_item(
                     path=path,
                     source=source,
                     code="agent_task.taskboard.final_artifact_readback_failed",
@@ -1652,9 +1631,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         raw_manifest = final.get("artifact_manifest") if isinstance(final, Mapping) else None
         if isinstance(raw_manifest, Mapping):
             manifest_path = str(raw_manifest.get("path") or "").strip()
-            if not manifest_path or cls._workspace_artifact_display_path(
+            if not manifest_path or cls._task_workspace_artifact_display_path(
                 manifest_path
-            ) == cls._workspace_artifact_display_path(path):
+            ) == cls._task_workspace_artifact_display_path(path):
                 manifest.update(dict(DataFormatter.sanitize(raw_manifest)))
         if path:
             manifest["path"] = path
@@ -1853,7 +1832,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "reason": (str, "Concise final verification reason", True),
                 "final_result": (
                     str,
-                    "Final non-file business result or concise Workspace artifact path/ref pointer when accepted.",
+                    "Final non-file business result or concise TaskWorkspace artifact path/ref pointer when accepted.",
                     False,
                 ),
                 "missing_criteria": ([str], "Unmet or weak criteria, empty when accepted", False),
@@ -1922,15 +1901,15 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         sources = self._taskboard_promotable_deliverable_sources(revision)
         if len(sources) != 1:
             return None
-        trusted_refs = [dict(DataFormatter.sanitize(ref)) for ref in final_refs if self._is_trusted_workspace_artifact_ref(ref)]
+        trusted_refs = [dict(DataFormatter.sanitize(ref)) for ref in final_refs if self._is_trusted_task_workspace_artifact_ref(ref)]
         source = sources[0]
         explicit_final_result = str(source.get("explicit_final_result") or "").strip()
         if explicit_final_result:
             final_result = explicit_final_result
             final_result_source = "explicit_final_result"
         elif trusted_refs:
-            final_result = self._workspace_artifact_final_result_from_refs(trusted_refs)
-            final_result_source = "workspace_artifact"
+            final_result = self._task_workspace_artifact_final_result_from_refs(trusted_refs)
+            final_result_source = "task_workspace_artifact"
         else:
             final_result = candidate_final_result.strip()
             final_result_source = "candidate_final_result"
@@ -1984,7 +1963,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     "candidate_final_result": candidate,
                     "explicit_final_result": explicit_final_result,
                     "file_refs": trusted_refs,
-                    "declared_workspace_paths": self._taskboard_declared_workspace_paths_from_preview(preview),
+                    "declared_task_workspace_paths": self._taskboard_declared_task_workspace_paths_from_preview(preview),
                     "evidence_use": self._taskboard_result_evidence_use(preview),
                 }
             )
@@ -1995,7 +1974,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
 
         def collect(value: Any) -> None:
             if isinstance(value, Mapping):
-                if self._is_trusted_workspace_artifact_ref(value):
+                if self._is_trusted_task_workspace_artifact_ref(value):
                     refs.append(dict(DataFormatter.sanitize(value)))
                     return
                 for key in ("file_refs", "artifact_refs"):

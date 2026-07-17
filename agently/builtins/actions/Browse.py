@@ -564,7 +564,7 @@ class Browse:
         return name or "download.bin"
 
     @staticmethod
-    def _download_workspace_path(url: str, content: bytes, headers: Any) -> str:
+    def _download_task_workspace_path(url: str, content: bytes, headers: Any) -> str:
         filename = Browse._filename_from_response(url, headers)
         digest = hashlib.sha256(content).hexdigest()[:16]
         stem = Path(filename).stem or "download"
@@ -798,7 +798,11 @@ class Browse:
         )
         return any(marker in message or marker in error_name for marker in transient_markers)
 
-    async def _materialize_remote_file_trace(self, trace: dict[str, Any], workspace: Any) -> dict[str, Any]:
+    async def _materialize_remote_file_trace(
+        self,
+        trace: dict[str, Any],
+        task_workspace: Any,
+    ) -> dict[str, Any]:
         content = trace.get("content_bytes")
         content = content if isinstance(content, (bytes, bytearray)) else b""
         selected_url = str(trace.get("url") or trace.get("normalized_url") or "")
@@ -824,18 +828,18 @@ class Browse:
                     "content_kind": "remote_file",
                 },
             }
-        if workspace is None or not callable(getattr(workspace, "materialize_file", None)):
+        if task_workspace is None or not callable(getattr(task_workspace, "materialize_file", None)):
             return {
                 "ok": False,
                 "success": False,
                 "status": "blocked",
                 "data": None,
                 "result": None,
-                "error": "Remote file response requires a Workspace binding before it can be read.",
+                "error": "Remote file response requires a TaskWorkspace binding before it can be read.",
                 "diagnostics": [
                     {
-                        "code": "browse.remote_file.workspace_required",
-                        "message": "Remote file response requires a Workspace binding before it can be materialized and read.",
+                        "code": "browse.remote_file.task_workspace_required",
+                        "message": "Remote file response requires a TaskWorkspace binding before it can be materialized and read.",
                         "detail": {
                             "selected_url": selected_url,
                             "media_type": media_type,
@@ -851,8 +855,8 @@ class Browse:
                 },
             }
         headers = trace.get("headers") if isinstance(trace.get("headers"), dict) else {}
-        path = self._download_workspace_path(selected_url, bytes(content), headers)
-        materialized = await workspace.materialize_file(
+        path = self._download_task_workspace_path(selected_url, bytes(content), headers)
+        materialized = await task_workspace.materialize_file(
             path,
             bytes(content),
             source={
@@ -866,7 +870,7 @@ class Browse:
         )
         read_preview: dict[str, Any] = {}
         try:
-            read_result = await workspace.read_file(materialized["path"], max_bytes=4000)
+            read_result = await task_workspace.read_file(materialized["path"], max_bytes=4000)
             read_preview = {
                 "ok": read_result.get("ok"),
                 "readable": read_result.get("readable"),
@@ -936,7 +940,7 @@ class Browse:
         }
 
     async def _execute_action_method(self, method_name: str = "browse", **kwargs: Any) -> dict[str, Any]:
-        workspace = kwargs.pop("workspace", None)
+        task_workspace = kwargs.pop("task_workspace", None)
         custom_method = self.__dict__.get(method_name)
         if callable(custom_method):
             from agently.utils import FunctionShifter
@@ -999,7 +1003,7 @@ class Browse:
             "links": trace.get("links", []),
         }
         if trace.get("content_kind") == "remote_file":
-            return await self._materialize_remote_file_trace(trace, workspace)
+            return await self._materialize_remote_file_trace(trace, task_workspace)
         if trace.get("ok"):
             content = str(trace.get("content", "") or "")
             status = "partial_success" if diagnostics else "success"
@@ -1610,7 +1614,7 @@ class Browse:
         if extension in self.REMOTE_FILE_EXTENSIONS:
             return (
                 f"Can not browse '{target_url}'.\tError: Jina Reader backend skips remote-file URLs; "
-                "use a local Browse backend with Workspace materialization."
+                "use a local Browse backend with TaskWorkspace materialization."
             )
 
         timeout = self.jina_reader_timeout if self.jina_reader_timeout is not None else self.timeout

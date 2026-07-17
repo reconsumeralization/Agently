@@ -42,7 +42,7 @@ class ExecutionResourcePolicy(TypedDict, total=False):
     auto_allow: bool
     approval_mode: Literal["auto", "always", "never"]
     policy_approval_handler: str
-    workspace_roots: list[str]
+    task_workspace_roots: list[str]
     path_allowlist: list[str]
     path_denylist: list[str]
     allowed_cmd_prefixes: list[str]

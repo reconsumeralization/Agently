@@ -75,13 +75,12 @@ JUDGE_RULES = [
 async def main() -> None:
     workspace_dir = default_workspace("support-ticket-policy-reply")
     workspace_dir.mkdir(parents=True, exist_ok=True)
-    agent = Agently.create_agent("agent-task-support-ticket-policy-reply").use_workspace(workspace_dir)
+    agent = Agently.create_agent("agent-task-support-ticket-policy-reply").use_task_workspace(workspace_dir).use_record_store(workspace_dir, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=0.0)
-    workspace = agent.workspace
-    if workspace is None:
-        raise RuntimeError("Workspace was not initialized.")
+    task_workspace = agent.task_workspace
+    record_store = agent.record_store
 
-    agent.enable_workspace_file_actions(read=True, write=True, expose_to_model=True)
+    agent.enable_task_workspace_file_actions(read=True, write=True, expose_to_model=True)
 
     @agent.action_func
     def lookup_ticket_context(ticket_id: str) -> dict[str, Any]:
@@ -90,35 +89,35 @@ async def main() -> None:
         return SUPPORT_TICKET_CONTEXT
 
     agent.use_actions(lookup_ticket_context)
-    await workspace.put(
+    await record_store.put(
         content=SUPPORT_TICKET_CONTEXT,
         collection="observations",
         kind="support_ticket_business_context",
         summary="Support ticket, billing records, and policy excerpts for SUP-1842",
-        scope={"task_id": TASK_ID},
+        scope={"task_id": TASK_ID, "execution_id": TASK_ID},
         source={"type": "mock_business_system", "name": "support_ticket_context"},
     )
 
     print("[SETUP] Support ticket policy reply")
-    print(f"[SETUP] Workspace: {workspace_dir}")
+    print(f"[SETUP] TaskWorkspace: {workspace_dir}")
     print(f"[SETUP] Provider: {provider}, model_key={TASK_MODEL_KEY}")
 
     execution = agent.create_task(
         task_id=TASK_ID,
         goal=(
             "Prepare a customer-facing support reply for ticket SUP-1842. Use lookup_ticket_context and the "
-            "Workspace business context as factual evidence. Write the final reply to "
+            "TaskWorkspace business context as factual evidence. Write the final reply to "
             f"{OUTPUT_FILE}. The business system provides facts only; the model must judge whether the reply "
             "responsibly handles the policy and billing context."
         ),
         success_criteria=[
-            "The final Markdown reply file exists in Workspace.",
+            "The final Markdown reply file exists in TaskWorkspace.",
             "The reply is grounded in the ticket, billing records, and policy excerpts.",
             "The reply does not invent facts or promise an operational outcome not supported by the business context.",
             "The reply gives the customer a concrete next step and appropriate tone.",
             "The execution evidence includes reading back or checking the final file content.",
         ],
-        workspace=workspace_dir,
+        task_workspace=workspace_dir,
         max_iterations=3,
         limits={"max_model_requests": 12, "max_seconds": 240, "max_no_progress_seconds": 90},
         options={
@@ -143,7 +142,7 @@ async def main() -> None:
 
     result = await execution.async_start()
     meta = await execution.async_get_meta()
-    output_path = resolve_result_artifact_path(workspace, result, OUTPUT_FILE)
+    output_path = resolve_result_artifact_path(task_workspace, result, OUTPUT_FILE)
     artifact_text = output_path.read_text(encoding="utf-8") if output_path.is_file() else ""
     model_judge = await judge_business_artifact(
         agent,
@@ -169,8 +168,8 @@ async def main() -> None:
             and item.value["verification"].get("is_complete") is False
             for item in stream_items
         ),
-        "workspace_recovery_ref_count": len(meta.get("workspace_refs", {}).get("checkpoints", [])),
-        "workspace_process_record_count": len(meta.get("workspace_refs", {}).get("decisions", [])),
+        "record_store_recovery_ref_count": len(meta.get("record_refs", {}).get("checkpoints", [])),
+        "workspace_process_record_count": len(meta.get("record_refs", {}).get("decisions", [])),
         "stream_trace_file": str(stream_trace_path),
         "output_file": str(output_path),
     }

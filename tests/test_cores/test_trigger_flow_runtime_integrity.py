@@ -48,7 +48,7 @@ async def test_terminal_result_is_carried_once_and_closed_event_is_compact(
 
     flow.to(produce).end()
     execution = flow.create_execution(auto_close=False)
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
 
     try:
         await execution.async_start("start")
@@ -71,7 +71,7 @@ async def test_terminal_result_is_carried_once_and_closed_event_is_compact(
         }
         assert large_body not in repr(completed)
         assert large_body not in repr(closed)
-        assert workspace._backend is None
+        assert record_store._backend is None
         assert not (tmp_path / ".agently").exists()
     finally:
         Agently.event_center.unregister_hook(hook_name)

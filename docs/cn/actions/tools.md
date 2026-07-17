@@ -140,15 +140,15 @@ provider-specific 默认 `region`；Browse 会把策略作为 `Accept-Language` 
 `http` / `https` candidate 会先尝试，再判断整体不可达；结构化结果会包含
 selected URL、retry candidates、canonical links、same-site links、attempts，以及
 必要的 security downgrade diagnostic。Browse 收到 PDF、Office 文件、图片或其他
-download-like binary response，且当前 execution 绑定了 Workspace 时，会把 bytes
+download-like binary response，且当前 execution 绑定了 TaskWorkspace 时，会把 bytes
 物化到 `downloads/`，并返回 file refs 与有界 `read_file` preview。Browse 本身不解析
-文档；后续读取由 Workspace file IO handlers 负责。没有绑定 Workspace 时，远程文件
+文档；后续读取由 TaskWorkspace file IO handlers 负责。没有绑定 TaskWorkspace 时，远程文件
 Browse 会 fail closed，不会把 raw bytes 放进模型 hot path。
 
 shell 能力优先使用 `agent.enable_shell(...)`，它挂载托管 `run_bash` action。
 `Cmd` 仍作为低层兼容 package 与 Bash 执行实现 helper 保留。shell 用于测试、构建、
 git inspection 和只读诊断；文件读取、检索、编辑和写入使用 `read_file`、`grep_files`、
-`edit_file`、`apply_patch` 等 Workspace file actions。
+`edit_file`、`apply_patch` 等 TaskWorkspace file actions。
 
 当前 action-native 示例见 `examples/builtin_actions/`。历史 built-in tool 示例已移到
 `examples/archived/builtin_tools/`，并在 README 中指向当前替代案例。

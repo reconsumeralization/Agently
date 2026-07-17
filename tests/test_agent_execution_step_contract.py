@@ -13,13 +13,14 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently
-from agently.core import PluginManager, TaskBoardGraph, TaskBoardRevision, TaskBoardValidator, build_task_board_evidence_view
+from agently.core import PluginManager, SkillLibrary, TaskBoardGraph, TaskBoardRevision, TaskBoardValidator, build_task_board_evidence_view
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, AgentExecutionResult
 from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
 from agently.core.application.AgentTask import AgentTask
 from agently.core.application.AgentTask.BlockCarrier import WorkUnitResult
-from agently.types.data import AgentExecutionStreamData, AgentlyRequestData, WorkspaceContextPackage
-from agently.types.options import ExecutionOptions, SkillsRouteOptions
+from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
+from agently.types.data import AgentExecutionStreamData, AgentlyRequestData
+from agently.types.options import ExecutionOptions
 from agently.utils import DataFormatter
 from agently.utils import Settings
 from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.result_views import (
@@ -573,7 +574,7 @@ def _create_scoped_action_agent(name: str = "agent-execution-scoped-action-test"
 
 
 def test_task_context_contract_is_ref_backed_and_cap_free(tmp_path):
-    agent = _create_agent("execution-task-context-contract").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-task-context-contract").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Prepare a current source-grounded report.",
@@ -587,7 +588,7 @@ def test_task_context_contract_is_ref_backed_and_cap_free(tmp_path):
         1,
         {
             "step_instruction": "Collect latest evidence as refs and read only scoped snippets.",
-            "deliverable_mode": "workspace_artifact",
+            "deliverable_mode": "task_workspace_artifact",
         },
         {
             "goal": task.goal,
@@ -608,11 +609,11 @@ def test_task_context_contract_is_ref_backed_and_cap_free(tmp_path):
         "search_note",
         "generated_code",
         "large_extraction",
-        "workspace_note",
+        "task_workspace_note",
     }
     assert intermediate_policy["default_state"] == "ref_only"
     assert "compact refs" in intermediate_policy["hot_path"]
-    assert "Workspace or Action artifacts" in intermediate_policy["hot_path"]
+    assert "TaskWorkspace or Action artifacts" in intermediate_policy["hot_path"]
     assert "max_bytes" in intermediate_policy["readback"]
     assert "offsets" in intermediate_policy["readback"]
     assert "discovery or materialization only" in intermediate_policy["evidence_boundary"]
@@ -631,7 +632,7 @@ def test_task_context_contract_is_ref_backed_and_cap_free(tmp_path):
 
 @pytest.mark.asyncio
 async def test_taskboard_work_units_receive_task_context_contract(tmp_path):
-    agent = _create_agent("execution-taskboard-context-contract").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-taskboard-context-contract").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Prepare a current source-grounded report.",
@@ -663,7 +664,7 @@ async def test_taskboard_work_units_receive_task_context_contract(tmp_path):
 
     cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
     cast(Any, task)._taskboard_dependency_action_artifact_readbacks = fake_dependency_readbacks
-    context_pack: WorkspaceContextPackage = {
+    context_pack: dict[str, Any] = {
         "goal": task.goal,
         "items": [],
         "profile": "test",
@@ -715,8 +716,8 @@ async def test_taskboard_work_units_receive_task_context_contract(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_taskboard_readback_card_consumes_skill_context_pack_refs(tmp_path):
-    agent = _create_agent("execution-taskboard-skill-context-readback").use_workspace(tmp_path / "workspace")
+async def test_taskboard_readback_card_does_not_promote_skill_procedure_as_evidence(tmp_path):
+    agent = _create_agent("execution-taskboard-skill-context-readback").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Summarize agently-request setup guidance.",
@@ -736,13 +737,13 @@ async def test_taskboard_readback_card_consumes_skill_context_pack_refs(tmp_path
         )
 
     cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
-    context_pack: WorkspaceContextPackage = {
+    context_pack: dict[str, Any] = {
         "goal": task.goal,
         "items": [],
         "profile": "test",
         "omitted": [],
         "diagnostics": {},
-        "skills_context_pack": {
+        "skill_projection": {
             "schema_version": "agently.skills.context_pack.v1",
             "skills": [
                 {
@@ -797,13 +798,12 @@ async def test_taskboard_readback_card_consumes_skill_context_pack_refs(tmp_path
         context_pack,
     )
 
-    assert result.status == "completed"
-    assert result.preview["skill_context_readbacks"][0]["skill_id"] == "agently-request"
-    assert result.preview["remaining_work"] == []
+    assert result.status == "blocked"
+    assert "skill_context_readbacks" not in result.preview
+    assert result.preview["remaining_work"]
     evidence_items = result.metadata["evidence_ledger"]["items"]
-    assert {item["kind"] for item in evidence_items} == {"skill_context.readback"}
-    assert any("model settings" in item.get("body", "") for item in evidence_items)
-    assert captured_work_units[0]["input_refs"][0]["kind"] == "skill_context"
+    assert evidence_items == []
+    assert captured_work_units[0]["input_refs"] == []
 
 
 def _write_skill(root: Path):
@@ -1289,14 +1289,14 @@ class MockWorkspaceArtifactDraftStallRequester(MockAgentExecutionRequester):
         if "Plan the next bounded AgentExecution step" in text:
             payload = {
                 "execution_shape": "direct",
-                "step_instruction": "Prepare a Workspace-backed final artifact.",
+                "step_instruction": "Prepare a TaskWorkspace-backed final artifact.",
                 "expected_evidence": "final.md is written and read back.",
                 "rationale": "The task requests a deliverable file.",
-                "deliverable_mode": "workspace_artifact",
+                "deliverable_mode": "task_workspace_artifact",
             }
         elif "Execute exactly one bounded step" in text:
             payload = {
-                "step_result": "Control result ready; framework should draft the Workspace artifact.",
+                "step_result": "Control result ready; framework should draft the TaskWorkspace artifact.",
                 "artifact_manifest": {"path": "final.md", "sections": [{"id": "summary", "title": "Summary"}]},
                 "evidence": ["artifact source evidence"],
                 "remaining_work": [],
@@ -1305,7 +1305,7 @@ class MockWorkspaceArtifactDraftStallRequester(MockAgentExecutionRequester):
             payload = {
                 "is_complete": False,
                 "requires_block": True,
-                "reason": "The Workspace artifact was not delivered.",
+                "reason": "The TaskWorkspace artifact was not delivered.",
                 "missing_criteria": ["final.md readback is missing."],
                 "replan_instruction": "",
                 "final_result_required": True,
@@ -1345,14 +1345,14 @@ class MockWorkspaceArtifactDraftRetryRequester(MockAgentExecutionRequester):
         if "Plan the next bounded AgentExecution step" in text:
             payload = {
                 "execution_shape": "direct",
-                "step_instruction": "Prepare a Workspace-backed final artifact.",
+                "step_instruction": "Prepare a TaskWorkspace-backed final artifact.",
                 "expected_evidence": "final.md is written and read back.",
                 "rationale": "The task requests a deliverable file.",
-                "deliverable_mode": "workspace_artifact",
+                "deliverable_mode": "task_workspace_artifact",
             }
         elif "Execute exactly one bounded step" in text:
             payload = {
-                "step_result": "Control result ready; framework should draft the Workspace artifact.",
+                "step_result": "Control result ready; framework should draft the TaskWorkspace artifact.",
                 "artifact_manifest": {"path": "final.md", "sections": [{"id": "summary", "title": "Summary"}]},
                 "evidence": ["artifact source evidence"],
                 "remaining_work": [],
@@ -1361,7 +1361,7 @@ class MockWorkspaceArtifactDraftRetryRequester(MockAgentExecutionRequester):
             payload = {
                 "is_complete": True,
                 "requires_block": False,
-                "reason": "The Workspace artifact was delivered after retry.",
+                "reason": "The TaskWorkspace artifact was delivered after retry.",
                 "missing_criteria": [],
                 "replan_instruction": "",
                 "final_result_required": True,
@@ -1406,14 +1406,14 @@ class MockWorkspaceArtifactDraftNaturalTextRequester(MockAgentExecutionRequester
         if "Plan the next bounded AgentExecution step" in text:
             payload = {
                 "execution_shape": "direct",
-                "step_instruction": "Prepare a Workspace-backed final artifact.",
+                "step_instruction": "Prepare a TaskWorkspace-backed final artifact.",
                 "expected_evidence": "final.md is written and read back.",
                 "rationale": "The task requests a deliverable file.",
-                "deliverable_mode": "workspace_artifact",
+                "deliverable_mode": "task_workspace_artifact",
             }
         elif "Execute exactly one bounded step" in text:
             payload = {
-                "step_result": "Control result ready; framework should draft the Workspace artifact.",
+                "step_result": "Control result ready; framework should draft the TaskWorkspace artifact.",
                 "artifact_manifest": {"path": "final.md", "sections": [{"id": "summary", "title": "Summary"}]},
                 "evidence": ["artifact source evidence"],
                 "remaining_work": [],
@@ -1422,7 +1422,7 @@ class MockWorkspaceArtifactDraftNaturalTextRequester(MockAgentExecutionRequester
             payload = {
                 "is_complete": True,
                 "requires_block": False,
-                "reason": "The Workspace artifact was delivered.",
+                "reason": "The TaskWorkspace artifact was delivered.",
                 "missing_criteria": [],
                 "replan_instruction": "",
                 "final_result_required": True,
@@ -1673,7 +1673,7 @@ class MockTaskBoardConsumerDrivenRequester(MockAgentExecutionRequester):
                 "sufficient": False,
                 "next_board_action": "readback",
                 "target_refs": ["sources/source.md"],
-                "gaps": ["Need bounded Workspace readback for sources/source.md."],
+                "gaps": ["Need bounded TaskWorkspace readback for sources/source.md."],
                 "evidence": ["collect card produced a ref-only source pointer"],
                 "remaining_work": ["Continue the control card after readback."],
                 "diagnostics": [{"kind": "consumer_driven_sufficiency"}],
@@ -1688,7 +1688,7 @@ class MockTaskBoardSectionedArtifactRequester(MockAgentExecutionRequester):
     tail_marker = "SECTIONED-ARTIFACT-END-MARKER"
     first_section = (
         "# Sectioned Report\n\n"
-        "This report is intentionally long enough to require a Workspace-backed sectioned artifact.\n\n"
+        "This report is intentionally long enough to require a TaskWorkspace-backed sectioned artifact.\n\n"
         + ("Source-grounded analysis paragraph with bounded evidence refs.\n" * 120)
     )
     second_section = (
@@ -1712,11 +1712,11 @@ class MockTaskBoardSectionedArtifactRequester(MockAgentExecutionRequester):
                         "objective": "Produce the complete sectioned Markdown deliverable.",
                         "depends_on": [],
                         "evidence_to_use": [],
-                        "done_when": "The complete sectioned report is available in Workspace.",
+                        "done_when": "The complete sectioned report is available in TaskWorkspace.",
                         "allowed_execution_shape": "control",
                     }
                 ],
-                "reflection_points": ["Ensure the artifact is complete and backed by Workspace readback."],
+                "reflection_points": ["Ensure the artifact is complete and backed by TaskWorkspace readback."],
                 "completion_gate": "The sectioned artifact is written and accepted.",
                 "why_this_effort_shape": "One control card can write the final sectioned report.",
                 "risk_notes": [],
@@ -1742,7 +1742,7 @@ class MockTaskBoardSectionedArtifactRequester(MockAgentExecutionRequester):
         elif _is_taskboard_final_request(text):
             payload = {
                 "accepted": True,
-                "reason": "sectioned Workspace artifact satisfies the criterion",
+                "reason": "sectioned TaskWorkspace artifact satisfies the criterion",
                 "final_result": "# Sectioned Report",
                 "missing_criteria": [],
             }
@@ -2452,21 +2452,21 @@ def _create_flat_slow_plan_agent(name: str = "agent-execution-flat-slow-plan"):
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
-def _create_workspace_artifact_draft_stall_agent(name: str = "agent-execution-artifact-draft-stall"):
+def _create_task_workspace_artifact_draft_stall_agent(name: str = "agent-execution-artifact-draft-stall"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockWorkspaceArtifactDraftStallRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
-def _create_workspace_artifact_draft_retry_agent(name: str = "agent-execution-artifact-draft-retry"):
+def _create_task_workspace_artifact_draft_retry_agent(name: str = "agent-execution-artifact-draft-retry"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockWorkspaceArtifactDraftRetryRequester, activate=True)
     return Agently.AgentType(plugin_manager, parent_settings=settings, name=name)
 
 
-def _create_workspace_artifact_draft_natural_text_agent(name: str = "agent-execution-artifact-draft-natural-text"):
+def _create_task_workspace_artifact_draft_natural_text_agent(name: str = "agent-execution-artifact-draft-natural-text"):
     settings = Settings(name=f"{ name }-settings", parent=Agently.settings)
     plugin_manager = PluginManager(settings, parent=Agently.plugin_manager, name=f"{ name }-plugins")
     plugin_manager.register("ModelRequester", MockWorkspaceArtifactDraftNaturalTextRequester, activate=True)
@@ -2576,7 +2576,7 @@ def _create_taskboard_control_dependency_readback_agent(
 
 
 def test_taskboard_blocked_scoped_retrieval_card_adds_continuation_patch(tmp_path):
-    agent = _create_agent("taskboard-scoped-retrieval-continuation").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("taskboard-scoped-retrieval-continuation").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         task_id="taskboard-scoped-retrieval-continuation",
@@ -2600,7 +2600,7 @@ def test_taskboard_blocked_scoped_retrieval_card_adds_continuation_patch(tmp_pat
                                     {
                                         "query": "Project Atlas blocker",
                                         "expected_role": "evidence_snippet",
-                                        "search_surface": "workspace_index",
+                                        "source_kinds": ["record_store"],
                                         "filters": {"collection": "retained-notes"},
                                         "snippet_limit": 200,
                                     }
@@ -2731,7 +2731,7 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
         {
             "status": "blocked",
             "next_board_action": "readback",
-            "target_refs": ["workspace://final.md"],
+            "target_refs": ["task-workspace://final.md"],
             "gaps": ["Need exact final artifact wording before patching."],
             "remaining_work": ["Read final.md, then apply the attribution correction."],
         },
@@ -2742,7 +2742,7 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
     continued_cards = continued_revision.graph.card_by_id()
     assert "final.continue.readback" in continued_cards
     assert "final.continue.continue" in continued_cards
-    assert continued_cards["final.continue.continue"].metadata["target_refs"] == ["workspace://final.md"]
+    assert continued_cards["final.continue.continue"].metadata["target_refs"] == ["task-workspace://final.md"]
 
 
 def test_taskboard_control_auto_readback_scope_includes_upstream_evidence_cards():
@@ -3013,7 +3013,7 @@ def test_taskboard_control_stream_display_meta_uses_locale_keys_not_hardcoded_la
     assert nested_meta["display_category"] == "evidence"
 
 
-def test_taskboard_control_workspace_target_refs_become_readback_patch():
+def test_taskboard_control_task_workspace_target_refs_become_readback_patch():
     validator = TaskBoardValidator()
     revision = TaskBoardRevision.create(
         board_id="workspace-target-refs",
@@ -3021,7 +3021,7 @@ def test_taskboard_control_workspace_target_refs_become_readback_patch():
             {
                 "graph_id": "workspace-target-refs-graph",
                 "cards": [
-                    {"id": "collect", "objective": "Collect retained Workspace refs."},
+                    {"id": "collect", "objective": "Collect retained TaskWorkspace refs."},
                     {
                         "id": "final",
                         "objective": "Write final answer after retained notes are read.",
@@ -3059,7 +3059,7 @@ def test_taskboard_control_workspace_target_refs_become_readback_patch():
     cards = next_revision.graph.card_by_id()
     assert cards["final.readback"].allowed_execution_shape == "readback"
     assert cards["final.readback"].metadata["target_refs"] == ["retained-notes/rec_abc-operations-note.txt"]
-    assert cards["final.readback"].metadata["workspace_target_refs"] == ["retained-notes/rec_abc-operations-note.txt"]
+    assert cards["final.readback"].metadata["task_workspace_target_refs"] == ["retained-notes/rec_abc-operations-note.txt"]
     assert "external_target_refs" not in cards["final.readback"].metadata
     assert cards["final.continue"].depends_on == ("collect", "final.readback")
     assert cards["final.continue"].metadata["readback_card_id"] == "final.readback"
@@ -3116,7 +3116,7 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
                         "depends_on": ["collect"],
                         "allowed_execution_shape": "control",
                         "required_outputs": ["final.md"],
-                        "metadata": {"final_workspace_deliverables": ["final.md"]},
+                        "metadata": {"final_task_workspace_deliverables": ["final.md"]},
                     },
                 ],
             }
@@ -3149,7 +3149,7 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
     assert cards["final.evidence"].allowed_execution_shape == "actions"
     assert cards["final.evidence"].metadata["target_refs"] == ["https://example.test/source.pdf"]
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
-    assert cards["final.continue"].metadata["final_workspace_deliverables"] == ["final.md"]
+    assert cards["final.continue"].metadata["final_task_workspace_deliverables"] == ["final.md"]
     assert "final.md" in cards["final.continue"].objective
 
 
@@ -3164,7 +3164,7 @@ def test_scoped_retrieval_results_expose_model_hot_view_without_provenance_noise
         "sha256": "1" * 64,
         "media_type": "text/markdown",
         "content_kind": "text",
-        "search_engine": "workspace_file_grep",
+        "search_engine": "task_workspace_file_grep",
         "grep_tool": "rg",
         "scope": {"max_file_bytes": 200000},
         "file_ref": {"path": "retained/source.md", "sha256": "1" * 64},
@@ -3182,26 +3182,20 @@ def test_scoped_retrieval_results_expose_model_hot_view_without_provenance_noise
         "state": {
             "execution_block_results": [
                 {
-                    "kind": "workspace_operation",
+                    "kind": "context_read",
                     "execution_block_id": "block-1",
                     "source_plan_block_id": "plan-block-1",
                     "output": {
-                        "operation": "search",
+                        "operation": "read",
                         "query": "needle",
-                        "filters": {"collection": "retained"},
-                        "bounded": {
-                            "search_surface": "workspace_files",
-                            "search_engines": ["workspace_file_grep"],
-                            "max_results": 8,
-                            "total_matches": 1,
-                            "returned_results": 1,
-                            "candidate_bytes": 4096,
-                            "returned_snippet_bytes": 64,
-                            "include_snippets": True,
-                            "snippet_limit": 300,
-                            "file_path": "retained",
-                            "file_pattern": "**",
-                            "context_lines": 2,
+                            "filters": {"collection": "retained"},
+                            "bounded": {
+                                "package_id": "context_package:example",
+                                "task_context_id": "task_context:example",
+                                "context_revision": 3,
+                                "returned_results": 1,
+                                "used_chars": 15,
+                                "omitted_count": 0,
                         },
                         "locator_refs": [raw_locator],
                         "evidence_snippets": [
@@ -3218,7 +3212,7 @@ def test_scoped_retrieval_results_expose_model_hot_view_without_provenance_noise
                                 "sha256": "1" * 64,
                                 "media_type": "text/markdown",
                                 "content_kind": "text",
-                                "search_engine": "workspace_file_grep",
+                                "search_engine": "task_workspace_file_grep",
                                 "grep_tool": "rg",
                                 "scope": {"max_file_bytes": 200000},
                                 "file_ref": {"path": "retained/source.md", "sha256": "1" * 64},
@@ -3245,7 +3239,7 @@ def test_scoped_retrieval_results_expose_model_hot_view_without_provenance_noise
     assert hot_results[0]["locator_refs"][0]["path"] == "retained/source.md"
     assert hot_results[0]["locator_refs"][0]["ref"]["id"] == "record-1"
     assert hot_results[0]["evidence_snippets"][0]["content"] == "needle evidence"
-    assert hot_results[0]["bounded"]["snippet_limit"] == 300
+    assert hot_results[0]["bounded"]["task_context_id"] == "task_context:example"
     assert '"sha256"' not in hot_text
     assert '"bytes"' not in hot_text
     assert '"media_type"' not in hot_text
@@ -3259,14 +3253,14 @@ def test_scoped_retrieval_results_expose_model_hot_view_without_provenance_noise
     assert block_context["state"]["execution_block_results"][0]["output"]["locator_refs"][0]["sha256"]
 
 
-def test_taskboard_workspace_operation_prompt_view_omits_reconstructable_provenance_noise():
-    compact = AgentTask._compact_taskboard_workspace_operation(
+def test_taskboard_context_read_prompt_view_omits_reconstructable_provenance_noise():
+    compact = AgentTask._compact_taskboard_context_read(
         {
             "id": "op-1",
             "plan_block_id": "plan-1",
             "source_plan_block_id": "source-plan-1",
             "execution_block_id": "exec-block-1",
-            "kind": "workspace_operation",
+            "kind": "context_read",
             "status": "completed",
             "output": {
                 "diagnostics": [{"code": "diag", "message": "visible", "sha256": "1" * 64, "raw": {"bytes": 4096}}],
@@ -3282,7 +3276,7 @@ def test_taskboard_workspace_operation_prompt_view_omits_reconstructable_provena
                             "bytes": 4096,
                             "sha256": "1" * 64,
                             "media_type": "text/markdown",
-                            "search_engine": "workspace_file_grep",
+                            "search_engine": "task_workspace_file_grep",
                             "grep_tool": "rg",
                             "content_state": "ref_only",
                         }
@@ -3293,7 +3287,7 @@ def test_taskboard_workspace_operation_prompt_view_omits_reconstructable_provena
                             "content": "bounded source detail",
                             "bytes": 4096,
                             "sha256": "1" * 64,
-                            "search_engine": "workspace_file_grep",
+                            "search_engine": "task_workspace_file_grep",
                             "grep_tool": "rg",
                         }
                     ],
@@ -3304,7 +3298,7 @@ def test_taskboard_workspace_operation_prompt_view_omits_reconstructable_provena
                         "content": "bounded source detail",
                         "bytes": 4096,
                         "sha256": "1" * 64,
-                        "search_engine": "workspace_file_grep",
+                        "search_engine": "task_workspace_file_grep",
                         "grep_tool": "rg",
                     }
                 ],
@@ -3324,8 +3318,8 @@ def test_taskboard_workspace_operation_prompt_view_omits_reconstructable_provena
     assert '"execution_block_id"' not in prompt_text
 
 
-def test_block_carrier_workspace_ref_meta_omits_reconstructable_provenance_noise():
-    compact = AgentTask._compact_workspace_ref_or_snippet_for_meta(
+def test_block_carrier_task_workspace_ref_meta_omits_reconstructable_provenance_noise():
+    compact = AgentTask._compact_task_workspace_ref_or_snippet_for_meta(
         {
             "path": "retained/source.md",
             "line_start": 7,
@@ -3337,7 +3331,7 @@ def test_block_carrier_workspace_ref_meta_omits_reconstructable_provenance_noise
             "bytes": 4096,
             "sha256": "1" * 64,
             "media_type": "text/markdown",
-            "search_engine": "workspace_file_grep",
+            "search_engine": "task_workspace_file_grep",
             "grep_tool": "rg",
         },
         max_chars=1000,
@@ -3365,8 +3359,8 @@ def test_model_hot_artifact_refs_omit_programmatic_provenance_noise():
             "size": 4096,
             "sha256": "1" * 64,
             "content_kind": "text",
-            "handler_id": "workspace_text",
-            "source": "workspace",
+            "handler_id": "task_workspace_text",
+            "source": "task_workspace",
             "truncated": True,
             "available": True,
         }
@@ -3462,7 +3456,7 @@ def test_taskboard_available_readback_omits_programmatic_provenance_noise():
     hot_text = json.dumps(available, ensure_ascii=False)
 
     assert available["action_artifact_readback"]["artifact_refs"][0]["selection_key"] == "selection-1"
-    assert available["workspace_file_readback"]["file_refs"][0]["path"] == "retained/source.md"
+    assert available["task_workspace_file_readback"]["file_refs"][0]["path"] == "retained/source.md"
     assert '"sha256"' not in hot_text
     assert '"bytes"' not in hot_text
     assert '"media_type"' not in hot_text
@@ -3471,7 +3465,7 @@ def test_taskboard_available_readback_omits_programmatic_provenance_noise():
 
 @pytest.mark.asyncio
 async def test_taskboard_readback_work_unit_hot_payload_omits_programmatic_provenance_noise(tmp_path):
-    agent = _create_agent("execution-taskboard-readback-hot-provenance").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-taskboard-readback-hot-provenance").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Read dependency evidence without hot-loading provenance fields.",
@@ -3580,8 +3574,8 @@ async def test_taskboard_readback_work_unit_hot_payload_omits_programmatic_prove
 
 @pytest.mark.asyncio
 async def test_taskboard_dependency_readback_work_unit_hot_payload_omits_programmatic_provenance_noise(tmp_path):
-    agent = _create_agent("execution-taskboard-dependency-readback-hot-provenance").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-dependency-readback-hot-provenance").use_task_workspace(
+        tmp_path / "task_workspace"
     )
     task = AgentTask(
         agent,
@@ -3748,8 +3742,8 @@ def test_taskboard_control_readback_required_patch_type_becomes_readback_patch()
     assert cards["analyze.continue"].depends_on == ("collect", "analyze.readback")
 
 
-def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():
-    assert AgentTask._taskboard_control_output_allows_workspace_delivery(
+def test_taskboard_control_blocked_output_does_not_allow_task_workspace_delivery():
+    assert AgentTask._taskboard_control_output_allows_task_workspace_delivery(
         {
             "status": "blocked",
             "sufficient": False,
@@ -3758,7 +3752,7 @@ def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():
             "remaining_work": ["Read scoped evidence before generating the deliverable."],
         }
     ) is False
-    assert AgentTask._taskboard_control_output_allows_workspace_delivery(
+    assert AgentTask._taskboard_control_output_allows_task_workspace_delivery(
         {
             "status": "completed",
             "sufficient": True,
@@ -3767,7 +3761,7 @@ def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():
             "gaps": [],
         }
     ) is True
-    assert AgentTask._taskboard_control_output_allows_workspace_delivery(
+    assert AgentTask._taskboard_control_output_allows_task_workspace_delivery(
         {
             "status": "completed",
             "sufficient": True,
@@ -3777,7 +3771,7 @@ def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():
             "gaps": ["Non-fatal evidence limitation disclosed for verifier review."],
         }
     ) is True
-    assert AgentTask._taskboard_control_output_allows_workspace_delivery(
+    assert AgentTask._taskboard_control_output_allows_task_workspace_delivery(
         {
             "status": "completed",
             "sufficient": True,
@@ -3789,77 +3783,80 @@ def test_taskboard_control_blocked_output_does_not_allow_workspace_delivery():
 
 
 @pytest.mark.asyncio
-async def test_workspace_artifact_delivery_blocks_empty_body_without_trusted_readback(tmp_path):
-    agent = _create_agent("execution-workspace-artifact-empty-body").use_workspace(tmp_path / "workspace")
+async def test_task_workspace_artifact_delivery_blocks_empty_body_without_trusted_readback(tmp_path):
+    agent = _create_agent("execution-workspace-artifact-empty-body").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
-        goal="Produce a trusted Workspace artifact.",
+        goal="Produce a trusted TaskWorkspace artifact.",
         success_criteria=["final.md is written and read back."],
         execution="taskboard",
         max_iterations=None,
     )
     execution_meta: dict[str, Any] = {"logs": {"action_logs": {}, "route_logs": {}, "errors": []}}
 
-    delivered = await task._deliver_workspace_artifact(
+    delivered = await task._deliver_task_workspace_artifact(
         {"status": "completed", "artifact_manifest": {"path": "final.md"}},
-        plan={"deliverable_mode": "workspace_artifact"},
+        plan={"deliverable_mode": "task_workspace_artifact"},
         execution_meta=execution_meta,
-        source="test.workspace_artifact.empty_body",
+        source="test.task_workspace_artifact.empty_body",
         allow_stream_draft=False,
     )
 
     assert delivered["status"] == "blocked"
-    assert delivered["workspace_artifact_delivery"]["status"] == "failed"
-    assert delivered["workspace_artifact_delivery"]["error"]["type"] == "EmptyWorkspaceArtifactBody"
-    assert delivered["diagnostics"][0]["code"] == "agent_task.workspace_artifact.empty_body"
-    assert not (task.workspace.root / "final.md").exists()
+    assert delivered["task_workspace_artifact_delivery"]["status"] == "failed"
+    assert delivered["task_workspace_artifact_delivery"]["error"]["type"] == "EmptyWorkspaceArtifactBody"
+    assert delivered["diagnostics"][0]["code"] == "agent_task.task_workspace_artifact.empty_body"
+    assert not (task.task_workspace.root / "final.md").exists()
     evidence_items = execution_meta["blocks"]["evidence"]["evidence_items"]
     assert evidence_items[0]["status"] == "failed"
     assert evidence_items[0]["supports"]["unavailability"] is True
 
 
 @pytest.mark.asyncio
-async def test_workspace_artifact_delivery_blocks_structured_wrapper_body(tmp_path):
-    agent = _create_agent("execution-workspace-artifact-wrapper-body").use_workspace(tmp_path / "workspace")
+async def test_task_workspace_artifact_delivery_blocks_structured_wrapper_body(tmp_path):
+    agent = _create_agent("execution-workspace-artifact-wrapper-body").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
-        goal="Produce a natural Markdown Workspace artifact.",
+        goal="Produce a natural Markdown TaskWorkspace artifact.",
         success_criteria=["final.md is written as natural text."],
         execution="taskboard",
         max_iterations=None,
     )
     execution_meta: dict[str, Any] = {"logs": {"action_logs": {}, "route_logs": {}, "errors": []}}
 
-    delivered = await task._deliver_workspace_artifact(
+    delivered = await task._deliver_task_workspace_artifact(
         {
             "status": "completed",
             "artifact_manifest": {"path": "final.md"},
             "artifact_markdown": json.dumps({"answer": "# Final\n\nWrapped body."}),
         },
-        plan={"deliverable_mode": "workspace_artifact"},
+        plan={"deliverable_mode": "task_workspace_artifact"},
         execution_meta=execution_meta,
-        source="test.workspace_artifact.wrapper_body",
+        source="test.task_workspace_artifact.wrapper_body",
         allow_stream_draft=False,
     )
 
     assert delivered["status"] == "blocked"
-    assert delivered["workspace_artifact_delivery"]["status"] == "failed"
-    assert delivered["workspace_artifact_delivery"]["error"]["type"] == "StructuredWorkspaceArtifactBody"
-    assert delivered["diagnostics"][0]["code"] == "agent_task.workspace_artifact.structured_wrapper_body"
-    assert not (task.workspace.root / "final.md").exists()
+    assert delivered["task_workspace_artifact_delivery"]["status"] == "failed"
+    assert delivered["task_workspace_artifact_delivery"]["error"]["type"] == "StructuredWorkspaceArtifactBody"
+    assert delivered["diagnostics"][0]["code"] == "agent_task.task_workspace_artifact.structured_wrapper_body"
+    assert not (task.task_workspace.root / "final.md").exists()
 
 
 @pytest.mark.asyncio
-async def test_taskboard_control_workspace_patch_materializes_file_without_graph_patch(tmp_path):
-    agent = _create_agent("execution-taskboard-workspace-patch").use_workspace(tmp_path / "workspace")
+async def test_taskboard_control_task_workspace_patch_materializes_file_without_graph_patch(tmp_path):
+    agent = _create_agent("execution-taskboard-workspace-patch").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
+    )
     task = AgentTask(
         agent,
-        goal="Repair a Workspace-backed final deliverable.",
-        success_criteria=["The corrected Workspace file is available through trusted readback refs."],
+        goal="Repair a TaskWorkspace-backed final deliverable.",
+        success_criteria=["The corrected TaskWorkspace file is available through trusted readback refs."],
         execution="taskboard",
         max_iterations=None,
     )
-    await task.workspace.write_file(
+    await task.task_workspace.write_file(
         "final.md",
         "# Final\n\nCoverage: stale label\n\nKeep this line.\n",
         append=False,
@@ -3870,7 +3867,7 @@ async def test_taskboard_control_workspace_patch_materializes_file_without_graph
         output = {
             "status": "completed",
             "sufficient": True,
-            "answer": "Patch the final Workspace artifact.",
+            "answer": "Patch the final TaskWorkspace artifact.",
             "next_board_action": "patch",
             "remaining_work": [],
             "gaps": [],
@@ -3892,7 +3889,7 @@ async def test_taskboard_control_workspace_patch_materializes_file_without_graph
         )
 
     cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
-    context_pack: WorkspaceContextPackage = {
+    context_pack: dict[str, Any] = {
         "goal": task.goal,
         "items": [],
         "profile": "test",
@@ -3909,7 +3906,7 @@ async def test_taskboard_control_workspace_patch_materializes_file_without_graph
                         "id": "repair",
                         "objective": "Apply a precise correction to final.md.",
                         "allowed_execution_shape": "control",
-                        "metadata": {"final_workspace_deliverables": ["final.md"]},
+                        "metadata": {"final_task_workspace_deliverables": ["final.md"]},
                     }
                 ],
             }
@@ -3921,35 +3918,38 @@ async def test_taskboard_control_workspace_patch_materializes_file_without_graph
         SimpleNamespace(revision=revision, card=card, dependency_results={}, planning_policy=None),
         context_pack,
     )
-    readback = await task.workspace.read_file("final.md", max_bytes=4000)
+    readback = await task.task_workspace.read_file("final.md", max_bytes=4000)
 
     assert result.status == "completed"
     assert result.patch_proposal is None
     assert result.file_refs
-    assert task._workspace_artifact_display_path(result.file_refs[0]["path"]) == "final.md"
-    assert result.file_refs[0]["role"] == "workspace_artifact"
+    assert task._task_workspace_artifact_display_path(result.file_refs[0]["path"]) == "final.md"
+    assert result.file_refs[0]["role"] == "task_workspace_artifact"
     assert "Coverage: corrected label" in readback["content"]
     assert "Coverage: stale label" not in readback["content"]
     assert any(
-        diagnostic.get("code") == "taskboard.control.workspace_patch_applied"
+        diagnostic.get("code") == "taskboard.control.task_workspace_patch_applied"
         for diagnostic in result.diagnostics
     )
-    assert result.preview["workspace_patch_delivery"]["status"] == "completed"
-    assert "workspace_patch_proposal" in result.preview
+    assert result.preview["task_workspace_patch_delivery"]["status"] == "completed"
+    assert "task_workspace_patch_proposal" in result.preview
     assert "patch_proposal" not in result.preview
 
 
 @pytest.mark.asyncio
-async def test_taskboard_control_workspace_text_patch_writes_complete_file(tmp_path):
-    agent = _create_agent("execution-taskboard-workspace-text-patch").use_workspace(tmp_path / "workspace")
+async def test_taskboard_control_task_workspace_text_patch_writes_complete_file(tmp_path):
+    agent = _create_agent("execution-taskboard-workspace-text-patch").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
+    )
     task = AgentTask(
         agent,
-        goal="Repair a Workspace-backed final deliverable by replacing the file body.",
-        success_criteria=["The corrected Workspace file is available through trusted readback refs."],
+        goal="Repair a TaskWorkspace-backed final deliverable by replacing the file body.",
+        success_criteria=["The corrected TaskWorkspace file is available through trusted readback refs."],
         execution="taskboard",
         max_iterations=None,
     )
-    await task.workspace.write_file("final.md", "# Old\n\nUnsupported claim.", append=False)
+    await task.task_workspace.write_file("final.md", "# Old\n\nUnsupported claim.", append=False)
     corrected = "# Final\n\nCorrected source-grounded deliverable."
 
     async def fake_run_work_unit_through_blocks(**kwargs: Any) -> tuple[Any, dict[str, Any], WorkUnitResult]:
@@ -3957,12 +3957,12 @@ async def test_taskboard_control_workspace_text_patch_writes_complete_file(tmp_p
         output = {
             "status": "completed",
             "sufficient": True,
-            "answer": "Replace the final Workspace artifact with the corrected body.",
+            "answer": "Replace the final TaskWorkspace artifact with the corrected body.",
             "next_board_action": "patch",
             "remaining_work": [],
             "gaps": [],
             "patch_proposal": {
-                "type": "workspace_text_patch",
+                "type": "task_workspace_text_patch",
                 "path": "final.md",
                 "content": corrected,
             },
@@ -3974,7 +3974,7 @@ async def test_taskboard_control_workspace_text_patch_writes_complete_file(tmp_p
         )
 
     cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
-    context_pack: WorkspaceContextPackage = {
+    context_pack: dict[str, Any] = {
         "goal": task.goal,
         "items": [],
         "profile": "test",
@@ -3991,7 +3991,7 @@ async def test_taskboard_control_workspace_text_patch_writes_complete_file(tmp_p
                         "id": "repair",
                         "objective": "Apply a complete corrected final.md body.",
                         "allowed_execution_shape": "control",
-                        "metadata": {"final_workspace_deliverables": ["final.md"]},
+                        "metadata": {"final_task_workspace_deliverables": ["final.md"]},
                     }
                 ],
             }
@@ -4003,30 +4003,31 @@ async def test_taskboard_control_workspace_text_patch_writes_complete_file(tmp_p
         SimpleNamespace(revision=revision, card=card, dependency_results={}, planning_policy=None),
         context_pack,
     )
-    readback = await task.workspace.read_file("final.md", max_bytes=4000)
+    readback = await task.task_workspace.read_file("final.md", max_bytes=4000)
 
     assert result.status == "completed"
     assert result.patch_proposal is None
     assert result.file_refs
-    assert task._workspace_artifact_display_path(result.file_refs[0]["path"]) == "final.md"
+    assert task._task_workspace_artifact_display_path(result.file_refs[0]["path"]) == "final.md"
     assert readback["content"] == corrected
-    assert result.preview["workspace_patch_delivery"]["operation_count"] == 1
-    assert result.preview["workspace_patch_delivery"]["operations"][0]["type"] == "write"
+    assert result.preview["task_workspace_patch_delivery"]["operation_count"] == 1
+    assert result.preview["task_workspace_patch_delivery"]["operations"][0]["type"] == "write"
 
 
 @pytest.mark.asyncio
-async def test_taskboard_control_workspace_text_patch_patches_alias_applies_replace(tmp_path):
-    agent = _create_agent("execution-taskboard-workspace-text-patch-patches-alias").use_workspace(
-        tmp_path / "workspace"
+async def test_taskboard_control_task_workspace_text_patch_patches_alias_applies_replace(tmp_path):
+    agent = _create_agent("execution-taskboard-workspace-text-patch-patches-alias").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
     )
     task = AgentTask(
         agent,
-        goal="Repair a Workspace-backed final deliverable by applying a targeted patch.",
-        success_criteria=["The corrected Workspace file is available through trusted readback refs."],
+        goal="Repair a TaskWorkspace-backed final deliverable by applying a targeted patch.",
+        success_criteria=["The corrected TaskWorkspace file is available through trusted readback refs."],
         execution="taskboard",
         max_iterations=None,
     )
-    await task.workspace.write_file(
+    await task.task_workspace.write_file(
         "final.md",
         "# Final\n\n**Covered window:** 2026-02-12 - 2026-06-30\n\n## Source Methodology\n",
         append=False,
@@ -4042,7 +4043,7 @@ async def test_taskboard_control_workspace_text_patch_patches_alias_applies_repl
             "remaining_work": [],
             "gaps": [],
             "patch_proposal": {
-                "kind": "workspace_text_patch",
+                "kind": "task_workspace_text_patch",
                 "path": "final.md",
                 "patches": [
                     {
@@ -4059,7 +4060,7 @@ async def test_taskboard_control_workspace_text_patch_patches_alias_applies_repl
         )
 
     cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
-    context_pack: WorkspaceContextPackage = {
+    context_pack: dict[str, Any] = {
         "goal": task.goal,
         "items": [],
         "profile": "test",
@@ -4076,7 +4077,7 @@ async def test_taskboard_control_workspace_text_patch_patches_alias_applies_repl
                         "id": "repair",
                         "objective": "Apply a targeted final.md patch.",
                         "allowed_execution_shape": "control",
-                        "metadata": {"final_workspace_deliverables": ["final.md"]},
+                        "metadata": {"final_task_workspace_deliverables": ["final.md"]},
                     }
                 ],
             }
@@ -4088,29 +4089,29 @@ async def test_taskboard_control_workspace_text_patch_patches_alias_applies_repl
         SimpleNamespace(revision=revision, card=card, dependency_results={}, planning_policy=None),
         context_pack,
     )
-    readback = await task.workspace.read_file("final.md", max_bytes=4000)
+    readback = await task.task_workspace.read_file("final.md", max_bytes=4000)
 
     assert result.status == "completed"
     assert result.patch_proposal is None
     assert result.file_refs
-    assert task._workspace_artifact_display_path(result.file_refs[0]["path"]) == "final.md"
+    assert task._task_workspace_artifact_display_path(result.file_refs[0]["path"]) == "final.md"
     assert "## Date Window" in readback["content"]
     assert "**Covered window:**" not in readback["content"]
-    assert result.preview["workspace_patch_delivery"]["status"] == "completed"
-    assert result.preview["workspace_patch_delivery"]["operations"][0]["type"] == "replace"
+    assert result.preview["task_workspace_patch_delivery"]["status"] == "completed"
+    assert result.preview["task_workspace_patch_delivery"]["operations"][0]["type"] == "replace"
 
 
 @pytest.mark.asyncio
-async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
-    agent = _create_agent("execution-taskboard-workspace-file-readback").use_workspace(tmp_path / "workspace")
+async def test_taskboard_readback_card_reads_task_workspace_file_refs(tmp_path):
+    agent = _create_agent("execution-taskboard-workspace-file-readback").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
-        goal="Read cold Workspace file evidence.",
-        success_criteria=["The readback card reads the Workspace file ref."],
+        goal="Read cold TaskWorkspace file evidence.",
+        success_criteria=["The readback card reads the TaskWorkspace file ref."],
         execution="taskboard",
         max_iterations=None,
     )
-    write_result = await task.workspace.write_file(
+    write_result = await task.task_workspace.write_file(
         "sources/source.md",
         "# Official Evidence\n\nWorkspace-only detail that is not in the hot preview.",
     )
@@ -4121,13 +4122,13 @@ async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
             {
                 "graph_id": "workspace-file-readback-graph",
                 "cards": [
-                    {"id": "collect", "objective": "Collect Workspace file evidence."},
+                    {"id": "collect", "objective": "Collect TaskWorkspace file evidence."},
                     {
                         "id": "readback",
-                        "objective": "Read scoped Workspace file evidence.",
+                        "objective": "Read scoped TaskWorkspace file evidence.",
                         "depends_on": ["collect"],
                         "allowed_execution_shape": "readback",
-                        "required_outputs": ["Workspace file content preview."],
+                        "required_outputs": ["TaskWorkspace file content preview."],
                     },
                 ],
             }
@@ -4167,7 +4168,7 @@ async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
     assert result.metadata["execution_kind"] == "taskboard_artifact_readback"
     assert result.metadata["file_ref_count"] == 1
     ledger_items = result.metadata["evidence_ledger"]["items"]
-    readback_items = [item for item in ledger_items if item.get("kind") == "workspace_file.readback"]
+    readback_items = [item for item in ledger_items if item.get("kind") == "task_workspace_file.readback"]
     assert readback_items
     assert readback_items[0]["path"] == file_ref["path"]
     assert readback_items[0]["status"] == "ok"
@@ -4183,23 +4184,23 @@ async def test_taskboard_readback_card_reads_workspace_file_refs(tmp_path):
     )
     evidence_view = build_task_board_evidence_view(updated_revision).to_dict()
     projected_items = [
-        item for item in evidence_view["evidence_items"] if item.get("kind") == "workspace_file.readback"
+        item for item in evidence_view["evidence_items"] if item.get("kind") == "task_workspace_file.readback"
     ]
     assert projected_items
     assert "Workspace-only detail" in projected_items[0]["body"]
 
 
 @pytest.mark.asyncio
-async def test_taskboard_readback_card_reads_workspace_target_refs_from_content_store(tmp_path):
-    agent = _create_agent("execution-taskboard-content-target-readback").use_workspace(tmp_path / "workspace")
+async def test_taskboard_readback_card_reads_task_workspace_target_refs_from_content_store(tmp_path):
+    agent = _create_agent("execution-taskboard-content-target-readback").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
-        goal="Read retained Workspace content before synthesis.",
-        success_criteria=["The readback card reads retained Workspace content refs."],
+        goal="Read retained TaskWorkspace content before synthesis.",
+        success_criteria=["The readback card reads retained TaskWorkspace content refs."],
         execution="taskboard",
         max_iterations=None,
     )
-    retained_ref = await task.workspace.put(
+    retained_ref = await task.record_store.put(
         "The only active blocker is the data processing addendum waiting on legal review.",
         collection="retained-notes",
         kind="operations_note",
@@ -4217,7 +4218,7 @@ async def test_taskboard_readback_card_reads_workspace_target_refs_from_content_
                         "objective": "Read the retained operations note.",
                         "depends_on": ["collect"],
                         "allowed_execution_shape": "readback",
-                        "required_outputs": ["Workspace content readback preview."],
+                        "required_outputs": ["TaskWorkspace content readback preview."],
                         "metadata": {"target_refs": [retained_ref["id"]]},
                     },
                 ],
@@ -4262,18 +4263,18 @@ async def test_taskboard_readback_card_reads_workspace_target_refs_from_content_
 
 
 @pytest.mark.asyncio
-async def test_taskboard_readback_card_reads_workspace_file_refs_from_artifact_refs(tmp_path):
-    agent = _create_agent("execution-taskboard-workspace-file-readback-legacy").use_workspace(tmp_path / "workspace")
+async def test_taskboard_readback_card_reads_task_workspace_file_refs_from_artifact_refs(tmp_path):
+    agent = _create_agent("execution-taskboard-workspace-file-readback-legacy").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
-        goal="Read cold Workspace file evidence from an upstream card result.",
-        success_criteria=["The readback card reads the Workspace file ref."],
+        goal="Read cold TaskWorkspace file evidence from an upstream card result.",
+        success_criteria=["The readback card reads the TaskWorkspace file ref."],
         execution="taskboard",
         max_iterations=None,
     )
-    write_result = await task.workspace.write_file(
+    write_result = await task.task_workspace.write_file(
         "deliverables/final.md",
-        "# Final Deliverable\n\nThe complete Workspace-backed deliverable body is here.",
+        "# Final Deliverable\n\nThe complete TaskWorkspace-backed deliverable body is here.",
     )
     file_ref = dict(write_result["file_refs"][0])
     revision = TaskBoardRevision.create(
@@ -4282,13 +4283,13 @@ async def test_taskboard_readback_card_reads_workspace_file_refs_from_artifact_r
             {
                 "graph_id": "workspace-file-readback-artifact-ref-graph",
                 "cards": [
-                    {"id": "draft", "objective": "Write the Workspace-backed deliverable."},
+                    {"id": "draft", "objective": "Write the TaskWorkspace-backed deliverable."},
                     {
                         "id": "readback",
-                        "objective": "Read the upstream Workspace-backed deliverable.",
+                        "objective": "Read the upstream TaskWorkspace-backed deliverable.",
                         "depends_on": ["draft"],
                         "allowed_execution_shape": "readback",
-                        "required_outputs": ["Workspace file content preview."],
+                        "required_outputs": ["TaskWorkspace file content preview."],
                     },
                 ],
             }
@@ -4304,7 +4305,7 @@ async def test_taskboard_readback_card_reads_workspace_file_refs_from_artifact_r
                     "result": {
                         "card_id": "draft",
                         "status": "completed",
-                        "preview": "Workspace artifact delivered at deliverables/final.md",
+                        "preview": "TaskWorkspace artifact delivered at deliverables/final.md",
                         "artifact_refs": [file_ref],
                     },
                 }
@@ -4324,25 +4325,25 @@ async def test_taskboard_readback_card_reads_workspace_file_refs_from_artifact_r
     assert result.metadata["file_ref_count"] == 1
     assert result.file_refs[0]["path"] == file_ref["path"]
     assert result.preview["file_readbacks"][0]["ok"] is True
-    assert "complete Workspace-backed deliverable body" in result.preview["file_readbacks"][0]["content_preview"]
+    assert "complete TaskWorkspace-backed deliverable body" in result.preview["file_readbacks"][0]["content_preview"]
 
 
 @pytest.mark.asyncio
 async def test_taskboard_readback_card_projects_required_final_deliverable_as_artifact_readback(tmp_path):
-    agent = _create_agent("execution-taskboard-final-artifact-readback-evidence").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-final-artifact-readback-evidence").use_task_workspace(
+        tmp_path / "task_workspace"
     )
     task = AgentTask(
         agent,
-        goal="Verify a final Workspace deliverable through readback evidence.",
+        goal="Verify a final TaskWorkspace deliverable through readback evidence.",
         success_criteria=["The final deliverable body is verifier-visible."],
         execution="taskboard",
         max_iterations=None,
         options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
     )
-    write_result = await task.workspace.write_file(
+    write_result = await task.task_workspace.write_file(
         "final.md",
-        "# Final Report\n\nThe final Workspace artifact body is verifier-visible.",
+        "# Final Report\n\nThe final TaskWorkspace artifact body is verifier-visible.",
     )
     file_ref = dict(write_result["file_refs"][0])
     revision = TaskBoardRevision.create(
@@ -4354,10 +4355,10 @@ async def test_taskboard_readback_card_projects_required_final_deliverable_as_ar
                     {"id": "draft", "objective": "Write final.md."},
                     {
                         "id": "readback",
-                        "objective": "Read the final Workspace artifact.",
+                        "objective": "Read the final TaskWorkspace artifact.",
                         "depends_on": ["draft"],
                         "allowed_execution_shape": "readback",
-                        "required_outputs": ["Workspace artifact body readback evidence."],
+                        "required_outputs": ["TaskWorkspace artifact body readback evidence."],
                     },
                 ],
             }
@@ -4373,7 +4374,7 @@ async def test_taskboard_readback_card_projects_required_final_deliverable_as_ar
                     "result": {
                         "card_id": "draft",
                         "status": "completed",
-                        "preview": "Workspace artifact delivered at final.md",
+                        "preview": "TaskWorkspace artifact delivered at final.md",
                         "artifact_refs": [file_ref],
                     },
                 }
@@ -4389,11 +4390,11 @@ async def test_taskboard_readback_card_projects_required_final_deliverable_as_ar
 
     assert result.status == "completed"
     ledger_items = result.metadata["evidence_ledger"]["items"]
-    artifact_items = [item for item in ledger_items if item.get("kind") == "workspace_artifact.readback"]
+    artifact_items = [item for item in ledger_items if item.get("kind") == "task_workspace_artifact.readback"]
     assert artifact_items
     assert artifact_items[0]["path"] == file_ref["path"]
     assert artifact_items[0]["supports"]["content"] is True
-    assert "final Workspace artifact body" in artifact_items[0]["body"]
+    assert "final TaskWorkspace artifact body" in artifact_items[0]["body"]
 
     updated_revision = TaskBoardValidator().apply_patch(
         revision,
@@ -4404,26 +4405,26 @@ async def test_taskboard_readback_card_projects_required_final_deliverable_as_ar
     )
     evidence_view = build_task_board_evidence_view(updated_revision).to_dict()
     projected_items = [
-        item for item in evidence_view["evidence_items"] if item.get("kind") == "workspace_artifact.readback"
+        item for item in evidence_view["evidence_items"] if item.get("kind") == "task_workspace_artifact.readback"
     ]
     assert projected_items
-    assert "final Workspace artifact body" in projected_items[0]["body"]
+    assert "final TaskWorkspace artifact body" in projected_items[0]["body"]
 
 
 @pytest.mark.asyncio
-async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_action_readback(
+async def test_taskboard_readback_card_promotes_nested_task_workspace_file_refs_from_action_readback(
     tmp_path,
     monkeypatch,
 ):
-    agent = _create_agent("execution-taskboard-nested-workspace-file-readback").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-taskboard-nested-workspace-file-readback").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Read a downloaded file ref discovered inside Action artifact readback.",
-        success_criteria=["The readback card promotes nested Workspace file refs."],
+        success_criteria=["The readback card promotes nested TaskWorkspace file refs."],
         execution="taskboard",
         max_iterations=None,
     )
-    write_result = await task.workspace.write_file(
+    write_result = await task.task_workspace.write_file(
         "downloads/source.md",
         "# Downloaded Source\n\nWorkspace-only PDF text extracted after download.",
     )
@@ -4457,7 +4458,7 @@ async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_
                     {"id": "collect", "objective": "Download source material."},
                     {
                         "id": "readback",
-                        "objective": "Read scoped downloaded Workspace file evidence.",
+                        "objective": "Read scoped downloaded TaskWorkspace file evidence.",
                         "depends_on": ["collect"],
                         "allowed_execution_shape": "readback",
                         "required_outputs": ["Downloaded file content preview."],
@@ -4509,7 +4510,7 @@ async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_
     assert payload["file_readbacks"][0]["ok"] is True
     assert "Workspace-only PDF text" in payload["file_readbacks"][0]["content_preview"]
     assert any(
-        item.get("code") == "taskboard.readback.workspace_file_refs_discovered"
+        item.get("code") == "taskboard.readback.task_workspace_file_refs_discovered"
         for item in payload["diagnostics"]
         if isinstance(item, dict)
     )
@@ -4542,7 +4543,7 @@ async def test_taskboard_readback_card_promotes_nested_workspace_file_refs_from_
 
 @pytest.mark.asyncio
 async def test_taskboard_intermediate_card_relocates_required_final_deliverable_path(tmp_path):
-    agent = _create_agent("execution-taskboard-intermediate-final-path").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-taskboard-intermediate-final-path").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Use an intermediate card artifact before the final deliverable.",
@@ -4571,41 +4572,41 @@ async def test_taskboard_intermediate_card_relocates_required_final_deliverable_
         card=revision.graph.card_by_id()["extract"],
         revision=revision,
     )
-    prepared, plan = task._prepare_taskboard_workspace_artifact_delivery(
+    prepared, plan = task._prepare_taskboard_task_workspace_artifact_delivery(
         {
             "artifact_markdown": "# Source Summary\n\nIntermediate evidence only.",
             "artifact_manifest": {"path": "final.md"},
         },
         context,
-        deliverable_mode="workspace_artifact",
+        deliverable_mode="task_workspace_artifact",
     )
 
-    delivered = await task._deliver_workspace_artifact(
+    delivered = await task._deliver_task_workspace_artifact(
         prepared,
         plan=plan,
         execution_meta={"logs": {}},
-        source="test.taskboard.intermediate.workspace_artifact",
+        source="test.taskboard.intermediate.task_workspace_artifact",
         card_context=context,
     )
 
-    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == (
+    assert task._task_workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == (
         "working/taskboard/extract/final.md"
     )
-    assert task.workspace.resolve_file_path("working/taskboard/extract/final.md").is_file()
-    assert not (task.workspace.root / "final.md").exists()
+    assert task.task_workspace.resolve_file_path(delivered["file_refs"][0]["path"]).is_file()
+    assert not (task.task_workspace.root / "final.md").exists()
     assert delivered["diagnostics"][0]["code"] == (
-        "taskboard.workspace_artifact.final_path_relocated_for_intermediate_card"
+        "taskboard.task_workspace_artifact.final_path_relocated_for_intermediate_card"
     )
 
 
-def test_empty_artifact_manifest_does_not_request_workspace_delivery():
-    assert AgentTask._workspace_artifact_delivery_mode({"artifact_manifest": {}}) == ""
+def test_empty_artifact_manifest_does_not_request_task_workspace_delivery():
+    assert AgentTask._task_workspace_artifact_delivery_mode({"artifact_manifest": {}}) == ""
 
 
 @pytest.mark.asyncio
 async def test_taskboard_intermediate_card_relocates_explicit_artifact_without_task_output_contract(tmp_path):
-    agent = _create_agent("execution-taskboard-intermediate-uncontracted-path").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-intermediate-uncontracted-path").use_task_workspace(
+        tmp_path / "task_workspace"
     )
     task = AgentTask(
         agent,
@@ -4634,34 +4635,34 @@ async def test_taskboard_intermediate_card_relocates_explicit_artifact_without_t
         card=revision.graph.card_by_id()["extract"],
         revision=revision,
     )
-    prepared, plan = task._prepare_taskboard_workspace_artifact_delivery(
+    prepared, plan = task._prepare_taskboard_task_workspace_artifact_delivery(
         {
             "artifact_markdown": "# Source Summary\n\nIntermediate evidence only.",
             "artifact_manifest": {"path": "final.md"},
         },
         context,
-        deliverable_mode="workspace_artifact",
+        deliverable_mode="task_workspace_artifact",
     )
 
-    delivered = await task._deliver_workspace_artifact(
+    delivered = await task._deliver_task_workspace_artifact(
         prepared,
         plan=plan,
         execution_meta={"logs": {}},
-        source="test.taskboard.intermediate_uncontracted.workspace_artifact",
+        source="test.taskboard.intermediate_uncontracted.task_workspace_artifact",
         card_context=context,
     )
 
-    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == (
+    assert task._task_workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == (
         "working/taskboard/extract/final.md"
     )
-    assert task.workspace.resolve_file_path("working/taskboard/extract/final.md").is_file()
-    assert not (task.workspace.root / "final.md").exists()
+    assert task.task_workspace.resolve_file_path(delivered["file_refs"][0]["path"]).is_file()
+    assert not (task.task_workspace.root / "final.md").exists()
 
 
 @pytest.mark.asyncio
 async def test_taskboard_remaining_work_leaf_card_relocates_required_final_deliverable_path(tmp_path):
-    agent = _create_agent("execution-taskboard-leaf-remaining-work-final-path").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-leaf-remaining-work-final-path").use_task_workspace(
+        tmp_path / "task_workspace"
     )
     task = AgentTask(
         agent,
@@ -4689,31 +4690,31 @@ async def test_taskboard_remaining_work_leaf_card_relocates_required_final_deliv
         card=revision.graph.card_by_id()["continue-evidence"],
         revision=revision,
     )
-    prepared, plan = task._prepare_taskboard_workspace_artifact_delivery(
+    prepared, plan = task._prepare_taskboard_task_workspace_artifact_delivery(
         {
             "artifact_markdown": "# Evidence Continuation\n\nThis is not the final deliverable.",
             "artifact_manifest": {"path": "final.md"},
             "remaining_work": ["Use this evidence in the final synthesis card."],
         },
         context,
-        deliverable_mode="workspace_artifact",
+        deliverable_mode="task_workspace_artifact",
     )
 
-    delivered = await task._deliver_workspace_artifact(
+    delivered = await task._deliver_task_workspace_artifact(
         prepared,
         plan=plan,
         execution_meta={"logs": {}},
-        source="test.taskboard.leaf_remaining_work.workspace_artifact",
+        source="test.taskboard.leaf_remaining_work.task_workspace_artifact",
         card_context=context,
     )
 
-    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == (
+    assert task._task_workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == (
         "working/taskboard/continue-evidence/final.md"
     )
-    assert task.workspace.resolve_file_path("working/taskboard/continue-evidence/final.md").is_file()
-    assert not (task.workspace.root / "final.md").exists()
+    assert task.task_workspace.resolve_file_path(delivered["file_refs"][0]["path"]).is_file()
+    assert not (task.task_workspace.root / "final.md").exists()
     assert any(
-        item.get("code") == "taskboard.workspace_artifact.final_path_relocated_for_intermediate_card"
+        item.get("code") == "taskboard.task_workspace_artifact.final_path_relocated_for_intermediate_card"
         and item.get("remaining_work_present") is True
         for item in delivered["diagnostics"]
         if isinstance(item, dict)
@@ -4722,7 +4723,7 @@ async def test_taskboard_remaining_work_leaf_card_relocates_required_final_deliv
 
 @pytest.mark.asyncio
 async def test_taskboard_final_repair_card_keeps_required_final_deliverable_path(tmp_path):
-    agent = _create_agent("execution-taskboard-final-repair-final-path").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-taskboard-final-repair-final-path").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Repair and materialize the final deliverable.",
@@ -4740,7 +4741,7 @@ async def test_taskboard_final_repair_card_keeps_required_final_deliverable_path
                     {
                         "id": "repair",
                         "objective": "Repair the final deliverable.",
-                        "metadata": {"final_workspace_deliverables": ["final.md"]},
+                        "metadata": {"final_task_workspace_deliverables": ["final.md"]},
                     },
                     {
                         "id": "audit",
@@ -4755,40 +4756,40 @@ async def test_taskboard_final_repair_card_keeps_required_final_deliverable_path
         card=revision.graph.card_by_id()["repair"],
         revision=revision,
     )
-    prepared, plan = task._prepare_taskboard_workspace_artifact_delivery(
+    prepared, plan = task._prepare_taskboard_task_workspace_artifact_delivery(
         {
             "artifact_markdown": "# Final Repair\n\nMaterialized at the required final path.",
             "artifact_manifest": {"path": "working/taskboard/repair/final.md"},
         },
         context,
-        deliverable_mode="workspace_artifact",
+        deliverable_mode="task_workspace_artifact",
     )
 
-    delivered = await task._deliver_workspace_artifact(
+    delivered = await task._deliver_task_workspace_artifact(
         prepared,
         plan=plan,
         execution_meta={"logs": {}},
-        source="test.taskboard.final_repair.workspace_artifact",
+        source="test.taskboard.final_repair.task_workspace_artifact",
         card_context=context,
     )
 
-    assert task._workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
-    assert task.workspace.resolve_file_path("final.md").is_file()
-    assert not (task.workspace.root / "working/taskboard/repair/final.md").exists()
+    assert task._task_workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
+    assert task.task_workspace.resolve_file_path(delivered["file_refs"][0]["path"]).is_file()
+    assert not (task.task_workspace.root / "working/taskboard/repair/final.md").exists()
     assert any(
-        item.get("code") == "taskboard.workspace_artifact.final_path_authorized"
+        item.get("code") == "taskboard.task_workspace_artifact.final_path_authorized"
         for item in delivered["diagnostics"]
         if isinstance(item, dict)
     )
 
 
 def test_execution_options_validate_known_route_schema():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="routes.skills was removed"):
         ExecutionOptions.model_validate({"routes": {"skills": {"unknown": True}}})
 
 
 def test_create_task_execution_parameter_normalizes_and_rejects(tmp_path):
-    agent = _create_agent("execution-strategy-normalization").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-strategy-normalization").use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.create_task(
         goal="Do the task.",
@@ -4850,7 +4851,7 @@ def test_guidance_delta_projects_readable_status_text():
 
 @pytest.mark.asyncio
 async def test_agent_execution_add_guidance_during_flat_task_does_not_wait_for_completion(tmp_path):
-    agent = _create_agent("execution-live-guidance").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-live-guidance").use_task_workspace(tmp_path / "task_workspace")
     execution = agent.create_task(
         goal="Prepare the incident response summary.",
         success_criteria=["The final answer uses the operator's latest guidance."],
@@ -4941,13 +4942,13 @@ async def test_agent_execution_add_guidance_during_flat_task_does_not_wait_for_c
     assert context_packs[1]["guidance"][0]["id"] == guidance["id"]
     assert "operator's newly uploaded incident note" in context_packs[1]["guidance"][0]["content_preview"]
     assert task_meta["guidance_items"][0]["status"] == "applied"
-    assert task_meta["guidance_refs"] == task_meta["workspace_refs"]["guidance"]
-    assert meta_view["workspace_refs"]["agent_task"]["guidance"] == task_meta["guidance_refs"]
+    assert task_meta["guidance_refs"] == task_meta["record_refs"]["guidance"]
+    assert meta_view["record_refs"]["agent_task"]["guidance"] == task_meta["guidance_refs"]
 
 
 @pytest.mark.asyncio
 async def test_agent_execution_add_guidance_before_task_creation_is_queued_then_applied(tmp_path):
-    agent = _create_agent("execution-queued-guidance").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-queued-guidance").use_task_workspace(tmp_path / "task_workspace")
     execution = agent.create_task(
         goal="Prepare the queued guidance summary.",
         success_criteria=["The queued guidance is reflected in the final answer."],
@@ -5011,12 +5012,12 @@ async def test_agent_execution_add_guidance_before_task_creation_is_queued_then_
     assert context_packs[0]["guidance"][0]["id"] == guidance["id"]
     assert task_meta["guidance_items"][0]["status"] == "applied"
     assert task_meta["guidance_items"][0]["storage"] == "memory"
-    assert "workspace_ref" not in task_meta["guidance_items"][0]
+    assert "task_workspace_ref" not in task_meta["guidance_items"][0]
 
 
 @pytest.mark.asyncio
-async def test_agent_task_context_pack_loads_required_skill_context(tmp_path, monkeypatch):
-    agent = _create_agent("execution-required-skill-context-pack").use_workspace(tmp_path / "workspace")
+async def test_agent_task_does_not_call_legacy_skills_context_pack_builder(tmp_path, monkeypatch):
+    agent = _create_agent("execution-required-skill-context-pack").use_task_workspace(tmp_path / "task_workspace")
     calls: list[dict[str, Any]] = []
 
     async def fake_build_skills_context_pack(**kwargs: Any) -> dict[str, Any]:
@@ -5052,22 +5053,89 @@ async def test_agent_task_context_pack_loads_required_skill_context(tmp_path, mo
 
     context_pack = await task._build_context()
 
-    assert calls
-    assert calls[0]["skill_ids"] == ["agently-request"]
-    assert calls[0]["actionize_scripts"] is True
-    skills_context_pack = context_pack.get("skills_context_pack")
-    assert isinstance(skills_context_pack, dict)
-    skills = skills_context_pack.get("skills")
-    assert isinstance(skills, list)
-    assert skills[0]["skill_id"] == "agently-request"
-    assert "source" not in skills[0]
-    assert "/tmp/registry" not in json.dumps(skills_context_pack, ensure_ascii=False)
-    assert context_pack["diagnostics"]["skills_context_pack"]["status"] == "loaded"
-    assert context_pack["diagnostics"]["skills_context_pack"]["loaded_skill_ids"] == ["agently-request"]
+    assert calls == []
+    assert context_pack["skill_projection"]["skills"] == []
 
 
-def test_flat_context_pack_skill_binding_satisfies_required_skill_evidence(tmp_path):
-    agent = _create_agent("execution-flat-required-skill-binding").use_workspace(tmp_path / "workspace")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("execution", ["flat", "taskboard"])
+async def test_agent_task_context_prepare_blocks_when_required_skill_guidance_is_empty(
+    tmp_path,
+    monkeypatch,
+    execution,
+):
+    agent = _create_agent(f"execution-required-skill-context-blocked-{execution}").use_task_workspace(tmp_path / execution)
+
+    async def fake_build_skills_context_pack(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": "agently.skills.context_pack.v1",
+            "task": kwargs.get("task", ""),
+            "usable": False,
+            "used_chars": 0,
+            "skills": [
+                {
+                    "skill_id": "agently-request",
+                    "mode": "required",
+                    "selected_resources": [],
+                    "allocation": {
+                        "guidance_chars": 0,
+                        "resource_chars": 0,
+                    },
+                }
+            ],
+            "citations": [],
+            "diagnostics": [
+                {
+                    "level": "error",
+                    "code": "skill_context_pack.required_guidance_empty",
+                    "skill_id": "agently-request",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        agent,
+        "async_build_skills_context_pack",
+        fake_build_skills_context_pack,
+        raising=False,
+    )
+    task = AgentTask(
+        agent,
+        goal="Build a structured Agently request.",
+        success_criteria=["The answer follows Agently request guidance."],
+        execution=execution,
+        options={"capability_constraints": {"skills": {"required": ["agently-request"]}}},
+    )
+
+    if execution == "flat":
+        frame = await task._flat_context_prepare_stage({"iteration": 1})
+    else:
+        frame = await task._taskboard_context_prepare_stage({"iteration": 1})
+
+    result = cast(dict[str, Any], frame.get("iteration_result"))
+    assert result["terminal"] is True
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "required_skill_context_unavailable"
+    assert result["missing_criteria"] == ["required_skill_context:agently-request"]
+    assert task.status == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_agent_task_context_prepare_ignores_legacy_skill_pack_builder(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("execution-required-skill-context-builder-failed").use_task_workspace(tmp_path / "task_workspace")
+
+    async def fail_build_skills_context_pack(**_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("simulated context build failure")
+
+    monkeypatch.setattr(
+        agent,
+        "async_build_skills_context_pack",
+        fail_build_skills_context_pack,
+        raising=False,
+    )
     task = AgentTask(
         agent,
         goal="Build a structured Agently request.",
@@ -5075,15 +5143,42 @@ def test_flat_context_pack_skill_binding_satisfies_required_skill_evidence(tmp_p
         execution="flat",
         options={"capability_constraints": {"skills": {"required": ["agently-request"]}}},
     )
-    context_pack: WorkspaceContextPackage = {
+
+    frame = await task._flat_context_prepare_stage({"iteration": 1})
+
+    result = cast(dict[str, Any], frame.get("iteration_result"))
+    assert result["terminal"] is True
+    assert result["status"] == "blocked"
+    assert task.result["required_skill_context"]["missing_skill_ids"] == [
+        "agently-request"
+    ]
+
+
+def test_flat_context_pack_availability_needs_response_bound_skill_consumption(tmp_path):
+    agent = _create_agent("execution-flat-required-skill-binding").use_task_workspace(tmp_path / "task_workspace")
+    task = AgentTask(
+        agent,
+        goal="Build a structured Agently request.",
+        success_criteria=["The answer follows Agently request guidance."],
+        execution="flat",
+        options={"capability_constraints": {"skills": {"required": ["agently-request"]}}},
+    )
+    context_pack: dict[str, Any] = {
+        "package_id": "context-package-1",
         "goal": task.goal,
         "items": [],
         "profile": "test",
         "omitted": [],
         "diagnostics": {},
-        "skills_context_pack": {
-            "schema_version": "agently.skills.context_pack.v1",
-            "skills": [{"skill_id": "agently-request"}],
+        "skill_projection": {
+            "schema_version": "agently.context_package.skill_projection.v2",
+            "skills": [
+                {
+                    "skill_id": "agently-request",
+                    "binding_id": "skill-binding-1",
+                    "revision_ref": "skill:agently-request@sha256:abc",
+                }
+            ],
         },
     }
     execution_meta = {
@@ -5094,25 +5189,17 @@ def test_flat_context_pack_skill_binding_satisfies_required_skill_evidence(tmp_p
         },
     }
 
-    enriched_meta = task._flat_execution_meta_with_context_capability_logs(
+    enriched_meta = task._flat_execution_meta_with_skill_context_consumptions(
         execution_meta,
         context_pack=context_pack,
     )
     summary = task._execution_log_summary(enriched_meta)
 
-    assert summary["selected_skill_ids"] == ["agently-request"]
-    assert summary["missing_required_skills"] == []
-    assert "agently-request" in summary["capabilities_used"]
-    assert summary["capability_evidence"]["skills"]["selected"] == ["agently-request"]
-    assert summary["capability_evidence_requirements"] == [
-        {
-            "capability_id": "agently-request",
-            "capability_kind": "skill",
-            "kind": "capability_used",
-            "required": True,
-            "source": "flat_required_skill_context",
-        }
-    ]
+    assert summary["consumed_skill_ids"] == []
+    assert summary["missing_required_skill_context"] == ["agently-request"]
+    assert "agently-request" not in summary["capabilities_used"]
+    assert summary["context_evidence"]["skills"]["consumed"] == []
+    assert summary["capability_evidence_requirements"] == []
 
     verification = task._normalize_verification(
         {
@@ -5126,9 +5213,28 @@ def test_flat_context_pack_skill_binding_satisfies_required_skill_evidence(tmp_p
         candidate_final_result="done",
     )
 
-    assert verification["is_complete"] is True
-    assert verification["missing_required_capabilities"] == []
-    assert verification["missing_capability_evidence"] == []
+    assert verification["is_complete"] is False
+    assert verification["missing_required_capabilities"] == ["agently-request"]
+
+    execution_meta["logs"] = {"model_response_ids": ["response-1"]}
+    consumed_meta = task._flat_execution_meta_with_skill_context_consumptions(
+        execution_meta,
+        context_pack=context_pack,
+    )
+    consumed_summary = task._execution_log_summary(consumed_meta)
+
+    assert consumed_summary["consumed_skill_ids"] == ["agently-request"]
+    assert consumed_summary["missing_required_skill_context"] == []
+    assert consumed_summary["context_evidence"]["skills"]["consumptions"] == [
+        {
+            "skill_id": "agently-request",
+            "binding_id": "skill-binding-1",
+            "revision_ref": "skill:agently-request@sha256:abc",
+            "package_id": "context-package-1",
+            "request_id": "response-1",
+            "phase": "work.execute",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -5153,7 +5259,7 @@ async def test_agent_execution_guidance_on_non_task_route_is_not_applied_or_prom
     assert "Do not inject this into a non-task prompt." not in request_text
 
 
-def test_taskboard_final_normalization_preserves_complete_workspace_candidate():
+def test_taskboard_final_normalization_preserves_complete_task_workspace_candidate():
     candidate = "# Complete Deliverable\n\n" + ("complete section body\n" * 120)
     final = {
         "accepted": True,
@@ -5167,11 +5273,11 @@ def test_taskboard_final_normalization_preserves_complete_workspace_candidate():
     assert normalized["final_result"] == candidate.strip()
 
 
-def test_taskboard_final_normalization_prefers_workspace_ref_fallback_for_file_deliverable():
+def test_taskboard_final_normalization_prefers_task_workspace_ref_fallback_for_file_deliverable():
     candidate = "# Complete File Deliverable\n\n" + ("file body section\n" * 120)
     final = {
         "accepted": True,
-        "reason": "Trusted Workspace artifact refs identify the deliverable.",
+        "reason": "Trusted TaskWorkspace artifact refs identify the deliverable.",
         "missing_criteria": [],
     }
 
@@ -5179,12 +5285,12 @@ def test_taskboard_final_normalization_prefers_workspace_ref_fallback_for_file_d
         final,
         candidate,
         fallback_final_result=(
-            "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+            "TaskWorkspace artifact delivered at final.md; full content is available through file_refs/readback."
         ),
     )
 
     assert normalized["final_result"] == (
-        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+        "TaskWorkspace artifact delivered at final.md; full content is available through file_refs/readback."
     )
     assert "file body section" not in normalized["final_result"]
 
@@ -5192,13 +5298,13 @@ def test_taskboard_final_normalization_prefers_workspace_ref_fallback_for_file_d
 def test_taskboard_final_response_explains_partial_artifact_without_acceptance():
     final_response = AgentTask._taskboard_user_final_response(
         final={
-            "final_result": "Workspace artifact delivered at final.md; full content is available through file_refs/readback.",
+            "final_result": "TaskWorkspace artifact delivered at final.md; full content is available through file_refs/readback.",
         },
         accepted=False,
         artifact_status="partial",
         reason="Official PDF source was unavailable, so source-grounded claims remain weak.",
         missing_criteria=["Ground every official-source claim in verifier-visible evidence."],
-        final_refs=[{"path": "final.md", "role": "workspace_artifact"}],
+        final_refs=[{"path": "final.md", "role": "task_workspace_artifact"}],
         board_status="completed",
         degraded_finalization_attempted=False,
     )
@@ -5216,7 +5322,7 @@ def test_taskboard_final_response_replaces_overstrong_model_response_with_host_p
         artifact_status="degraded",
         reason="Verifier accepted under disclosed source limits.",
         missing_criteria=[],
-        final_refs=[{"path": "final.md", "role": "workspace_artifact"}],
+        final_refs=[{"path": "final.md", "role": "task_workspace_artifact"}],
         board_status="completed",
         degraded_finalization_attempted=False,
         completion_notes={
@@ -5239,7 +5345,7 @@ def test_agent_task_final_response_ignores_overstrong_unaccepted_model_response(
         artifact_status="partial",
         reason="Official source evidence is still missing.",
         missing_criteria=["Ground every official-source claim."],
-        final_refs=[{"path": "final.md", "role": "workspace_artifact"}],
+        final_refs=[{"path": "final.md", "role": "task_workspace_artifact"}],
     )
 
     assert "All success criteria are satisfied" not in final_response
@@ -5385,8 +5491,8 @@ def test_taskboard_completion_notes_do_not_degrade_resolved_repair_history():
 
 @pytest.mark.asyncio
 async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_path, monkeypatch):
-    agent = _create_agent("execution-taskboard-finalizer-rejection-verifier").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-finalizer-rejection-verifier").use_task_workspace(
+        tmp_path / "task_workspace"
     )
     task = AgentTask(
         agent,
@@ -5456,11 +5562,11 @@ async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_pa
     monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
     monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
     monkeypatch.setattr(task, "_request_verification", fake_request_verification)
-    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_missing_required_task_workspace_deliverables", no_missing_deliverables)
     monkeypatch.setattr(task, "_record_phase", noop)
     monkeypatch.setattr(task, "_emit", noop)
 
-    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(dict[str, Any], {}))
 
     assert verification_calls
     assert verification_calls[0]["execution_result"]["final_result"] == "Complete candidate final answer."
@@ -5477,7 +5583,7 @@ async def test_taskboard_finalizer_rejection_still_runs_terminal_verifier(tmp_pa
 
 @pytest.mark.asyncio
 async def test_taskboard_finalization_requires_required_skill_context_evidence(tmp_path, monkeypatch):
-    agent = _create_agent("execution-taskboard-required-skill-missing").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-taskboard-required-skill-missing").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Produce an Agently request checklist.",
@@ -5556,11 +5662,11 @@ async def test_taskboard_finalization_requires_required_skill_context_evidence(t
     monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
     monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
     monkeypatch.setattr(task, "_request_verification", fake_request_verification)
-    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_missing_required_task_workspace_deliverables", no_missing_deliverables)
     monkeypatch.setattr(task, "_record_phase", noop)
     monkeypatch.setattr(task, "_emit", noop)
 
-    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(dict[str, Any], {}))
 
     assert terminal["terminal"] is False
     assert terminal["status"] == "repair_requested"
@@ -5572,8 +5678,8 @@ async def test_taskboard_finalization_requires_required_skill_context_evidence(t
 
 
 @pytest.mark.asyncio
-async def test_taskboard_finalization_accepts_manager_loaded_required_skill_context(tmp_path, monkeypatch):
-    agent = _create_agent("execution-taskboard-required-skill-loaded").use_workspace(tmp_path / "workspace")
+async def test_taskboard_finalization_accepts_library_bound_required_skill_context(tmp_path, monkeypatch):
+    agent = _create_agent("execution-taskboard-required-skill-loaded").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Produce an Agently request checklist.",
@@ -5612,6 +5718,28 @@ async def test_taskboard_finalization_accepts_manager_loaded_required_skill_cont
                         "card_id": "final",
                         "status": "completed",
                         "preview": {"final_result": "Checklist grounded in agently-request guidance."},
+                        "diagnostics": [
+                            {
+                                "evidence_summary": {
+                                    "consumed_skill_ids": ["agently-request"],
+                                    "context_evidence": {
+                                        "skills": {
+                                            "consumed": ["agently-request"],
+                                            "consumptions": [
+                                                {
+                                                    "skill_id": "agently-request",
+                                                    "binding_id": "skill-binding-1",
+                                                    "revision_ref": "skill:agently-request@sha256:abc",
+                                                    "package_id": "context-package-1",
+                                                    "request_id": "response-1",
+                                                    "phase": "work.execute.taskboard",
+                                                }
+                                            ],
+                                        }
+                                    },
+                                }
+                            }
+                        ],
                     },
                 }
             ],
@@ -5654,16 +5782,16 @@ async def test_taskboard_finalization_accepts_manager_loaded_required_skill_cont
     monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
     monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
     monkeypatch.setattr(task, "_request_verification", fake_request_verification)
-    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_missing_required_task_workspace_deliverables", no_missing_deliverables)
     monkeypatch.setattr(task, "_record_phase", noop)
     monkeypatch.setattr(task, "_emit", noop)
 
     terminal = await task._finalize_taskboard(
         completed_revision,
         context_pack=cast(
-            WorkspaceContextPackage,
+            dict[str, Any],
             {
-                "skills_context_pack": {
+                "skill_projection": {
                     "schema_version": "agently.skills.context_pack.v1",
                     "skills": [{"skill_id": "agently-request"}],
                 }
@@ -5675,20 +5803,22 @@ async def test_taskboard_finalization_accepts_manager_loaded_required_skill_cont
     assert task.result["accepted"] is True
     terminal_state = cast(dict[str, Any], task._terminal_taskboard_state)
     assert terminal_state["final_verification"]["missing_required_capabilities"] == []
-    prompt_bound_skills = verification_calls[0]["execution_meta"]["logs"]["route_logs"]["prompt_bound_skills"]
-    assert prompt_bound_skills == [
+    consumptions = verification_calls[0]["execution_meta"]["logs"]["skill_context_consumptions"]
+    assert consumptions == [
         {
             "skill_id": "agently-request",
-            "mode": "required",
-            "binding": "context_pack",
-            "source": "skills_manager",
+            "binding_id": "skill-binding-1",
+            "revision_ref": "skill:agently-request@sha256:abc",
+            "package_id": "context-package-1",
+            "request_id": "response-1",
+            "phase": "work.execute.taskboard",
         }
     ]
 
 
 @pytest.mark.asyncio
 async def test_taskboard_degraded_final_success_is_not_plain_accepted(tmp_path, monkeypatch):
-    agent = _create_agent("execution-taskboard-degraded-final-success").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-taskboard-degraded-final-success").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Produce the best available source-grounded brief.",
@@ -5771,11 +5901,11 @@ async def test_taskboard_degraded_final_success_is_not_plain_accepted(tmp_path, 
     monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
     monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
     monkeypatch.setattr(task, "_request_verification", fake_request_verification)
-    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_missing_required_task_workspace_deliverables", no_missing_deliverables)
     monkeypatch.setattr(task, "_record_phase", noop)
     monkeypatch.setattr(task, "_emit", noop)
 
-    terminal = await task._finalize_taskboard(degraded_revision, context_pack=cast(WorkspaceContextPackage, {}))
+    terminal = await task._finalize_taskboard(degraded_revision, context_pack=cast(dict[str, Any], {}))
 
     assert terminal == {"terminal": True, "status": "completed"}
     assert finalizer_seen["allow_degraded_final"] is True
@@ -5789,8 +5919,8 @@ async def test_taskboard_degraded_final_success_is_not_plain_accepted(tmp_path, 
 
 @pytest.mark.asyncio
 async def test_taskboard_completion_notes_disclose_card_gaps_in_final_response(tmp_path, monkeypatch):
-    agent = _create_agent("execution-taskboard-completion-notes-final-response").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-completion-notes-final-response").use_task_workspace(
+        tmp_path / "task_workspace"
     )
     task = AgentTask(
         agent,
@@ -5865,11 +5995,11 @@ async def test_taskboard_completion_notes_disclose_card_gaps_in_final_response(t
     monkeypatch.setattr(task, "_promote_taskboard_final_candidate", lambda *args, **kwargs: None)
     monkeypatch.setattr(task, "_request_taskboard_final", fake_taskboard_final)
     monkeypatch.setattr(task, "_request_verification", fake_request_verification)
-    monkeypatch.setattr(task, "_missing_required_workspace_deliverables", no_missing_deliverables)
+    monkeypatch.setattr(task, "_missing_required_task_workspace_deliverables", no_missing_deliverables)
     monkeypatch.setattr(task, "_record_phase", noop)
     monkeypatch.setattr(task, "_emit", noop)
 
-    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(dict[str, Any], {}))
 
     assert terminal == {"terminal": True, "status": "completed"}
     assert task.result["accepted"] is True
@@ -5894,17 +6024,18 @@ async def test_taskboard_finalization_materializes_final_artifact_evidence_befor
     tmp_path,
     monkeypatch,
 ):
-    agent = _create_agent("execution-taskboard-final-artifact-verifier-evidence").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-final-artifact-verifier-evidence").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
     )
     task = AgentTask(
         agent,
-        goal="Produce a final Workspace report.",
+        goal="Produce a final TaskWorkspace report.",
         success_criteria=["The final report contains the verifier-visible required evidence section."],
         execution="taskboard",
         options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
     )
-    await task.workspace.write_file(
+    await task.task_workspace.write_file(
         "final.md",
         "# Final Report\n\n## Required Evidence Section\n\nThe final artifact has verifier-visible evidence.",
     )
@@ -5938,7 +6069,7 @@ async def test_taskboard_finalization_materializes_final_artifact_evidence_befor
                             ],
                             "remaining_work": [],
                         },
-                        "artifact_refs": [{"path": "final.md", "role": "workspace_artifact"}],
+                        "artifact_refs": [{"path": "final.md", "role": "task_workspace_artifact"}],
                     },
                 }
             ],
@@ -5949,8 +6080,8 @@ async def test_taskboard_finalization_materializes_final_artifact_evidence_befor
     async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
         verification_calls.append(DataFormatter.sanitize(kwargs))
         evidence_items = kwargs["execution_meta"]["blocks"]["evidence"]["evidence_items"]
-        assert any(item.get("kind") == "workspace_artifact.readback" for item in evidence_items)
-        assert any(item.get("kind") == "workspace_artifact.acceptance_locator" for item in evidence_items)
+        assert any(item.get("kind") == "task_workspace_artifact.readback" for item in evidence_items)
+        assert any(item.get("kind") == "task_workspace_artifact.acceptance_locator" for item in evidence_items)
         assert any("final artifact has verifier-visible evidence" in str(item.get("body") or "") for item in evidence_items)
         return {
             "is_complete": True,
@@ -5973,7 +6104,7 @@ async def test_taskboard_finalization_materializes_final_artifact_evidence_befor
     monkeypatch.setattr(task, "_record_phase", noop)
     monkeypatch.setattr(task, "_emit", noop)
 
-    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(dict[str, Any], {}))
 
     assert verification_calls
     assert terminal == {"terminal": True, "status": "completed"}
@@ -5986,12 +6117,13 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
     tmp_path,
     monkeypatch,
 ):
-    agent = _create_agent("execution-taskboard-final-artifact-promotion").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-final-artifact-promotion").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
     )
     task = AgentTask(
         agent,
-        goal="Produce a final Workspace report.",
+        goal="Produce a final TaskWorkspace report.",
         success_criteria=["The final report contains a verifier-visible required evidence section."],
         execution="taskboard",
         options={
@@ -6011,7 +6143,7 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
         + ("long body line\n" * 500)
         + "TAIL-MARKER-PROMOTED-FROM-WORKING-ARTIFACT"
     )
-    await task.workspace.write_file(source_path, source_content)
+    await task.task_workspace.write_file(source_path, source_content)
     revision = TaskBoardRevision.create(
         board_id="final-artifact-promotion",
         graph=TaskBoardGraph.from_value(
@@ -6042,7 +6174,7 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
                             ],
                             "remaining_work": [],
                         },
-                        "artifact_refs": [{"path": source_path, "role": "workspace_artifact"}],
+                        "artifact_refs": [{"path": source_path, "role": "task_workspace_artifact"}],
                     },
                 }
             ],
@@ -6053,11 +6185,11 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
     async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
         verification_calls.append(DataFormatter.sanitize(kwargs))
         file_refs = kwargs["execution_result"]["file_refs"]
-        assert task._workspace_artifact_display_path(file_refs[0]["path"]) == "final.md"
+        assert task._task_workspace_artifact_display_path(file_refs[0]["path"]) == "final.md"
         evidence_items = kwargs["execution_meta"]["blocks"]["evidence"]["evidence_items"]
         assert any(
-            item.get("kind") == "workspace_artifact.readback"
-            and task._workspace_artifact_display_path(item.get("path")) == "final.md"
+            item.get("kind") == "task_workspace_artifact.readback"
+            and task._task_workspace_artifact_display_path(item.get("path")) == "final.md"
             for item in evidence_items
         )
         return {
@@ -6081,9 +6213,9 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
     monkeypatch.setattr(task, "_record_phase", noop)
     monkeypatch.setattr(task, "_emit", noop)
 
-    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(WorkspaceContextPackage, {}))
-    final_target = task.workspace.resolve_file_path("final.md")
-    readback = await task.workspace.read_file("final.md", max_bytes=int(final_target.stat().st_size) + 1)
+    terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(dict[str, Any], {}))
+    final_target = task.task_workspace.resolve_file_path("final.md")
+    readback = await task.task_workspace.read_file("final.md", max_bytes=int(final_target.stat().st_size) + 1)
 
     assert verification_calls
     assert terminal == {"terminal": True, "status": "completed"}
@@ -6096,23 +6228,24 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
 async def test_taskboard_final_artifact_evidence_supports_targeted_readback(tmp_path):
     from agently.core.application.AgentTask.EvidenceLedger import evidence_ledger_view
 
-    agent = _create_agent("execution-taskboard-final-targeted-readback").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-final-targeted-readback").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
     )
     task = AgentTask(
         agent,
-        goal="Produce a sectioned final Workspace report.",
+        goal="Produce a sectioned final TaskWorkspace report.",
         success_criteria=["The final report includes a required section."],
         execution="taskboard",
         options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
     )
-    await task.workspace.write_file(
+    await task.task_workspace.write_file(
         "final.md",
         "# Final Report\n\n## Required Evidence Section\n\nTARGETED-READBACK-MARKER proves scoped verification.",
     )
 
     evidence_items = await task._taskboard_final_artifact_verification_evidence_items(
-        [{"path": "final.md", "role": "workspace_artifact"}],
+        [{"path": "final.md", "role": "task_workspace_artifact"}],
         final={
             "accepted": True,
             "acceptance_points": [
@@ -6127,7 +6260,7 @@ async def test_taskboard_final_artifact_evidence_supports_targeted_readback(tmp_
     execution_meta = {"blocks": {"evidence": {"evidence_items": evidence_items}}}
     ledger = evidence_ledger_view({"evidence_items": evidence_items}, max_items=120, body_chars=2400)
 
-    await task._ensure_workspace_artifact_targeted_readback_evidence(
+    await task._ensure_task_workspace_artifact_targeted_readback_evidence(
         execution_meta,
         ledger,
         evidence_use=[],
@@ -6135,7 +6268,7 @@ async def test_taskboard_final_artifact_evidence_supports_targeted_readback(tmp_
 
     final_ledger = task._evidence_ledger_from_execution_meta(execution_meta)
     targeted = [
-        item for item in final_ledger["items"] if item.get("kind") == "workspace_artifact.targeted_readback"
+        item for item in final_ledger["items"] if item.get("kind") == "task_workspace_artifact.targeted_readback"
     ]
     assert targeted
     assert any("TARGETED-READBACK-MARKER" in str(item.get("body") or "") for item in targeted)
@@ -6155,8 +6288,8 @@ def test_taskboard_final_artifact_evidence_survives_taskboard_view_cap():
         for index in range(140)
     ]
     final_item = {
-        "id": "workspace_artifact_readback:agent_task.taskboard.final:final.md",
-        "kind": "workspace_artifact.readback",
+        "id": "task_workspace_artifact_readback:agent_task.taskboard.final:final.md",
+        "kind": "task_workspace_artifact.readback",
         "status": "ok",
         "body_state": "bounded",
         "path": "final.md",
@@ -6174,7 +6307,7 @@ def test_taskboard_final_artifact_evidence_survives_taskboard_view_cap():
     assert "action-evidence-139" not in ids
 
 
-def test_verifier_evidence_ledger_prioritizes_workspace_artifact_readback_when_capped():
+def test_verifier_evidence_ledger_prioritizes_task_workspace_artifact_readback_when_capped():
     generic_items = [
         {
             "id": f"generic-evidence-{index}",
@@ -6186,24 +6319,24 @@ def test_verifier_evidence_ledger_prioritizes_workspace_artifact_readback_when_c
         for index in range(100)
     ]
     targeted_item = {
-        "id": "workspace_artifact_targeted_readback:final.md:source-list",
-        "kind": "workspace_artifact.targeted_readback",
+        "id": "task_workspace_artifact_targeted_readback:final.md:source-list",
+        "kind": "task_workspace_artifact.targeted_readback",
         "status": "ok",
         "body_state": "bounded",
         "path": "final.md",
         "body": "## Source List\n\nVerifier-visible source list.",
     }
     readback_item = {
-        "id": "workspace_artifact_readback:agent_task.taskboard.final:final.md",
-        "kind": "workspace_artifact.readback",
+        "id": "task_workspace_artifact_readback:agent_task.taskboard.final:final.md",
+        "kind": "task_workspace_artifact.readback",
         "status": "ok",
         "body_state": "truncated",
         "path": "final.md",
         "body": "# Final\n\nInitial bounded body.",
     }
     locator_item = {
-        "id": "workspace_artifact_acceptance_locator:final.md:source-list",
-        "kind": "workspace_artifact.acceptance_locator",
+        "id": "task_workspace_artifact_acceptance_locator:final.md:source-list",
+        "kind": "task_workspace_artifact.acceptance_locator",
         "status": "ok",
         "body_state": "ref_only",
         "path": "final.md",
@@ -6235,7 +6368,7 @@ def test_verifier_evidence_ledger_prioritizes_workspace_artifact_readback_when_c
 
 @pytest.mark.asyncio
 async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate(tmp_path):
-    agent = _create_flat_replan_agent("execution-flat-strategy").use_workspace(tmp_path / "workspace")
+    agent = _create_flat_replan_agent("execution-flat-strategy").use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.create_task(
         goal="Produce a checked answer.",
@@ -6265,7 +6398,7 @@ async def test_flat_execution_strategy_forces_linear_steps_and_keeps_replan_gate
 
 @pytest.mark.asyncio
 async def test_flat_strategy_does_not_receive_taskboard_harness_state(tmp_path):
-    agent = _create_flat_replan_agent("execution-flat-no-taskboard-harness").use_workspace(tmp_path / "workspace")
+    agent = _create_flat_replan_agent("execution-flat-no-taskboard-harness").use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.create_task(
         goal="Produce a checked answer.",
@@ -6288,8 +6421,8 @@ async def test_flat_strategy_does_not_receive_taskboard_harness_state(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_structured_deliverable_contract_requires_workspace_readback(tmp_path):
-    agent = _create_goal_pursuit_agent("execution-deliverable-contract-guard").use_workspace(tmp_path / "workspace")
+async def test_structured_deliverable_contract_requires_task_workspace_readback(tmp_path):
+    agent = _create_goal_pursuit_agent("execution-deliverable-contract-guard").use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.create_task(
         goal="Produce the requested final file.",
@@ -6313,14 +6446,14 @@ async def test_structured_deliverable_contract_requires_workspace_readback(tmp_p
     assert result["accepted"] is False
     assert result["status"] == "max_iterations"
     assert verification["is_complete"] is False
-    assert "required_workspace_deliverable_missing" in verification["guard_reasons"]
-    assert "Missing required Workspace deliverable(s): final.md" in verification["missing_criteria"]
+    assert "required_task_workspace_deliverable_missing" in verification["guard_reasons"]
+    assert "Missing required TaskWorkspace deliverable(s): final.md" in verification["missing_criteria"]
 
 
 @pytest.mark.asyncio
 async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
-    agent = _create_flat_repair_constraint_agent("execution-flat-repair-constraints").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_flat_repair_constraint_agent("execution-flat-repair-constraints").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     execution = agent.create_task(
@@ -6341,7 +6474,7 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
     assert result["status"] == "completed"
     assert result["accepted"] is True
     assert result["final_result"] == (
-        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+        "TaskWorkspace artifact delivered at final.md; full content is available through file_refs/readback."
     )
     assert first_verification["is_complete"] is False
     assert first_verification["failure_analysis"] == "The candidate artifact overshoots the accepted item count."
@@ -6366,7 +6499,7 @@ async def test_flat_verifier_repair_constraints_feed_next_planner(tmp_path):
 
 @pytest.mark.asyncio
 async def test_flat_actions_shape_activates_framework_actions_from_capabilities(tmp_path):
-    agent = _create_flat_action_agent("execution-flat-action-strategy").use_workspace(tmp_path / "workspace")
+    agent = _create_flat_action_agent("execution-flat-action-strategy").use_task_workspace(tmp_path / "task_workspace")
 
     @agent.action_func
     def probe_action() -> dict[str, str]:
@@ -6407,8 +6540,8 @@ async def test_flat_actions_shape_activates_framework_actions_from_capabilities(
 
 @pytest.mark.asyncio
 async def test_flat_request_timeout_does_not_cancel_progressing_child_execution(tmp_path):
-    agent = _create_flat_action_planning_slow_agent("execution-flat-action-planning-slow").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_flat_action_planning_slow_agent("execution-flat-action-planning-slow").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     @agent.action_func
@@ -6438,8 +6571,8 @@ async def test_flat_request_timeout_does_not_cancel_progressing_child_execution(
 
 @pytest.mark.asyncio
 async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_path):
-    agent = _create_flat_action_planning_stall_agent("execution-flat-action-planning-timeout").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_flat_action_planning_stall_agent("execution-flat-action-planning-timeout").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     @agent.action_func
@@ -6476,8 +6609,8 @@ async def test_flat_action_planning_stall_returns_structured_child_failure(tmp_p
 
 @pytest.mark.asyncio
 async def test_flat_plan_no_progress_timeout_is_reported_as_idle_guard(tmp_path):
-    agent = _create_flat_slow_plan_agent("execution-flat-plan-no-progress-timeout").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_flat_slow_plan_agent("execution-flat-plan-no-progress-timeout").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     execution = agent.create_task(
@@ -6504,7 +6637,7 @@ async def test_flat_plan_no_progress_timeout_is_reported_as_idle_guard(tmp_path)
 async def test_flat_action_planning_stall_preserves_completed_action_logs(tmp_path):
     agent = _create_flat_action_post_execution_planning_stall_agent(
         "execution-flat-action-post-action-planning-timeout"
-    ).use_workspace(tmp_path / "workspace")
+    ).use_task_workspace(tmp_path / "task_workspace")
 
     @agent.action_func
     def probe_action() -> dict[str, str]:
@@ -6537,7 +6670,7 @@ async def test_flat_action_planning_stall_preserves_completed_action_logs(tmp_pa
 
 @pytest.mark.asyncio
 async def test_agent_task_heartbeat_does_not_reset_progress_clock(tmp_path):
-    agent = _create_agent("execution-heartbeat-progress-clock").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-heartbeat-progress-clock").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Track progress clock.",
@@ -6566,7 +6699,7 @@ async def test_agent_task_heartbeat_does_not_reset_progress_clock(tmp_path):
 
 @pytest.mark.asyncio
 async def test_agent_task_concurrent_heartbeat_loops_emit_once_per_interval(tmp_path):
-    agent = _create_agent("execution-heartbeat-concurrent-dedupe").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-heartbeat-concurrent-dedupe").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         goal="Track quiet progress.",
@@ -6598,9 +6731,9 @@ async def test_agent_task_concurrent_heartbeat_loops_emit_once_per_interval(tmp_
 
 
 @pytest.mark.asyncio
-async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(tmp_path):
-    agent = _create_workspace_artifact_draft_stall_agent("execution-workspace-artifact-draft-timeout").use_workspace(
-        tmp_path / "workspace"
+async def test_task_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(tmp_path):
+    agent = _create_task_workspace_artifact_draft_stall_agent("execution-workspace-artifact-draft-timeout").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     execution = agent.create_task(
@@ -6628,7 +6761,7 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
     delta_text = "".join([chunk async for chunk in execution.get_async_generator(type="delta")])
     elapsed = asyncio.get_running_loop().time() - started_at
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
+    deliveries = task_meta["diagnostics"]["task_workspace_artifact_delivery"]
     failed_delivery = deliveries[-1]
     heartbeat_items = [item for item in stream_items if getattr(item, "path", "") == "agent_task.heartbeat"]
 
@@ -6636,21 +6769,21 @@ async def test_workspace_artifact_draft_timeout_emits_heartbeat_and_diagnostics(
     assert result["accepted"] is False
     assert failed_delivery["status"] == "failed"
     assert failed_delivery["error"]["type"] == "_AgentTaskDeadlineExceeded"
-    assert "workspace_artifact_draft stream produced no event" in failed_delivery["error"]["message"]
+    assert "task_workspace_artifact_draft stream produced no event" in failed_delivery["error"]["message"]
     assert heartbeat_items
     assert any(
-        getattr(item, "value", {}).get("stage") == "workspace_artifact_draft"
+        getattr(item, "value", {}).get("stage") == "task_workspace_artifact_draft"
         for item in heartbeat_items
         if isinstance(getattr(item, "value", None), dict)
     )
     assert "Still working" not in delta_text
-    assert not (tmp_path / "workspace" / "final.md").exists()
+    assert not (tmp_path / "task_workspace" / "final.md").exists()
 
 
 @pytest.mark.asyncio
-async def test_workspace_artifact_draft_retry_status_resets_partial_without_public_delta_marker(tmp_path):
-    agent = _create_workspace_artifact_draft_retry_agent("execution-workspace-artifact-draft-retry").use_workspace(
-        tmp_path / "workspace"
+async def test_task_workspace_artifact_draft_retry_status_resets_partial_without_public_delta_marker(tmp_path):
+    agent = _create_task_workspace_artifact_draft_retry_agent("execution-workspace-artifact-draft-retry").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     execution = agent.create_task(
@@ -6663,7 +6796,7 @@ async def test_workspace_artifact_draft_retry_status_resets_partial_without_publ
     await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
+    deliveries = task_meta["diagnostics"]["task_workspace_artifact_delivery"]
     failed_delivery = deliveries[-1]
 
     assert MockWorkspaceArtifactDraftRetryRequester.draft_calls == 1
@@ -6681,14 +6814,14 @@ async def test_workspace_artifact_draft_retry_status_resets_partial_without_publ
             "source": "structured_status",
         }
     ]
-    assert not (tmp_path / "workspace" / "files" / "final.md").exists()
+    assert not (tmp_path / "task_workspace" / "files" / "final.md").exists()
 
 
 @pytest.mark.asyncio
-async def test_workspace_artifact_draft_writes_natural_text_without_output_contract(tmp_path):
-    agent = _create_workspace_artifact_draft_natural_text_agent(
+async def test_task_workspace_artifact_draft_writes_natural_text_without_output_contract(tmp_path):
+    agent = _create_task_workspace_artifact_draft_natural_text_agent(
         "execution-workspace-artifact-draft-natural-text"
-    ).use_workspace(tmp_path / "workspace")
+    ).use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.create_task(
         goal="Produce final.md.",
@@ -6700,7 +6833,7 @@ async def test_workspace_artifact_draft_writes_natural_text_without_output_contr
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
-    deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
+    deliveries = task_meta["diagnostics"]["task_workspace_artifact_delivery"]
     delivered = deliveries[-1]
     file_ref = delivered["file_refs"][0]
 
@@ -6718,7 +6851,7 @@ async def test_workspace_artifact_draft_writes_natural_text_without_output_contr
 
 @pytest.mark.asyncio
 async def test_flat_actions_shape_fans_out_multiple_commands_in_one_step(tmp_path):
-    agent = _create_flat_parallel_action_agent("execution-flat-action-fanout").use_workspace(tmp_path / "workspace")
+    agent = _create_flat_parallel_action_agent("execution-flat-action-fanout").use_task_workspace(tmp_path / "task_workspace")
     active = 0
     max_active = 0
 
@@ -6784,7 +6917,7 @@ async def test_flat_actions_shape_fans_out_multiple_commands_in_one_step(tmp_pat
 
 @pytest.mark.asyncio
 async def test_flat_verifier_uses_bounded_action_evidence_prompt(tmp_path):
-    agent = _create_flat_action_agent("execution-flat-verifier-evidence-bounds").use_workspace(tmp_path / "workspace")
+    agent = _create_flat_action_agent("execution-flat-verifier-evidence-bounds").use_task_workspace(tmp_path / "task_workspace")
 
     hidden_tail = "VERIFIER_SHOULD_NOT_SEE_FULL_ACTION_OUTPUT"
 
@@ -6820,8 +6953,8 @@ async def test_flat_verifier_uses_bounded_action_evidence_prompt(tmp_path):
 
 @pytest.mark.asyncio
 async def test_flat_promotes_report_like_evidence_to_candidate_final_result(tmp_path):
-    agent = _create_flat_evidence_candidate_agent("execution-flat-evidence-candidate").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_flat_evidence_candidate_agent("execution-flat-evidence-candidate").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     execution = agent.create_task(
@@ -6851,7 +6984,7 @@ async def test_flat_promotes_report_like_evidence_to_candidate_final_result(tmp_
 
 @pytest.mark.asyncio
 async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path):
-    agent = _create_taskboard_agent("execution-taskboard-strategy").use_workspace(tmp_path / "workspace")
+    agent = _create_taskboard_agent("execution-taskboard-strategy").use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.create_task(
         goal="Produce a board-managed answer.",
@@ -6900,8 +7033,8 @@ async def test_taskboard_execution_strategy_runs_framework_owned_board(tmp_path)
 @pytest.mark.asyncio
 async def test_taskboard_checkpoint_and_resume_snapshot_include_handoff_projection(tmp_path):
     task_id = "taskboard-resume-checkpoint"
-    workspace_dir = tmp_path / "workspace"
-    agent = _create_taskboard_agent("execution-taskboard-checkpoint").use_workspace(workspace_dir)
+    task_workspace_dir = tmp_path / "task_workspace"
+    agent = _create_taskboard_agent("execution-taskboard-checkpoint").use_task_workspace(task_workspace_dir)
 
     execution = agent.create_task(
         task_id=task_id,
@@ -6916,22 +7049,22 @@ async def test_taskboard_checkpoint_and_resume_snapshot_include_handoff_projecti
     task_meta = meta["logs"]["route_logs"]["agent_task"]
 
     assert result["status"] == "completed"
-    assert task_meta["workspace_refs"]["checkpoints"] == []
-    checkpoint_history = await agent.workspace.checkpoint_history(task_id)
+    assert task_meta["record_refs"]["checkpoints"] == []
+    checkpoint_history = await agent.record_store.checkpoint_history(task_id)
     assert checkpoint_history == []
 
-    snapshot = await agent.workspace.get_snapshot(f"{task_id}::resume")
+    snapshot = await agent.record_store.get_snapshot(f"{task_id}::resume")
     assert snapshot is None
     terminal_state = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     assert terminal_state["revision"]["revision_id"]
-    assert task_meta["diagnostics"]["workspace_retention"]["status"] in {"applied", "noop"}
+    assert task_meta["diagnostics"]["task_workspace_retention"]["status"] in {"applied", "noop"}
 
 
 @pytest.mark.asyncio
 async def test_taskboard_resume_terminal_snapshot_without_reexecuting_cards(tmp_path):
     task_id = "taskboard-terminal-resume"
-    workspace_dir = tmp_path / "workspace"
-    agent = _create_taskboard_agent("execution-taskboard-terminal-resume-1").use_workspace(workspace_dir)
+    task_workspace_dir = tmp_path / "task_workspace"
+    agent = _create_taskboard_agent("execution-taskboard-terminal-resume-1").use_task_workspace(task_workspace_dir)
 
     execution = agent.create_task(
         task_id=task_id,
@@ -6945,18 +7078,18 @@ async def test_taskboard_resume_terminal_snapshot_without_reexecuting_cards(tmp_
     assert result["status"] == "completed"
     assert result["final_result"] == "taskboard accepted result"
 
-    agent2 = _create_taskboard_agent("execution-taskboard-terminal-resume-2").use_workspace(workspace_dir)
+    agent2 = _create_taskboard_agent("execution-taskboard-terminal-resume-2").use_task_workspace(task_workspace_dir)
     MockAgentExecutionRequester.requests = []
     with pytest.raises(ValueError, match="No resumable AgentTask snapshot"):
-        await agent2.async_resume(task_id, workspace=workspace_dir)
+        await agent2.async_resume(task_id, task_workspace=task_workspace_dir)
     assert MockAgentExecutionRequester.requests == []
 
 
 @pytest.mark.asyncio
 async def test_taskboard_resume_blocked_snapshot_retries_finalization_without_replanning(tmp_path):
     task_id = "taskboard-blocked-resume"
-    workspace_dir = tmp_path / "workspace"
-    agent = _create_taskboard_agent("execution-taskboard-blocked-resume-seed").use_workspace(workspace_dir)
+    task_workspace_dir = tmp_path / "task_workspace"
+    agent = _create_taskboard_agent("execution-taskboard-blocked-resume-seed").use_task_workspace(task_workspace_dir)
     revision = TaskBoardRevision.from_value(
         {
             "board_id": task_id,
@@ -6979,14 +7112,22 @@ async def test_taskboard_resume_blocked_snapshot_retries_finalization_without_re
                     "metadata": {"note": "completed before resume"},
                 }
             },
-        }
+            }
+        )
+    seed_task = AgentTask(
+        agent,
+        task_id=task_id,
+        goal="Produce a board-managed answer.",
+        success_criteria=["The board final answer is accepted."],
+        execution="taskboard",
     )
-    await agent.workspace.put_snapshot(
+    await agent.record_store.put_snapshot(
         f"{task_id}::resume",
         {
-            "resume_version": 2,
+            "resume_version": 3,
             "task_id": task_id,
             "iteration": 1,
+            "context_state": seed_task._context_resume_state(),
             "manifest": {
                 "goal": "Produce a board-managed answer.",
                 "success_criteria": ["The board final answer is accepted."],
@@ -7016,7 +7157,7 @@ async def test_taskboard_resume_blocked_snapshot_retries_finalization_without_re
                 "revision": revision.to_dict(),
                 "evidence_view": build_task_board_evidence_view(revision).to_dict(),
                 "runtime_topology": {"driver": "triggerflow_taskboard_lifecycle"},
-                "workspace_refs": {},
+                "task_workspace_refs": {},
                 "final_result": {
                     "status": "blocked",
                     "accepted": False,
@@ -7036,9 +7177,9 @@ async def test_taskboard_resume_blocked_snapshot_retries_finalization_without_re
         },
     )
 
-    agent2 = _create_taskboard_agent("execution-taskboard-blocked-resume").use_workspace(workspace_dir)
+    agent2 = _create_taskboard_agent("execution-taskboard-blocked-resume").use_task_workspace(task_workspace_dir)
     MockAgentExecutionRequester.requests = []
-    resumed = await agent2.async_resume(task_id, workspace=workspace_dir)
+    resumed = await agent2.async_resume(task_id, task_workspace=task_workspace_dir)
     resumed_result = await resumed.async_start()
 
     request_text = "\n".join(MockAgentExecutionRequester.requests)
@@ -7051,7 +7192,7 @@ async def test_taskboard_resume_blocked_snapshot_retries_finalization_without_re
 
 @pytest.mark.asyncio
 async def test_taskboard_control_card_runs_single_model_request_through_block_carrier(tmp_path):
-    agent = _create_taskboard_control_agent("execution-taskboard-control-card").use_workspace(tmp_path / "workspace")
+    agent = _create_taskboard_control_agent("execution-taskboard-control-card").use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.create_task(
         goal="Produce a control-card deliverable.",
@@ -7070,12 +7211,12 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
     assert result["status"] == "completed"
     assert result["accepted"] is True
     assert result["final_result"] == (
-        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+        "TaskWorkspace artifact delivered at final.md; full content is available through file_refs/readback."
     )
     assert taskboard["finalization_source"] == "candidate_promotion"
     assert card_result["status"] == "completed"
-    assert card_result["preview"]["workspace_artifact_delivery"]["status"] == "delivered"
-    assert "Complete deliverable body." in card_result["preview"]["workspace_artifact_delivery"]["file_refs"][0]["preview"]
+    assert card_result["preview"]["task_workspace_artifact_delivery"]["status"] == "delivered"
+    assert "Complete deliverable body." in card_result["preview"]["task_workspace_artifact_delivery"]["file_refs"][0]["preview"]
     assert card_result["metadata"]["execution_kind"] == "taskboard_control_request"
     block_carrier = card_result["metadata"]["block_carrier"]
     assert block_carrier["work_unit"]["origin"] == "taskboard_card"
@@ -7094,9 +7235,7 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
     assert not any(item.path == "agent_task.taskboard.card.synthesize.execution.started" for item in stream_items)
     assert not any("Execute exactly one TaskBoard card" in request for request in MockAgentExecutionRequester.requests)
     planning_requests = [
-        request
-        for request in MockAgentExecutionRequester.requests
-        if _is_taskboard_plan_request(request)
+        request for request in MockAgentExecutionRequester.requests if _is_taskboard_plan_request(request)
     ]
     assert planning_requests
     assert "serial chain of control-only cards" in planning_requests[-1]
@@ -7105,15 +7244,43 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
 
 @pytest.mark.asyncio
 async def test_taskboard_control_consumer_requests_readback_without_intermediate_verifier(tmp_path):
-    agent = _create_taskboard_consumer_driven_agent("execution-taskboard-consumer-driven").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_taskboard_consumer_driven_agent("execution-taskboard-consumer-driven").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    skill_root = tmp_path / "consumer-control-skill"
+    _write_skill(skill_root)
+    skill_library = SkillLibrary(tmp_path / "skill-library")
+    installed_skill = skill_library.install(skill_root, trust="trusted")
+    agent.skill_library = skill_library
+    skill_binding = SkillBinding.create(
+        installed_skill,
+        task_id="taskboard-control-consumer",
+        mode="required",
+        binding_id="binding_consumer_control",
     )
     task = AgentTask(
         agent,
+        task_id="taskboard-control-consumer",
         goal="Use downstream control-card consumption to decide whether upstream evidence is enough.",
         success_criteria=["The control card requests readback when dependency evidence is only a ref."],
         execution="taskboard",
         max_iterations=None,
+        options={
+            "capability_constraints": {
+                "skills": {"required": [installed_skill.skill_id]},
+            },
+            "skill_bindings": [
+                {
+                    "binding_id": "binding_consumer_control",
+                    "canonical_skill_id": installed_skill.skill_id,
+                    "mode": "required",
+                }
+            ],
+        },
+    )
+    task.task_context.attach(
+        SkillContextSource(skill_library, bindings=(skill_binding,)),
+        binding_id="skill_context_binding:taskboard-control-consumer",
     )
     revision = TaskBoardRevision.create(
         board_id="consumer-driven-sufficiency",
@@ -7170,6 +7337,13 @@ async def test_taskboard_control_consumer_requests_readback_without_intermediate
         },
     )
 
+    context_pack = {
+        "goal": task.goal,
+        "profile": "",
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+    }
     result = await task._run_taskboard_control_card(
         SimpleNamespace(
             card=revision.graph.card_by_id()["review"],
@@ -7177,7 +7351,7 @@ async def test_taskboard_control_consumer_requests_readback_without_intermediate
             dependency_results=revision.card_results,
             planning_policy=None,
         ),
-        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+        cast(Any, context_pack),
     )
 
     request_text = "\n".join(MockAgentExecutionRequester.requests)
@@ -7189,6 +7363,19 @@ async def test_taskboard_control_consumer_requests_readback_without_intermediate
     assert result.metadata["next_board_action"] == "readback"
     assert result.preview["sufficient"] is False
     assert result.preview["next_board_action"] == "readback"
+    contexts = task._lifecycle_state.skill_bindings["binding_consumer_control"]["contexts"]
+    assert len(contexts) == 1
+    context_without_id = dict(contexts[0])
+    control_request_id = context_without_id.pop("request_id")
+    assert context_without_id == {
+        "phase": "work.execute.taskboard",
+        "guidance_chars": len(installed_skill.instruction_body),
+        "resource_chars": 0,
+        "selected_resource_keys": [],
+        "truncated": False,
+    }
+    assert len(control_request_id) == 32
+    assert not control_request_id.startswith(f"{task.id}:")
 
     next_revision = TaskBoardValidator().apply_patch(revision, result.patch_proposal)
     cards = next_revision.graph.card_by_id()
@@ -7201,9 +7388,9 @@ async def test_taskboard_control_consumer_requests_readback_without_intermediate
 
 
 @pytest.mark.asyncio
-async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tmp_path):
-    agent = _create_taskboard_sectioned_artifact_agent("execution-taskboard-sectioned-artifact").use_workspace(
-        tmp_path / "workspace"
+async def test_taskboard_sectioned_artifact_uses_task_workspace_and_bounded_stream(tmp_path):
+    agent = _create_taskboard_sectioned_artifact_agent("execution-taskboard-sectioned-artifact").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     execution = agent.create_task(
@@ -7218,7 +7405,7 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
     meta = await execution.async_get_meta()
     task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
-    deliveries = task_meta["diagnostics"]["workspace_artifact_delivery"]
+    deliveries = task_meta["diagnostics"]["task_workspace_artifact_delivery"]
     delivered = next(item for item in deliveries if item.get("status") == "delivered")
     tick_completed_items = [
         item
@@ -7232,7 +7419,7 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
         if _is_taskboard_final_request(request)
     ]
     marker = MockTaskBoardSectionedArtifactRequester.tail_marker
-    expected_workspace_body = (
+    expected_task_workspace_body = (
         f"{MockTaskBoardSectionedArtifactRequester.first_section.strip()}\n\n"
         f"## Details\n\n{MockTaskBoardSectionedArtifactRequester.second_section.strip()}"
     )
@@ -7240,14 +7427,14 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
     assert result["status"] == "completed"
     assert result["accepted"] is True
     assert result["final_result"] == (
-        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+        "TaskWorkspace artifact delivered at final.md; full content is available through file_refs/readback."
     )
     assert marker not in result["final_result"]
-    assert delivered["mode"] == "sectioned_workspace_artifact"
-    assert delivered["readback"]["bytes"] == len(expected_workspace_body.encode("utf-8"))
+    assert delivered["mode"] == "sectioned_task_workspace_artifact"
+    assert delivered["readback"]["bytes"] == len(expected_task_workspace_body.encode("utf-8"))
     assert delivered["readback"]["sha256"]
-    assert taskboard["revision"]["card_results"]["synthesize"]["preview"]["workspace_artifact_delivery"]["mode"] == (
-        "sectioned_workspace_artifact"
+    assert taskboard["revision"]["card_results"]["synthesize"]["preview"]["task_workspace_artifact_delivery"]["mode"] == (
+        "sectioned_task_workspace_artifact"
     )
     assert not final_requests
     assert all(marker not in request for request in final_requests)
@@ -7261,8 +7448,8 @@ async def test_taskboard_sectioned_artifact_uses_workspace_and_bounded_stream(tm
 
 @pytest.mark.asyncio
 async def test_taskboard_final_preserves_complete_candidate_from_terminal_card(tmp_path):
-    agent = _create_taskboard_final_candidate_agent("execution-taskboard-final-candidate").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_taskboard_final_candidate_agent("execution-taskboard-final-candidate").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     execution = agent.create_task(
@@ -7280,19 +7467,19 @@ async def test_taskboard_final_preserves_complete_candidate_from_terminal_card(t
     assert len(result["final_result"]) > len(MockTaskBoardFinalCandidateRequester.full_report[:120])
 
 
-def test_taskboard_final_refs_prioritize_required_workspace_deliverable(tmp_path):
-    agent = _create_agent("execution-taskboard-final-ref-priority").use_workspace(tmp_path / "workspace")
+def test_taskboard_final_refs_prioritize_required_task_workspace_deliverable(tmp_path):
+    agent = _create_agent("execution-taskboard-final-ref-priority").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
-        goal="Write a final Workspace report.",
+        goal="Write a final TaskWorkspace report.",
         success_criteria=["final.md is the trusted final deliverable."],
         execution="taskboard",
         options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
     )
     refs = [
-        {"path": "working/taskboard/clone_and_read_evidence/final.md", "role": "workspace_artifact"},
+        {"path": "working/taskboard/clone_and_read_evidence/final.md", "role": "task_workspace_artifact"},
         {"path": "configs/_base_/default.yaml", "source": "taskboard_target_ref", "content_state": "ref_only"},
-        {"path": "final.md", "role": "workspace_artifact", "bytes": 12000},
+        {"path": "final.md", "role": "task_workspace_artifact", "bytes": 12000},
         {"artifact_id": "act_art_123", "role": "output"},
     ]
 
@@ -7305,7 +7492,7 @@ def test_taskboard_final_refs_prioritize_required_workspace_deliverable(tmp_path
 
 @pytest.mark.asyncio
 async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path):
-    agent = _create_taskboard_readback_agent("execution-taskboard-readback").use_workspace(tmp_path / "workspace")
+    agent = _create_taskboard_readback_agent("execution-taskboard-readback").use_task_workspace(tmp_path / "task_workspace")
 
     @agent.action_func
     def produce_large_evidence() -> dict[str, Any]:
@@ -7368,8 +7555,8 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
 
 @pytest.mark.asyncio
 async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(tmp_path):
-    agent = _create_taskboard_dependency_readback_agent("execution-taskboard-dependency-readback").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_taskboard_dependency_readback_agent("execution-taskboard-dependency-readback").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     @agent.action_func
@@ -7423,7 +7610,7 @@ async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(t
 async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs(tmp_path):
     agent = _create_taskboard_control_dependency_readback_agent(
         "execution-taskboard-control-dependency-readback"
-    ).use_workspace(tmp_path / "workspace")
+    ).use_task_workspace(tmp_path / "task_workspace")
 
     @agent.action_func
     def produce_large_evidence() -> dict[str, Any]:
@@ -7458,7 +7645,7 @@ async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs
     assert result["status"] == "completed"
     assert result["accepted"] is True
     assert result["final_result"] == (
-        "Workspace artifact delivered at final.md; full content is available through file_refs/readback."
+        "TaskWorkspace artifact delivered at final.md; full content is available through file_refs/readback."
     )
     assert taskboard["finalization_source"] == "candidate_promotion"
     assert synthesize_result["status"] == "completed"
@@ -7482,8 +7669,8 @@ async def test_taskboard_control_card_prefetches_dependency_action_artifact_refs
 
 @pytest.mark.asyncio
 async def test_taskboard_request_timeout_does_not_cancel_progressing_card_by_default(tmp_path):
-    agent = _create_taskboard_slow_card_agent("execution-taskboard-card-request-timeout-isolated").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_taskboard_slow_card_agent("execution-taskboard-card-request-timeout-isolated").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     execution = agent.create_task(
@@ -7513,7 +7700,7 @@ async def test_taskboard_request_timeout_does_not_cancel_progressing_card_by_def
 
 @pytest.mark.asyncio
 async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
-    agent = _create_taskboard_slow_card_agent("execution-taskboard-card-timeout").use_workspace(tmp_path / "workspace")
+    agent = _create_taskboard_slow_card_agent("execution-taskboard-card-timeout").use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.create_task(
         goal="Run a board card that should time out.",
@@ -7550,8 +7737,8 @@ async def test_taskboard_card_timeout_returns_structured_card_failure(tmp_path):
 
 @pytest.mark.asyncio
 async def test_taskboard_tick_timeout_does_not_cancel_running_cards(tmp_path):
-    agent = _create_taskboard_slow_card_agent("execution-taskboard-tick-timeout-does-not-cancel").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_taskboard_slow_card_agent("execution-taskboard-tick-timeout-does-not-cancel").use_task_workspace(
+        tmp_path / "task_workspace"
     )
 
     execution = agent.create_task(
@@ -7585,8 +7772,8 @@ async def test_taskboard_tick_timeout_does_not_cancel_running_cards(tmp_path):
 
 @pytest.mark.asyncio
 async def test_taskboard_control_no_progress_timeout_returns_structured_card_failure(tmp_path):
-    agent = _create_taskboard_control_stall_agent("execution-taskboard-control-no-progress-timeout").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_taskboard_control_stall_agent("execution-taskboard-control-no-progress-timeout").use_task_workspace(
+        tmp_path / "task_workspace"
     )
     idle_timeout_seconds = 0.8
 
@@ -7620,8 +7807,8 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
 
 @pytest.mark.asyncio
 async def test_taskboard_agent_card_data_wait_uses_no_progress_timeout(tmp_path):
-    agent = _create_agent("execution-taskboard-agent-card-data-no-progress").use_workspace(
-        tmp_path / "workspace"
+    agent = _create_agent("execution-taskboard-agent-card-data-no-progress").use_task_workspace(
+        tmp_path / "task_workspace"
     )
     task = AgentTask(
         agent,
@@ -7648,7 +7835,7 @@ async def test_taskboard_agent_card_data_wait_uses_no_progress_timeout(tmp_path)
 
 @pytest.mark.asyncio
 async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
-    agent = _create_taskboard_retry_card_agent("execution-taskboard-card-retry").use_workspace(tmp_path / "workspace")
+    agent = _create_taskboard_retry_card_agent("execution-taskboard-card-retry").use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.create_task(
         goal="Run a board card that should recover after one transient timeout.",
@@ -7685,7 +7872,7 @@ async def test_taskboard_card_transient_timeout_retries_and_completes(tmp_path):
 async def test_taskboard_action_card_stops_planning_after_one_successful_action_round(tmp_path):
     agent = _create_taskboard_action_post_execution_planning_stall_agent(
         "execution-taskboard-card-partial-evidence-stall"
-    ).use_workspace(tmp_path / "workspace")
+    ).use_task_workspace(tmp_path / "task_workspace")
 
     @agent.action_func
     def probe_action() -> dict[str, str]:
@@ -7711,7 +7898,7 @@ async def test_taskboard_action_card_stops_planning_after_one_successful_action_
         item.get("evidence_summary") for item in diagnostics if isinstance(item, dict) and item.get("evidence_summary")
     ]
 
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", json.dumps(result, ensure_ascii=False, default=str)
     assert partial_result["status"] == "completed"
     assert MockTaskBoardActionPostExecutionPlanningStallRequester.action_planning_calls == 1
     assert evidence_summaries
@@ -7735,7 +7922,7 @@ async def test_taskboard_action_card_stops_planning_after_one_successful_action_
 @pytest.mark.asyncio
 async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(tmp_path):
     skill_pack = _install_site_skill(tmp_path)
-    agent = _create_goal_pursuit_agent("execution-first-goal-chain").use_workspace(tmp_path / "workspace")
+    agent = _create_goal_pursuit_agent("execution-first-goal-chain").use_task_workspace(tmp_path / "task_workspace")
 
     execution = (
         agent.goal("Build the site.", success_criteria=["The runnable page exists."])
@@ -7760,7 +7947,7 @@ async def test_execution_first_chain_from_goal_accepts_skills_input_and_stream(t
 
 
 def test_goal_alias_and_detailed_effort_strategy_are_normalized(tmp_path):
-    agent = _create_agent("execution-goals-effort-alias").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-goals-effort-alias").use_task_workspace(tmp_path / "task_workspace")
 
     execution = agent.goals(
         ["Build the site.", "Publish a launch checklist."],
@@ -7831,7 +8018,7 @@ def test_goal_alias_and_detailed_effort_strategy_are_normalized(tmp_path):
 
 @pytest.mark.asyncio
 async def test_goal_pursuit_effort_iteration_limit_is_soft_strategy_metadata(tmp_path):
-    agent = _create_goal_pursuit_agent("execution-detailed-effort-task").use_workspace(tmp_path / "workspace")
+    agent = _create_goal_pursuit_agent("execution-detailed-effort-task").use_task_workspace(tmp_path / "task_workspace")
     execution = agent.goal("Build the site.", success_criteria=["The runnable page exists."]).effort(
         "low", budget={"iteration_limit": 2}
     )
@@ -7846,7 +8033,7 @@ async def test_goal_pursuit_effort_iteration_limit_is_soft_strategy_metadata(tmp
 
 @pytest.mark.asyncio
 async def test_goal_pursuit_wall_clock_budget_is_owned_by_agent_task(tmp_path):
-    agent = _create_goal_pursuit_agent("execution-task-route-deadline-owner").use_workspace(tmp_path / "workspace")
+    agent = _create_goal_pursuit_agent("execution-task-route-deadline-owner").use_task_workspace(tmp_path / "task_workspace")
     execution = (
         agent.create_execution(limits={"max_seconds": 0.2, "max_no_progress_seconds": 5})
         .goal("Build the site.", success_criteria=["The runnable page exists."])
@@ -7880,7 +8067,7 @@ async def test_routed_parent_joins_agent_task_before_releasing_transferred_actio
     monkeypatch,
     parent_exit: str,
 ):
-    agent = _create_agent(f"execution-routed-child-join-{parent_exit}").use_workspace(
+    agent = _create_agent(f"execution-routed-child-join-{parent_exit}").use_task_workspace(
         tmp_path / parent_exit
     )
     action_id = f"late_child_action_{parent_exit}"
@@ -7936,7 +8123,7 @@ async def test_routed_parent_joins_agent_task_before_releasing_transferred_actio
             {},
             artifact_scope={"kind": "agent_task", "id": task.id},
         )
-        await task.workspace.put(
+        await task.record_store.put(
             {"late": True},
             collection="observations",
             kind="late_child_process",
@@ -7998,12 +8185,12 @@ async def test_routed_parent_joins_agent_task_before_releasing_transferred_actio
         scope != ("agent_task", task.id)
         for scope in agent.action._artifact_manager._artifact_scopes.values()
     )
-    assert await task.workspace.search(filters={"kind": "late_child_process"}) == []
+    assert await task.record_store.search(filters={"kind": "late_child_process"}) == []
 
 
 def test_execution_first_chain_allows_capabilities_before_goal(tmp_path):
     skill_pack = _install_site_skill(tmp_path)
-    agent = _create_agent("execution-first-skill-first").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("execution-first-skill-first").use_task_workspace(tmp_path / "task_workspace")
 
     execution = (
         agent.use_skills(str(skill_pack), auto_allow=True)
@@ -8035,7 +8222,7 @@ def test_goal_accepts_multiple_goals_and_optional_success_criteria():
 
 @pytest.mark.asyncio
 async def test_execution_first_chain_allows_goal_after_prompt_output(tmp_path):
-    agent = _create_goal_pursuit_agent("execution-first-goal-after-prompt").use_workspace(tmp_path / "workspace")
+    agent = _create_goal_pursuit_agent("execution-first-goal-after-prompt").use_task_workspace(tmp_path / "task_workspace")
     execution = (
         agent.input("Use these facts.")
         .output({"summary": (str, "summary", True)}, format="json")
@@ -8055,7 +8242,7 @@ async def test_execution_first_chain_allows_goal_after_prompt_output(tmp_path):
 @pytest.mark.asyncio
 async def test_allow_create_task_false_blocks_goal_pursuit(tmp_path):
     """ISSUE-007: allow_create_task=False is an enforced limit, not a no-op."""
-    agent = _create_goal_pursuit_agent("execution-no-create-task").use_workspace(tmp_path / "workspace")
+    agent = _create_goal_pursuit_agent("execution-no-create-task").use_task_workspace(tmp_path / "task_workspace")
     execution = agent.goal("Build the site.", success_criteria=["The runnable page exists."]).create_execution(
         limits={"allow_create_task": False}
     )
@@ -8080,14 +8267,14 @@ async def test_route_policy_block_and_deterministic_fallback():
     )
 
     blocked_exec = SimpleNamespace(
-        options={"route_policy": {"allowed_routes": ["skills"], "on_violation": "block"}},
+        options={"route_policy": {"allowed_routes": ["removed_route"], "on_violation": "block"}},
         effective_options={},
         local_skill_selectors=[],
         local_skills_pack_selectors=[],
         local_action_ids=[],
     )
     planner = HybridRoutePlanner(cast(Any, None), execution=blocked_exec)
-    assert planner.allowed_routes() == {"skills"}
+    assert planner.allowed_routes() == {"removed_route"}
     assert planner.route_allowed("model_request") is False
     assert planner.on_violation() == "block"
     route, meta = await planner.select_route()
@@ -8096,7 +8283,7 @@ async def test_route_policy_block_and_deterministic_fallback():
 
     # Default on_violation is a fallback to model_request (backward compatible).
     fallback_exec = SimpleNamespace(
-        options={"route_policy": {"allowed_routes": ["skills"]}},
+        options={"route_policy": {"allowed_routes": ["removed_route"]}},
         effective_options={},
         local_skill_selectors=[],
         local_skills_pack_selectors=[],
@@ -8182,13 +8369,13 @@ def test_create_task_and_task_loop_return_strategy_execution_drafts(tmp_path):
         task_id="task-draft",
         goal="Draft a task",
         success_criteria=["The task is drafted."],
-        workspace=tmp_path / "task",
+        task_workspace=tmp_path / "task",
     )
     loop_execution = agent.create_task_loop(
         task_id="loop-draft",
         goal="Loop a task",
         success_criteria=["The loop is drafted."],
-        workspace=tmp_path / "loop",
+        task_workspace=tmp_path / "loop",
     )
 
     assert type(task_execution).__name__ == "AgentExecution"
@@ -8200,8 +8387,8 @@ def test_create_task_and_task_loop_return_strategy_execution_drafts(tmp_path):
 
 @pytest.mark.asyncio
 async def test_agent_execution_direct_strategy_forces_model_request_route(tmp_path):
-    agent = _create_action_agent("direct-strategy-route").use_workspace(
-        tmp_path / "workspace", mode="read_write"
+    agent = _create_action_agent("direct-strategy-route").use_task_workspace(
+        tmp_path / "task_workspace", mode="read_write"
     )
     agent.set_action_loop(max_rounds=1, timeout=5)
     agent.enable_shell(commands=["echo allowed"], action_id="echo_cli", sandbox="trusted_local")
@@ -8381,8 +8568,8 @@ async def test_agent_execution_select_route_is_reused_by_start():
 
 @pytest.mark.asyncio
 async def test_agent_execution_model_request_exposes_action_logs_and_artifacts(tmp_path):
-    agent = _create_action_agent("action-log-exposure").use_workspace(
-        tmp_path / "workspace", mode="read_write"
+    agent = _create_action_agent("action-log-exposure").use_task_workspace(
+        tmp_path / "task_workspace", mode="read_write"
     )
     agent.set_action_loop(max_rounds=2, timeout=5)
     agent.enable_shell(commands=["echo allowed"], action_id="echo_cli", sandbox="trusted_local")
@@ -8421,8 +8608,8 @@ async def test_required_skill_create_execution_routes_to_agent_task(tmp_path):
     contract = Agently.skills_executor.install_skills(skill_root, trust_level="local", update=True)
     skill_id = str(contract["skill_id"])
 
-    agent = _create_action_agent("required-skill-with-actions").use_workspace(
-        tmp_path / "workspace", mode="read_write"
+    agent = _create_action_agent("required-skill-with-actions").use_task_workspace(
+        tmp_path / "task_workspace", mode="read_write"
     )
     agent.set_action_loop(max_rounds=2, timeout=5)
     agent.enable_shell(commands=["echo allowed"], action_id="echo_cli", sandbox="trusted_local")
@@ -8620,72 +8807,26 @@ def test_agent_execution_bounded_step_rejects_dynamic_task_route():
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_bounded_step_budget_covers_skills_model_stage(tmp_path):
+async def test_agent_execution_bounded_step_budget_covers_skill_bound_model_route(tmp_path):
     MockAgentExecutionRequester.requests = []
     skill_root = tmp_path / "skill-pack" / "skills" / "task-step"
     _write_skill(skill_root)
-    agent = _create_agent("task-step-skills-budget").use_skills(
-        str(tmp_path / "skill-pack"),
-        mode="required",
-        auto_allow=True,
-    )
-    execution = agent.input("use the task step skill").create_execution(
+    library = SkillLibrary(tmp_path / "library")
+    skill = library.install(skill_root, trust="trusted")
+    agent = _create_agent("task-step-skills-budget")
+    agent.skill_library = library
+    execution = agent.create_execution(
         lineage={"task_id": "budget-task", "iteration_id": "iter-1", "step_id": "skills"},
         limits={"max_model_requests": 0},
-    )
+    ).input("use the task step skill").use_skills(skill.skill_id, mode="required")
 
     with pytest.raises(AgentExecutionLimitExceeded):
         await execution.async_get_data()
 
     meta = await execution.async_get_meta()
     assert meta["status"] == "blocked"
-    assert meta["route_plan"]["selected_route"] == "skills"
+    assert meta["route_plan"]["selected_route"] != "skills"
     assert meta["diagnostics"]["budget"]["model_requests_used"] == 0
-
-
-@pytest.mark.asyncio
-async def test_agent_execution_options_forward_skills_effort(tmp_path):
-    captured: dict[str, Any] = {}
-    skill_root = tmp_path / "skill-pack" / "skills" / "task-step"
-    _write_skill(skill_root)
-    agent = _create_agent("task-step-skills-options")
-    original_execute_skills_plan = agent.async_execute_skills_plan
-
-    async def capture_execute_skills_plan(*args: Any, **kwargs: Any):
-        captured["effort"] = kwargs.get("effort")
-        captured["output_format"] = kwargs.get("output_format")
-        return await original_execute_skills_plan(*args, **kwargs)
-
-    agent.async_execute_skills_plan = capture_execute_skills_plan
-    execution = (
-        agent.use_skills(str(tmp_path / "skill-pack"), mode="required", auto_allow=True)
-        .input("use the task step skill")
-        .create_execution(
-            lineage={"task_id": "options-task", "iteration_id": "iter-1", "step_id": "skills"},
-            options=ExecutionOptions.model_validate(
-                {"routes": {"skills": SkillsRouteOptions(effort="fast", output_format="flat_markdown")}}
-            ),
-            limits={"max_model_requests": 0},
-        )
-    )
-
-    with pytest.raises(AgentExecutionLimitExceeded):
-        await execution.async_get_data()
-
-    meta = await execution.async_get_meta()
-    assert captured["effort"] == "fast"
-    assert captured["output_format"] == "flat_markdown"
-    assert meta["options"]["routes"]["skills"]["effort"] == "fast"
-    assert meta["options"]["routes"]["skills"]["output_format"] == "flat_markdown"
-    assert meta["effective_options"]["execution"]["limits"]["max_model_requests"] == 0
-    assert meta["consumed_options"]["routes.skills.effort"] == {
-        "value": "fast",
-        "owner": "AgentlySkillsManager",
-    }
-    assert meta["consumed_options"]["routes.skills.output_format"] == {
-        "value": "flat_markdown",
-        "owner": "AgentlySkillsManager",
-    }
 
 
 @pytest.mark.asyncio
@@ -8727,7 +8868,8 @@ async def test_two_bounded_step_executions_can_be_correlated_as_developer_loop()
 
 @pytest.mark.asyncio
 async def test_fresh_non_active_agent_execution_rejects_process_checkpoint_without_starting(tmp_path):
-    agent = _create_agent("task-step-workspace-binding").use_workspace(tmp_path / "run")
+    agent = _create_agent("task-step-workspace-binding").use_task_workspace(tmp_path / "run")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
     execution = (
         agent.input("workspace-bound step")
         .output({"answer": (str, "answer", True)}, format="json")
@@ -8743,55 +8885,58 @@ async def test_fresh_non_active_agent_execution_rejects_process_checkpoint_witho
     )
 
     with pytest.raises(RuntimeError, match="non-active.*process|process.*non-active"):
-        await execution.async_record_workspace(
+        await execution.async_record_data(
             content={"stage": "requested-before-terminal"},
             summary="workspace-bound task-step record",
             checkpoint=True,
         )
 
     assert execution.status == "created"
-    assert execution.workspace_refs["observations"] == []
-    assert execution.workspace_refs["checkpoints"] == []
+    assert execution.record_refs["observations"] == []
+    assert execution.record_refs["checkpoints"] == []
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_workspace_purpose_defaults_to_process(tmp_path):
-    agent = _create_agent("task-step-workspace-process-purpose").use_workspace(tmp_path / "run")
+async def test_agent_execution_record_purpose_defaults_to_process(tmp_path):
+    agent = _create_agent("task-step-workspace-process-purpose").use_task_workspace(tmp_path / "run")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
     execution = agent.input("record process workspace data").create_execution().strategy("direct")
 
     with pytest.raises(RuntimeError, match="non-active.*process|process.*non-active"):
-        await execution.async_record_workspace(
+        await execution.async_record_data(
             content={"stage": "working"},
-            meta={"workspace_purpose": "audit"},
+            meta={"record_purpose": "audit"},
         )
 
     assert execution.status == "created"
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_workspace_purpose_deliverable_is_an_explicit_record_write(tmp_path):
-    agent = _create_agent("task-step-workspace-deliverable-purpose").use_workspace(tmp_path / "run")
+async def test_agent_execution_record_purpose_deliverable_is_an_explicit_record_write(tmp_path):
+    agent = _create_agent("task-step-workspace-deliverable-purpose").use_task_workspace(tmp_path / "run")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
     execution = agent.input("record deliverable workspace data").create_execution().strategy("direct")
-    assert execution.workspace is not None
-    workspace_record = await execution.async_record_workspace(
+    assert execution.record_store is not None
+    record_write = await execution.async_record_data(
         content={"report": "accepted body"},
         purpose="deliverable",
     )
 
-    assert workspace_record["record"]["meta"]["workspace_purpose"] == "deliverable"
-    assert await execution.workspace.get_data(workspace_record["record"]) == {"report": "accepted body"}
-    record_ref = workspace_record["record"]
+    assert record_write["record"]["meta"]["record_purpose"] == "deliverable"
+    assert await execution.record_store.get_data(record_write["record"]) == {"report": "accepted body"}
+    record_ref = record_write["record"]
     assert record_ref["source"]["type"] == "agent_execution"
     assert record_ref["meta"]["execution_id"] == execution.id
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_workspace_purpose_rejects_deliverable_checkpoint_role(tmp_path):
-    agent = _create_agent("task-step-workspace-purpose-role-conflict").use_workspace(tmp_path / "run")
+async def test_agent_execution_record_purpose_rejects_deliverable_checkpoint_role(tmp_path):
+    agent = _create_agent("task-step-workspace-purpose-role-conflict").use_task_workspace(tmp_path / "run")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
     execution = agent.input("reject conflated workspace roles").create_execution().strategy("direct")
 
     with pytest.raises(ValueError, match="deliverable.*checkpoint|checkpoint.*deliverable"):
-        await execution.async_record_workspace(
+        await execution.async_record_data(
             content={"report": "must not become recovery state"},
             purpose="deliverable",
             checkpoint=True,
@@ -8799,21 +8944,23 @@ async def test_agent_execution_workspace_purpose_rejects_deliverable_checkpoint_
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_workspace_purpose_audit_is_explicitly_requested_by_the_call(tmp_path):
-    agent = _create_agent("task-step-workspace-audit-purpose").use_workspace(tmp_path / "run")
+async def test_agent_execution_record_purpose_audit_is_explicitly_requested_by_the_call(tmp_path):
+    agent = _create_agent("task-step-workspace-audit-purpose").use_task_workspace(tmp_path / "run")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
     execution = agent.input("record explicitly requested audit data").create_execution().strategy("direct")
-    workspace_record = await execution.async_record_workspace(
+    record_write = await execution.async_record_data(
         content={"decision": "reviewed"},
         purpose="audit",
     )
 
-    assert workspace_record["record"]["meta"]["workspace_purpose"] == "audit"
-    assert await execution.workspace.get_data(workspace_record["record"]) == {"decision": "reviewed"}
+    assert record_write["record"]["meta"]["record_purpose"] == "audit"
+    assert await execution.record_store.get_data(record_write["record"]) == {"decision": "reviewed"}
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_post_terminal_workspace_records_are_purpose_governed(tmp_path):
-    agent = _create_agent("task-step-post-terminal-workspace-purpose").use_workspace(tmp_path / "run")
+async def test_agent_execution_post_terminal_record_writes_are_purpose_governed(tmp_path):
+    agent = _create_agent("task-step-post-terminal-workspace-purpose").use_task_workspace(tmp_path / "run")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
     execution = agent.input("Finish before post-terminal writes.").create_execution().strategy("direct")
 
     async def fake_route(**_kwargs: Any) -> tuple[str, dict[str, str]]:
@@ -8824,23 +8971,23 @@ async def test_agent_execution_post_terminal_workspace_records_are_purpose_gover
     assert await execution.async_get_data() == {"reply": "done"}
 
     with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
-        await execution.async_record_workspace(content={"late": "process"}, purpose="process")
+        await execution.async_record_data(content={"late": "process"}, purpose="process")
     with pytest.raises(RuntimeError, match="post-terminal.*recovery|recovery.*post-terminal"):
-        await execution.async_record_workspace(content={"late": "recovery"}, purpose="recovery")
+        await execution.async_record_data(content={"late": "recovery"}, purpose="recovery")
 
-    deliverable = await execution.async_record_workspace(
+    deliverable = await execution.async_record_data(
         content={"late": "deliverable"},
         purpose="deliverable",
     )
-    assert await execution.workspace.get_data(deliverable["record"]) == {"late": "deliverable"}
+    assert await execution.record_store.get_data(deliverable["record"]) == {"late": "deliverable"}
 
 
 @pytest.mark.asyncio
-async def test_agent_execution_workspace_record_uses_execution_scoped_lazy_default_workspace(tmp_path, monkeypatch):
+async def test_agent_execution_record_write_uses_execution_scoped_lazy_default_record_store(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     agent = _create_agent("task-step-workspace-missing")
-    workspace = agent.workspace
-    assert workspace._backend is None
+    record_store = agent.record_store
+    assert record_store._backend is None
     execution = (
         agent.input("missing workspace")
         .output({"answer": (str, "answer", True)}, format="json")
@@ -8848,16 +8995,19 @@ async def test_agent_execution_workspace_record_uses_execution_scoped_lazy_defau
     )
 
     with pytest.raises(RuntimeError, match="non-active.*process|process.*non-active"):
-        await execution.async_record_workspace()
+        await execution.async_record_data()
 
-    assert workspace._backend is None
-    assert execution.workspace._backend is None
-    assert execution.workspace.root == tmp_path.resolve()
-    assert not (execution.workspace.root / ".agently").exists()
+    assert record_store._backend is None
+    assert execution.record_store._backend is None
+    assert execution.task_workspace.root == (
+        tmp_path / ".agently" / "task_workspaces" / agent.id
+    ).resolve()
+    assert not (tmp_path / ".agently" / "records").exists()
 
 
-def test_agent_execution_record_workspace_sync_wrapper_rejects_non_active_process(tmp_path):
-    agent = _create_agent("task-step-workspace-sync").use_workspace(tmp_path / "run")
+def test_agent_execution_record_data_sync_wrapper_rejects_non_active_process(tmp_path):
+    agent = _create_agent("task-step-workspace-sync").use_task_workspace(tmp_path / "run")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
     execution = (
         agent.input("workspace-bound sync step")
         .output({"answer": (str, "answer", True)}, format="json")
@@ -8868,13 +9018,13 @@ def test_agent_execution_record_workspace_sync_wrapper_rejects_non_active_proces
     )
 
     with pytest.raises(RuntimeError, match="non-active.*process|process.*non-active"):
-        execution.record_workspace(content={"sync": True}, checkpoint=True)
+        execution.record_data(content={"sync": True}, checkpoint=True)
 
 
 @pytest.mark.asyncio
 async def test_real_direct_route_emits_one_canonical_agent_execution_terminal_event(tmp_path):
     events: list[Any] = []
-    agent = _create_agent("real-route-single-terminal-success").use_workspace(tmp_path / "success")
+    agent = _create_agent("real-route-single-terminal-success").use_task_workspace(tmp_path / "success")
     execution: Any = agent.input("Return one result.").create_execution().strategy("direct")
 
     async def capture(event: Any) -> None:
@@ -8904,7 +9054,7 @@ async def test_bounded_structured_agent_execution_reaches_request_terminal_with_
         .output(
             {
                 "answer": (str, "Completed support reply.", True),
-                "artifact_manifest": (dict, "Workspace artifact manifest."),
+                "artifact_manifest": (dict, "TaskWorkspace artifact manifest."),
                 "file_refs": ([str], "Produced file references."),
                 "evidence": ([dict], "Evidence records."),
                 "evidence_use": ([dict], "Claim-to-evidence bindings."),
@@ -8960,7 +9110,7 @@ async def test_bounded_structured_agent_execution_reaches_request_terminal_with_
 @pytest.mark.asyncio
 async def test_real_direct_route_failure_emits_one_bounded_canonical_terminal_event(tmp_path):
     events: list[Any] = []
-    agent = _create_failing_agent("real-route-single-terminal-failure").use_workspace(tmp_path / "failure")
+    agent = _create_failing_agent("real-route-single-terminal-failure").use_task_workspace(tmp_path / "failure")
     execution: Any = agent.input("Fail through the real requester.").create_execution().strategy("direct")
 
     async def capture(event: Any) -> None:
@@ -8985,7 +9135,8 @@ async def test_real_direct_route_failure_emits_one_bounded_canonical_terminal_ev
 
 @pytest.mark.asyncio
 async def test_active_agent_execution_process_and_recovery_writes_use_execution_lifecycle_id(tmp_path):
-    agent = _create_agent("active-workspace-write").use_workspace(tmp_path / "workspace")
+    agent = _create_agent("active-workspace-write").use_task_workspace(tmp_path / "task_workspace")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
     execution: Any = agent.input("Wait for active writes.").create_execution(
         lineage={"task_id": "different-task-id", "step_id": "active-write"}
     ).strategy("direct")
@@ -9002,11 +9153,11 @@ async def test_active_agent_execution_process_and_recovery_writes_use_execution_
     run = asyncio.create_task(execution.async_get_data())
     await started.wait()
     process_record = await asyncio.wait_for(
-        execution.async_record_workspace(purpose="process", content={"stage": "active"}),
+        execution.async_record_data(purpose="process", content={"stage": "active"}),
         timeout=1,
     )
     recovery_record = await asyncio.wait_for(
-        execution.async_record_workspace(
+        execution.async_record_data(
             purpose="recovery",
             content={"stage": "checkpoint"},
             checkpoint=True,
@@ -9017,11 +9168,11 @@ async def test_active_agent_execution_process_and_recovery_writes_use_execution_
 
     assert process_record["record"]["scope"]["execution_id"] == execution.id
     assert recovery_record["checkpoint"] is not None
-    history = await execution.workspace.checkpoint_history(execution.id, step_id="active-write")
+    history = await execution.record_store.checkpoint_history(execution.id, step_id="active-write")
     assert [item["id"] for item in history] == [recovery_record["checkpoint"]["id"]]
-    assert await execution.workspace.checkpoint_history("different-task-id") == []
+    assert await execution.record_store.checkpoint_history("different-task-id") == []
 
     finish.set()
     assert await run == {"answer": "done"}
     with pytest.raises(RuntimeError, match="post-terminal.*process|process.*post-terminal"):
-        await execution.async_record_workspace(purpose="process", content={"late": True})
+        await execution.async_record_data(purpose="process", content={"late": True})

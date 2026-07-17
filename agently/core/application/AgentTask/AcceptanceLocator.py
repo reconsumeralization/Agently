@@ -23,7 +23,7 @@ from typing import Any
 from agently.utils import DataFormatter
 
 
-ACCEPTANCE_LOCATOR_KIND = "workspace_artifact.acceptance_locator"
+ACCEPTANCE_LOCATOR_KIND = "task_workspace_artifact.acceptance_locator"
 
 _HEADING_RE = re.compile(r"^\s{0,3}(?P<marks>#{1,6})\s+(?P<title>.+?)\s*#*\s*$")
 _SPACE_RE = re.compile(r"\s+")
@@ -128,7 +128,7 @@ def acceptance_points_from_manifest(manifest: Mapping[str, Any] | None, *, max_p
     return DataFormatter.sanitize(points)
 
 
-def build_workspace_artifact_acceptance_locator_items(
+def build_task_workspace_artifact_acceptance_locator_items(
     *,
     path: str,
     source: str,
@@ -373,9 +373,9 @@ def _locator_item(
         "byte_end": locator.get("byte_end"),
         "content_fingerprint": str(locator.get("content_fingerprint") or ""),
         "source_evidence_ids": list(source_evidence_ids),
-        "source": "agent_task.workspace_artifact.acceptance_locator",
+        "source": "agent_task.task_workspace_artifact.acceptance_locator",
         "provenance": {
-            "source": "agent_task.workspace_artifact.acceptance_locator",
+            "source": "agent_task.task_workspace_artifact.acceptance_locator",
             "artifact_source": source,
             "path": path,
             "criterion_id": criterion_id,
@@ -391,13 +391,17 @@ def _locator_item(
     if status != "ok":
         item["diagnostics"] = [
             {
-                "code": "agent_task.workspace_artifact.acceptance_locator_not_found",
-                "message": "Acceptance locator anchor was not found in the trusted Workspace artifact.",
+                "code": "agent_task.task_workspace_artifact.acceptance_locator_not_found",
+                "message": "Acceptance locator anchor was not found in the trusted TaskWorkspace artifact.",
                 "expected_anchor": anchor,
                 "criterion": criterion,
             }
         ]
-    return DataFormatter.sanitize({key: value for key, value in item.items() if value not in ("", [], None)})
+    # Every value above is constructed from bounded scalar projections and
+    # string-id lists. Re-sanitizing each locator recursively is both redundant
+    # and pathologically expensive when a verification pass produces many
+    # acceptance points.
+    return {key: value for key, value in item.items() if value not in ("", [], None)}
 
 
 def _locate_acceptance_point(
@@ -689,7 +693,7 @@ def _fingerprint(value: str) -> str:
 
 
 def _locator_evidence_id(*, path: str, source: str, criterion_id: str, anchor: str, index: int) -> str:
-    raw = f"workspace_artifact_acceptance_locator:{source}:{path}:{criterion_id}:{anchor or index}"
+    raw = f"task_workspace_artifact_acceptance_locator:{source}:{path}:{criterion_id}:{anchor or index}"
     return "".join(ch if ch.isalnum() or ch in "._:-/" else "_" for ch in raw)[:240]
 
 
@@ -697,6 +701,6 @@ __all__ = [
     "ACCEPTANCE_LOCATOR_KIND",
     "acceptance_locator_view_from_ledger",
     "acceptance_points_from_manifest",
-    "build_workspace_artifact_acceptance_locator_items",
+    "build_task_workspace_artifact_acceptance_locator_items",
     "collect_acceptance_points",
 ]

@@ -38,8 +38,8 @@ class AgentTaskTaskBoardStrategyMixin(
 ):
     _latest_taskboard_acceptance_index: dict[str, Any] | None
 
-    def _set_taskboard_planned_workspace_deliverables(self, revision: Any) -> list[str]:
-        """Cache model-selected final paths after host-owned Workspace validation."""
+    def _set_taskboard_planned_task_workspace_deliverables(self, revision: Any) -> list[str]:
+        """Cache model-selected final paths after host-owned TaskWorkspace validation."""
 
         accepted: list[str] = []
         invalid: list[dict[str, Any]] = []
@@ -49,13 +49,13 @@ class AgentTaskTaskBoardStrategyMixin(
             if not isinstance(metadata, Mapping):
                 continue
             for raw_path in self._normalize_string_list(
-                metadata.get("final_workspace_deliverables")
+                metadata.get("final_task_workspace_deliverables")
             ):
                 path = Path(raw_path)
                 try:
                     if path.is_absolute() or ".." in path.parts:
-                        raise ValueError("TaskBoard final deliverable paths must stay Workspace-relative.")
-                    self.workspace.resolve_file_path(raw_path)
+                        raise ValueError("TaskBoard final deliverable paths must stay TaskWorkspace-relative.")
+                    self.task_workspace.resolve_file_path(raw_path)
                 except Exception as error:
                     invalid.append(
                         {
@@ -68,7 +68,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 normalized = path.as_posix()
                 if normalized not in accepted:
                     accepted.append(normalized)
-        self._taskboard_planned_workspace_deliverables = accepted
+        self._taskboard_planned_task_workspace_deliverables = accepted
         if invalid:
             self.diagnostics.setdefault("taskboard_invalid_final_deliverables", []).extend(invalid)
         return accepted
@@ -300,7 +300,7 @@ class AgentTaskTaskBoardStrategyMixin(
             await self._emit_progress(
                 iteration_index,
                 "context",
-                "TaskBoard: building a Workspace context pack for board planning.",
+                "TaskBoard: building a TaskContext package for board planning.",
             )
             await self._apply_guidance_boundary(iteration_index=iteration_index, boundary="taskboard_context")
             context_pack = await self._await_task_deadline(
@@ -308,6 +308,14 @@ class AgentTaskTaskBoardStrategyMixin(
                 stage="context",
             )
             await self._emit("agent_task.taskboard.context", context_pack)
+            required_skill_blocker = self._required_skill_context_blocker(context_pack)
+            if required_skill_blocker is not None:
+                frame["context_pack"] = context_pack
+                frame["iteration_result"] = await self._terminate_required_skill_context_blocked(
+                    iteration_index,
+                    required_skill_blocker,
+                )
+                return frame
             carried_revision = frame.get("taskboard_revision")
             if isinstance(carried_revision, Mapping):
                 resumed_taskboard_state = {
@@ -354,7 +362,7 @@ class AgentTaskTaskBoardStrategyMixin(
         if frame.get("iteration_result") is not None:
             return frame
         iteration_index = int(frame["iteration"])
-        context_pack = cast("WorkspaceContextPackage", frame["context_pack"])
+        context_pack = cast("TaskContextView", frame["context_pack"])
         resumed_taskboard_state = cast(
             Mapping[str, Any] | None,
             frame.get("resumed_taskboard_state"),
@@ -404,7 +412,7 @@ class AgentTaskTaskBoardStrategyMixin(
             )
             return frame
 
-        self._set_taskboard_planned_workspace_deliverables(board_revision)
+        self._set_taskboard_planned_task_workspace_deliverables(board_revision)
 
         if resumed_revision is None and self._taskboard_should_fallback_to_flat(board_revision):
             self.diagnostics.setdefault("execution_strategy_gates", []).append(
@@ -475,7 +483,7 @@ class AgentTaskTaskBoardStrategyMixin(
         if frame.get("iteration_result") is not None:
             return frame
         iteration_index = int(frame["iteration"])
-        context_pack = cast("WorkspaceContextPackage", frame["context_pack"])
+        context_pack = cast("TaskContextView", frame["context_pack"])
         resumed_taskboard_state = cast(
             Mapping[str, Any] | None,
             frame.get("resumed_taskboard_state"),
@@ -852,7 +860,7 @@ class AgentTaskTaskBoardStrategyMixin(
         previous_acceptance_index = frame.get("taskboard_acceptance_index")
         transition_result = await self._finalize_taskboard(
             TaskBoardRevision.from_value(frame["taskboard_revision"]),
-            context_pack=cast("WorkspaceContextPackage", frame["context_pack"]),
+            context_pack=cast("TaskContextView", frame["context_pack"]),
             previous_acceptance_index=(
                 previous_acceptance_index
                 if isinstance(previous_acceptance_index, Mapping)
@@ -891,11 +899,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 "taskboard_revision": DataFormatter.sanitize(result["revision"]),
                 "taskboard_tick_index": int(frame.get("taskboard_tick_index") or 0),
                 **(
-                    {
-                        "taskboard_acceptance_index": DataFormatter.sanitize(
-                            self._latest_taskboard_acceptance_index
-                        )
-                    }
+                    {"taskboard_acceptance_index": DataFormatter.sanitize(self._latest_taskboard_acceptance_index)}
                     if isinstance(self._latest_taskboard_acceptance_index, Mapping)
                     else {}
                 ),
@@ -903,7 +907,13 @@ class AgentTaskTaskBoardStrategyMixin(
         frame["iteration_result"] = dict(result)
         return frame
 
-    async def _request_taskboard_plan(self, context_pack: "WorkspaceContextPackage"):
+    async def _request_taskboard_plan(self, context_pack: "TaskContextView"):
+        del context_pack
+        request_context_pack, context_package = await self._read_task_context_view(
+            phase="planning",
+            consumer_id=f"agent_task:{self.id}:taskboard-planner",
+            intent=f"Plan the TaskBoard: {self.goal}",
+        )
         policy = resolve_task_board_planning_policy(
             self._taskboard_effort(),
             metadata={"execution_strategy": self.execution_strategy, "task_id": self.id},
@@ -917,7 +927,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 "goal": self.goal,
                 "success_criteria": self.success_criteria,
                 "task_context_contract": self._task_context_contract_for_model_prompt(),
-                "context_pack": DataFormatter.sanitize(context_pack),
+                "context_pack": DataFormatter.sanitize(request_context_pack),
                 "execution_prompt": self._execution_prompt_context(),
                 "planning_policy": policy.to_prompt_payload(),
                 "taskboard_harness_policy": {
@@ -935,7 +945,7 @@ class AgentTaskTaskBoardStrategyMixin(
                         "metadata_fields": [
                             "preflight_kind",
                             "requires_capability_ids",
-                            "requires_workspace_refs",
+                            "requires_task_workspace_refs",
                             "focus_item_ids",
                         ],
                     },
@@ -954,10 +964,10 @@ class AgentTaskTaskBoardStrategyMixin(
             "Use the planning_policy as vocabulary guidance for orchestration complexity, evidence depth, "
             "reflection density, and repair tendency. Do not create hard budgets, fixed card counts, "
             "or action allowlists from the effort profile. "
-            "When context_pack.skills_context_pack is present, its guidance and selected_resources are already "
-            "Manager-loaded Skill context. Use their content directly as task evidence; do not create readback "
+            "When context_pack.skill_projection is present, its guidance and selected_resources are already "
+            "TaskContext-disclosed Skill procedure. Apply it directly; do not treat it as business evidence or create readback "
             "cards or scoped_retrieval query groups for skills/... citations, and do not treat Skill citations "
-            "as Workspace file paths or local registry paths. "
+            "as TaskWorkspace file paths or local registry paths. "
             "Plan card objectives and done_when conditions around user-visible outcomes, not around one "
             "specific provider, endpoint, file format, or auxiliary guidance source unless the user explicitly "
             "requires that exact source or artifact. Mark replaceable evidence attempts, optional guidance, "
@@ -966,22 +976,22 @@ class AgentTaskTaskBoardStrategyMixin(
             "Use allowed_execution_shape='control' for synthesis, verification, finalization, or board-continuation "
             "decision cards that should be handled by one structured model request. Use allowed_execution_shape='readback' "
             "for cards whose only job is bounded cold artifact readback. Use an action-capable shape such as 'actions' "
-            "or 'auto' for cards that need external tools, Workspace operations, side effects, or mixed action/readback work. "
+            "or 'auto' for cards that need external tools, Context reads, side effects, or mixed action/readback work. "
             "For an actions card, include action_commands only when the exact offered Action ids and every required "
             "argument are already known now. Omit action_commands when any argument depends on a future card result; "
             "do not invent placeholders, copy opaque ids, or guess arguments. "
             "Treat action_commands as the exhaustive command batch for that card: completion follows after that exact "
-            "batch finishes. Never combine evidence-gathering action_commands with later synthesis or final Workspace "
-            "delivery in the same card. Put synthesis and final_workspace_deliverables on a dependent control card so "
+            "batch finishes. Never combine evidence-gathering action_commands with later synthesis or final TaskWorkspace "
+            "delivery in the same card. Put synthesis and final_task_workspace_deliverables on a dependent control card so "
             "the complete dependency evidence is available to its structured request. "
             "Use capability_evidence_requirements as hard completion evidence contracts. When an exact Action success "
             "is required, ensure the board has a card whose execution can produce that Action event; prose or an "
-            "ordinary Workspace readback does not satisfy it. "
+            "ordinary TaskWorkspace readback does not satisfy it. "
             "When readiness checks are necessary, express them as optional preflight metadata on cards "
-            "(preflight_kind, requires_capability_ids, requires_workspace_refs, focus_item_ids) and only for mounted "
-            "capabilities or existing Workspace refs; do not require universal git, browser, shell, or init-script checks. "
-            "When the submitted task explicitly requires an exact Workspace-relative final file path, put that exact "
-            "path in final_workspace_deliverables on the one card that owns final materialization. Do not put working "
+            "(preflight_kind, requires_capability_ids, requires_task_workspace_refs, focus_item_ids) and only for mounted "
+            "capabilities or existing TaskWorkspace refs; do not require universal git, browser, shell, or init-script checks. "
+            "When the submitted task explicitly requires an exact TaskWorkspace-relative final file path, put that exact "
+            "path in final_task_workspace_deliverables on the one card that owns final materialization. Do not put working "
             "paths, inferred filenames, source refs, or intermediate artifacts in this field. "
             "After evidence fan-in, do not create a serial chain of control-only cards for synthesis, finalization, "
             "review, and next-step decision when one control card can return the deliverable, sufficient/gaps, "
@@ -990,7 +1000,20 @@ class AgentTaskTaskBoardStrategyMixin(
             "decisions that cannot be verified in one request."
         )
         request.output(task_board_planning_output_schema(), format="json")
-        raw_plan = await self._await_task_request(request.async_get_data(), stage="taskboard_plan")
+        result_handle = request.get_result()
+        raw_plan = await self._await_task_request(
+            result_handle.async_get_data(),
+            stage="taskboard_plan",
+        )
+        self._record_task_context_consumption(
+            context_package,
+            request_id=result_handle.id,
+        )
+        await self._emit_required_skill_context_bound(
+            request_context_pack,
+            request_id=result_handle.id,
+            phase="work.plan",
+        )
         if not isinstance(raw_plan, Mapping):
             raise TypeError("TaskBoard planning request must return a mapping.")
         raw_plan = self._normalize_taskboard_initial_plan(raw_plan)
@@ -1032,7 +1055,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 prepared.append(raw_card)
                 continue
             card = dict(raw_card)
-            final_paths = self._normalize_string_list(card.get("final_workspace_deliverables"))
+            final_paths = self._normalize_string_list(card.get("final_task_workspace_deliverables"))
             commands_value = card.get("action_commands")
             commands = (
                 [dict(command) for command in commands_value if isinstance(command, Mapping)]
@@ -1082,7 +1105,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 action_id = str(command.get("action_id") or "").strip()
                 action_input = command.get("action_input")
                 if (
-                    self._taskboard_workspace_write_action_ids([action_id])
+                    self._taskboard_task_workspace_write_action_ids([action_id])
                     and isinstance(action_input, Mapping)
                     and str(action_input.get("path") or "").strip() in final_paths
                     and isinstance(action_input.get("content"), str)
@@ -1119,7 +1142,7 @@ class AgentTaskTaskBoardStrategyMixin(
             )
             source_card["allowed_execution_shape"] = "actions"
             source_card["action_commands"] = commands
-            source_card.pop("final_workspace_deliverables", None)
+            source_card.pop("final_task_workspace_deliverables", None)
             command_action_ids = self._normalize_string_list(
                 [command.get("action_id") for command in commands]
             )
@@ -1129,7 +1152,7 @@ class AgentTaskTaskBoardStrategyMixin(
             final_card = dict(card)
             final_card["id"] = final_id
             final_card["objective"] = (
-                "Synthesize the dependency evidence and materialize the declared final Workspace deliverable."
+                "Synthesize the dependency evidence and materialize the declared final TaskWorkspace deliverable."
             )
             final_card["action_block"] = final_card["objective"]
             final_card["depends_on"] = self._merge_string_lists(

@@ -33,6 +33,38 @@ class AVOID_COPY:
 
 EMPTY = AVOID_COPY()
 
+from .context import (
+    ContextBlock,
+    ContextBudget,
+    ContextCandidate,
+    ContextCompleteness,
+    ContextConsumer,
+    ContextConsumption,
+    ContextDiagnostic,
+    ContextOmission,
+    ContextPackage,
+    ContextPhase,
+    ContextReadIntent,
+    ContextRole,
+    ContextSourceBindingSnapshot,
+    TaskContextEntrySnapshot,
+    TaskContextSnapshot,
+)
+from .task_workspace import (
+    TaskWorkspaceDiagnostic,
+    TaskWorkspaceExportResult,
+    TaskWorkspaceFileInfo,
+    TaskWorkspaceFileOperation,
+    TaskWorkspaceFileRead,
+    TaskWorkspaceFileRef,
+    TaskWorkspaceFileWrite,
+    TaskWorkspaceReadResult,
+    TaskWorkspaceRetentionDiagnostic,
+    TaskWorkspaceRetentionResult,
+    TaskWorkspaceTerminalStatus,
+    TaskWorkspaceWriteResult,
+)
+
 from .serializable import SerializableData, SerializableMapping, SerializableValue
 from .prompt import (
     ChatMessage,
@@ -178,7 +210,6 @@ from .execution_plan import (
     PreferredExecutionShape,
     ReplanSignal,
     ReplanStatus,
-    SkillActivation,
     TaskFrame,
 )
 
@@ -224,57 +255,27 @@ from .policy_approval import (
 )
 
 from .skill import (
-    ExecutionStrategy,
-    SkillContextPack,
-    SkillContextPackIncludeMode,
-    SkillContextPackIntent,
-    SkillContextPackResource,
-    SkillContextPackSkill,
-    SkillCapabilityNeed,
-    SkillCard,
-    SkillContract,
-    SkillDecisionCard,
-    SkillExecutionDict,
-    SkillExecutionPlan,
-    SkillExecutionStatus,
     SkillMode,
     SkillRuntimeStreamHandler,
     SkillRuntimeStreamItem,
-    SkillsPackRecord,
-    SkillPlanRejection,
-    SkillPlanSelection,
 )
 
-from .workspace import (
-    WorkspaceBackendCapabilities,
-    WorkspaceMode,
-    WorkspaceContentSegment,
-    WorkspaceContextItem,
-    WorkspaceContextOmission,
-    WorkspaceContextPackage,
-    WorkspaceRetrievalItem,
-    WorkspaceRetrievalMethod,
-    WorkspaceRetrievalOmission,
-    WorkspaceRetrievalPackage,
-    WorkspaceRetrievalSelection,
-    WorkspaceRetrievalSource,
-    WorkspaceFileDiagnostic,
-    WorkspaceFileExportResult,
-    WorkspaceFileInfo,
-    WorkspaceFileOperation,
-    WorkspaceFileReadResult,
-    WorkspaceFileRef,
-    WorkspaceFileWriteResult,
-    WorkspaceLeaseRef,
-    WorkspaceLinkRef,
-    WorkspaceContextPlan,
-    WorkspaceRecordRef,
-    WorkspaceReferenceEnvelope,
-    WorkspaceRetentionDiagnostic,
-    WorkspaceRetentionResult,
-    WorkspaceRetentionTerminalStatus,
-    WorkspaceRuntimeEventRecord,
-    WorkspaceSearchResult,
+from .record_store import (
+    RecordStoreCapabilities,
+    RecordStoreMode,
+    RecordContentSegment,
+    RecordRetrievalItem,
+    RecordRetrievalMethod,
+    RecordRetrievalOmission,
+    RecordRetrievalPackage,
+    RecordRetrievalSelection,
+    RecordRetrievalSource,
+    ExecutionLease,
+    RecordLink,
+    RecordRef,
+    RecordReference,
+    StoredRuntimeEvent,
+    RecordSearchResult,
 )
 
 from .agent_execution import (
@@ -286,9 +287,9 @@ from .agent_execution import (
     AgentExecutionMeta,
     AgentExecutionStatus,
     AgentExecutionStreamMeta,
-    AgentExecutionWorkspacePurpose,
-    AgentExecutionWorkspaceRecord,
-    AgentExecutionWorkspaceRefs,
+    AgentExecutionRecordPurpose,
+    AgentExecutionRecordWrite,
+    AgentExecutionRecordRefs,
     CapabilityKind,
     CapabilityRoute,
     EvidenceRequirement,

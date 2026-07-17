@@ -1,188 +1,75 @@
 ---
 title: 执行层选择
-description: 从业务问题形态选择 ModelRequest、AgentExecution、TaskDAG 和 TriggerFlow。
-keywords: Agently, AgentExecution, ModelRequest, TaskDAG, TriggerFlow, 执行层, DAG, 编排
+description: 选择 ModelRequest、AgentExecution、AgentTask、TaskDAG、Blocks、TriggerFlow 与上下文/存储 owner。
+keywords: Agently, AgentExecution, AgentTask, TaskContext, TaskDAG, Blocks, TriggerFlow
 ---
 
 # 执行层选择
 
-Agently 提供多层执行能力，是因为业务问题需要的 planning、state、evidence 和
-定制自由度并不一样。
-
-默认用户侧主线是 `AgentExecution`：当产品需要一次带 prompt、Actions、Skills、
-goals、effort、result、stream 和 metadata 的 Agent run 时，从这里开始。只有当
-问题需要更低层的合同，才向下拆。
-
-## 层次图
+一次 Agent run 默认从 `AgentExecution` 开始；只有业务问题需要某个更底层 owner
+的 contract 时，才下沉到该层。
 
 ```mermaid
 flowchart TD
-    business["业务问题"]
-    model_request["ModelRequest\n单次模型请求"]
-    agent_execution["AgentExecution\n统一 Agent run"]
-    task_dag["TaskDAG / DAG substrate\nplanner, validator, resolver, executor, handlers"]
-    blocks["Blocks\nExecutionPlan, PlanBlocks, ExecutionBlocks"]
-    triggerflow["TriggerFlow\nworkflow execution substrate"]
-    workspace["Workspace / Evidence\nrecords, checkpoints, context packs"]
+    App["业务应用"]
+    AE["AgentExecution\nrun, result, stream, meta"]
+    MR["ModelRequest\n一次语义请求"]
+    AT["AgentTask\ngoal, plan, verify, replan"]
+    DAG["TaskDAG\n已校验的提交式 DAG"]
+    BL["Blocks\n已校验 execution blocks"]
+    TF["TriggerFlow\nworkflow lifecycle"]
+    TC["TaskContext + ContextReader\n渐进式披露"]
+    TW["TaskWorkspace\n任务文件"]
+    RS["RecordStore\nrecords 与 durability"]
 
-    business -->|"单个答案"| model_request
-    business -->|"Agent run、工具、Skills、目标、stream"| agent_execution
-    business -->|"提交式依赖图"| task_dag
-    agent_execution -->|"direct route"| model_request
-    agent_execution -->|"bounded task frame"| blocks
-    task_dag -->|"默认 async_run"| triggerflow
-    task_dag -.->|"显式 compile_blocks / async_run_blocks"| blocks
-    blocks -->|"compiled execution block graph"| triggerflow
-    agent_execution -->|"任务证据"| workspace
-    task_dag -.->|"snapshot evidence handoff"| agent_execution
-    triggerflow -->|"runtime events、state、pause/resume"| task_dag
+    App --> AE
+    AE --> MR
+    AE --> AT
+    DAG --> TF
+    DAG -. "显式 Blocks carrier" .-> BL
+    AT --> BL
+    BL --> TF
+    AE --> TC
+    AT --> TC
+    TC --> TW
+    TC --> RS
+    TF --> RS
 ```
 
-边的合同含义：
+## 所有者
 
-- `ModelRequest` 负责一次标准化模型调用和结构化输出。
-- `AgentExecution` 负责用户侧 Agent run，以及 result/stream/meta facade。
-- `TaskDAG` 负责图形任务逻辑：Planner、Validator、Resolver、Executor、handlers、
-  dependency results、semantic outputs 和 runtime placeholders。
-- `TaskDAG` 是独立的提交式 DAG API。`AgentExecution` 可以把 TaskDAG snapshot
-  当作 evidence 消费，但不会把 TaskDAG / DynamicTask 选成 route 或 bounded-step
-  strategy。
-- `Blocks` 负责把有边界的 ExecutionPlan / PlanBlock instances 降低为
-  TriggerFlow-backed ExecutionBlocks。对 TaskDAG，Blocks 是显式 opt-in carrier；
-  只有调用 `compile_blocks(...)` / `async_run_blocks(...)`、需要
-  `ExecutionBlockGraph` 与 evidence/result mapping 时才介入。普通
-  `TaskDAGExecutor.async_run(...)` 直接进入 TriggerFlow substrate。
-- `TriggerFlow` 负责更底层的 workflow substrate：execution state、signals、
-  concurrency、stream、pause/resume、persistence 和 lifecycle。
-- `Workspace` 保存 evidence 和 context；它不负责判断任务是否完成。
-
-`DynamicTask` 是当前覆盖 DAG substrate 的兼容与便利 facade。它仍可使用，但架构
-owner 是 `TaskDAG`。
+| 所有者 | 用于 | 不用于 |
+|---|---|---|
+| `ModelRequest` | 精确 prompt、结构化输出、settings、一次 response | workflow state 或长任务 lifecycle |
+| `AgentExecution` | 一次公开 Agent run、candidate binding、result/stream/meta | custom DAG validation 或持久 workflow topology |
+| `AgentTask` | 一个 goal-driven task 的 plan、bounded execution、evidence、verification、repair/replan | developer-owned 稳定 workflow topology |
+| `TaskDAG` | 模型/应用提交的 acyclic plan data、validation、resolver、dependency results | 面向人的 acceptance 或 pause/resume policy |
+| `Blocks` | 已校验 block lowering、signals、result/evidence mapping | Skill 安装、capability grant、storage |
+| `TriggerFlow` | branch、concurrency、wait、resume、runtime stream、save/load | prompt 或 DAG task semantics |
+| `TaskContext` / `ContextReader` | source binding 与 consumer/phase 信息交付 | source persistence 或副作用 |
+| `TaskWorkspace` | 任务文件边界、mutation/readback、file refs | records、memory、snapshots |
+| `RecordStore` | records、检索索引、links、checkpoints、snapshots/events | 任务文件或语义决策 |
 
 ## 按问题形态选择
 
-| 业务形态 | 从哪里开始 | 获得的框架能力 |
-|---|---|---|
-| 一个答案、抽取、分类或改写 | `ModelRequest` 或 `agent.input(...).output(...).start()` | Prompt 渲染、provider 抽象、结构化输出、streaming |
-| 一次可能用 Actions 或 Skills 的 Agent run | `AgentExecution` / `agent.start()` | 路由选择、Action/Skill evidence、result/stream/meta facade |
-| 一个必须验证完成情况的复杂业务任务 | `agent.goal(...).effort(...).start()` 或 `agent.create_task(...)` | Goal planning、bounded steps、Workspace evidence、model verifier、host guards、replan |
-| 一个提交式或模型生成的依赖图 | `TaskDAG` 模块，或 DynamicTask facade | DAG planning、validation、handler 解析、dependency result collection、semantic outputs |
-| 一个由应用代码拥有的稳定 workflow topology | `TriggerFlow` | 分支、并发、信号、pause/resume、持久化、runtime stream |
-| 产品团队需要最大 DAG 定制自由度，同时仍想要 Agent result surface | 定制 `TaskDAG` 模块，再把 snapshot 作为 evidence 传给 `AgentExecution` | 自定义 Planner/Validator/Resolver/Executor，同时保留 AgentExecution result、stream、meta 和 evidence path |
+| 业务形态 | 起点 |
+|---|---|
+| 一次抽取、分类、改写或回答 | `ModelRequest` |
+| 一次使用 Actions 或 Skills 的 Agent 请求 | `AgentExecution` |
+| 必须验证完成情况的单个业务目标 | `agent.create_task(...)` / AgentTask strategy |
+| 应用或模型提交的 DAG data | `TaskDAG` / DynamicTask facade |
+| 源码中由开发者拥有的稳定 workflow topology | `TriggerFlow` |
+| 从多个已知 source 获取有界相关信息 | `TaskContext` + consumer-bound `ContextReader` |
+| 读取或修改已有项目文件 | `TaskWorkspace` |
+| 持久 memory、evidence records 或 recovery | `RecordStore` |
 
-## 介入点
+Skills 不增加新执行层。`SkillLibrary` 拥有安装 revision；AgentExecution 把它们
+绑定到 TaskContext；实际工作由所选执行 owner 完成。
 
-| 层 | 适合控制 | 不适合承担 |
-|---|---|---|
-| `ModelRequest` | 精确 prompt、output schema、模型设置和一次响应 | 工具路由、长任务完成、workflow state |
-| `AgentExecution` | 用户侧 Agent run、路线诊断、stream/meta/result、execution-local candidates | 自定义图校验细节或 workflow 持久化细节 |
-| `TaskDAG` | 图 schema、planner contract、validator rules、handlers、dependency data、semantic outputs | 面向人的任务验收或完整 workflow lifecycle |
-| `Blocks` | ExecutionPlan lowering、PlanBlock/ExecutionBlock contracts、标准 block signals、result/evidence mapping | 任务生命周期 owner、capability grant 或原始 TriggerFlow dispatch |
-| `TriggerFlow` | Runtime state、signals、joins、concurrency、pause/resume、save/load | 模型 prompt/output 行为或 DAG task 语义 |
-| `Workspace` | Evidence records、checkpoints、context packs、后续步骤 recall | Planning、verification 或自动记忆决策 |
+TaskDAG 是 data，执行前必须 validate/resolve。开发者拥有的稳定 topology 可以
+直接使用 TriggerFlow。TaskDAG 默认 executor 使用 TriggerFlow；只有需要 block
+lifecycle evidence 时才显式 `compile_blocks(...)`。
 
-## 定制 DAG 再回写 AgentExecution
-
-当团队需要高自由度时，可以把 DAG 路径拆成独立模块，逐层定制，独立运行后再把
-snapshot 作为 evidence 传给后续 `AgentExecution`。
-
-```python
-from agently.builtins.plugins import AgentlyTaskDAGPlanner
-from agently.core import TaskDAGExecutor, TaskDAGResolver, TaskDAGValidator
-
-handlers = {
-    "fetch_handler": fetch_handler,
-    "analyze_handler": analyze_handler,
-    "render_handler": render_handler,
-}
-
-resolver = TaskDAGResolver(handlers)
-validator = TaskDAGValidator(resolver)
-planner = AgentlyTaskDAGPlanner(validator=validator)
-
-graph = await planner.async_plan(planner_agent, {"target": goal})
-validator.validate(graph, strict_schema_version=True)
-
-snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(
-    graph,
-    graph_input={"goal": goal},
-)
-
-execution = agent.create_execution()
-execution.input({"goal": goal, "dag_snapshot": snapshot})
-result = await execution.async_start()
-```
-
-应用已经直接持有 executor 时，同样把 snapshot 当作下一次 Agent step 的 evidence：
-
-```python
-snapshot = await TaskDAGExecutor(resolver, validator=validator).async_run(
-    graph,
-    graph_input={"goal": goal},
-)
-
-execution = agent.create_execution()
-execution.input({"goal": goal, "dag_snapshot": snapshot})
-data = await execution.async_start()
-await execution.async_record_workspace(
-    collection="observations",
-    kind="dag_execution_evidence",
-    content={"dag_snapshot": snapshot, "agent_result": data},
-    checkpoint=True,
-)
-```
-
-两种写法里，DAG 结果都只是 evidence。它本身不等于业务目标完成。启用 Goal
-Pursuit 时，最终完成仍由 AgentTask 的 model verifier 加 host guard 决定。
-
-## 运行流
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant AE as AgentExecution
-    participant DAG as TaskDAG
-    participant Blocks as Blocks
-    participant TF as TriggerFlow
-    participant WS as Workspace
-    participant V as Verifier/Guard
-
-    App->>AE: 配置 prompt, skills, actions, goal, effort
-    opt 独立 DAG evidence
-        App->>DAG: 运行提交式或定制 DAG
-        DAG->>Blocks: validated DAG segment
-        Blocks->>TF: ExecutionBlockGraph
-        TF-->>Blocks: block signals, dependency results, snapshots
-        Blocks-->>DAG: DAG snapshot and result
-        DAG-->>AE: 可选 snapshot evidence
-    end
-    AE->>Blocks: bounded ExecutionPlan segment
-    Blocks->>TF: ExecutionBlockGraph
-    TF-->>Blocks: block signals, dependency results, snapshots
-    Blocks-->>AE: EvidenceEnvelope and result views
-    AE->>WS: 可选 evidence/checkpoint records
-    AE->>V: Goal Pursuit 激活时验证目标完成
-    V-->>AE: accepted, blocked, replan, or partial
-    AE-->>App: AgentExecutionResult / stream / meta
-```
-
-## 实用规则
-
-- 除非问题明显需要更低层 owner，否则从 `AgentExecution` 开始。
-- 只有一次模型调用时，用 `ModelRequest`。
-- 当一次 Agent run 应该保持在 direct `model_request`/ActionLoop route 上时，用
-  `AgentExecution.strategy("direct")`。只有 host 明确想要 AgentTask 时，才使用
-  `.strategy("flat")` 或 `.strategy("taskboard")`。默认 `.strategy("auto")` 会让
-  普通 prompt/action run 保持 direct；只有 goals、success criteria、task options
-  或 Skill selectors 等结构化 task signals 才进入 AgentTask。
-- 当计划本身是数据，需要校验、依赖执行、handler 和结果收集时，用 `TaskDAG`。
-- bounded AgentTask step、Skill activation，或 TaskDAG 调用方显式选择 Blocks
-  carrier 获取 `ExecutionBlockGraph` 与 evidence/result mapping 时，看
-  [Blocks 生命周期](blocks-lifecycle.md)。
-- 当应用拥有稳定 workflow topology、等待、join、并发或 durable execution 时，用
-  `TriggerFlow`。
-- 用 `Workspace` 持久化 evidence 和 context，不要让它决定下一步做什么。
-- `DynamicTask` 保持 facade / compatibility entrypoint；不要把它写成产品侧第二套
-  task lifecycle。
-- Goal Pursuit 激活时，DAG 完成只代表 evidence 可用。最终验收仍需要 model
-  verifier 加 host guard。
+`context_read` 只接收调用方绑定的 ContextReader。文件操作使用 TaskWorkspace
+Actions，持久化使用 RecordStore ports。一个 owner 的 readback 不能被当作另一个
+owner 的 required capability 已执行的证据。

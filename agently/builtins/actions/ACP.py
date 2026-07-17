@@ -596,7 +596,7 @@ class ACP:
                 "agents": list(self._agents or []),
             },
             "policy": {
-                "workspace_roots": [str(self.root)],
+                "task_workspace_roots": [str(self.root)],
                 "timeout_seconds": float(self.timeout_seconds or 0),
             },
             "meta": {"component": "builtins.actions.ACP", "session_scope": self.session_scope},

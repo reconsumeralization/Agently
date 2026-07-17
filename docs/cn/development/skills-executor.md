@@ -1,569 +1,120 @@
 ---
-title: Skills Compatibility
-description: 通过 Agent Skills API 使用标准 SKILL.md Skill，SkillsExecutor 仅作为兼容 facade 保留。
-keywords: Agently, Skills Manager, Skills Executor, SKILL.md, skills, run_skills_task, use_skills
+title: Skills 与 AgentExecution
+description: SkillLibrary、TaskContext 渐进式披露和轻量 SkillsExecutor 兼容 facade。
+keywords: Agently, Skills, SkillLibrary, AgentExecution, TaskContext, SkillsExecutor
 ---
 
-# Skills Compatibility
+# Skills 与 AgentExecution
 
-> 语言： [English](../../en/development/skills-executor.md) · **中文**
+真实世界的 Skill 是带 revision 的知识与工作方法包。`SKILL.md` 提供指导，索引资源
+可以提供 references、examples、assets 或 scripts。Skill 不是执行 route、策略
+引擎、Action 授权或 workflow。
 
-`SkillsManager` 是 Agently 内部的 Skill 发现、渐进式上下文披露、能力需求发现、
-受 policy 控制的 Action candidate 绑定 owner。它不是新的公开推荐 API。用户代码
-优先使用 `agent.use_skills(...)`、AgentExecution 的 Skills 选择，以及需要兼容
-执行入口时的 `agent.run_skills_task(...)`。Context-pack API 是高级 custom
-planner/TaskDAG 集成接口，不是普通用户路径。`Agently.skills_executor` 保留为
-legacy registry、context pack、resolver 和 effort strategy 兼容 facade，底层委托给
-内部 manager。
+## 所有权
 
-Agently Skills 遵循标准 Skills 目录：`SKILL.md` 是能力定义，`scripts/`、
-`references/`、`assets/` 是可选资源目录。Agently 不定义额外的 Skill
-作者清单。
+| 层 | 所有者 |
+|---|---|
+| 安装、解析、revision、resolve、list、pack membership | `SkillLibrary` |
+| 任务级 selector 意图、精确 revision binding、required/model-decision mode | `AgentExecution` |
+| guidance/resources 渐进式披露 | `TaskContext` + `SkillContextSource` + `ContextReader` |
+| ModelRequest、AgentTask、TaskDAG、workflow、副作用 | 原有执行所有者 |
+| 已发布的管理形态兼容调用 | `Agently.skills_executor` 轻量 facade |
 
-```markdown
----
-name: release-review
-description: Use when checking release readiness and rollback risk.
----
+`SkillLibrary` 安装不可变、content-addressed revision。execution 绑定精确
+revision，不绑定可变目录 alias。Skill description 可以交给语义模型 selector；
+本地代码不得用关键词表或正则从自由文本任务中选择 Skill。
 
-# Release Review
-
-Follow this checklist before recommending a release or rollback...
-```
-
-## 声明和安装
-
-正常 Agent 运行时，优先在 Agent 上用 `use_skills(...)` 声明 Skills。
-Skills runtime 会像 Action candidate 一样先记录 source，在规划时轻量发现
-`SKILL.md`，只有 planner 选中或 required 时才完整安装 Skill 和资源。
+## 推荐 Agent API
 
 ```python
-agent.use_skills(
-    [{"source": "anthropics/skills", "subpath": "skills/docx"}],
-    mode="required",
-)
-```
-
-`install_skills_pack(...)` 保留为高级池管理入口：预热、离线镜像、确定性 CI
-fixture、显式 registry 维护。`install_skills(...)` 仍用于单个本地 Skill
-目录的作者开发和 smoke test。
-
-自己编写本地 Skill 时，也应放在完全独立、符合标准结构的目录中。业务代码不要
-拼 inline `SKILL.md` 字符串，也不要使用根目录 `skill.yaml` 这类 YAML 清单；
-应用层只把目录路径交给兼容 registry facade：
-
-```text
-my-skill/
-|-- SKILL.md
-|-- scripts/
-|-- references/
-`-- assets/
-```
-
-```python
-report = Agently.skills_executor.install_skills_pack(
-    "anthropics/skills",
-    fetch=True,
-    subpath="skills/docx",
-    trust_level="remote",
-)
-```
-
-远程安装会把仓库 clone 到 Agently 的本地 registry source cache，再把标准
-`SKILL.md` 包复制进 registry，并记录 source URL、ref、解析后的 commit、
-subpath、trust level 和 checksums。安装远程 Skill 不会执行包内 scripts。
-
-`install_skills(...)` 会把标准本地 Skill 目录复制到本地 registry。安装后的
-Skill 根目录仍然直接包含 `SKILL.md`。Agently 只在安装副本内添加 `.agently/`
-管理目录。
-
-```text
-.agently/skills/release-review/
-|-- SKILL.md
-|-- scripts/
-|-- references/
-|-- assets/
-`-- .agently/
-    |-- install.json
-    |-- decision_card.json
-    |-- resource_index.json
-    `-- checksums.json
-```
-
-`.agently/` 文件用于加速路由、检查和资源索引，不是 Skill 能力定义。派生文件缺失或过期时，Agently 会重建，或直接回退读取 `SKILL.md`。
-
-`skill_id` 由 `SKILL.md` frontmatter 里的 `name` 派生：小写、空白变成
-`-`，只保留 `a-z0-9._-`。后续调用建议使用安装返回的
-`contract["skill_id"]`。
-
-```python
-contract = Agently.skills_executor.install_skills("./release-review")
-agent.use_skills([contract["skill_id"]], mode="model_decision")
-```
-
-根目录下的 `skill.yaml`、`skill.json`、`agently.skill.yaml` 等非标准清单会被拒绝。`scripts/`、`references/`、`assets/` 里的同名文件只作为普通资源处理。
-
-## 选择
-
-用 `use_skills(...)` 将已安装或远程 Skills 暴露为 route candidates。模型先看到简短 decision cards；只有 Skills route 真正执行时才 materialize 完整 guidance 和资源。
-
-```python
-agent = Agently.create_agent("ops-assistant")
-agent.use_skills(["release-review"], mode="model_decision")
-agent.use_skills([{"source": "anthropics/skills", "subpath": "skills/docx"}], mode="required")
-```
-
-需要检查将会使用哪些 Skills 时，调用 `resolve_skills_plan(...)`。Required
-Skills 保持调用方顺序；多个可选候选由模型排序。
-
-对 AgentTask execution 来说，`mode="required"` 同时也是可用性契约。Agently
-会在业务规划开始前解析远程 source selector，并 materialize 已选择的 Skill；任务
-上下文包和能力约束使用安装后的规范 `skill_id`。如果发现、安装或安装后检查失败，
-execution 会在任何业务模型工作或产物生成之前进入 blocked。`auto_allow=True` 只
-授权匹配 Skill 请求的能力；它不代表 Skill 已可用，也不会豁免安装失败。
-
-```python
-plan = await agent.async_resolve_skills_plan(
-    "Should this release be blocked?",
-    skills=["release-review", "incident-triage"],
-    mode="model_decision",
-)
-```
-
-## 执行
-
-当任务必须通过 selected Skills 回答时，用 `run_skills_task(...)`。它是 Blocks
-生命周期上的兼容 facade：内部会构造包含 `skill_activation` PlanBlock 和具体策略
-PlanBlock 的 ExecutionPlan，再降低为 TriggerFlow-backed ExecutionBlockGraph。默认
-`single_shot` route label 会降低为 `model_request` block；`runtime_chain`、`staged`
-和 `react` 等多步 label 会降低为可信 `flow_segment` block。Skill 不能通过
-Agently 私有 frontmatter 声明执行策略。
-
-当可用 action 存在时，`react` 会把 tool/action 规划和执行委托给 Agent
-ActionRuntime，因此 kwargs schema、MCP tools、policy、approval、concurrency 和
-ExecutionResource 处理仍由 Action 层拥有，而不是由 Skills 重新实现。Skill
-activation evidence 只证明 guidance 和资源上下文已加载；side-effect evidence
-必须来自下游 Actions、Workspace operations、waits 或其他具体 execution blocks。
-
-```python
-execution = await agent.async_run_skills_task(
-    "Review this release and give a go/no-go recommendation.",
-    skills=["release-review"],
-    mode="required",
+contract = Agently.skills_executor.install_skills(
+    "./skills/release-review",
+    trust_level="local",
+    update=True,
 )
 
-print(execution.status)
-print(execution.output)
-print(execution.skill_logs)
-print(execution.close_snapshot["blocks"]["evidence"])
-```
-
-`output=` 使用和 `.output(...)` 相同的 schema grammar；它就是本次
-Skill run 的结构化输出契约，描述 Skill 执行要交付的业务结果形状。
-`output_format=` 才控制承载格式，例如 JSON、flat Markdown、hybrid、XML-like field envelope、YAML literal 或自动选择。
-旧的 `semantic_outputs=` 参数仅作为 Skills 执行的兼容别名保留，并会触发
-deprecation warning。
-
-```python
-execution = await agent.async_run_skills_task(
-    "Write a release decision.",
-    skills=["release-review"],
-    mode="required",
-    output={"decision": (str, "go or no-go", True)},
-)
-```
-
-显式 Skills 执行也支持 Agent prompt 方法。Skill run 会消费当前 prompt snapshot，
-把渲染后的 prompt 文本作为 task，并把 `output` / `output_format` slot 映射为
-`output` / `output_format`：
-
-```python
-execution = await (
+execution = (
     agent
-    .info({"release": "4.1.2.x"})
-    .input("Write a release decision.")
-    .output({"decision": (str, "go or no-go", True)}, format="json")
-    .async_run_skills_task(skills=["release-review"], mode="required")
-)
-```
-
-`set_agent_prompt(...)` 写入的长期 prompt 会被继承并保留给后续 execution；
-quick prompt 写入的本轮 execution prompt 会被冻结到这次 Skill run，然后从
-pending execution prompt 清理。显式传入的 `output=` 和
-`output_format=` 参数优先于 prompt 推导值。
-
-`output_format=` 用于选择这次模型响应的输出控制方式。普通 Skill 回答保持默认
-`"auto"`。Auto 是结构规则：扁平且全是字符串字段时选择
-`"xml_field"`；顶层 dict 同时包含字符串字段和任意非字符串 typed 字段时选择
-`"hybrid"`；全控制字段、全复杂结构和非 dict 输出选择 `"json"`。紧凑全 typed
-机器可读结果或下游 JSON-only 契约应显式用 `"json"`。扁平纯字符串字段
-适合 XML-like field boundary 时可显式用 `"xml_field"`；长文本混合 typed
-字段时可显式用 `"hybrid"`；只有明确需要 YAML target document 时才显式用
-`"yaml_literal"`。
-
-```python
-execution = await agent.async_run_skills_task(
-    "Draft a release announcement as HTML.",
-    skills=["release-review"],
-    mode="required",
-    output={"html": (str, "render-ready HTML", True)},
-    output_format="xml_field",
-)
-```
-
-固定必填字段优先写在 schema 元组第三项：
-
-```python
-output = {
-    "rules": [
-        {
-            "rule_id": (str, "Stable rule id", True),
-            "passed": (bool, "Whether this rule passed", True),
-            "evidence": (str, "Concise evidence; empty string is allowed", False),
-        }
-    ],
-    "passes": (bool, "Overall pass/fail", True),
-}
-```
-
-运行时 `ensure_keys=` 只用于条件路径或运行时才决定的路径。`max_retries=3`
-表示解析失败、必填 key 缺失、严格输出校验失败或自定义 validator 失败时，Agently
-最多还会发起三次额外模型尝试。普通遗漏、markdown header 错误、auto format
-降级到 JSON 通常能靠重试恢复；但模型持续回显占位符脚手架、用散文填布尔/数字字段、生成畸形嵌套数组、长 prompt 被截断，或需要填很多
-`rule_results[*].evidence` 这类 wildcard 路径时，三次重试后仍可能失败。多规则
-model judge 建议显式 `output_format="json"`，schema 尽量浅，规则过多时拆成多次
-judge。
-
-直接执行 Skills 时，`stream_handler` 会收到 runtime items：
-
-- `skills.prompt_only.start`
-- `skills.model_stream`，包含 `path`、`value`、`delta`、`is_complete`
-- `skills.prompt_only.done`
-- `effort="normal"` 或 `effort="max"` 选中内置 planner chain 时，会收到
-  `skills.runtime_chain.*`
-- 选中多步兼容 label 时，还会收到 `skills.staged.*` 和 `skills.react.*`
-- 内置 `staged` 或 `react` 策略因 step budget 耗尽而停止或截断工作时，会收到
-  `skills.execution.budget_exhausted`
-- host cancellation 传入 Skills runtime，或框架执行在正常 Skills result
-  返回前失败时，会收到 `skills.execution.aborted`
-
-Blocks lowering evidence、ExecutionBlockGraph、ResultAdapter output 和
-TriggerFlow close snapshot 可从 `execution.close_snapshot["blocks"]` 读取。
-Abort diagnostics 会包含 strategy、effort、elapsed seconds，以及可用时的最后一个
-active runtime event。Wall-clock 和 no-progress 限制仍属于 host policy；Skills
-只在 runtime 观察到取消或失败后记录诊断。
-
-直接 Skills `stream_handler` 回调可用 `agently.types.data` 里的
-`SkillRuntimeStreamHandler` 标注。如果你在自定义 Skills effort strategy 里调用
-`context.async_request_model(..., stream_handler=...)`，这个模型流回调收到的是
-`StreamingData`，可用 `ModelStreamingHandler` 标注。两个类型都可以从根入口导入：
-`from agently import StreamingData, ModelStreamingHandler`。
-
-`effort="fast"` 使用低开销 single-shot 兼容 label。`effort="normal"` 固定走完整
-preflight -> research -> plan -> execute -> verify -> reflect -> finalize
-兼容链路。`effort="max"` 使用同一链路，但提高 retry 预算，并作为后续 Dynamic Task
-升级的挂接点。每个 label 都会在 close snapshot 中留下 Blocks plan/evidence
-metadata。
-
-需要覆盖内置档位时，可以用 `agent.set_settings("effort_presets", {...})` 把调用方
-看到的质量/成本档位映射到策略、model key、step budget、retry count 和 artifact
-inline limit：
-
-```python
-agent.set_settings("effort_presets", {
-    "fast": {"strategy": "single_shot", "reason_key": "reason_fast", "step_budget": 1},
-    "normal": {"strategy": "runtime_chain", "reason_key": "reason", "retry_count": 1},
-})
-
-execution = await agent.async_run_skills_task(
-    "Draft a release decision.",
-    skills=["release-review"],
-    mode="required",
-    effort="normal",
-)
-```
-
-当 Skills 由 Agent auto-orchestration 自动选中时，通过
-`create_execution(options=...)` 传入同一个 effort 选择：
-
-```python
-from agently.types.options import ExecutionOptions, SkillsRouteOptions
-
-execution = agent.input("Draft a release decision.").create_execution(
-    options=ExecutionOptions(
-        routes={"skills": SkillsRouteOptions(effort="normal")},
-    )
-)
-```
-
-需要完全自定义行动策略时，可以在 legacy SkillsExecutor facade 上注册 effort
-strategy handler，再通过 `effort=` 调用。这是高级兼容面；普通应用应优先使用
-AgentExecution Skills selection 和内置 effort presets。handler 会拿到 Agent
-runtime context、选中的 Skills plan、解析后的 effort config 和 output format；
-它可以请求模型、通过 context 调用 Action/MCP、发 runtime stream，并返回最终输出。
-
-handler 遵循 `SkillsEffortStrategyHandler` protocol：
-
-```python
-def handler(
-    *,
-    context: SkillsExecutionContext,
-    task: str,
-    plan: SkillExecutionPlan,
-    output_format: str | None = None,
-    effort: str | None = None,
-    effort_config: dict | None = None,
-) -> Awaitable[Any] | Any: ...
-```
-
-内置兼容 route label 也注册在同一张 strategy 表里：`single_shot`、
-`runtime_chain`、`staged` 和 `react`。可以用
-`Agently.skills_executor.list_effort_strategies()` 查看当前可用策略名。自定义
-handler 只有显式传入 `replace=True` 时才能替换内置策略；否则重名会 fail closed。
-内置参考实现位于
-`agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/effort_strategies/`，
-并作为可信 Blocks runtime handler 被调用，不是另一套 Skills-owned lifecycle。
-
-```python
-async def audit_plus_strategy(*, context, task, plan, effort_config, **_):
-    await context.async_emit_runtime_stream({
-        "type": "skills.audit_plus.checkpoint",
-        "action": "checkpoint",
+    .use_skills([contract["skill_id"]], mode="required")
+    .input("审查 3.2.0 发布候选。")
+    .output({
+        "decision": (str, "GO 或 NO-GO", True),
+        "risks": ([str], "有证据支撑的发布风险", True),
     })
-    return await context.async_request_model(
-        prompt={
-            "task": task,
-            "selected_skills": plan["selected_skills"],
-            "policy": effort_config,
-        },
-        model_key="verifier",
-        output_schema={"decision": (str, "go / no-go", True)},
-        output_format="json",
-    )
-
-Agently.skills_executor.register_effort_strategy(
-    "audit_plus",
-    audit_plus_strategy,
 )
+result = await execution.async_get_data()
+```
 
-agent.set_settings("effort_presets", {
-    "audit_plus": {"strategy": "audit_plus", "custom_budget": 7},
-})
+`mode="required"` 以 fail-closed 方式绑定所选 revision。
+`mode="model_decision"` 下，AgentExecution 用结构化 `ModelRequest` 从宿主发放
+的 key 中选择，校验后绑定 revision；未知或重复 key 会 fail closed。
 
-execution = await agent.async_run_skills_task(
-    "Audit this release.",
-    skills=["release-review"],
+`agent.require_skills(...)` 是 required mode 的便捷方法。
+`agent.use_skills_packs(...)` 把已安装的不可变 pack 展开为固定 revision refs。
+
+revision 可用不等于已经被消费。只有披露后的 context package 绑定到一个具体的
+ModelRequest response 时，AgentTask 才记录 Skill context consumption。该记录属于
+上下文证据，不是可执行的 planner capability，也不是 Action evidence。
+
+## `Agently.skills_executor` 仍然负责什么
+
+facade 只保留已经发布的 Skill 管理和投影调用：
+
+- 配置 SkillLibrary root 和允许的 trust label；
+- 安装、列出、检查、读取本地 Skill package；
+- 安装、列出、检查本地 Skill pack；
+- 构造兼容 context-pack projection；
+- 提供 TaskDAG `skill` resolver helper。
+
+它不负责 route selection、effort strategy、stage、React loop、runtime chain、
+Blocks lowering、script execution、capability inference、Action mounting、网络
+下载或审批。远程 source 必须先由有权限的宿主代码物化，再按本地目录安装。
+
+```python
+pack = await Agently.skills_executor.async_build_context_pack(
+    task="准备发布审查",
+    skills=[contract["skill_id"]],
+    include_references=True,
+)
+```
+
+该方法创建临时 TaskContext，并使用与普通 execution 相同的 ContextReader
+contract。`actionize_scripts=True` 会被忽略并产生 diagnostic；Skill script
+仍是 descriptor，只有明确拥有授权和副作用责任的 Action/runtime 才能执行。
+
+## 已发布的执行便捷 adapter
+
+`agent.run_skills_task(...)` 与 `agent.async_run_skills_task(...)` 保留为普通
+AgentExecution 的 result-shaped adapter：
+
+```python
+compat = await agent.async_run_skills_task(
+    "审查 3.2.0 发布候选。",
+    skills=[contract["skill_id"]],
     mode="required",
-    effort="audit_plus",
+    output={"decision": (str, "GO 或 NO-GO", True)},
 )
+print(compat.execution.id, compat.output)
 ```
 
-Skills runtime 内部模型调用使用符号阶段 key：`planner`、`research`、`reason`、
-`executor`、`verifier`、`reflector` 和 `finalizer`。如果某个 key 没有在
-`model_pool` 里映射，Agently 会沿用 agent 继承来的模型配置，而不会把这个符号 key
-当成 provider model name 发出去。
+adapter 不选择 `skills` route。execution 和其他请求一样使用
+`model_request`，或调用方显式指定的 AgentTask strategy。需要 stream、meta、
+TaskContext diagnostics、retry 或 lifecycle control 的新代码应直接使用
+AgentExecution API。
 
-通过 Agent 自动编排选中 Skills route 时，模型字段流会桥接到稳定路径，例如
-`skills.model.fields.<field_path>`。
+## 上下文限制与渐进式披露
 
-## 面向 DAG 消费者的高级 Context Pack
+安装 Skill 不会把全部资源复制进每次 prompt。required `SKILL.md` guidance
+优先交付；resource index 与显式 refs 支持后续 bounded read。上下文过大时，
+reader 返回 omissions、diagnostics 和可继续读取的 refs，不会把合成 summary
+伪装成完整 source。
 
-常规 AgentExecution 会在选定 Skills 后，由内部 Skills Manager 自动构建 context
-pack；应用代码不应该显式管理这个 pack。只有自定义 planner、Dynamic Task 或
-TaskDAG node 需要完整 Skill 上下文，但不需要进入完整 Skills execution route 时，
-才把 context-pack API 当作高级集成接口调用。Context pack 会在
-`agently.skills.context_pack.v1` schema 下提供已选 Skill 的 `SKILL.md` 指导、和任务
-相关的 references、examples、可选 assets、resource index metadata、citations、
-diagnostics，以及受宿主 policy 控制的 action candidates。
+按 consumer 和 phase 返回一份或多份有界信息块。完整文件和原始 evidence
+留在 SkillLibrary、TaskWorkspace 或 RecordStore；hot model path 只携带当前任务
+相关的 package。
 
-```python
-pack = await agent.async_build_skills_context_pack(
-    "Generate DeepSeek provider setup code.",
-    skills=["model-setup"],
-    intent="generate_code",
-    include_examples="auto",
-    include_references="auto",
-    budget_chars=12000,
-)
-```
+## 副作用
 
-DAG-shaped execution 应复用兼容 resolver adapter，不需要创建新的
-scheduler：
-
-```python
-from agently.core import TaskDAGExecutor
-
-snapshot = await TaskDAGExecutor(
-    Agently.skills_executor.task_dag_resolver()
-).async_run({
-    "graph_id": "skill-context-demo",
-    "task_schema_version": "task_dag/v1",
-    "tasks": [
-        {
-            "id": "skill_context",
-            "kind": "skill",
-            "inputs": {
-                "task": "Generate provider setup code.",
-                "skill_ids": ["model-setup"],
-                "intent": "generate_code",
-            },
-        }
-    ],
-    "semantic_outputs": {"context": "skill_context"},
-})
-```
-
-`include_public_lookup=True` 和 `actionize_scripts=True` 仍然是显式开启的宿主
-policy 操作。公开检索需要 `web_search: "allow"`。脚本 Action 化需要
-`script_run: "allow"` 或通过 PolicyApproval；它只挂载 allowlisted shell Action
-candidate，不会执行脚本。
-
-安装 Skill 不会自动执行 bundled scripts 或资源。标准 Skill 如果在正文、资源、
-`compatibility` 或公开 `metadata` 里表达了 search、browse、HTTP、Workspace file、
-Python、shell/script 或 MCP 需求，SkillsManager 会在 plan 里记录结构化
-`capability_needs`。Skill 仍然不授予能力。执行前，Agently 会把这些需求和宿主
-policy 对照；只有明确标记为 `allow` 的内置能力会被自动加载，`approval` 和 `off`
-都会 fail closed 并返回诊断。
-
-```python
-agent.configure_skill_capabilities(
-    auto_load={
-        "web_search": "allow",
-        "web_browse": "allow",
-        "workspace_write": "allow",
-        "script_run": "approval",
-        "shell": "approval",
-        "mcp": "approval",
-    },
-    workspace_root="./research-project",
-    search={
-        "backend": "auto",
-    },
-    # 每次 Skills 执行后回收一次性挂载的能力，而不是把它们留在 agent 上。
-    # 默认 "agent" 保留挂载以便复用。
-    capability_scope="execution",
-    # 仅自动挂载置信度达到该阈值的能力需求；从 SKILL.md 正文推断的低置信
-    # 需求仅作提示。默认不设阈值。
-    min_auto_mount_confidence=0.8,
-    # 内置 HTTP 能力默认拒绝私网/环回/链路本地目标；需要时显式放行内部主机。
-    http_request={"allow_hosts": ["internal.api.example.com"]},
-)
-agent.configure_policy_approval(handler="input_timeout_fail")
-```
-
-可信宿主可以通过框架 access-control settings 开启自动授权，而不是切换 approval handler：
-
-```python
-Agently.set_settings("access_control_policy.auto_allow", True)  # 进程默认
-agent.set_settings("access_control_policy.auto_allow", True)    # 仅当前 Agent
-
-execution = agent.create_execution().access_control_policy({"auto_allow": True})
-
-agent.use_skills(
-    [{"source": "owner/skills-with-local-mcp", "auto_allow": True}],
-    mode="required",
-)
-```
-
-`auto_allow=True` 是宿主授权。它可以自动通过 Action、ExecutionResource、
-TaskDAG、Blocks 和 Skills capability gate，但不会移除 Workspace root、命令
-allowlist、MCP 配置、HTTP allowlist 或 sandbox policy 等结构性边界。
-selector 级 `auto_allow=True` 只作用于匹配的 Skill。
-
-内置只读 HTTP 能力默认拒绝私网、环回与链路本地主机（SSRF 防护）；如需访问内部
-目标，用 `http_request={"allow_hosts": [...]}` 或 `{"allow_private": true}` 显式放行。
-默认脚本白名单只包含本地解释器（`bash`、`sh`、`python`、`node`），不含会拉取并执行
-任意远端代码的包运行器（`npx`/`npm`）；确有需要时再通过 policy 显式加入。
-
-当 `capability_scope="execution"` 时，Agently 只回收本次执行中新挂载的能力。
-如果宿主 Agent 已经存在匹配的 Action，内部 SkillsManager 可以通过本地 Action
-模糊解析复用该宿主 Action，并最终绑定到精确 `action_id`。歧义、低置信、policy
-拒绝或资源不可用都会 fail closed 并返回诊断；execution-scoped cleanup 不能覆盖或注销宿主拥有的 actions。
-
-面向搜索的 Skills，Agently 会装载由 `ddgs` Python package 支撑的框架 Search
-能力。请在宿主环境中预先保持 `ddgs` 最新（`python -m pip install --upgrade ddgs`）；
-Agently 运行时不会改动宿主环境。backend 策略不能被固定成某一个 provider；
-默认使用 `backend="auto"`，也可以由宿主 policy 配置任何 ddgs 支持的 backend。
-Search 会把 backend 层面的“无结果”视为成功空结果，并在选定 backend 没有解析到
-可用结果时继续尝试配置或默认的 ddgs fallback backends。如果一个或多个 backend
-失败后由 fallback backend 找到可用结果，Search 会返回
-`status="partial_success"`、`success=True` 和 backend diagnostics，让任务继续
-使用证据，同时让操作者看到哪些搜索源发生了降级。
-
-Workspace 文件操作归 Workspace 边界所有。Agent 已绑定 Workspace 时，
-SkillsManager 会优先通过 Workspace 文件边界暴露文件 actions，再退回
-`agent.enable_workspace_file_actions(...)`。
-
-`approval` 由框架全局 PolicyApproval handler 处理，不由 Skills 私有 handler
-处理。默认 handler 是 `input_timeout_fail`：交互式 CLI 会等待输入并在超时后失败，
-非交互服务环境会立即失败。测试和可信本地 fixture 可以使用 `auto_approve`。
-真实服务应根据包裹 TriggerFlow execution 的服务方法注册对应 handler，例如数据库 pending
-approval 记录、HTTP callback、webhook resume、SSE/WebSocket 等待，或 save 后返回
-interrupt id。需要 pending diagnostic 或 TriggerFlow `policy_approval` interrupt 时使用
-`fail_closed`。
-
-SkillsManager 不会把 `mcp`、`mcpServers`、`allow-scripts` 或
-Agently-specific `allowed-actions` 等 Skill frontmatter 当成能力授权。公开
-`compatibility` 和 `metadata` 可以作为发现 `capability_needs` 的证据，但加载仍由
-宿主 policy 控制。
-如果宿主希望在确定性读取 Skill 之外加入模型判断，可以开启
-`skills.capability_discovery.model_assisted=True`；模型推断出的 needs 仍然只是
-证据，必须经过同一套宿主 policy gate。
-
-公开 Agent Skills 规范里的 `allowed-tools` 是实验字段。Agently 如果支持它，也只能
-把它作为 already-mounted host tools 的限制或预批准提示；它不能挂载新 Actions、
-创建 MCP client、开启 shell/file access，或合成缺失 backend。
-
-## 验收样例
-
-`examples/agent_auto_orchestration/19_remote_skills_weather_event_ops.py`
-端到端验证了 4.1.3 的远程连接器路径：业务代码只通过 `agent.use_skills(...)`
-声明公开远程 Skills；免费 weather MCP 服务通过 ActionRuntime 注册；模型生成 MCP
-action calls 取得真实天气观测；内部 SkillsManager 在命中后懒安装选中的 Skills，并用
-`effort="normal"` 执行完整链路。
-
-## 配置
-
-Skill 的适用性来自 `SKILL.md`；Agently 的 `.agently/` 文件只是描述性的安装元数据。
-多步 Skills 执行应组合 Agently 已有的 TriggerFlow、Action 和
-ExecutionResource 边界；人工审批或持久 wait/resume 应通过 TriggerFlow
-`pause_for(...)` / `continue_with(...)`，或 Action / ExecutionResource
-审批策略表达，不应通过修改已关闭的 `SkillExecution` snapshot 来伪装恢复。
-
-框架级 `skills.*` 配置仍可调整宿主行为，例如普通 prompt 是否披露可选 Skill
-候选的完整 guidance。有 plugin defaults 时会先加载 plugin defaults，框架配置
-是最终应用级默认值。两层配置都不能替代 `SKILL.md` 成为 Skill 能力定义。
-
-本地 registry 相关配置应使用 legacy SkillsExecutor 兼容 helper：
-
-```python
-Agently.skills_executor.configure(
-    registry_root="./.agently/skills-dev",
-    allowed_trust_levels=["local"],
-)
-```
-
-## API Summary
-
-推荐 Agent API：
-
-- `agent.use_skills(...)`
-- `agent.use_skills_packs(...)`
-- `agent.resolve_skills_plan(...)`
-- `agent.run_skills_task(...)`
-
-高级集成 API：
-
-- `agent.build_skills_context_pack(...)`
-
-Legacy 兼容 facade：
-
-- `Agently.skills_executor.install_skills(...)`
-- `Agently.skills_executor.install_skills_pack(...)`
-- `Agently.skills_executor.configure(...)`
-- `Agently.skills_executor.inspect_skills(...)`
-- `Agently.skills_executor.build_context_pack(...)`
-- `Agently.skills_executor.task_dag_resolver(...)`
-
-`SkillContract` 描述已安装的标准 Skill、Agently 安装元数据、decision card、
-资源索引和 checksums，不包含框架自创的 stage 声明。
+Skill 描述工作方法。Host code、ActionRuntime、ExecutionResource、
+TaskWorkspace、RecordStore、TaskDAG 与 TriggerFlow 继续承担原有责任。Skill
+不能静默授予 filesystem、network、MCP、credential 或 process 权限。

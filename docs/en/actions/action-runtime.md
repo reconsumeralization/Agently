@@ -109,11 +109,17 @@ print(calculate("3333+6666=?"))
 | `agent.enable_nodejs(...)` | mount a Docker-backed `run_nodejs` action |
 | `agent.enable_code_runtime(...)` | mount a Docker-backed common-language code runtime action for Python, JavaScript/Node.js, TypeScript, C, C++, Go, Rust, Java, C#/.NET, PHP, Ruby, Perl, R, Lua, or Bash |
 | `agent.enable_sqlite(...)` | mount a managed `query_sqlite` action |
-| `agent.enable_workspace_file_actions(...)` | expose the current Workspace file area as handler-backed list/search/read/write actions, plus `export_file` when `export=True` and `write=True` |
-| `agent.enable_coding_agent_actions(...)` | expose coding-agent Workspace actions for file readback, glob/grep search, targeted edit, unified-diff patch, and guarded full-file writes |
+| `agent.enable_task_workspace_file_actions(...)` | expose the current TaskWorkspace file area as handler-backed list/search/read/write actions, plus `export_file` when `export=True` and `write=True` |
+| `agent.enable_coding_agent_actions(...)` | expose coding-agent TaskWorkspace actions for file readback, glob/grep search, targeted edit, unified-diff patch, and guarded full-file writes |
 | `@agent.auto_func` | turn a Python function signature + docstring into a model-backed implementation that uses the agent's actions |
 | `agent.get_action_result(prompt=turn.prompt)` | retrieve action call records for a request-scoped turn |
 | `extra.action_logs` | structured logs produced during the action loop |
+
+Built-in multi-Action packages use atomic registration batches. If Search or
+MCP tool registration fails at any point, including MCP client shutdown,
+Agently removes Actions created by that batch and restores any same-id host
+Action's prior spec, executor, function, and tags. A failed package mount must
+not leave partial Actions or overwrite host-owned registrations.
 
 `agent.action.get_action_info()` and `agent.action.get_tool_info()` return the
 visible action/tool schemas registered on that agent by default, including
@@ -149,12 +155,12 @@ not a model-visible action input; do not ask the model to run `pip`, `npm`,
 For coding-agent style local file work, prefer
 `agent.enable_coding_agent_actions(...)`. It exposes `read_file`,
 `glob_files`, `grep_files`, `edit_file`, `apply_patch`, and guarded
-`write_file` over the current Workspace file root. `edit_file(...)` can use an
+`write_file` over the current TaskWorkspace file root. `edit_file(...)` can use an
 `expected_sha256` stale guard, `apply_patch(...)` applies a unified diff and can
 require exact `expected_files`, and `write_file(...)` in coding-agent mode
 requires either prior read state or an expected hash unless the host disables
 that guard. Use shell for tests, builds, git inspection, and read-only
-diagnostics; use Workspace file actions for file reading, search, editing, and
+diagnostics; use TaskWorkspace file actions for file reading, search, editing, and
 writing.
 
 When `agent.enable_shell(...)` is called without an explicit `commands=...`
@@ -211,7 +217,7 @@ The default `on_missing="skip"` records diagnostics and avoids fake runnable
 agents; `on_missing="error"` fails closed. ACP run actions declare
 `ExecutionResource(kind="acp")` so root scope and lifecycle facts stay in the
 resource layer. If `root` is omitted, `agent.use_acp()` uses the Agent's bound
-Workspace `root` as the coding-agent project root; pass `root=...` only
+TaskWorkspace `root` as the coding-agent project root; pass `root=...` only
 when the host intentionally authorizes a different project directory. ACP
 session reuse is an internal AgentExecution resource policy, not an ordinary
 task-start option. CLI adapters are marked
@@ -254,7 +260,7 @@ recording an execution digest plus artifact references.
 The digest is what the next action-planning round normally sees. It includes the
 action id, call id, purpose, status, a compact instruction preview, result
 preview, preview truncation metadata, redaction notes, artifact candidates, and any
-Workspace file refs returned by the Action. Full raw content such as complete
+TaskWorkspace file refs returned by the Action. Full raw content such as complete
 code, shell output, SQL rows, page HTML, screenshots, or logs is retained as a
 redacted artifact instead of being inserted into every prompt. Each model-visible
 candidate carries one host-issued `selection_key` plus task-relevant facts such
@@ -271,7 +277,7 @@ is neither a model-invented canonical id nor an artifact readback selector.
 ### Required Action evidence
 
 When AgentTask completion requires `action_succeeded`, the requirement names an
-exact capability id and kind. Workspace readback cannot satisfy a specified
+exact capability id and kind. TaskWorkspace readback cannot satisfy a specified
 Action: a readable file may prove file content, but it does not prove that the
 required callable capability ran successfully. If the exact Action is mounted,
 TaskBoard may create an Action-shaped repair that carries the same structured
@@ -283,7 +289,7 @@ masking the gap behind a verifier request.
 
 When final verification or grounding requests a repair without an exact
 `action_succeeded` requirement, a trusted file-backed factual-grounding repair
-uses a control-shaped bounded Workspace patch in both Flat and TaskBoard. The
+uses a control-shaped bounded TaskWorkspace patch in both Flat and TaskBoard. The
 patch proposal is a structured ModelRequest result; this repair does not open a
 general AgentExecution/ActionRuntime round, so mounted `write_file` or unrelated
 Actions cannot rewrite the artifact. Host code validates the authorized path,
@@ -310,11 +316,11 @@ should return typed `file_refs` or `artifact_refs` with the path, size or bytes,
 media type, and SHA-256 when available. A path-only payload such as
 `{"filename": "...", "path": "...", "size": ...}` stays visible as bounded
 Action result evidence and a ref pointer, but it is not treated as a trusted
-Workspace file unless the path is inside the Workspace files root and Workspace
+TaskWorkspace file unless the path is inside the TaskWorkspace files root and TaskWorkspace
 readback succeeds.
 
 For a declared AgentTask deliverable path, a successful file-producing Action
-is the write owner. AgentTask reads back and adopts that exact Workspace file;
+is the write owner. AgentTask reads back and adopts that exact TaskWorkspace file;
 it does not overwrite it with a model-returned artifact body during terminal
 materialization. Updating the file requires another explicit file Action. If
 the successful Action's path cannot be read back, artifact delivery fails
@@ -343,7 +349,7 @@ readback_call = {
 
 This is an in-flow readback contract. After a standalone ActionFlow returns,
 its candidates truthfully report `available=false`; applications must use a
-durably promoted Workspace ref instead of trying to read the released scope.
+durably promoted TaskWorkspace ref instead of trying to read the released scope.
 The public readback selector is only `selection_key`. Agently resolves it
 against the currently bound AgentExecution, AgentTask, or standalone ActionFlow
 artifact scope; TaskBoard host code binds the current task lineage so sibling
@@ -356,7 +362,7 @@ records before they enter a TriggerFlow state or return boundary. This covers
 large kwargs/instructions as well as large output fields and avoids retaining
 duplicate `data`, `result`, and `model_digest` payloads. Finite internal
 ActionRuntime execution flows, ActionFlows, and TaskDAG executions do not bind a
-Workspace. `TriggerFlowActionFlow` binds Workspace recovery only when an
+TaskWorkspace. `TriggerFlowActionFlow` binds RecordStore recovery only when an
 approval pause needs save/resume.
 
 `Action.to_action_results(records)` uses the digest for instruction-heavy
@@ -427,7 +433,7 @@ agent.set_settings("action.planning_model_key", "task-main")
 
 This applies to the default structured-plan and native tool-call planning
 paths. It is especially important when a higher-level runtime such as
-SkillsManager-backed Skills execution or AgentTask delegates a bounded action round to
+AgentExecution Skill binding or AgentTask delegates a bounded action round to
 ActionRuntime.
 
 Structured planning fields are provisional while the provider response is
@@ -526,7 +532,7 @@ in its own terminal seam. A routed AgentTask explicitly transfers that scope to
 its parent AgentExecution, which keeps it live through terminal selection and
 promotion and releases it afterward; on parent cancellation or timeout, the
 routed task's stream owner cancels and joins the child before that release, so
-the child cannot create a late artifact or Workspace process record. Child
+the child cannot create a late artifact or RecordStore process record. Child
 ActionFlows never release that inherited scope early. If selected promotion
 fails, the selected source is kept with bounded retry diagnostics while
 unselected artifacts from that exact scope are released.

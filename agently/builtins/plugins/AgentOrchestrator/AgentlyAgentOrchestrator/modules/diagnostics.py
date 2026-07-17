@@ -37,7 +37,7 @@ def initial_diagnostics() -> dict[str, Any]:
     }
 
 
-def initial_workspace_refs() -> dict[str, Any]:
+def initial_record_refs() -> dict[str, Any]:
     return {
         "observations": [],
         "artifacts": [],
@@ -194,6 +194,6 @@ def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
         "close_snapshot": DataFormatter.sanitize(owner.close_snapshot),
         "logs": DataFormatter.sanitize(owner.logs),
         "diagnostics": DataFormatter.sanitize(owner.diagnostics),
-        "workspace_refs": DataFormatter.sanitize(owner.workspace_refs),
+        "record_refs": DataFormatter.sanitize(owner.record_refs),
         "guidance_items": DataFormatter.sanitize(getattr(owner, "guidance_items", [])),
     }

@@ -73,7 +73,7 @@ class _FlatArtifactRequester:
                     {
                         "criterion_id": "criterion:1",
                         "satisfied": True,
-                        "summary": "The trusted Workspace readback contains the report.",
+                        "summary": "The trusted TaskWorkspace readback contains the report.",
                         "gaps": [],
                         "evidence_ids": [],
                     }
@@ -87,7 +87,7 @@ class _FlatArtifactRequester:
                 "step_instruction": "write the final report",
                 "expected_evidence": "trusted file readback",
                 "rationale": "one bounded step is enough",
-                "deliverable_mode": "workspace_artifact",
+                "deliverable_mode": "task_workspace_artifact",
             }
         elif "Execute exactly one bounded step" in text:
             payload = {
@@ -125,16 +125,16 @@ async def test_agent_task_process_state_stays_in_memory_by_default(tmp_path: Pat
     root = tmp_path / "project"
     root.mkdir()
     task = AgentTask(
-        _agent("agent-task-memory-only").use_workspace(root),
+        _agent("agent-task-memory-only").use_task_workspace(root),
         task_id="agent-task-memory-only",
         goal="Return one bounded answer.",
         success_criteria=["The answer is returned."],
         execution="flat",
     )
 
-    assert task.workspace.root == root.resolve()
-    assert task.workspace.execution_id == task.id
-    assert task.workspace.mode == "read_only"
+    assert task.task_workspace.root == root.resolve()
+    assert task.task_workspace.execution_id == task.id
+    assert task.task_workspace.mode == "read_only"
 
     context = {"items": [], "diagnostics": {}}
     plan = {"step_instruction": "Answer once.", "execution_shape": "direct"}
@@ -168,11 +168,11 @@ async def test_agent_task_process_state_stays_in_memory_by_default(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_taskboard_tick_does_not_materialize_workspace_storage(tmp_path: Path):
+async def test_taskboard_tick_does_not_materialize_record_store_storage(tmp_path: Path):
     root = tmp_path / "project"
     root.mkdir()
     task = AgentTask(
-        _agent("taskboard-memory-only").use_workspace(root),
+        _agent("taskboard-memory-only").use_task_workspace(root),
         task_id="taskboard-memory-only",
         goal="Coordinate one card.",
         success_criteria=["The card completes."],
@@ -215,19 +215,19 @@ async def test_agent_task_terminal_file_retention_uses_identity_state_without_da
     root = tmp_path / "project"
     root.mkdir()
     task = AgentTask(
-        _agent("agent-task-file-retention").use_workspace(root),
+        _agent("agent-task-file-retention").use_task_workspace(root, mode="read_only"),
         task_id="agent-task-file-retention",
         goal="Write a final report.",
         success_criteria=["The report is retained."],
         execution="flat",
     )
-    draft = await task.workspace.write_file("report/draft.md", "draft")
-    final = await task.workspace.write_file("report/final.md", "final")
+    draft = await task.task_workspace.write_file("report/draft.md", "draft")
+    final = await task.task_workspace.write_file("report/final.md", "final")
     final_ref = cast(dict[str, Any], final["file_refs"][0])
 
     retained = await task._register_terminal_deliverables([cast(Any, final_ref)])
     task.result = {"status": "completed", "artifact_refs": retained}
-    result = await task._apply_terminal_workspace_retention(status="completed")
+    result = await task._apply_terminal_task_workspace_retention(status="completed")
 
     assert result and result["status"] == "applied"
     assert len(retained) == 1
@@ -248,7 +248,7 @@ async def test_terminal_artifact_resolves_stable_reference_tokens_to_source_card
     root = tmp_path / "project"
     root.mkdir()
     task = AgentTask(
-        _agent("agent-task-reference-token").use_workspace(root),
+        _agent("agent-task-reference-token").use_task_workspace(root),
         task_id="agent-task-reference-token",
         goal="Write a cited report.",
         success_criteria=["The report citation resolves."],
@@ -266,7 +266,7 @@ async def test_terminal_artifact_resolves_stable_reference_tokens_to_source_card
         }
     )
     reference_id = str(source["reference_id"])
-    final = await task.workspace.write_file(
+    final = await task.task_workspace.write_file(
         "report/final.md",
         f"# Final\n\nSupported claim [[ref:{reference_id}]].\n",
     )
@@ -285,7 +285,7 @@ async def test_terminal_artifact_resolves_stable_reference_tokens_to_source_card
             "source_url": "https://example.com/source",
         }
     ]
-    await task._apply_terminal_workspace_retention(status="completed")
+    await task._apply_terminal_task_workspace_retention(status="completed")
     manifest_path = next((root / ".agently" / "identity" / "tasks").glob("*/manifest.json"))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert reference_id in manifest["task_reference_catalog"]["references"]
@@ -300,32 +300,32 @@ async def test_terminal_artifact_unknown_reference_token_fails_closed_and_legacy
     unknown_root = tmp_path / "unknown"
     unknown_root.mkdir()
     unknown_task = AgentTask(
-        _agent("agent-task-reference-token-unknown").use_workspace(unknown_root),
+        _agent("agent-task-reference-token-unknown").use_task_workspace(unknown_root),
         task_id="agent-task-reference-token-unknown",
         goal="Write a cited report.",
         success_criteria=["The report citation resolves."],
         execution="flat",
     )
-    unknown = await unknown_task.workspace.write_file("report.md", "Unknown [[ref:ref_Z]].")
+    unknown = await unknown_task.task_workspace.write_file("report.md", "Unknown [[ref:ref_Z]].")
 
     retained = await unknown_task._register_terminal_deliverables([cast(Any, unknown["file_refs"][0])])
 
     assert retained == []
     assert unknown_task._terminal_retention_deferred is True
-    assert unknown_task.diagnostics["workspace_retention"]["diagnostics"][-1]["code"] == (
+    assert unknown_task.diagnostics["task_workspace_retention"]["diagnostics"][-1]["code"] == (
         "agent_task.retention.reference_token_invalid"
     )
 
     legacy_root = tmp_path / "legacy"
     legacy_root.mkdir()
     legacy_task = AgentTask(
-        _agent("agent-task-reference-token-legacy").use_workspace(legacy_root),
+        _agent("agent-task-reference-token-legacy").use_task_workspace(legacy_root),
         task_id="agent-task-reference-token-legacy",
         goal="Retain a legacy report for explicit re-verification.",
         success_criteria=["The report is retained without guessing aliases."],
         execution="flat",
     )
-    legacy = await legacy_task.workspace.write_file("legacy.md", "Legacy citation (e1).")
+    legacy = await legacy_task.task_workspace.write_file("legacy.md", "Legacy citation (e1).")
 
     legacy_retained = await legacy_task._register_terminal_deliverables([cast(Any, legacy["file_refs"][0])])
 
@@ -344,7 +344,7 @@ async def test_flat_agent_task_completes_with_final_file_and_identity_manifest(t
         goal="Write a final report.",
         success_criteria=["A final report is written and read back."],
         execution="flat",
-        workspace=root,
+        task_workspace=root,
         max_iterations=1,
     )
 
@@ -355,7 +355,7 @@ async def test_flat_agent_task_completes_with_final_file_and_identity_manifest(t
     assert len(result["artifact_refs"]) == 1
     ref = result["artifact_refs"][0]
     assert ref["type"] == "file"
-    assert ref["execution_id"] == "flat-agent-task-effects"
+    assert ref["execution_id"] == execution.id
     assert ref["locator_id"].startswith("loc_")
     assert ref["content_version_id"].startswith("cv_")
     assert (root / ref["path"]).read_text(encoding="utf-8").startswith("# Final report")
@@ -373,7 +373,7 @@ async def test_taskboard_full_run_completes_with_identity_manifest_without_datab
     root = tmp_path / "project"
     root.mkdir()
     task = AgentTask(
-        _agent("taskboard-full-effects").use_workspace(root),
+        _agent("taskboard-full-effects").use_task_workspace(root),
         task_id="taskboard-full-effects",
         goal="Write a TaskBoard report.",
         success_criteria=["The report is written and read back."],
@@ -398,10 +398,10 @@ async def test_taskboard_full_run_completes_with_identity_manifest_without_datab
         return SimpleNamespace(revision=revision, planning_policy=planning_policy)
 
     async def run_card(context: Any, _context: Mapping[str, Any]) -> TaskBoardCardResult:
-        write = await task.workspace.write_file("reports/final.md", "# TaskBoard final\n")
+        write = await task.task_workspace.write_file("reports/final.md", "# TaskBoard final\n")
         ref = cast(dict[str, Any], write["file_refs"][0])
-        ref["role"] = "workspace_artifact"
-        ref["source"] = "agent_task.workspace_artifact.taskboard_test"
+        ref["role"] = "task_workspace_artifact"
+        ref["source"] = "agent_task.task_workspace_artifact.taskboard_test"
         return TaskBoardCardResult(
             card_id=context.card.id,
             status="completed",
@@ -426,7 +426,7 @@ async def test_taskboard_full_run_completes_with_identity_manifest_without_datab
                 {
                     "criterion_id": "criterion:1",
                     "satisfied": True,
-                    "summary": "The trusted TaskBoard Workspace readback contains the report.",
+                    "summary": "The trusted TaskBoard TaskWorkspace readback contains the report.",
                     "gaps": [],
                     "evidence_ids": [],
                 }

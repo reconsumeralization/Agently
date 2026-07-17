@@ -368,8 +368,8 @@ def test_action_bash_sandbox_uses_execution_resource(tmp_path):
     assert Agently.execution_resource.list(scope="action_call") == []
 
 
-def test_bash_execution_resource_materializes_workspace_boundary(tmp_path):
-    # Provider-side file-boundary materialization: a Workspace-issued root that
+def test_bash_execution_resource_materializes_task_workspace_boundary(tmp_path):
+    # Provider-side file-boundary materialization: a TaskWorkspace-issued root that
     # does not yet exist is created by the provider before the executor runs
     # (spec section 8.6).
     boundary = tmp_path / "lineage" / "executions" / "exec-mat" / "files"
@@ -868,9 +868,7 @@ async def test_action_use_mcp_url_headers_passes_normalized_transport_to_fastmcp
         async def list_tools(self):
             return []
 
-    registrar_module = importlib.import_module(
-        "agently.core.operation.Action.ActionResourceRegistrar"
-    )
+    registrar_module = importlib.import_module("agently.core.operation.Action.ActionResourceRegistrar")
 
     with (
         mock.patch.object(registrar_module.LazyImport, "import_package") as lazy_import,
@@ -884,3 +882,128 @@ async def test_action_use_mcp_url_headers_passes_normalized_transport_to_fastmcp
     lazy_import.assert_called_once_with("fastmcp", version_constraint=">=3", auto_install=False)
     assert captured[-1]["mcpServers"]["default"]["url"] == "https://example.com/mcp"
     assert captured[-1]["mcpServers"]["default"]["headers"] == {"Authorization": "Bearer token"}
+
+
+@pytest.mark.asyncio
+async def test_action_use_mcp_rolls_back_batch_and_restores_host_action_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import unittest.mock as mock
+
+    tools = [
+        types.SimpleNamespace(
+            name="mcp_existing",
+            description="MCP replacement.",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {}},
+            _meta={},
+        ),
+        types.SimpleNamespace(
+            name="mcp_new",
+            description="New MCP Action.",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {}},
+            _meta={},
+        ),
+    ]
+
+    class FakeClient:
+        def __init__(self, _transport):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def list_tools(self):
+            return tools
+
+    agent = Agently.create_agent()
+    agent.action.register_action(
+        action_id="mcp_existing",
+        desc="Host-owned MCP Action.",
+        kwargs={},
+        func=lambda: {"owner": "host"},
+    )
+    original_register = agent.action.register_action
+    registration_count = 0
+
+    def fail_second_registration(**kwargs: Any):
+        nonlocal registration_count
+        registration_count += 1
+        if registration_count == 2:
+            raise RuntimeError("MCP batch registration failed")
+        return original_register(**kwargs)
+
+    monkeypatch.setattr(agent.action, "register_action", fail_second_registration)
+    registrar_module = importlib.import_module("agently.core.operation.Action.ActionResourceRegistrar")
+
+    with (
+        mock.patch.object(registrar_module.LazyImport, "import_package"),
+        mock.patch("fastmcp.Client", FakeClient),
+        pytest.raises(RuntimeError, match="MCP batch registration failed"),
+    ):
+        await agent.action.async_use_mcp("https://example.com/mcp")
+
+    restored = agent.action.action_registry.get_spec("mcp_existing")
+    assert restored is not None
+    assert restored.get("desc") == "Host-owned MCP Action."
+    assert not agent.action.action_registry.has("mcp_new")
+
+
+@pytest.mark.asyncio
+async def test_action_use_mcp_rolls_back_when_client_exit_fails():
+    import unittest.mock as mock
+
+    tools = [
+        types.SimpleNamespace(
+            name="mcp_exit_existing",
+            description="MCP replacement.",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {}},
+            _meta={},
+        ),
+        types.SimpleNamespace(
+            name="mcp_exit_new",
+            description="New MCP Action.",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {}},
+            _meta={},
+        ),
+    ]
+
+    class FailingExitClient:
+        def __init__(self, _transport):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            raise RuntimeError("MCP client exit failed")
+
+        async def list_tools(self):
+            return tools
+
+    agent = Agently.create_agent()
+    agent.action.register_action(
+        action_id="mcp_exit_existing",
+        desc="Host-owned MCP exit Action.",
+        kwargs={},
+        func=lambda: {"owner": "host"},
+    )
+    registrar_module = importlib.import_module("agently.core.operation.Action.ActionResourceRegistrar")
+
+    with (
+        mock.patch.object(registrar_module.LazyImport, "import_package"),
+        mock.patch("fastmcp.Client", FailingExitClient),
+        pytest.raises(RuntimeError, match="MCP client exit failed"),
+    ):
+        await agent.action.async_use_mcp("https://example.com/mcp")
+
+    restored = agent.action.action_registry.get_spec("mcp_exit_existing")
+    assert restored is not None
+    assert restored.get("desc") == "Host-owned MCP exit Action."
+    assert not agent.action.action_registry.has("mcp_exit_new")

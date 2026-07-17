@@ -152,16 +152,16 @@ handoff. Bare domains and same-host `http` / `https` candidates are tried before
 the action gives up, and structured results include the selected URL, retry
 candidates, canonical links, same-site links, attempts, and any security
 downgrade diagnostic. When Browse receives a PDF, Office file, image, or other
-download-like binary response and the current execution has a bound Workspace,
+download-like binary response and the current execution has a bound TaskWorkspace,
 it materializes the bytes into `downloads/` and returns file refs plus bounded
-`read_file` preview. Browse does not parse the document itself; Workspace file
-IO handlers own that later read. Without a bound Workspace, remote-file Browse
+`read_file` preview. Browse does not parse the document itself; TaskWorkspace file
+IO handlers own that later read. Without a bound TaskWorkspace, remote-file Browse
 fails closed instead of sending raw bytes into the model hot path.
 
 For shell access, prefer `agent.enable_shell(...)`, which mounts a managed
 `run_bash` action. `Cmd` remains available as a low-level compatibility package
 and as an implementation helper for Bash execution. Use shell for tests,
-builds, git inspection, and read-only diagnostics; use Workspace file actions
+builds, git inspection, and read-only diagnostics; use TaskWorkspace file actions
 such as `read_file`, `grep_files`, `edit_file`, and `apply_patch` for file
 reading, searching, editing, and writing.
 

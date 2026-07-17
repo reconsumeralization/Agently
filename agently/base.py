@@ -34,10 +34,10 @@ from agently.core import (
     ModelRequest,
     BaseAgent,
     Blocks,
-    SkillsManager,
     SkillsExecutor,
-    WorkspaceManager,
+    SkillLibrary,
 )
+from agently.core.storage import RecordStoreRegistry
 from agently._default_init import (
     _load_default_actions,
     _load_default_settings,
@@ -48,8 +48,6 @@ from agently._default_init import (
 if TYPE_CHECKING:
     from agently.types.data import RuntimeEventLevel, SerializableValue, TaskDAG
     from agently.builtins.hookers.RuntimeConsoleSinkHooker import RuntimeLogProfile
-    from agently.core import Workspace
-    from agently.types.plugins import WorkspaceBackend
 
 # Basic Initialize
 
@@ -96,10 +94,18 @@ _load_default_actions(action_registry)
 action_dispatcher: Any = action.action_dispatcher
 action_runtime: Any = action.action_runtime
 action_flow: Any = action.action_flow
-skills_manager: SkillsManager = SkillsManager(plugin_manager, settings)
-skills_executor: SkillsExecutor = SkillsExecutor(plugin_manager, settings, manager=skills_manager)
+skill_library: SkillLibrary = SkillLibrary(
+    str(settings.get("skills.library.root", ".agently/skill-library"))
+)
+skills_executor: SkillsExecutor = SkillsExecutor(
+    plugin_manager,
+    settings,
+    library=skill_library,
+)
 blocks: Blocks = Blocks(plugin_manager, settings)
-workspace: WorkspaceManager = WorkspaceManager()
+# Private persistence construction registry. It is not part of the Agently
+# application facade and will be replaced by concrete store ports.
+record_store_registry: RecordStoreRegistry = RecordStoreRegistry()
 _agently_emitter: Any = event_center.create_emitter("Agently")
 
 
@@ -198,7 +204,8 @@ if settings.get("debug", None) is not None:
 from agently.builtins.agent_extensions import (
     StreamingPrintExtension,
     SessionExtension,
-    WorkspaceExtension,
+    TaskWorkspaceExtension,
+    RecordStoreExtension,
     ActionExtension,
     SkillsExtension,
     KeyWaiterExtension,
@@ -211,7 +218,8 @@ class Agent(
     StreamingPrintExtension,
     SessionExtension,
     SkillsExtension,
-    WorkspaceExtension,
+    TaskWorkspaceExtension,
+    RecordStoreExtension,
     ActionExtension,
     KeyWaiterExtension,
     AutoFuncExtension,
@@ -267,10 +275,9 @@ class AgentlyMain(Generic[A]):
         self.action_dispatcher = action_dispatcher
         self.action_runtime = action_runtime
         self.action_flow = action_flow
-        self.skills_manager = skills_manager
         self.skills_executor = skills_executor
+        self.skill_library = skill_library
         self.blocks = blocks
-        self.workspace = workspace
         self.AgentType = AgentType
 
         def refresh_httpx_log_level() -> None:
@@ -402,39 +409,6 @@ class AgentlyMain(Generic[A]):
         skip_exceptions: bool = False,
     ) -> TriggerFlow[Any, Any, Any]:
         return TriggerFlow(name=name, skip_exceptions=skip_exceptions)
-
-    def create_workspace(
-        self,
-        path_or_backend: "str | Path | WorkspaceBackend | None" = None,
-        *,
-        create: bool = True,
-        mode: str = "read_only",
-        provider: str | None = None,
-        provider_options: dict[str, Any] | None = None,
-        db_store_provider: Any | None = None,
-        db_store_options: dict[str, Any] | None = None,
-        embedding_provider: Any | None = None,
-        embedding_options: dict[str, Any] | None = None,
-        vector_store_provider: Any | None = None,
-        vector_store_options: dict[str, Any] | None = None,
-        default_scope: dict[str, Any] | None = None,
-        default_search_scope: dict[str, Any] | None = None,
-    ) -> "Workspace":
-        return self.workspace.create(
-            path_or_backend,
-            create=create,
-            mode=mode,
-            provider=provider,
-            provider_options=provider_options,
-            db_store_provider=db_store_provider,
-            db_store_options=db_store_options,
-            embedding_provider=embedding_provider,
-            embedding_options=embedding_options,
-            vector_store_provider=vector_store_provider,
-            vector_store_options=vector_store_options,
-            default_scope=default_scope,
-            default_search_scope=default_search_scope,
-        )
 
     def create_observation_bridge(self, *watch_targets: Any, **bridge_options: Any) -> Any:
         devtools = LazyImport.import_package(

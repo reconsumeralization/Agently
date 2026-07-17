@@ -321,7 +321,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         self,
         iteration_index: int,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
     ) -> WorkUnitIntent:
         effective_shape = str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "direct")
         execution_policy = self._step_execution_policy()
@@ -330,23 +330,23 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             step_scope = {}
         scoped_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
         repair_context = self._active_repair_context()
-        grounding_patch_context = self._flat_grounding_workspace_patch_context(repair_context)
+        grounding_patch_context = self._flat_grounding_task_workspace_patch_context(repair_context)
         if grounding_patch_context:
             effective_shape = "direct"
             scoped_ids = []
         if grounding_patch_context:
-            objective = "Apply the structured material-claim repair contract to the authorized Workspace artifact."
+            objective = "Apply the structured material-claim repair contract to the authorized TaskWorkspace artifact."
             input_payload = {
                 "task_id": self.id,
                 "iteration": iteration_index,
-                "authorized_workspace_target": {
+                "authorized_task_workspace_target": {
                     "path": grounding_patch_context.get("path"),
                     "content_version_id": grounding_patch_context.get("content_version_id"),
                 },
             }
             delivery_contract = {
                 "deliverable_mode": "",
-                "material_claim_workspace_patch": DataFormatter.sanitize(grounding_patch_context),
+                "material_claim_task_workspace_patch": DataFormatter.sanitize(grounding_patch_context),
             }
         else:
             objective = str(plan.get("step_instruction") or "")
@@ -418,7 +418,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         *,
         work_unit: WorkUnitIntent,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
         execution_id: str,
         handler: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]],
         start_payload: Mapping[str, Any],
@@ -451,7 +451,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         handler_name = str(work_unit.runtime_preferences.get("handler") or "agent_task_bounded_step")
         blocks_execution = flow.create_execution(
             auto_close=False,
-            workspace=False,
+            record_store=False,
             runtime_resources={
                 "blocks.handlers": {
                     "agent_task_bounded_step": handler,
@@ -459,11 +459,17 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 }
             },
         )
-        # Blocks is the execution substrate for this AgentTask work unit, not a
-        # new Workspace product owner. Preserve the task-bound record search
-        # scope and fallback-file area instead of rebinding them to the
-        # internal TriggerFlow execution id.
-        blocks_execution.set_runtime_resource("workspace", self.workspace)
+        # Blocks is an execution substrate. TaskWorkspace remains the explicit
+        # file-effect resource, while all heterogeneous task information is
+        # disclosed through a consumer-bound ContextReader.
+        blocks_execution.set_runtime_resource("task_workspace", self.task_workspace)
+        blocks_execution.set_runtime_resource(
+            "context_reader",
+            self._task_context_reader(
+                phase="execution",
+                consumer_id=f"agent_task:{self.id}:blocks:{work_unit.id}",
+            ),
+        )
         await blocks_execution.async_start(
             {
                 "task_id": self.id,
@@ -567,19 +573,29 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         meta_waiter: Callable[[Awaitable[Any]], Awaitable[Any]] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         payload = dict(input_payload)
+        resolved_info_payload = dict(info_payload or {})
         if isinstance(carrier_output_policy, Mapping):
             payload["carrier_output_policy"] = DataFormatter.sanitize(dict(carrier_output_policy))
+        context_phase = "card" if "taskboard.card" in started_event else "execution"
+        request_context_pack, context_package = await self._read_task_context_view(
+            phase=context_phase,
+            consumer_id=f"agent_task:{self.id}:worker:{execution.id}",
+            intent=str(payload.get("goal") or payload.get("card") or instruction or self.goal),
+        )
+        if "context_pack" in resolved_info_payload and "context_pack" not in payload:
+            resolved_info_payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
+        else:
+            payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
         execution.input(payload)
-        if isinstance(info_payload, Mapping) and info_payload:
-            execution.info(dict(info_payload))
+        if resolved_info_payload:
+            execution.info(resolved_info_payload)
         execution.language(language_policy.get("language", "auto"))
         if use_output:
             execution.instruct(instruction)
             execution.output(dict(output_schema), format=output_format)
         else:
             execution.instruct(
-                instruction
-                + " For this work unit, return the natural-language body directly as plain text. "
+                instruction + " For this work unit, return the natural-language body directly as plain text. "
                 "Do not wrap the body in JSON, XML fields, YAML, Markdown frontmatter, or diagnostic labels."
             )
         await self._emit(
@@ -611,6 +627,26 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             with suppress(asyncio.CancelledError, Exception):
                 await stream_task
             raise
+        if isinstance(meta, Mapping):
+            logs = meta.get("logs")
+            logs = logs if isinstance(logs, Mapping) else {}
+            response_ids = logs.get("model_response_ids")
+            if not isinstance(response_ids, Sequence) or isinstance(
+                response_ids,
+                str | bytes | bytearray,
+            ):
+                response_ids = []
+            phase = "work.execute.taskboard" if "taskboard.card" in started_event else "work.execute"
+            for response_id in self._normalize_string_list(response_ids):
+                self._record_task_context_consumption(
+                    context_package,
+                    request_id=response_id,
+                )
+                await self._emit_required_skill_context_bound(
+                    request_context_pack,
+                    request_id=response_id,
+                    phase=phase,
+                )
         return result, cast(dict[str, Any], meta)
 
     @staticmethod
@@ -649,7 +685,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         self,
         work_unit_or_iteration: WorkUnitIntent | int,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
     ):
         from agently.types.data import ExecutionPlan, ExecutionPlanEdge, PlanBlockInstance
 
@@ -677,8 +713,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "action_call",
                 "mcp_tool_call",
                 "script_action",
-                "workspace_operation",
-                "skill_activation",
+                "context_read",
                 "approval_wait",
                 "external_wait",
                 "validation",
@@ -806,7 +841,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             filters = cls._scoped_retrieval_filters(raw_group)
             include_snippets = expected_role != "locator_ref"
             bound_inputs: dict[str, Any] = {
-                "operation": "search",
+                "operation": "read",
                 "query": query,
                 "filters": filters,
                 "max_results": raw_group.get("max_results", 8),
@@ -821,7 +856,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 if value is not None:
                     bound_inputs[key] = value
             for key in (
-                "search_surface",
+                "source_kinds",
                 "include_hidden",
                 "max_file_bytes",
                 "context_lines",
@@ -838,9 +873,9 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             blocks.append(
                 PlanBlockInstance(
                     id=f"{work_unit.id}:scoped-retrieval-{index}",
-                    plan_block_id="workspace_operation",
-                    kind="workspace_operation",
-                    intent=f"Run scoped Workspace retrieval for query group {index + 1}.",
+                    plan_block_id="context_read",
+                    kind="context_read",
+                    intent=f"Read scoped task context for query group {index + 1}.",
                     bound_inputs=bound_inputs,
                     output_contract={
                         "locator_refs": "bounded targets only; content not read",
@@ -905,12 +940,12 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         for item in results:
             if not isinstance(item, Mapping):
                 continue
-            if str(item.get("kind") or "") != "workspace_operation":
+            if str(item.get("kind") or "") != "context_read":
                 continue
             output = item.get("output")
             if not isinstance(output, Mapping):
                 continue
-            if str(output.get("operation") or "") != "search":
+            if str(output.get("operation") or "") != "read":
                 continue
             scoped_results.append(
                 {
@@ -1032,24 +1067,12 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         if not isinstance(value, Mapping):
             return {}
         allowed_keys = (
-            "search_surface",
-            "retrieval_strategy",
-            "retrieval_method",
-            "retrieval_selection",
-            "retrieval_rerank",
-            "retrieval_candidate_count",
-            "retrieval_selected_count",
-            "retrieval_omitted",
-            "max_results",
-            "total_matches",
+            "package_id",
+            "task_context_id",
+            "context_revision",
             "returned_results",
-            "file_returned_results",
-            "include_snippets",
-            "snippet_offset",
-            "snippet_limit",
-            "file_path",
-            "file_pattern",
-            "context_lines",
+            "used_chars",
+            "omitted_count",
         )
         return DataFormatter.sanitize({key: value.get(key) for key in allowed_keys if key in value})
 
@@ -1076,7 +1099,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "role",
                 "content_state",
                 "source",
-                "workspace_source",
+                "task_workspace_source",
                 "path",
                 "record_id",
                 "collection",
@@ -1138,7 +1161,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             "role",
             "content_state",
             "source",
-            "workspace_source",
+            "task_workspace_source",
             "rank",
             "index",
             "path",
@@ -1388,7 +1411,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             "work_unit_result": cls._compact_work_unit_result_for_meta(work_unit_result),
             "output_policy": output_policy.to_dict(),
             "block_result": cls._compact_block_result_for_meta(block_result),
-            "workspace_operations": cls._compact_workspace_operations_for_meta(snapshot),
+            "context_reads": cls._compact_context_reads_for_meta(snapshot),
             "snapshot_status": snapshot.get("status") if isinstance(snapshot, Mapping) else None,
         }
 
@@ -1538,7 +1561,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 output = item.get("output")
                 output_summary: dict[str, Any] = {}
                 if isinstance(output, Mapping):
-                    if str(item.get("kind") or "") == "workspace_operation":
+                    if str(item.get("kind") or "") == "context_read":
                         for output_key in ("operation", "query", "filters", "bounded", "diagnostics"):
                             if output_key in output:
                                 output_summary[output_key] = cls._compact_value_for_meta(
@@ -1549,7 +1572,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         if isinstance(locator_refs, (list, tuple)):
                             output_summary["locator_ref_count"] = len(locator_refs)
                             if locator_refs:
-                                output_summary["first_locator_ref"] = cls._compact_workspace_ref_or_snippet_for_meta(
+                                output_summary["first_locator_ref"] = cls._compact_task_workspace_ref_or_snippet_for_meta(
                                     locator_refs[0],
                                     max_chars=1000,
                                 )
@@ -1557,7 +1580,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         if isinstance(evidence_snippets, (list, tuple)):
                             output_summary["evidence_snippet_count"] = len(evidence_snippets)
                             if evidence_snippets:
-                                output_summary["first_evidence_snippet"] = cls._compact_workspace_ref_or_snippet_for_meta(
+                                output_summary["first_evidence_snippet"] = cls._compact_task_workspace_ref_or_snippet_for_meta(
                                     evidence_snippets[0],
                                     max_chars=1800,
                                 )
@@ -1635,7 +1658,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize(compact)
 
     @classmethod
-    def _compact_workspace_operations_for_meta(cls, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _compact_context_reads_for_meta(cls, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
         blocks_state = snapshot.get("blocks", {}) if isinstance(snapshot, Mapping) else {}
         results = blocks_state.get("execution_block_results") if isinstance(blocks_state, Mapping) else None
         if not isinstance(results, Sequence) or isinstance(results, (str, bytes, bytearray)):
@@ -1644,7 +1667,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         for item in results:
             if not isinstance(item, Mapping):
                 continue
-            if str(item.get("kind") or "") != "workspace_operation":
+            if str(item.get("kind") or "") != "context_read":
                 continue
             output = item.get("output")
             if not isinstance(output, Mapping):
@@ -1657,7 +1680,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             if isinstance(locator_refs, (list, tuple)):
                 output_summary["locator_ref_count"] = len(locator_refs)
                 if locator_refs:
-                    output_summary["first_locator_ref"] = cls._compact_workspace_ref_or_snippet_for_meta(
+                    output_summary["first_locator_ref"] = cls._compact_task_workspace_ref_or_snippet_for_meta(
                         locator_refs[0],
                         max_chars=1000,
                     )
@@ -1665,7 +1688,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             if isinstance(evidence_snippets, (list, tuple)):
                 output_summary["evidence_snippet_count"] = len(evidence_snippets)
                 if evidence_snippets:
-                    output_summary["first_evidence_snippet"] = cls._compact_workspace_ref_or_snippet_for_meta(
+                    output_summary["first_evidence_snippet"] = cls._compact_task_workspace_ref_or_snippet_for_meta(
                         evidence_snippets[0],
                         max_chars=1800,
                     )
@@ -1687,7 +1710,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return operations
 
     @classmethod
-    def _compact_workspace_ref_or_snippet_for_meta(cls, value: Any, *, max_chars: int) -> Any:
+    def _compact_task_workspace_ref_or_snippet_for_meta(cls, value: Any, *, max_chars: int) -> Any:
         if not isinstance(value, Mapping):
             return cls._compact_value_for_meta(value, max_chars=max_chars)
         compact: dict[str, Any] = {}
@@ -1752,7 +1775,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         request = getattr(execution, "request", None)
         set_settings = getattr(request, "set_settings", None)
         if callable(set_settings):
-            set_settings("action.workspace", self.workspace)
+            set_settings("action.task_workspace", self.task_workspace)
 
 
 __all__ = ["AgentTaskCarrierMixin"]

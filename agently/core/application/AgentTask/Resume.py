@@ -15,8 +15,95 @@
 
 from __future__ import annotations
 
+from agently.core.TaskWorkspace import TaskWorkspace, TaskWorkspaceContextSource
+from agently.core.application.SkillLibrary import (
+    SkillBinding,
+    SkillContextSource,
+    SkillLibrary,
+)
+from agently.core.context import TaskContext
+from agently.core.storage import RecordStore, RecordStoreContextSource
+from agently.types.data import (
+    ContextBlock,
+    ContextConsumption,
+    ContextDiagnostic,
+    ContextOmission,
+    ContextPackage,
+)
+
 from .LifecycleState import AgentTaskLifecycleState
 from .TaskShared import *
+
+
+def _context_package_from_dict(value: Mapping[str, Any]) -> ContextPackage:
+    raw_blocks = value.get("blocks")
+    blocks = tuple(
+        ContextBlock(
+            block_id=str(item.get("block_id") or ""),
+            block_key=str(item.get("block_key") or ""),
+            source_id=str(item.get("source_id") or ""),
+            source_revision=str(item.get("source_revision") or ""),
+            source_ref=str(item.get("source_ref") or ""),
+            binding_id=str(item.get("binding_id") or ""),
+            role=cast(Any, item.get("role")),
+            content=item.get("content"),
+            completeness=cast(Any, item.get("completeness")),
+            content_chars=int(item.get("content_chars") or 0),
+            required=bool(item.get("required")),
+            refs=tuple(str(ref) for ref in item.get("refs") or ()),
+            metadata=cast(Mapping[str, Any], item.get("metadata") or {}),
+        )
+        for item in raw_blocks or ()
+        if isinstance(item, Mapping)
+    )
+    raw_omissions = value.get("omissions")
+    omissions = tuple(
+        ContextOmission(
+            block_key=str(item.get("block_key") or ""),
+            reason=str(item.get("reason") or ""),
+            required=bool(item.get("required")),
+            source_ref=(
+                str(item.get("source_ref"))
+                if item.get("source_ref") is not None
+                else None
+            ),
+            details=cast(Mapping[str, Any], item.get("details") or {}),
+        )
+        for item in raw_omissions or ()
+        if isinstance(item, Mapping)
+    )
+    raw_diagnostics = value.get("diagnostics")
+    diagnostics = tuple(
+        ContextDiagnostic(
+            code=str(item.get("code") or ""),
+            message=str(item.get("message") or ""),
+            details=cast(Mapping[str, Any], item.get("details") or {}),
+        )
+        for item in raw_diagnostics or ()
+        if isinstance(item, Mapping)
+    )
+    return ContextPackage(
+        package_id=str(value.get("package_id") or ""),
+        task_context_id=str(value.get("task_context_id") or ""),
+        context_revision=int(value.get("context_revision") or 0),
+        consumer_id=str(value.get("consumer_id") or ""),
+        phase=str(value.get("phase") or ""),
+        source_revisions=cast(Mapping[str, str], value.get("source_revisions") or {}),
+        blocks=blocks,
+        omissions=omissions,
+        diagnostics=diagnostics,
+    )
+
+
+def _context_consumption_from_dict(value: Mapping[str, Any]) -> ContextConsumption:
+    return ContextConsumption(
+        consumption_id=str(value.get("consumption_id") or ""),
+        package_id=str(value.get("package_id") or ""),
+        request_id=str(value.get("request_id") or ""),
+        consumer_id=str(value.get("consumer_id") or ""),
+        phase=str(value.get("phase") or ""),
+        block_ids=tuple(str(item) for item in value.get("block_ids") or ()),
+    )
 
 
 class AgentTaskResumeMixin(AgentTaskMixinBase):
@@ -41,6 +128,234 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
             "options": DataFormatter.sanitize(self.options),
         }
 
+    def _context_resume_state(self) -> dict[str, Any]:
+        snapshot = self.task_context.snapshot()
+        sources: list[dict[str, Any]] = []
+        for binding in snapshot.bindings:
+            source = self.task_context._binding_source(binding.binding_id)
+            descriptor: dict[str, Any] = {
+                "binding": binding.to_dict(),
+                "source_type": f"{source.__class__.__module__}.{source.__class__.__qualname__}",
+            }
+            if isinstance(source, TaskWorkspaceContextSource):
+                descriptor.update(
+                    {
+                        "kind": "task_workspace",
+                        "execution_id": source.task_workspace.execution_id,
+                    }
+                )
+            elif isinstance(source, RecordStoreContextSource):
+                descriptor["kind"] = "record_store"
+            elif isinstance(source, SkillContextSource):
+                descriptor.update(
+                    {
+                        "kind": "skill_library",
+                        "skill_bindings": [
+                            {
+                                "binding_id": item.binding_id,
+                                "task_id": item.task_id,
+                                "canonical_ref": item.canonical_ref,
+                                "revision": item.revision,
+                                "revision_ref": item.revision_ref,
+                                "mode": item.mode,
+                                "scope": item.scope,
+                            }
+                            for item in source.bindings
+                        ],
+                    }
+                )
+            else:
+                descriptor["kind"] = "unsupported"
+            sources.append(descriptor)
+        return {
+            "schema_version": "agent_task_context_resume/v1",
+            "task_context": snapshot.to_dict(),
+            "sources": sources,
+            "readers": [
+                reader._export_state()
+                for reader in self.context_readers.values()
+            ],
+            "packages": [
+                package.to_dict()
+                for package in self.context_packages
+                if isinstance(package, ContextPackage)
+            ],
+            "consumptions": [
+                consumption.to_dict()
+                for consumption in self.context_consumptions
+                if isinstance(consumption, ContextConsumption)
+            ],
+        }
+
+    @staticmethod
+    def _resume_task_workspace(
+        task_workspace: TaskWorkspace,
+        context_state: Mapping[str, Any],
+    ) -> TaskWorkspace:
+        raw_sources = context_state.get("sources")
+        if not isinstance(raw_sources, Sequence) or isinstance(
+            raw_sources,
+            str | bytes | bytearray,
+        ):
+            return task_workspace
+        execution_id = ""
+        for descriptor in raw_sources:
+            if not isinstance(descriptor, Mapping):
+                continue
+            if descriptor.get("kind") == "task_workspace":
+                execution_id = str(descriptor.get("execution_id") or "").strip()
+                break
+        if not execution_id or execution_id == task_workspace.execution_id:
+            return task_workspace
+        return TaskWorkspace(
+            task_workspace.root,
+            mode=task_workspace.mode,
+            create=True,
+            execution_id=execution_id,
+        )
+
+    @classmethod
+    def _restore_task_context(
+        cls,
+        agent: "BaseAgent",
+        context_state: Mapping[str, Any],
+        *,
+        task_workspace: TaskWorkspace,
+        record_store: RecordStore,
+    ) -> TaskContext:
+        raw_snapshot = context_state.get("task_context")
+        raw_sources = context_state.get("sources")
+        if not isinstance(raw_snapshot, Mapping) or not isinstance(raw_sources, Sequence) or isinstance(
+            raw_sources,
+            str | bytes | bytearray,
+        ):
+            raise ValueError("AgentTask resume snapshot has no restorable TaskContext contract.")
+        task_context = TaskContext(
+            task_id=str(raw_snapshot.get("task_id") or ""),
+            context_id=str(raw_snapshot.get("context_id") or ""),
+        )
+        source_by_binding: dict[str, Mapping[str, Any]] = {}
+        for descriptor in raw_sources:
+            if not isinstance(descriptor, Mapping):
+                continue
+            binding = descriptor.get("binding")
+            if isinstance(binding, Mapping):
+                source_by_binding[str(binding.get("binding_id") or "")] = descriptor
+        raw_bindings = raw_snapshot.get("bindings")
+        for binding in raw_bindings or ():
+            if not isinstance(binding, Mapping):
+                continue
+            binding_id = str(binding.get("binding_id") or "")
+            descriptor = source_by_binding.get(binding_id)
+            if descriptor is None:
+                raise ValueError(f"TaskContext source descriptor is missing for {binding_id!r}.")
+            kind = str(descriptor.get("kind") or "")
+            if kind == "task_workspace":
+                source: Any = TaskWorkspaceContextSource(task_workspace)
+            elif kind == "record_store":
+                source = RecordStoreContextSource(record_store)
+            elif kind == "skill_library":
+                library = getattr(agent, "skill_library", None)
+                if not isinstance(library, SkillLibrary):
+                    raise ValueError("AgentTask Skill Context resume requires the original SkillLibrary.")
+                raw_skill_bindings = descriptor.get("skill_bindings")
+                if not isinstance(raw_skill_bindings, Sequence) or isinstance(
+                    raw_skill_bindings,
+                    str | bytes | bytearray,
+                ):
+                    raise ValueError("AgentTask Skill Context resume has no exact Skill bindings.")
+                skill_bindings = tuple(
+                    SkillBinding(
+                        binding_id=str(item.get("binding_id") or ""),
+                        task_id=str(item.get("task_id") or ""),
+                        canonical_ref=str(item.get("canonical_ref") or ""),
+                        revision=str(item.get("revision") or ""),
+                        revision_ref=str(item.get("revision_ref") or ""),
+                        mode=cast(Any, item.get("mode")),
+                        scope=str(item.get("scope") or "task"),
+                    )
+                    for item in raw_skill_bindings
+                    if isinstance(item, Mapping)
+                )
+                source = SkillContextSource(library, bindings=skill_bindings)
+            else:
+                source_type = str(descriptor.get("source_type") or "unknown")
+                raise ValueError(
+                    f"AgentTask cannot durably restore ContextSource {source_type!r}."
+                )
+            expected_source_id = str(binding.get("source_id") or "")
+            if str(source.source_id) != expected_source_id:
+                raise ValueError(
+                    f"Restored ContextSource identity changed for {binding_id!r}."
+                )
+            if kind == "skill_library" and str(source.source_revision) != str(
+                binding.get("source_revision") or ""
+            ):
+                raise ValueError(
+                    f"Restored Skill Context revision changed for {binding_id!r}."
+                )
+            task_context.attach(
+                source,
+                binding_id=binding_id,
+                required=bool(binding.get("required")),
+                priority=int(binding.get("priority") or 0),
+                scope=str(binding.get("scope") or "task"),
+                metadata=cast(Mapping[str, Any], binding.get("metadata") or {}),
+            )
+        raw_entries = raw_snapshot.get("entries")
+        for entry in raw_entries or ():
+            if not isinstance(entry, Mapping):
+                continue
+            task_context.put(
+                role=cast(Any, entry.get("role")),
+                content=entry.get("content"),
+                entry_id=str(entry.get("entry_id") or ""),
+                required=bool(entry.get("required")),
+                source_ref=(
+                    str(entry.get("source_ref"))
+                    if entry.get("source_ref") is not None
+                    else None
+                ),
+                priority=int(entry.get("priority") or 0),
+                metadata=cast(Mapping[str, Any], entry.get("metadata") or {}),
+            )
+        if task_context.revision != int(raw_snapshot.get("revision") or 0):
+            raise ValueError("Restored TaskContext revision does not match its durable snapshot.")
+        return task_context
+
+    def _restore_context_history(self, context_state: Mapping[str, Any]) -> None:
+        raw_packages = context_state.get("packages")
+        self.context_packages = [
+            _context_package_from_dict(item)
+            for item in raw_packages or ()
+            if isinstance(item, Mapping)
+        ]
+        raw_consumptions = context_state.get("consumptions")
+        self.context_consumptions = [
+            _context_consumption_from_dict(item)
+            for item in raw_consumptions or ()
+            if isinstance(item, Mapping)
+        ]
+        raw_readers = context_state.get("readers")
+        if not isinstance(raw_readers, Sequence) or isinstance(
+            raw_readers,
+            str | bytes | bytearray,
+        ):
+            return
+        for state in raw_readers:
+            if not isinstance(state, Mapping):
+                continue
+            raw_consumer = state.get("consumer")
+            if not isinstance(raw_consumer, Mapping):
+                continue
+            consumer_id = str(raw_consumer.get("consumer_id") or "")
+            phase = str(state.get("phase") or "")
+            reader = self._task_context_reader(
+                phase=phase,
+                consumer_id=consumer_id,
+            )
+            reader._restore_state(state, packages=self.context_packages)
+
     async def _write_resume_snapshot(self, iteration_index: int, verification: dict[str, Any]) -> None:
         """Persist a resumable snapshot keyed by task_id after an iteration.
 
@@ -50,19 +365,21 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         terminal result) from a fresh process.
         """
         # AgentTask process state is run-local by default. Hosts explicitly opt
-        # into durable Workspace recovery when cross-process resume is needed.
-        if not bool(self._agent_task_option("workspace_recovery", False)):
+        # into durable RecordStore recovery when cross-process resume is needed.
+        if not bool(self._agent_task_option("record_store_recovery", False)):
             return
         try:
-            await self._task_reference_catalog.activate_persistence(self.workspace)
-            await self.workspace.put_snapshot(
+            if self.record_store is None:
+                return
+            await self.record_store.put_snapshot(
                 self._resume_run_id(self.id),
                 DataFormatter.sanitize(
                     {
-                        "resume_version": 1,
+                        "resume_version": 3,
                         "task_id": self.id,
                         "iteration": iteration_index,
                         "manifest": self._resume_manifest(),
+                        "context_state": self._context_resume_state(),
                         "iterations_summary": self._iteration_prompt_summaries(),
                         "reflection_summaries": self._reflection_prompt_summaries(),
                         "satisfied_required_actions": sorted(self._satisfied_required_actions),
@@ -119,7 +436,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         """
         # See _write_resume_snapshot: TaskBoard ticks persist only when the host
         # explicitly requests cross-process recovery.
-        if not bool(self._agent_task_option("workspace_recovery", False)):
+        if not bool(self._agent_task_option("record_store_recovery", False)):
             return
         final_result = final_result if isinstance(final_result, Mapping) else {}
         status = str(final_result.get("status") or self.status or "").strip().lower()
@@ -137,15 +454,17 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         }
         try:
             effective_revision = TaskBoardRevision.from_value(revision)
-            await self._task_reference_catalog.activate_persistence(self.workspace)
-            await self.workspace.put_snapshot(
+            if self.record_store is None:
+                return
+            await self.record_store.put_snapshot(
                 self._resume_run_id(self.id),
                 DataFormatter.sanitize(
                     {
-                        "resume_version": 2,
+                        "resume_version": 3,
                         "task_id": self.id,
                         "iteration": int(tick_index),
                         "manifest": self._resume_manifest(),
+                        "context_state": self._context_resume_state(),
                         "iterations_summary": self._iteration_prompt_summaries(),
                         "reflection_summaries": self._reflection_prompt_summaries(),
                         "satisfied_required_actions": sorted(self._satisfied_required_actions),
@@ -167,7 +486,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                             "acceptance_index": dict(acceptance_index or {}),
                             "handoff_projection": dict(handoff_projection or {}),
                             "runtime_topology": dict(runtime_topology),
-                            "workspace_refs": DataFormatter.sanitize(self.workspace_refs),
+                            "record_refs": DataFormatter.sanitize(self.record_refs),
                             "final_result": dict(final_result),
                         },
                         "last_verification": {
@@ -202,7 +521,8 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         agent: "BaseAgent",
         task_id: str,
         *,
-        workspace: str | os.PathLike[str] | None = None,
+        task_workspace: str | os.PathLike[str] | TaskWorkspace | None = None,
+        record_store: RecordStore | None = None,
     ) -> _AgentTaskT:
         """Rebuild an AgentTask from its latest durable snapshot.
 
@@ -213,18 +533,46 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         was in flight at crash time is re-planned.
         """
         agent_any = cast(Any, agent)
-        if workspace is not None:
-            agent_any.use_workspace(workspace)
-        bound_workspace = getattr(agent, "workspace", None)
-        if bound_workspace is None:
+        if isinstance(task_workspace, (str, os.PathLike)):
+            agent_any.use_task_workspace(task_workspace)
+        bound_task_workspace = (
+            task_workspace
+            if isinstance(task_workspace, TaskWorkspace)
+            else getattr(agent, "task_workspace", None)
+        )
+        bound_record_store = record_store or getattr(agent, "record_store", None)
+        if not isinstance(bound_record_store, RecordStore):
             raise RuntimeError(
-                "AgentTask.async_resume requires a Workspace binding. Pass workspace=... "
-                "or call agent.use_workspace(...) before resuming."
+                "AgentTask.async_resume requires a record-store binding."
             )
-        state = await bound_workspace.get_snapshot(cls._resume_run_id(str(task_id)))
-        manifest = state.get("manifest") if isinstance(state, dict) else None
+        state = await bound_record_store.get_snapshot(cls._resume_run_id(str(task_id)))
+        if not isinstance(state, dict):
+            raise ValueError(f"No resumable AgentTask snapshot was found for task_id '{ task_id }'.")
+        manifest = state.get("manifest")
         if not isinstance(manifest, dict) or not manifest.get("goal"):
             raise ValueError(f"No resumable AgentTask snapshot was found for task_id '{ task_id }'.")
+        context_state = state.get("context_state")
+        if not isinstance(context_state, Mapping):
+            raise ValueError(
+                "AgentTask snapshot predates the TaskContext durable contract and cannot be resumed."
+            )
+        if not isinstance(bound_task_workspace, TaskWorkspace):
+            raise RuntimeError("AgentTask.async_resume requires a TaskWorkspace binding.")
+        restored_task_workspace = cls._resume_task_workspace(
+            bound_task_workspace,
+            context_state,
+        )
+        restored_record_store = bound_record_store._bind_execution(
+            str(task_id),
+            scope={"task_id": str(task_id), "execution_id": str(task_id)},
+            search_scope={"task_id": str(task_id), "execution_id": str(task_id)},
+        )
+        restored_task_context = cls._restore_task_context(
+            agent,
+            context_state,
+            task_workspace=restored_task_workspace,
+            record_store=restored_record_store,
+        )
         task = cast(
             _AgentTaskT,
             cast(Any, cls)(
@@ -232,7 +580,9 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                 goal=str(manifest.get("goal") or ""),
                 success_criteria=list(manifest.get("success_criteria") or []),
                 execution=cast(Any, manifest.get("execution_strategy", "auto")),
-                workspace=workspace,
+                record_store=restored_record_store,
+                task_context=restored_task_context,
+                task_workspace=restored_task_workspace,
                 max_iterations=_normalize_agent_task_max_iterations(manifest.get("max_iterations")),
                 verify=cast(Any, manifest.get("verify", "before_done")),
                 context_profile=str(manifest.get("context_profile", "auto")),
@@ -243,6 +593,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
             ),
         )
         task_any = cast(Any, task)
+        task_any._restore_context_history(context_state)
         task_reference_catalog = state.get("task_reference_catalog")
         if isinstance(task_reference_catalog, Mapping):
             task_any._task_reference_catalog = TaskReferenceCatalog.from_snapshot(

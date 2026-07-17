@@ -8,7 +8,7 @@ keywords: Agently, knowledge base, KB, retrieval, embeddings, Chroma
 
 > Languages: **English** · [中文](../../cn/knowledge/knowledge-base.md)
 
-A knowledge base in Agently terms is: a vector store provider, an embedding provider that turns text into vectors, and a query path that returns relevant chunks. Agently ships a Chroma adapter as the reference implementation; its package path is still `agently.integrations.chromadb`. Workspace retrieval stores records through a `DBStoreProvider` and can combine an `EmbeddingProvider` with a pluggable `VectorStoreProvider`: the local default uses `db_store_provider="sqlite"` for records and Chroma when available, falling back to SQLite vector storage.
+A knowledge base in Agently terms is: a vector store provider, an embedding provider that turns text into vectors, and a query path that returns relevant chunks. Agently ships a Chroma adapter as the reference implementation; its package path is still `agently.integrations.chromadb`. RecordStore retrieval stores records through a `DBStoreProvider` and can combine an `EmbeddingProvider` with a pluggable `VectorStoreProvider`: the local default uses `db_store_provider="sqlite"` for records and Chroma when available, falling back to SQLite vector storage.
 
 ## When to reach for KB
 

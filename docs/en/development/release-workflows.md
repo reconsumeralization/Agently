@@ -176,7 +176,8 @@ for that companion before declaring the release line aligned.
 Foundation-layer capabilities are release-critical framework substrate, not
 application-level use cases. Examples include ModelRequest/ModelResponse,
 TriggerFlow, Dynamic Task/TaskDAG, ActionRuntime, ExecutionResource,
-Workspace/ContextBuilder/ContextPackage, RuntimeEvent/EventCenter, and provider protocols. When a
+TaskContext/ContextReader, TaskWorkspace, RecordStore, RuntimeEvent/EventCenter,
+and provider protocols. When a
 release touches or claims one of these substrate capabilities, tests are not
 enough by themselves: the release reviewer must also run the corresponding core
 example under `examples/` and confirm the real effect still works through the
@@ -222,7 +223,7 @@ Before recommending a release:
   Ollama when the example contains model-owned routing, planning, verification,
   evaluation, or response generation
 - run release examples with an explicit all-allowed test capability policy when
-  they may exercise Skills, Actions, Workspace, network, Python, shell, HTTP,
+  they may exercise Skills, Actions, TaskWorkspace, RecordStore, network, Python, shell, HTTP,
   browse, search, or MCP capability loading; do not confuse this release-test
   posture with Agently's default fail-closed runtime permission posture
 - record the command, interpreter, provider/model, environment assumptions,

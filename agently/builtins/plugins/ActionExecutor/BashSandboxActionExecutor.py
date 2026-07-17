@@ -75,7 +75,7 @@ class BashSandboxActionExecutor:
 
         cmd = Cmd(
             allowed_cmd_prefixes=policy.get("allowed_cmd_prefixes", self.allowed_cmd_prefixes),
-            allowed_workdir_roots=policy.get("workspace_roots", self.allowed_workdir_roots),
+            allowed_workdir_roots=policy.get("task_workspace_roots", self.allowed_workdir_roots),
             timeout=int(policy.get("timeout_seconds", self.timeout)),
             env=self.env,
             max_output_chars=int(policy.get("max_output_chars", self.max_output_chars)),

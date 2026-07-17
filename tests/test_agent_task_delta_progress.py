@@ -1204,8 +1204,8 @@ async def test_flat_live_action_lifecycle_projects_started_completed_and_failed(
 
 
 @pytest.mark.asyncio
-async def test_action_delta_links_only_workspace_readback_verified_file_refs(tmp_path: Any) -> None:
-    agent = Agently.create_agent("delta-progress-file-ref").use_workspace(tmp_path / "workspace")
+async def test_action_delta_links_only_task_workspace_readback_verified_file_refs(tmp_path: Any) -> None:
+    agent = Agently.create_agent("delta-progress-file-ref").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
         task_id="delta-progress-file-ref-task",
@@ -1213,7 +1213,7 @@ async def test_action_delta_links_only_workspace_readback_verified_file_refs(tmp
         success_criteria=["The report file is readable."],
         execution="flat",
     )
-    written = await task.workspace.write_file("reports/final.md", "# Final report\n")
+    written = await task.task_workspace.write_file("reports/final.md", "# Final report\n")
     trusted_ref = written["file_refs"][0]
     outside_path = tmp_path / "outside-secret.txt"
     outside_path.write_text("secret", encoding="utf-8")
@@ -1259,7 +1259,7 @@ async def test_action_delta_links_only_workspace_readback_verified_file_refs(tmp
     )
 
     trusted_item, untrusted_item = task._stream_items[-2:]
-    expected_open_path = str(task.workspace.resolve_file_path(trusted_ref["path"]))
+    expected_open_path = str(task.task_workspace.resolve_file_path(trusted_ref["path"]))
     assert trusted_item.value["file_refs"][0]["open_path"] == expected_open_path
     trusted_text = AgentExecutionTextDeltaProjector().project(trusted_item)
     assert trusted_text is not None

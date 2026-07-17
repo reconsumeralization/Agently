@@ -62,19 +62,19 @@ class ActionTaskAdapter:
 
 
 class SkillTaskAdapter:
-    def __init__(self, skills_manager: Any):
-        self.skills_manager = skills_manager
+    def __init__(self, skill_task_runner: Any):
+        self.skill_task_runner = skill_task_runner
 
     async def __call__(self, context: TaskDAGContext):
-        if hasattr(self.skills_manager, "async_run_skills_task"):
+        if hasattr(self.skill_task_runner, "async_run_skills_task"):
             skill_id = context.task.binding if isinstance(context.task.binding, str) else context.task.id
-            return await self.skills_manager.async_run_skills_task(
+            return await self.skill_task_runner.async_run_skills_task(
                 context.task.purpose or context.task.title or context.task.id,
                 skills=[skill_id],
             )
-        if callable(self.skills_manager):
-            return await FunctionShifter.asyncify(self.skills_manager)(context)
-        raise TypeError("Skill dynamic task requires a Skills Manager-like object or callable.")
+        if callable(self.skill_task_runner):
+            return await FunctionShifter.asyncify(self.skill_task_runner)(context)
+        raise TypeError("Skill dynamic task requires an AgentExecution adapter or callable.")
 
 
 class DynamicTask:
@@ -106,7 +106,7 @@ class DynamicTask:
         self.planner_source = planner
         self.model_source = model
         self.actions = actions
-        self.skills_manager = skills
+        self.skill_task_runner = skills
         self.handlers = dict(handlers or {})
         self.output_schema = output_schema
         self.ensure_keys = ensure_keys
@@ -137,8 +137,8 @@ class DynamicTask:
         resolver.register("model", self._run_model_task)
         if self.actions is not None:
             resolver.register("action", ActionTaskAdapter(self.actions))
-        if self.skills_manager is not None:
-            resolver.register("skill", SkillTaskAdapter(self.skills_manager))
+        if self.skill_task_runner is not None:
+            resolver.register("skill", SkillTaskAdapter(self.skill_task_runner))
         for key, handler in self.handlers.items():
             handler_key = str(key).strip()
             if handler_key in {"model", "action", "skill", "validate", "approval", "artifact", "emit"}:

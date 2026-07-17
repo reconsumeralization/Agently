@@ -8,7 +8,7 @@ keywords: Agently, ExecutionResource, Action, TriggerFlow, sandbox, MCP, runtime
 
 > 语言：[English](../../en/actions/execution-environment.md) · **中文**
 
-> 在 4.1.3.8 的 Workspace/ActionRuntime 边界重构中更名：托管的活动资源接缝现在
+> 在 4.1.3.8 的 TaskWorkspace/ActionRuntime 边界重构中更名：托管的活动资源接缝现在
 > 称为 **ExecutionResource**（`ExecutionResourceManager`、
 > `ExecutionResourceProvider`、`Agently.execution_resource`），旧的
 > `ExecutionEnvironment*` 名称已移除。本页保留原 URL 以保持链接稳定。

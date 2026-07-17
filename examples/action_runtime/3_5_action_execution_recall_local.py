@@ -8,7 +8,7 @@ from agently.core.runtime import bind_runtime_context
 
 agent = Agently.create_agent()
 workspace = Path(__file__).resolve().parent
-execution = agent.input("Inspect the example Workspace.").create_execution().strategy("direct")
+execution = agent.input("Inspect the example TaskWorkspace.").create_execution().strategy("direct")
 artifact_scope = {"kind": "agent_execution", "id": execution.id}
 
 agent.enable_shell(

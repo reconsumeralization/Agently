@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 
-_CARRIER_KINDS = frozenset({"workspace_artifact", "inline_final_result"})
+_CARRIER_KINDS = frozenset({"task_workspace_artifact", "inline_final_result"})
 _CARRIER_STATUSES = frozenset({"proposed", "materialized", "accepted", "rejected"})
 _REQUESTED_STRATEGIES = frozenset({"auto", "flat", "taskboard"})
 _EFFECTIVE_STRATEGIES = frozenset({"flat", "taskboard"})
@@ -82,10 +82,10 @@ class TerminalCarrier:
         )
         object.__setattr__(self, "content_version_id", content_version_id)
         path = str(self.path or "").strip()
-        if kind == "workspace_artifact" and not path:
-            raise ValueError("Workspace terminal carriers require a path.")
+        if kind == "task_workspace_artifact" and not path:
+            raise ValueError("TaskWorkspace terminal carriers require a path.")
         if kind == "inline_final_result" and path:
-            raise ValueError("Inline terminal carriers cannot own a Workspace path.")
+            raise ValueError("Inline terminal carriers cannot own a TaskWorkspace path.")
         if kind == "inline_final_result" and not content_version_id.startswith("inline:"):
             raise ValueError("Inline terminal carriers require an inline: content_version_id.")
         object.__setattr__(self, "path", path)
@@ -214,6 +214,7 @@ class AgentTaskLifecycleState:
     work_result_id: str = ""
     evidence_ref: str = ""
     evidence_version: int = 0
+    skill_bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
     carrier_inventory: TerminalCarrierInventory | None = None
     active_issue: dict[str, Any] = field(default_factory=dict)
     repair_contract: dict[str, Any] = field(default_factory=dict)
@@ -237,6 +238,41 @@ class AgentTaskLifecycleState:
             field_name="evidence_version",
             allow_zero=True,
         )
+        normalized_skill_bindings: dict[str, dict[str, Any]] = {}
+        for raw_binding_id, raw_binding in dict(self.skill_bindings).items():
+            if not isinstance(raw_binding, Mapping):
+                raise ValueError("AgentTask Skill bindings must be mappings.")
+            binding_id = _required_text(
+                raw_binding.get("binding_id") or raw_binding_id,
+                field_name="skill_binding.binding_id",
+            )
+            if binding_id in normalized_skill_bindings:
+                raise ValueError(f"duplicate AgentTask Skill binding id: {binding_id}")
+            canonical_skill_id = _required_text(
+                raw_binding.get("canonical_skill_id"),
+                field_name="skill_binding.canonical_skill_id",
+            )
+            mode = str(raw_binding.get("mode") or "required").strip()
+            if mode not in {"required", "model_decision"}:
+                raise ValueError(f"Unsupported AgentTask Skill binding mode: {mode}.")
+            contexts = raw_binding.get("contexts")
+            normalized_contexts = (
+                [deepcopy(dict(item)) for item in contexts if isinstance(item, Mapping)]
+                if isinstance(contexts, Sequence) and not isinstance(contexts, str | bytes | bytearray)
+                else []
+            )
+            normalized_skill_bindings[binding_id] = {
+                "binding_id": binding_id,
+                "canonical_skill_id": canonical_skill_id,
+                "mode": mode,
+                "resolved_source": str(raw_binding.get("resolved_source") or ""),
+                "resolved_revision": str(raw_binding.get("resolved_revision") or ""),
+                "source_subpath": str(raw_binding.get("source_subpath") or ""),
+                "install_status": str(raw_binding.get("install_status") or "completed"),
+                "activation_status": str(raw_binding.get("activation_status") or "bound"),
+                "contexts": normalized_contexts,
+            }
+        self.skill_bindings = normalized_skill_bindings
         if self.carrier_inventory is None:
             self.carrier_inventory = TerminalCarrierInventory(
                 inventory_version=0,
@@ -248,6 +284,117 @@ class AgentTaskLifecycleState:
         self.repair_contract = deepcopy(dict(self.repair_contract))
         self.replan_signal = deepcopy(dict(self.replan_signal))
         self.terminal_decision = deepcopy(dict(self.terminal_decision))
+
+    def skill_binding_id(self, canonical_skill_id: str) -> str:
+        skill_id = str(canonical_skill_id or "").strip()
+        for binding_id, binding in self.skill_bindings.items():
+            if str(binding.get("canonical_skill_id") or "") == skill_id:
+                return binding_id
+        return ""
+
+    def bind_skill(
+        self,
+        *,
+        binding_id: str,
+        canonical_skill_id: str,
+        mode: str = "required",
+        resolved_source: str = "",
+        resolved_revision: str = "",
+        source_subpath: str = "",
+    ) -> str:
+        normalized_binding_id = _required_text(
+            binding_id,
+            field_name="skill_binding.binding_id",
+        )
+        normalized_skill_id = _required_text(
+            canonical_skill_id,
+            field_name="skill_binding.canonical_skill_id",
+        )
+        normalized_mode = str(mode or "required").strip()
+        if normalized_mode not in {"required", "model_decision"}:
+            raise ValueError(f"Unsupported AgentTask Skill binding mode: {normalized_mode}.")
+        existing_id = self.skill_binding_id(normalized_skill_id)
+        if existing_id:
+            return existing_id
+        if normalized_binding_id in self.skill_bindings:
+            raise ValueError(f"duplicate AgentTask Skill binding id: {normalized_binding_id}")
+        self.skill_bindings[normalized_binding_id] = {
+            "binding_id": normalized_binding_id,
+            "canonical_skill_id": normalized_skill_id,
+            "mode": normalized_mode,
+            "resolved_source": str(resolved_source or ""),
+            "resolved_revision": str(resolved_revision or ""),
+            "source_subpath": str(source_subpath or ""),
+            "install_status": "completed",
+            "activation_status": "bound",
+            "contexts": [],
+        }
+        return normalized_binding_id
+
+    def record_skill_context_binding(
+        self,
+        *,
+        request_id: str,
+        phase: str,
+        bindings: Sequence[Mapping[str, Any]],
+    ) -> None:
+        normalized_request_id = _required_text(
+            request_id,
+            field_name="skill_context.request_id",
+        )
+        normalized_phase = _required_text(
+            phase,
+            field_name="skill_context.phase",
+        )
+        for item in bindings:
+            if not isinstance(item, Mapping):
+                raise ValueError("Skill context bindings must be mappings.")
+            binding_id = _required_text(
+                item.get("binding_id"),
+                field_name="skill_context.binding_id",
+            )
+            binding = self.skill_bindings.get(binding_id)
+            if binding is None:
+                raise ValueError(f"Skill context referenced unknown AgentTask binding id: {binding_id}")
+            canonical_skill_id = _required_text(
+                item.get("canonical_skill_id"),
+                field_name="skill_context.canonical_skill_id",
+            )
+            if canonical_skill_id != binding["canonical_skill_id"]:
+                raise ValueError("Skill context canonical id does not match its AgentTask binding.")
+            context_record = {
+                "request_id": normalized_request_id,
+                "phase": normalized_phase,
+                "guidance_chars": _positive_int(
+                    item.get("guidance_chars", 0),
+                    field_name="skill_context.guidance_chars",
+                    allow_zero=True,
+                ),
+                "resource_chars": _positive_int(
+                    item.get("resource_chars", 0),
+                    field_name="skill_context.resource_chars",
+                    allow_zero=True,
+                ),
+                "selected_resource_keys": (
+                    [str(value) for value in item.get("selected_resource_keys", []) if str(value).strip()]
+                    if isinstance(item.get("selected_resource_keys"), Sequence)
+                    and not isinstance(
+                        item.get("selected_resource_keys"),
+                        str | bytes | bytearray,
+                    )
+                    else []
+                ),
+                "truncated": bool(item.get("truncated", False)),
+            }
+            contexts = binding.setdefault("contexts", [])
+            existing_index = next(
+                (index for index, current in enumerate(contexts) if current.get("request_id") == normalized_request_id),
+                None,
+            )
+            if existing_index is None:
+                contexts.append(context_record)
+            else:
+                contexts[existing_index] = context_record
 
     def require_version(self, expected_version: int) -> "AgentTaskLifecycleState":
         expected = _positive_int(expected_version, field_name="expected_version")
@@ -451,6 +598,7 @@ class AgentTaskLifecycleState:
             "work_result_id": self.work_result_id,
             "evidence_ref": self.evidence_ref,
             "evidence_version": self.evidence_version,
+            "skill_bindings": deepcopy(self.skill_bindings),
             "carrier_inventory": inventory.to_dict() if inventory is not None else None,
             "active_issue": deepcopy(self.active_issue),
             "repair_contract": deepcopy(self.repair_contract),
@@ -472,9 +620,7 @@ class AgentTaskLifecycleState:
             task_id=str(value.get("task_id") or ""),
             requested_strategy=str(value.get("requested_strategy") or ""),
             effective_strategy=(
-                str(value.get("effective_strategy"))
-                if value.get("effective_strategy") is not None
-                else None
+                str(value.get("effective_strategy")) if value.get("effective_strategy") is not None else None
             ),
             phase=str(value.get("phase") or "created"),
             iteration=value.get("iteration", 0),
@@ -484,6 +630,7 @@ class AgentTaskLifecycleState:
             work_result_id=str(value.get("work_result_id") or ""),
             evidence_ref=str(value.get("evidence_ref") or ""),
             evidence_version=value.get("evidence_version", 0),
+            skill_bindings=dict(value.get("skill_bindings") or {}),
             carrier_inventory=inventory,
             active_issue=dict(value.get("active_issue") or {}),
             repair_contract=dict(value.get("repair_contract") or {}),

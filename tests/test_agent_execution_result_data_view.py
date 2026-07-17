@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 
 from agently import Agently
-from agently.types.data import WorkspaceFileRef
+from agently.types.data import TaskWorkspaceFileRef
 
 
 def _terminal_payload(final_result: Any, *, strategy: str = "flat") -> dict[str, Any]:
@@ -57,7 +57,7 @@ async def test_direct_terminal_retention_keeps_small_result_inline(tmp_path) -> 
 
     execution: Any = (
         Agently.create_agent("result-view-direct-small-retention")
-        .use_workspace(tmp_path / "run")
+        .use_task_workspace(tmp_path / "run")
         .input("Return a small direct result.")
         .create_execution()
         .strategy("direct")
@@ -78,7 +78,7 @@ async def test_direct_large_result_is_not_copied_into_workspace(tmp_path) -> Non
 
     execution: Any = (
         Agently.create_agent("result-view-direct-large-memory-only")
-        .use_workspace(tmp_path / "run")
+        .use_task_workspace(tmp_path / "run")
         .input("Return a large direct result.")
         .create_execution()
         .strategy("direct")
@@ -102,13 +102,13 @@ async def test_direct_terminal_cleanup_keeps_only_verified_file_ref(tmp_path) ->
 
     execution: Any = (
         Agently.create_agent("result-view-direct-file-cleanup")
-        .use_workspace(tmp_path / "run")
+        .use_task_workspace(tmp_path / "run", mode="read_only")
         .input("Return a file-backed result.")
         .create_execution()
         .strategy("direct")
     )
-    draft = await execution.workspace.write_file("working/draft.md", "discard")
-    final = await execution.workspace.write_file("deliverables/final.md", "retain")
+    draft = await execution.task_workspace.write_file("working/draft.md", "discard")
+    final = await execution.task_workspace.write_file("deliverables/final.md", "retain")
     execution.result = {"artifact_refs": [final["file_refs"][0]]}
     execution.status = "success"
 
@@ -139,7 +139,7 @@ async def test_agent_execution_error_projection_is_shared_and_utf8_bounded(
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     execution: Any = (
         Agently.create_agent(f"result-view-bounded-error-{error_kind}")
-        .use_workspace(tmp_path / error_kind)
+        .use_task_workspace(tmp_path / error_kind)
         .input("Raise one oversized error.")
         .create_execution()
         .strategy("direct")

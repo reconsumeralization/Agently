@@ -15,8 +15,7 @@
 from __future__ import annotations
 
 import hashlib
-
-from agently.core.Workspace.Errors import WorkspacePolicyError
+import uuid
 
 from .LifecycleState import TerminalCarrier, TerminalCarrierInventory
 from .TaskShared import *
@@ -26,18 +25,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
     """Materialize and resolve the one current terminal carrier inventory."""
 
     async def _allocate_terminal_carrier_id(self) -> str:
-        catalog = getattr(self.workspace.backend, "_identity_catalog", None)
-        allocate = getattr(catalog, "allocate", None)
-        if not callable(allocate):
-            raise WorkspacePolicyError(
-                "Workspace backend cannot allocate stable terminal carrier identities."
-            )
-        typed_allocate = cast(Callable[..., Awaitable[Any]], allocate)
-        identity = await typed_allocate("carrier")
-        carrier_id = str(getattr(identity, "entity_id", "") or "").strip()
-        if not carrier_id.startswith("car_"):
-            raise WorkspacePolicyError("Workspace returned an invalid terminal carrier identity.")
-        return carrier_id
+        return f"car_{uuid.uuid4().hex}"
 
     @staticmethod
     def _terminal_carrier_reuse_key(
@@ -62,7 +50,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
         diagnostics: list[dict[str, Any]] = []
         raw_carriers: list[dict[str, Any]] = []
         current_file_refs = self._trusted_terminal_file_refs(execution_result)
-        cumulative_file_refs = self._trusted_workspace_artifact_refs_from_summary(
+        cumulative_file_refs = self._trusted_task_workspace_artifact_refs_from_summary(
             execution_evidence_summary
         )
         text_file_refs = [
@@ -76,30 +64,30 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
                 for ref in cumulative_file_refs
                 if str(ref.get("content_kind") or "text") in {"", "text"}
             ]
-        required_deliverables = self._required_workspace_deliverables()
+        required_deliverables = self._required_task_workspace_deliverables()
         candidate_paths: list[str] = []
         for required_path in required_deliverables:
-            path = self._workspace_artifact_display_path(required_path)
+            path = self._task_workspace_artifact_display_path(required_path)
             if path and path not in candidate_paths:
                 candidate_paths.append(path)
-        # A declared deliverable path is the terminal Workspace carrier owner.
+        # A declared deliverable path is the terminal TaskWorkspace carrier owner.
         # Upstream/working artifacts remain cold evidence and must not compete
         # with that path in the semantic terminal audit. If no deliverable was
         # declared, current trusted refs remain the structural fallback.
         if not candidate_paths:
             for ref in text_file_refs:
-                path = self._workspace_artifact_display_path(ref.get("path"))
+                path = self._task_workspace_artifact_display_path(ref.get("path"))
                 if path and path not in candidate_paths:
                     candidate_paths.append(path)
 
         required_paths = {
-            self._workspace_artifact_display_path(path)
+            self._task_workspace_artifact_display_path(path)
             for path in required_deliverables
-            if self._workspace_artifact_display_path(path)
+            if self._task_workspace_artifact_display_path(path)
         }
         for path in candidate_paths:
             try:
-                promoted = await self.workspace._promote_file_identity(
+                promoted = await self.task_workspace._promote_file_identity(
                     path,
                     role="terminal_carrier",
                 )
@@ -107,8 +95,8 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
                 digest = str(promoted.get("sha256") or "").strip()
                 size = int(promoted.get("bytes") or promoted.get("size") or 0)
                 if not content_version_id or not digest:
-                    raise ValueError("Workspace did not return a versioned content identity.")
-                readback = await self.workspace.read_file(path, max_bytes=max(1, size + 1))
+                    raise ValueError("TaskWorkspace did not return a versioned content identity.")
+                readback = await self.task_workspace.read_file(path, max_bytes=max(1, size + 1))
                 text = readback.get("content")
                 if not isinstance(text, str) or bool(readback.get("truncated")):
                     raise ValueError("Terminal carrier readback was not complete text.")
@@ -116,7 +104,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
                     raise ValueError("Terminal carrier readback digest does not match its content version.")
                 raw_carriers.append(
                     {
-                        "kind": "workspace_artifact",
+                        "kind": "task_workspace_artifact",
                         "required": path in required_paths or not required_paths,
                         "text": text,
                         "path": path,
@@ -140,7 +128,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
 
         inline_is_pointer = (
             not inline_text
-            or self._looks_like_workspace_artifact_placeholder(inline_text)
+            or self._looks_like_task_workspace_artifact_placeholder(inline_text)
             or inline_text in candidate_paths
         )
         if inline_text and not inline_is_pointer:
@@ -204,8 +192,8 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
         diagnostics = list(self._terminal_materialization_diagnostics)
         for carrier in inventory.carriers:
             text = ""
-            if carrier.kind == "workspace_artifact":
-                promoted = await self.workspace._promote_file_identity(
+            if carrier.kind == "task_workspace_artifact":
+                promoted = await self.task_workspace._promote_file_identity(
                     carrier.path,
                     role="terminal_carrier_readback",
                 )
@@ -216,10 +204,10 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
                     or current_digest != carrier.content_digest
                 ):
                     raise ValueError(
-                        f"Terminal carrier {carrier.carrier_id} is stale for Workspace path {carrier.path}."
+                        f"Terminal carrier {carrier.carrier_id} is stale for TaskWorkspace path {carrier.path}."
                     )
                 size = int(promoted.get("bytes") or promoted.get("size") or 0)
-                readback = await self.workspace.read_file(
+                readback = await self.task_workspace.read_file(
                     carrier.path,
                     max_bytes=max(1, size + 1),
                 )
@@ -300,13 +288,13 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
             return None
         return carrier
 
-    async def _terminal_inventory_workspace_refs(self) -> list[dict[str, Any]]:
+    async def _terminal_inventory_task_workspace_refs(self) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []
         inventory = self._lifecycle_state.carrier_inventory
         for carrier in inventory.carriers:
-            if carrier.kind != "workspace_artifact":
+            if carrier.kind != "task_workspace_artifact":
                 continue
-            promoted = await self.workspace._promote_file_identity(
+            promoted = await self.task_workspace._promote_file_identity(
                 carrier.path,
                 role="terminal_carrier",
             )
@@ -321,18 +309,18 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
             refs.append(
                 {
                     **dict(DataFormatter.sanitize(promoted)),
-                    "role": "workspace_artifact",
+                    "role": "task_workspace_artifact",
                     "source": "agent_task.terminal_carrier_inventory",
                     "carrier_id": carrier.carrier_id,
                 }
             )
         return refs
 
-    async def _missing_required_workspace_deliverables(self) -> list[str]:
+    async def _missing_required_task_workspace_deliverables(self) -> list[str]:
         missing: list[str] = []
-        for path in self._required_workspace_deliverables():
+        for path in self._required_task_workspace_deliverables():
             try:
-                read_result = await self.workspace.read_file(path, max_bytes=1)
+                read_result = await self.task_workspace.read_file(path, max_bytes=1)
             except Exception:
                 missing.append(path)
                 continue
@@ -352,7 +340,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
         missing = self._normalize_string_list(missing_deliverables)
         if not missing:
             return
-        message = "Missing required Workspace deliverable(s): " + ", ".join(missing)
+        message = "Missing required TaskWorkspace deliverable(s): " + ", ".join(missing)
         verification["is_complete"] = False
         verification["final_result_required"] = True
         verification["missing_criteria"] = self._merge_string_lists(
@@ -365,13 +353,13 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
         )
         verification["guard_reasons"] = self._merge_string_lists(
             verification.get("guard_reasons"),
-            ["required_workspace_deliverable_missing"],
+            ["required_task_workspace_deliverable_missing"],
         )
         if not str(verification.get("failure_analysis") or "").strip():
             verification["failure_analysis"] = message
         if not str(verification.get("replan_instruction") or "").strip():
             verification["replan_instruction"] = (
-                "Write and read back the required Workspace deliverable before accepting completion."
+                "Write and read back the required TaskWorkspace deliverable before accepting completion."
             )
 
     def _apply_terminal_guard_issues(
@@ -460,7 +448,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
         plan: dict[str, Any],
         execution_result: Any,
         execution_meta: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
         missing_deliverables: Sequence[str] | None = None,
         terminal_guard_issues: Sequence[Mapping[str, Any]] = (),
         preferred_final_result: Any = None,
@@ -520,7 +508,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
             verification.get("is_complete")
         ):
             effective_missing_deliverables = (
-                await self._missing_required_workspace_deliverables()
+                await self._missing_required_task_workspace_deliverables()
             )
         if effective_missing_deliverables:
             self._guard_missing_required_deliverables(
@@ -589,10 +577,10 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
             if terminal_refs is not None
             else self._trusted_terminal_refs(execution_result, verification)
         )
-        inventory_workspace_refs = await self._terminal_inventory_workspace_refs()
+        inventory_task_workspace_refs = await self._terminal_inventory_task_workspace_refs()
         effective_terminal_refs = self._trusted_terminal_refs(
             supplied_terminal_refs,
-            inventory_workspace_refs,
+            inventory_task_workspace_refs,
         )
         terminal_file_refs = self._trusted_terminal_file_refs(effective_terminal_refs)
         final_result_value = (
@@ -620,10 +608,10 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
             "required_carrier_ids": [
                 carrier.carrier_id for carrier in offered_carriers if carrier.required
             ],
-            "workspace_paths": [
+            "task_workspace_paths": [
                 carrier.path
                 for carrier in offered_carriers
-                if carrier.kind == "workspace_artifact"
+                if carrier.kind == "task_workspace_artifact"
             ],
             "final_result": self._compact_terminal_final_result(
                 final_result_value,

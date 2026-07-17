@@ -330,7 +330,7 @@ class DAGActionFlow:
             dag_execution = compiled_dag.create_execution(
                 auto_close=False,
                 concurrency=concurrency,
-                workspace=False,
+                record_store=False,
             )
             await dag_execution.async_start({"round_index": round_index})
             result = await dag_execution.async_close(timeout=timeout)
@@ -438,7 +438,7 @@ class DAGActionFlow:
 
         execution = flow.create_execution(
             parent_run_context=action_loop_run,
-            workspace=False,
+            record_store=False,
             auto_close=False,
         )
         action_loop_completed = False

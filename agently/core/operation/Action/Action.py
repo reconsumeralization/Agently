@@ -405,6 +405,47 @@ class Action:
                 removed.append(action_id)
         return removed
 
+    def _snapshot_action_registration_batch(self, action_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Capture exact prior registrations for one internal atomic batch."""
+
+        snapshot: dict[str, dict[str, Any] | None] = {}
+        for action_id in self._normalize_registered_action_ids(action_ids):
+            spec = self.action_registry.get_spec(action_id)
+            if spec is None:
+                snapshot[action_id] = None
+                continue
+            snapshot[action_id] = {
+                "spec": dict(spec),
+                "executor": self.action_registry.get_executor(action_id),
+                "registry_func": self.action_registry.get_func(action_id),
+                "action_func": self.action_funcs.get(action_id),
+            }
+        return snapshot
+
+    def _rollback_action_registration_batch(
+        self,
+        action_ids: list[str],
+        snapshot: dict[str, dict[str, Any] | None],
+    ) -> None:
+        """Rollback only the ids declared by one failed internal batch."""
+
+        normalized_ids = self._normalize_registered_action_ids(action_ids)
+        self.unregister_action(list(reversed(normalized_ids)))
+        for action_id in normalized_ids:
+            previous = snapshot.get(action_id)
+            if previous is None:
+                continue
+            self.action_registry.register(
+                cast(ActionSpec, previous["spec"]),
+                previous["executor"],
+                func=previous.get("registry_func"),
+            )
+            action_func = previous.get("action_func")
+            if action_func is None:
+                self.action_funcs.pop(action_id, None)
+            else:
+                self.action_funcs[action_id] = action_func
+
     def action_func(self, func: Callable[P, R]) -> Callable[P, R]:
         action_id = func.__name__
         desc = inspect.getdoc(func) or func.__name__
@@ -936,7 +977,7 @@ class Action:
         env: dict[str, str] | None = None,
         max_output_chars: int = 20000,
         output_artifact_dir: str | Path | None = None,
-        workspace_mounts: list[dict[str, str]] | None = None,
+        task_workspace_mounts: list[dict[str, str]] | None = None,
         sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
@@ -957,7 +998,7 @@ class Action:
             env=env,
             max_output_chars=max_output_chars,
             output_artifact_dir=output_artifact_dir,
-            workspace_mounts=workspace_mounts,
+            task_workspace_mounts=task_workspace_mounts,
             sandbox=sandbox,
             docker_image=docker_image,
             docker_binary=docker_binary,

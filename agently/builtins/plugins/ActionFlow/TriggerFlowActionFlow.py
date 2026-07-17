@@ -504,8 +504,8 @@ class TriggerFlowActionFlow:
                     continue
                 data.set_state("pending_policy_approval_key", approval_key)
                 data.set_state("pending_policy_approval_action", dict(command))
-                if data.execution._get_runtime_resource("workspace", None) is None:
-                    data.execution.set_runtime_resource("workspace", recovery_workspace)
+                if data.execution._get_runtime_resource("record_store", None) is None:
+                    data.execution.set_runtime_resource("record_store", recovery_record_store)
                 gate_result = await policy_approval.async_gate(
                     data,
                     {
@@ -742,10 +742,10 @@ class TriggerFlowActionFlow:
 
         execution = flow.create_execution(
             parent_run_context=action_loop_run,
-            workspace=False,
+            record_store=False,
             auto_close=False,
         )
-        recovery_workspace = flow._create_execution_workspace_resource(
+        recovery_record_store = flow._create_execution_record_store_resource(
             execution.id,
             execution.run_context,
         )

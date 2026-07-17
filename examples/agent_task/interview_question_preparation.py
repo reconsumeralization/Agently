@@ -12,6 +12,7 @@ from typing import Any, cast
 from dotenv import find_dotenv, load_dotenv
 
 from agently import Agently
+from agently.builtins.actions import Browse, Search
 
 
 DEFAULT_TARGET_INPUTS = ["Karpathy from Anthropic", "Agently的作者莫欣（Maplemx）"]
@@ -58,12 +59,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--workspace",
         default=os.getenv("AGENT_TASK_WORKSPACE", ""),
-        help="Workspace directory. Defaults to agent-task-workspaces/interview-question-preparation-<hash>.",
+        help="TaskWorkspace directory. Defaults to agent-task-workspaces/interview-question-preparation-<hash>.",
     )
     parser.add_argument(
         "--output-file",
         default=os.getenv("AGENT_TASK_OUTPUT_FILE", ""),
-        help="Workspace-relative Markdown output path. Defaults to outputs/blog_interview_questions_<hash>.md.",
+        help="TaskWorkspace-relative Markdown output path. Defaults to outputs/blog_interview_questions_<hash>.md.",
     )
     parser.add_argument(
         "--audience",
@@ -216,7 +217,7 @@ def print_startup_summary(
 ) -> None:
     print("\n[SETUP] Blog interview preparation")
     print(f"[SETUP] Task id: {task_id}")
-    print(f"[SETUP] Workspace: {workspace_dir}")
+    print(f"[SETUP] TaskWorkspace: {workspace_dir}")
     print(f"[SETUP] Output file: {workspace_dir / output_file}")
     print(f"[SETUP] Main model: provider={provider}, model_key={task_model_key}")
     print(f"[SETUP] Progress model key: {progress_model_key}")
@@ -250,7 +251,7 @@ def print_result_summary(summary: dict[str, Any], file_text: str) -> None:
     print(f"[RESULT] Interview angle visible: {summary['has_interview_angle']}")
     print(f"[RESULT] Targets mentioned: {summary['mentions_all_targets']}")
     print(f"[RESULT] Semantic judge passed: {summary['semantic_judge_passed']}")
-    print(f"[RESULT] Workspace recovery refs: {summary['workspace_recovery_ref_count']}")
+    print(f"[RESULT] RecordStore recovery refs: {summary['record_store_recovery_ref_count']}")
     print(f"[RESULT] Observed action history entries: {summary['action_log_count']}")
     print(f"[RESULT] Stream trace: {summary['stream_trace_file']}")
     preview_lines = [line for line in file_text.splitlines() if line.strip()][:18]
@@ -466,7 +467,7 @@ async def main(argv: list[str] | None = None):
     Agently.skills_executor.configure(registry_root=str(registry_root), allowed_trust_levels=["local"])
     Agently.skills_executor.install_skills(skill_src, trust_level="local", update=True)
 
-    agent = Agently.create_agent("agent-task-interview-question-preparation").use_workspace(workspace_dir)
+    agent = Agently.create_agent("agent-task-interview-question-preparation").use_task_workspace(workspace_dir).use_record_store(workspace_dir, mode="read_write")
     provider, task_model_key, progress_model_key = configure_agent_model_pool(agent, temperature=0.0)
     interview_input = await parse_targets_with_model(
         agent,
@@ -485,22 +486,16 @@ async def main(argv: list[str] | None = None):
         task_model_key=task_model_key,
         progress_model_key=progress_model_key,
     )
-    agent.settings.set("skills.capability_discovery.model_assisted", True)
-    agent.configure_skill_capabilities(
-        auto_load={
-            "web_search": "allow",
-            "web_browse": "allow",
-            "workspace_read": "allow",
-            "workspace_write": "allow",
-        },
-        workspace_root=str(workspace_dir),
-        search={
-            "backend": os.getenv("SEARCH_BACKEND", "auto"),
-        },
+    agent.use_actions(
+        [
+            Search(timeout=20, backend=os.getenv("SEARCH_BACKEND", "auto")),
+            Browse(timeout=30),
+        ],
+        always=True,
     )
-    workspace = agent.workspace
-    if workspace is None:
-        raise RuntimeError("Workspace was not initialized.")
+    agent.enable_task_workspace_file_actions(read=True, write=True, expose_to_model=True)
+    task_workspace = agent.task_workspace
+    record_store = agent.record_store
 
     agent.set_agent_prompt(
         "system",
@@ -512,12 +507,12 @@ async def main(argv: list[str] | None = None):
     )
     agent.use_skills(["interview-question-preparer"], mode="required")
 
-    await workspace.put(
+    await record_store.put(
         content=interview_input,
         collection="observations",
         kind="interview_target",
         summary=f"Interview targets: {', '.join(target_labels)}",
-        scope={"task_id": task_id},
+        scope={"task_id": task_id, "execution_id": task_id},
         source={"type": "example_input", "phase": "target"},
     )
 
@@ -531,7 +526,7 @@ async def main(argv: list[str] | None = None):
     success_criteria = [
         "The model used public search or browse evidence for the specified organization/work, original names, and aliases.",
         "The task reflected on whether the information was sufficient before finalizing.",
-        f"The final Markdown file { output_file } exists in Workspace.",
+        f"The final Markdown file { output_file } exists in TaskWorkspace.",
         f"The file includes concrete source notes with URLs, titles, or source labels inside the Markdown file itself, explains why each source matters, includes a blog/story interview angle, and has at least { min_questions } interview questions.",
         "The file preserves each target's original name language and uses aliases as disambiguation/search context rather than silently renaming the target.",
         "The file explicitly marks unsupported or contradictory organization/work affiliations as uncertain instead of repeating the user's wording as fact.",
@@ -554,13 +549,10 @@ async def main(argv: list[str] | None = None):
             "candidate screen, or recruiting guide."
         ),
         success_criteria=success_criteria,
-        workspace=workspace_dir,
+        task_workspace=workspace_dir,
         max_iterations=4,
         limits={"max_model_requests": 18, "max_seconds": 280, "max_no_progress_seconds": 100},
-        options={
-            "agent_task": agent_task_options,
-            "routes": {"skills": {"effort": "react"}},
-        },
+        options={"agent_task": agent_task_options},
     )
 
     output_dir = workspace_dir / "outputs"
@@ -684,7 +676,7 @@ async def main(argv: list[str] | None = None):
         "workspace_context_items": max((item.get("context_item_count", 0) for item in meta["iterations"]), default=0),
         "progress_model_key": progress_model_key,
         "progress_model": os.getenv("AGENT_TASK_PROGRESS_MODEL", "qwen2.5:7b"),
-        "workspace_recovery_ref_count": len(meta.get("workspace_refs", {}).get("checkpoints", [])),
+        "record_store_recovery_ref_count": len(meta.get("record_refs", {}).get("checkpoints", [])),
         "action_log_count": action_log_count,
         "output_file": str(output_path),
     }
@@ -715,10 +707,10 @@ if __name__ == "__main__":
 # action_log_count=8
 # progress_event_count=2
 # snapshot_event_count=4
-# stream_trace_file points to a JSONL stream trace under the Workspace
+# stream_trace_file points to a JSONL stream trace under the TaskWorkspace
 #
 # Skills contract note:
 # The selected Skill is a standard SKILL.md without Agently-specific
 # allowed-actions, allow-scripts, mcp, mcpServers, execution, or stages
-# frontmatter. Search/Browse/Workspace read/write access is provided by host policy
-# through agent.configure_skill_capabilities(...), not by the Skill itself.
+# frontmatter. Search, Browse, and TaskWorkspace file actions are mounted by the
+# host through their public Action APIs, not by the Skill itself.

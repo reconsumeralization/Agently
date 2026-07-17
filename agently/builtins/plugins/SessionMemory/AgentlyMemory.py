@@ -17,8 +17,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from agently.core.Workspace.Retrieval import _default_model_unavailable_reason
-from agently.types.data.workspace import WorkspaceRetrievalPackage
+from agently.core.storage.Retrieval import _default_model_unavailable_reason
+from agently.types.data.record_store import RecordRetrievalPackage
 from agently.types.plugins import SessionMemory
 from agently.utils import Settings, SettingsNamespace
 
@@ -36,7 +36,6 @@ class AgentlyMemory(SessionMemory):
                     "enabled": True,
                     "budget": {"chars": 4000, "item_chars": 1200},
                     "selection": "length",
-                    "sources": ["records"],
                     "method": "keyword",
                     "rerank": True,
                     "rerank_min_candidates": 2,
@@ -69,12 +68,12 @@ class AgentlyMemory(SessionMemory):
         self,
         *,
         session: Any,
-        workspace: Any = None,
+        memory_store: Any = None,
         plugin_manager: Any,
         settings: Settings,
     ) -> None:
         self.session = session
-        self.workspace = workspace
+        self.memory_store = memory_store
         self.plugin_manager = plugin_manager
         self.settings = settings
         self.plugin_settings = SettingsNamespace(settings, "session.memory.AgentlyMemory")
@@ -88,8 +87,8 @@ class AgentlyMemory(SessionMemory):
     def _on_unregister() -> None:
         pass
 
-    def bind_workspace(self, workspace: Any) -> None:
-        self.workspace = workspace
+    def bind_memory_store(self, memory_store: Any) -> None:
+        self.memory_store = memory_store
 
     async def prepare_request(
         self,
@@ -100,7 +99,7 @@ class AgentlyMemory(SessionMemory):
     ) -> dict[str, Any]:
         if not self.plugin_settings.get("retrieve.enabled", True):
             return {"enabled": False, "reason": "retrieve_disabled"}
-        workspace = self._require_workspace()
+        memory_store = self._require_memory_store()
         plan = await self._plan_retrieval(prompt=prompt, session=session)
         diagnostics: dict[str, Any] = {"plan": plan, "packages": {}}
         budget = self._dict_setting("retrieve.budget", {"chars": 4000, "item_chars": 1200})
@@ -118,7 +117,7 @@ class AgentlyMemory(SessionMemory):
             scopes.append(SESSION_MEMORY)
         for memory_scope in scopes:
             package = await self._retrieve_scope(
-                workspace=workspace,
+                memory_store=memory_store,
                 session=session,
                 query=str(plan.get("query") or ""),
                 tags=tags,
@@ -145,7 +144,7 @@ class AgentlyMemory(SessionMemory):
             return {"enabled": False, "reason": "extract_disabled"}
         if not user_content and not assistant_content:
             return {"enabled": True, "stored": 0, "reason": "empty_turn"}
-        workspace = self._require_workspace()
+        memory_store = self._require_memory_store()
         try:
             memories = await self._extract_memories(
                 session=session,
@@ -168,7 +167,7 @@ class AgentlyMemory(SessionMemory):
             normalized = self._normalize_memory(memory, session=session)
             if normalized is None:
                 continue
-            stored_refs.append(await self._store_memory(workspace, normalized, session=session))
+            stored_refs.append(await self._store_memory(memory_store, normalized, session=session))
         diagnostics = {
             "enabled": True,
             "stored": len(stored_refs),
@@ -177,25 +176,25 @@ class AgentlyMemory(SessionMemory):
         self.diagnostics.append({"phase": "after_turn", **diagnostics})
         return diagnostics
 
-    def _require_workspace(self) -> Any:
-        if self.workspace is None:
+    def _require_memory_store(self) -> Any:
+        if self.memory_store is None:
             raise RuntimeError(
-                "Session memory mode 'AgentlyMemory' requires a Workspace. "
-                "Pass workspace=... to Session.use_memory(...) or activate the Session from an Agent with workspace support."
+                "Session memory mode 'AgentlyMemory' requires a RecordStore. "
+                "Pass memory_store=... to Session.use_memory(...) or activate the Session from an Agent with memory_store support."
             )
-        return self.workspace
+        return self.memory_store
 
     async def _retrieve_scope(
         self,
         *,
-        workspace: Any,
+        memory_store: Any,
         session: Any,
         query: str,
         tags: list[str],
         budget: dict[str, Any],
         selection: Any,
         memory_scope: str,
-    ) -> WorkspaceRetrievalPackage:
+    ) -> RecordRetrievalPackage:
         kind = "global_memory" if memory_scope == GLOBAL_MEMORY else "session_memory"
         scope = {"memory_scope": memory_scope}
         if memory_scope == SESSION_MEMORY:
@@ -204,7 +203,6 @@ class AgentlyMemory(SessionMemory):
             "tags": tags,
             "filters": {"collection": "memory", "kind": kind},
             "scope": scope,
-            "sources": self._list_setting("retrieve.sources", ["records"]),
             "budget": budget,
             "selection": selection,
             "method": cast(Any, self.plugin_settings.get("retrieve.method", "keyword")),
@@ -214,13 +212,13 @@ class AgentlyMemory(SessionMemory):
         }
         rerank_enabled = bool(self.plugin_settings.get("retrieve.rerank", True))
         if not rerank_enabled:
-            return await workspace.retrieve(
+            return await memory_store.retrieve(
                 query,
                 rerank=False,
                 **retrieve_kwargs,
             )
 
-        deterministic_package = await workspace.retrieve(
+        deterministic_package = await memory_store.retrieve(
             query,
             rerank=False,
             **retrieve_kwargs,
@@ -239,7 +237,7 @@ class AgentlyMemory(SessionMemory):
             deterministic_package["diagnostics"] = updated_diagnostics
             return deterministic_package
 
-        package = await workspace.retrieve(
+        package = await memory_store.retrieve(
             query,
             rerank=True,
             rerank_handler=self._rerank_candidates,
@@ -265,7 +263,7 @@ class AgentlyMemory(SessionMemory):
         except (TypeError, ValueError):
             return 0
 
-    def _should_use_empty_rerank_fallback(self, package: WorkspaceRetrievalPackage) -> bool:
+    def _should_use_empty_rerank_fallback(self, package: RecordRetrievalPackage) -> bool:
         if not bool(self.plugin_settings.get("retrieve.keep_candidates_on_empty_rerank", True)):
             return False
         diagnostics = package.get("diagnostics", {})
@@ -307,9 +305,9 @@ class AgentlyMemory(SessionMemory):
                     "Decide whether GLOBAL_MEMORY and SESSION_MEMORY are useful for this request."
                 ),
                 default_output={
-                    "query": (str, "Compact retrieval query for Workspace memory."),
+                    "query": (str, "Compact retrieval query for RecordStore memory."),
                     "tags": ([str], "Tags that should be used for memory retrieval."),
-                    "include_global": (bool, "Whether to retrieve Workspace-global memory."),
+                    "include_global": (bool, "Whether to retrieve RecordStore-global memory."),
                     "include_session": (bool, "Whether to retrieve active-session memory."),
                 },
             )
@@ -450,13 +448,13 @@ class AgentlyMemory(SessionMemory):
             "provenance": provenance,
         }
 
-    async def _store_memory(self, workspace: Any, memory: dict[str, Any], *, session: Any) -> Any:
+    async def _store_memory(self, memory_store: Any, memory: dict[str, Any], *, session: Any) -> Any:
         memory_scope = str(memory["memory_scope"])
         scope = {"memory_scope": memory_scope}
         if memory_scope == SESSION_MEMORY:
             scope["session_id"] = str(session.id)
         vector_enabled = bool(self.plugin_settings.get("vector_index.enabled", False))
-        vector_meta = self._vector_index_meta(workspace)
+        vector_meta = self._vector_index_meta(memory_store)
         provenance = dict(memory["provenance"])
         record_body = {
             "memory_scope": memory_scope,
@@ -467,7 +465,7 @@ class AgentlyMemory(SessionMemory):
             "provenance": provenance,
             "vector_index": vector_meta,
         }
-        return await workspace.put(
+        return await memory_store.put(
             record_body,
             collection="memory",
             kind=str(memory["kind"]),
@@ -483,8 +481,8 @@ class AgentlyMemory(SessionMemory):
             },
         )
 
-    def _vector_index_meta(self, workspace: Any) -> dict[str, Any]:
-        capabilities = workspace.capabilities()
+    def _vector_index_meta(self, memory_store: Any) -> dict[str, Any]:
+        capabilities = memory_store.capabilities()
         materialized = {
             str(component)
             for component in capabilities.get("materialized_components", [])
@@ -495,7 +493,7 @@ class AgentlyMemory(SessionMemory):
             "available": {"embedding", "vector"}.issubset(materialized),
         }
 
-    def _prompt_memory_package(self, package: WorkspaceRetrievalPackage) -> list[dict[str, Any]]:
+    def _prompt_memory_package(self, package: RecordRetrievalPackage) -> list[dict[str, Any]]:
         items = []
         for item in package.get("items", []):
             record = item.get("ref", {})
@@ -551,14 +549,6 @@ class AgentlyMemory(SessionMemory):
             except (TypeError, ValueError):
                 return default
         return default
-
-    def _list_setting(self, key: str, default: list[str]) -> list[str]:
-        value = self.plugin_settings.get(key, default)
-        if isinstance(value, str):
-            return [value]
-        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-            return [str(item) for item in value]
-        return list(default)
 
     def _merge_tags(self, *tag_groups: Any) -> list[str]:
         tags: list[str] = []

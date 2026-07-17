@@ -27,10 +27,8 @@ AgentlyPluginType = Literal[
     "ExecutionResourceProvider",
     "TaskDAGPlanner",
     "Blocks",
-    "SkillsManager",
-    "SkillsExecutor",
     "AgentOrchestrator",
-    "WorkspaceBackend",
+    "RecordStoreBackend",
     "DBStoreProvider",
     "ContentStore",
     "MetadataStore",
@@ -41,11 +39,8 @@ AgentlyPluginType = Literal[
     "VectorIndex",
     "EmbeddingProvider",
     "VectorStoreProvider",
-    "WorkspaceProviderFactory",
-    "ContextPlanner",
-    "Retriever",
-    "ContextBuilder",
-    "WorkspaceFileIOHandler",
+    "RecordStoreProviderFactory",
+    "TaskWorkspaceFileIOHandler",
 ]
 
 

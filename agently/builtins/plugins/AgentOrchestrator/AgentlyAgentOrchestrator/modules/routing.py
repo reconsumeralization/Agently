@@ -128,36 +128,13 @@ class HybridRoutePlanner:
         skills = self.skill_candidate_summary()
         action_candidates = self.action_candidates()
 
-        if skills["required"] and self.route_allowed("skills"):
-            return "skills", {
-                "mode": "required",
-                "selected_by": "deterministic",
-                "skills": skills.get("required_skills", []),
-                "skills_packs": skills.get("required_skills_packs", []),
-            }
-
-        optional_candidates = []
-        if skills["model_decision"] and self.route_allowed("skills"):
-            optional_candidates.append({
-                "route": "skills",
-                "mode": "model_decision",
-                "skills": skills.get("model_decision_skills", []),
-                "skills_packs": skills.get("model_decision_skills_packs", []),
-            })
-        if action_candidates and self.route_allowed("model_request"):
-            optional_candidates.append({"route": "model_request", "with_actions": True})
-
-        if len(optional_candidates) > 1:
-            return await self._select_ambiguous_route(optional_candidates)
-        if optional_candidates:
-            selected = optional_candidates[0]
-            route = str(selected.get("route"))
-            meta = {key: value for key, value in selected.items() if key != "route"}
-            meta["selected_by"] = "single_candidate"
-            return route, meta
-
         if self.route_allowed("model_request"):
-            return "model_request", {}
+            meta: dict[str, Any] = {"selected_by": "single_candidate"}
+            if action_candidates:
+                meta["with_actions"] = True
+            if skills.get("required") or skills.get("model_decision"):
+                meta["skill_context"] = True
+            return "model_request", meta
 
         # No candidate satisfied the route policy. on_violation="block" surfaces
         # the violation as an explicit blocked route (the AgentTask loop turns it
@@ -172,53 +149,6 @@ class HybridRoutePlanner:
             return "route_policy_blocked", {"selected_by": "route_policy_violation", **violation_meta}
         return "model_request", {"selected_by": "route_policy_fallback", **violation_meta}
 
-    async def _select_ambiguous_route(self, candidates: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
-        request_factory = getattr(self.agent, "create_temp_request", None)
-        if callable(request_factory):
-            try:
-                result = await (
-                    cast(Any, request_factory())
-                    .input(
-                        {
-                            "task": self.task_target(),
-                            "route_candidates": DataFormatter.sanitize(candidates),
-                            "route_policy": (
-                                "Choose exactly one route. Prefer skills for installed domain Skill behavior, "
-                                "and model_request when direct model reasoning with available actions is sufficient."
-                            ),
-                        }
-                    )
-                    .output(
-                        {
-                            "selected_route": (str, "one of: skills, model_request", True),
-                            "reason": (str, "concise business reason for the route choice"),
-                        },
-                        format="json",
-                    )
-                    .async_start(max_retries=2, raise_ensure_failure=False)
-                )
-                selected_route = str(_safe_get(result, "selected_route") or "").strip()
-                for candidate in candidates:
-                    if selected_route == candidate.get("route"):
-                        meta = {key: value for key, value in candidate.items() if key != "route"}
-                        meta["selected_by"] = "model"
-                        meta["route_choice_reason"] = _safe_get(result, "reason")
-                        return selected_route, meta
-            except Exception:
-                pass
-        # Deterministic fallback when the model route choice fails: prefer the
-        # lowest-cost route rather than candidate construction order.
-        fallback_priority = {"model_request": 0, "skills": 1}
-        candidate = min(
-            candidates,
-            key=lambda item: fallback_priority.get(str(item.get("route")), 99),
-        )
-        route = str(candidate.get("route"))
-        meta = {key: value for key, value in candidate.items() if key != "route"}
-        meta["selected_by"] = "fallback"
-        meta["route_choice_reason"] = "Model route choice failed; selected the lowest-cost allowed route."
-        return route, meta
-
     def build_route_plan(self, *, execution_id: str, route: str, route_meta: dict[str, Any]) -> dict[str, Any]:
         return {
             "execution_id": execution_id,
@@ -229,7 +159,3 @@ class HybridRoutePlanner:
                 "skills": self.skill_candidate_summary(),
             },
         }
-
-
-def _safe_get(value: Any, key: str) -> Any:
-    return value.get(key) if isinstance(value, dict) else None

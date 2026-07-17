@@ -5,7 +5,8 @@ from typing import Any, cast
 import pytest
 from pydantic import TypeAdapter
 
-from agently import TriggerFlow, TriggerFlowInterruptEvent, TriggerFlowRuntimeData, Workspace
+from agently import TriggerFlow, TriggerFlowInterruptEvent, TriggerFlowRuntimeData
+from agently.core.storage import RecordStore
 
 
 @pytest.mark.asyncio
@@ -14,7 +15,7 @@ async def test_trigger_flow_dynamic_pause_persists_waiting_snapshot_without_back
     monkeypatch,
 ):
     monkeypatch.chdir(tmp_path)
-    flow = TriggerFlow(name="dynamic-pause-default-workspace")
+    flow = TriggerFlow(name="dynamic-pause-default-record_store")
 
     async def ask_feedback(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(
@@ -26,20 +27,20 @@ async def test_trigger_flow_dynamic_pause_persists_waiting_snapshot_without_back
     flow.to(ask_feedback)
     execution = flow.create_execution(
         auto_close=False,
-        runtime_resources={"workspace": Workspace(tmp_path)},
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
 
     try:
-        assert workspace._backend is None
+        assert record_store._backend is None
         assert execution._snapshot_store is None
         assert execution._runtime_event_store is None
 
         await execution.async_start("pricing")
 
         pending = execution.get_pending_interrupts()
-        snapshot = await workspace.get_snapshot(execution.run_context.run_id)
-        runtime_events = await workspace.query_runtime_events(execution.id)
+        snapshot = await record_store.get_snapshot(execution.run_context.run_id)
+        runtime_events = await record_store.query_runtime_events(execution.id)
 
         assert pending["approval"]["status"] == "waiting"
         assert snapshot is not None
@@ -53,8 +54,8 @@ async def test_trigger_flow_dynamic_pause_persists_waiting_snapshot_without_back
         if path.is_file()
     }
     assert private_files == {
-        ".agently/identity/state.json",
-        ".agently/identity/state.lock",
+        ".agently/records/identity/state.json",
+        ".agently/records/identity/state.lock",
     }
 
 
@@ -81,17 +82,17 @@ async def test_trigger_flow_dynamic_pause_snapshot_failure_rolls_back_before_pub
         auto_close=False,
         runtime_resources={
             "execution_exchange_provider": ExchangeProvider(),
-            "workspace": Workspace(tmp_path),
+            "record_store": RecordStore(tmp_path, mode="read_write"),
         },
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
     status_before_pause = execution.get_status()
     state_version_before_pause = execution._state_version
 
     async def fail_snapshot(*args, **kwargs):
         raise OSError("injected pause snapshot failure")
 
-    monkeypatch.setattr(workspace, "put_snapshot", fail_snapshot)
+    monkeypatch.setattr(record_store, "put_snapshot", fail_snapshot)
     try:
         with pytest.raises(OSError, match="injected pause snapshot failure"):
             await execution.async_pause_for(
@@ -134,7 +135,7 @@ async def _run_overlapping_pause_snapshot_failure(
         auto_close=False,
         runtime_resources={"execution_exchange_provider": ExchangeProvider()},
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
 
     async def controlled_snapshot(run_id, state, *, step_id=None, **kwargs):
         nonlocal snapshot_calls
@@ -145,7 +146,7 @@ async def _run_overlapping_pause_snapshot_failure(
             raise OSError("injected older snapshot failure")
         return {"id": "newer-snapshot", "run_id": run_id, "step_id": step_id}
 
-    workspace.put_snapshot = controlled_snapshot
+    record_store.put_snapshot = controlled_snapshot
     first_task = asyncio.create_task(
         execution.async_pause_for(
             type="approval",
@@ -228,7 +229,7 @@ async def test_same_id_pause_does_not_publish_older_attempt_after_newer_attempt(
         auto_close=False,
         runtime_resources={"execution_exchange_provider": ExchangeProvider()},
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
 
     async def controlled_snapshot(*args, **kwargs):
         nonlocal snapshot_calls
@@ -238,7 +239,7 @@ async def test_same_id_pause_does_not_publish_older_attempt_after_newer_attempt(
             await release_first_snapshot.wait()
         return {"id": f"snapshot-{snapshot_calls}"}
 
-    workspace.put_snapshot = controlled_snapshot
+    record_store.put_snapshot = controlled_snapshot
     first_task = asyncio.create_task(
         execution.async_pause_for(
             type="approval",
@@ -286,7 +287,7 @@ async def test_same_id_cancelled_pause_attempts_leave_no_ghost_interrupt_or_fenc
         auto_close=False,
         runtime_resources={"execution_exchange_provider": ExchangeProvider()},
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
 
     async def blocked_snapshot(*args, **kwargs):
         nonlocal snapshot_calls
@@ -295,7 +296,7 @@ async def test_same_id_cancelled_pause_attempts_leave_no_ghost_interrupt_or_fenc
         snapshot_entered[call_index].set()
         await asyncio.Event().wait()
 
-    workspace.put_snapshot = blocked_snapshot
+    record_store.put_snapshot = blocked_snapshot
     first_task = asyncio.create_task(
         execution.async_pause_for(
             type="approval",
@@ -341,7 +342,7 @@ async def test_same_id_failed_pause_attempts_leave_no_ghost_interrupt_or_fence()
     execution = TriggerFlow(name="same-id-pause-double-failure").create_execution(
         auto_close=False,
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
 
     async def failed_snapshot(*args, **kwargs):
         nonlocal snapshot_calls
@@ -351,7 +352,7 @@ async def test_same_id_failed_pause_attempts_leave_no_ghost_interrupt_or_fence()
             await release_first_snapshot.wait()
         raise OSError(f"snapshot failure {snapshot_calls}")
 
-    workspace.put_snapshot = failed_snapshot
+    record_store.put_snapshot = failed_snapshot
     first_task = asyncio.create_task(
         execution.async_pause_for(
             type="approval",
@@ -399,7 +400,7 @@ async def test_same_id_failed_pause_restores_previous_exposed_interrupt():
         auto_close=False,
         runtime_resources={"execution_exchange_provider": ExchangeProvider()},
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
 
     async def fail_second_snapshot(*args, **kwargs):
         nonlocal snapshot_calls
@@ -408,7 +409,7 @@ async def test_same_id_failed_pause_restores_previous_exposed_interrupt():
             raise OSError("snapshot-2-failed")
         return {"id": "snapshot-1"}
 
-    workspace.put_snapshot = fail_second_snapshot
+    record_store.put_snapshot = fail_second_snapshot
     try:
         await execution.async_pause_for(
             type="approval",
@@ -462,14 +463,14 @@ async def test_continue_waits_until_pause_snapshot_and_exposure_complete():
         auto_close=False,
         runtime_resources={"execution_exchange_provider": ExchangeProvider()},
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
 
     async def blocked_snapshot(*args, **kwargs):
         snapshot_entered.set()
         await release_snapshot.wait()
         return {"id": "waiting-snapshot"}
 
-    workspace.put_snapshot = blocked_snapshot
+    record_store.put_snapshot = blocked_snapshot
     start_task = asyncio.create_task(execution.async_start("draft"))
     await asyncio.wait_for(snapshot_entered.wait(), timeout=2)
     continue_task = asyncio.create_task(
@@ -527,14 +528,14 @@ async def test_close_cancellation_during_pause_snapshot_does_not_publish_stale_w
         auto_close=False,
         runtime_resources={"execution_exchange_provider": ExchangeProvider()},
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
 
     async def blocked_snapshot(*args, **kwargs):
         snapshot_entered.set()
         await release_snapshot.wait()
         return {"id": "waiting-snapshot"}
 
-    workspace.put_snapshot = blocked_snapshot
+    record_store.put_snapshot = blocked_snapshot
     start_task = asyncio.create_task(execution.async_start("draft"))
     await asyncio.wait_for(snapshot_entered.wait(), timeout=2)
     close_task = asyncio.create_task(
@@ -580,16 +581,16 @@ async def test_close_cancellation_during_persisted_event_does_not_publish_stale_
         )
 
     flow.to(pause)
-    workspace = Workspace(tmp_path)
+    record_store = RecordStore(tmp_path, mode="read_write")
     execution = flow.create_execution(
         auto_close=False,
         runtime_resources={
             "execution_exchange_provider": ExchangeProvider(),
-            "workspace": workspace,
-            "runtime_event_store": workspace,
+            "record_store": record_store,
+            "runtime_event_store": record_store,
         },
     )
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
     runtime_event_store = cast(Any, execution._runtime_event_store)
     original_append_runtime_event = runtime_event_store.append_runtime_event
 

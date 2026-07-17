@@ -235,54 +235,55 @@ environment 准备时，才使用同步 `load(...)`；需要同样的同步 fail
 即可持久化同一个 snapshot。Durable provider 还可以暴露
 `get_snapshot(run_id)` 读取 snapshot state、
 `put_snapshot(..., expected_state_version=...)`、lease methods 和
-`put_artifact_ref(...)`。Workspace 已实现同一个 snapshot-store port，因此可以直接配置：
+`put_artifact_ref(...)`。RecordStore 已实现同一个 snapshot-store port，因此可以直接配置：
 
 ```python
-execution = flow.create_execution(workspace=agent.workspace)
+execution = flow.create_execution(record_store=agent.record_store)
 snapshot_ref = await execution.async_save(step_id="after-approval")
 ```
 
-如果需要共享任务信息，优先使用由应用显式创建并管理的 Workspace 实例：
+如果需要共享任务信息，优先使用由应用显式创建并管理的 RecordStore 实例：
 
 ```python
-shared_workspace = Agently.create_workspace("./project")
-execution = flow.create_execution(workspace=shared_workspace)
+from agently.core.storage import RecordStore
+
+shared_record_store = RecordStore("./project-state", mode="read_write")
+execution = flow.create_execution(record_store=shared_record_store)
 ```
 
-`flow.create_execution()` 默认在入口脚本目录上绑定轻量 Workspace。每个 execution
-看到同一个直接普通文件 root；没有外部写权限时创建的新文件隔离在
-`.agently/files/<execution-id>/`。传 `workspace=False` 可以显式关闭；传 Workspace 实例、路径或
-backend 时，execution 会使用显式选择的 Workspace。
-解析后的 execution-local Workspace facade 会作为 `runtime_resources["workspace"]`
-暴露给 TriggerFlow chunks，也可以通过 `data.require_resource("workspace")` 读取。
+`flow.create_execution()` 默认绑定 lazy、execution-scoped RecordStore view，
+但不会创建或绑定任务文件边界。传 `record_store=False` 可以显式关闭；传 RecordStore 实例、路径或
+backend 时，execution 会使用显式选择的 RecordStore。
+解析后的 execution-local RecordStore facade 会作为 `runtime_resources["record_store"]`
+暴露给 TriggerFlow chunks，也可以通过 `data.require_resource("record_store")` 读取。
 
-该绑定不会开启 RuntimeEvent 持久化，也不会创建 `.agently`。只有真实文件制品、
-records、recovery 或显式配置的 event storage 才会物化私有状态。
+该绑定不会创建 TaskWorkspace。records、recovery 或显式配置的 event storage
+会按需物化 RecordStore 状态。
 
 它是 live resource，不会被序列化进 execution state。如果某个 chunk 需要 Agent
 使用同一个显式信息范围，应在业务代码里把该 Agent 或单次 AgentExecution 绑定到同一个
-Workspace。如果 flow 需要在两个隔离 Workspace 之间移动数据，应在业务逻辑里显式用
-Workspace `search(...)`、`get(...)`、`get_data(...)`、`put(...)` 和 `link(...)`
-完成。Workspace 本身不提供跨空间 communication 或 replication 协议。
+RecordStore。如果 flow 需要在两个隔离 RecordStore 之间移动数据，应在业务逻辑里显式用
+RecordStore `search(...)`、`get(...)`、`get_data(...)`、`put(...)` 和 `link(...)`
+完成。RecordStore 本身不提供跨空间 communication 或 replication 协议。
 
-如果服务没有使用 `workspace=...`，也可以通过已有 execution resources 传入 store：
+也可以通过显式 durability resource port 传入 store：
 
 ```python
 execution = flow.create_execution(
-    runtime_resources={"snapshot_store": agent.workspace}
+    runtime_resources={"snapshot_store": agent.record_store}
 )
 snapshot_ref = await execution.async_save(step_id="after-approval")
 ```
 
-如果要从 Workspace-backed snapshot 恢复，先读出保存的 snapshot，再交回
+如果要从 RecordStore-backed snapshot 恢复，先读出保存的 snapshot，再交回
 TriggerFlow 的 load API：
 
 ```python
-saved_state = await agent.workspace.get_snapshot(execution.run_context.run_id)
+saved_state = await agent.record_store.get_snapshot(execution.run_context.run_id)
 assert saved_state is not None
 
-restored = flow.create_execution(workspace=agent.workspace)
-await restored.async_load(saved_state, runtime_resources={"workspace": agent.workspace})
+restored = flow.create_execution(record_store=agent.record_store)
+await restored.async_load(saved_state, runtime_resources={"record_store": agent.record_store})
 await restored.async_continue_with(
     "approval",
     {"approved": True},
@@ -292,11 +293,11 @@ await restored.async_continue_with(
 ```
 
 这条路径会保留 TriggerFlow 自己拥有的 pause/resume ledger、policy approval
-waits 与 `when(..., mode="and")` join progress；Workspace 仍只是 snapshot
+waits 与 `when(..., mode="and")` join progress；RecordStore 仍只是 snapshot
 provider。
 
 这条路径有一个可运行的 foundation check：
-`examples/trigger_flow/durable_recovery.py`。它会写入 Workspace-backed
+`examples/trigger_flow/durable_recovery.py`。它会写入 RecordStore-backed
 snapshot，在新的 execution 中 load，用稳定 `resume_request_id` 恢复，并证明重复
 callback 投递不会让下游 chunk 执行两次。
 
@@ -314,16 +315,16 @@ TriggerFlow 会在 snapshot 中携带 owner/lease 字段，并提供
 已过期执行上的 callback 会 fail fast，且不会写入 resume ledger；接管后的 worker
 应先 load 或 claim 这个 execution，再用同一个稳定 `resume_request_id` 处理。
 
-Workspace-backed provider 暴露同一个 lease port：
+RecordStore-backed provider 暴露同一个 lease port：
 
 ```python
-lease = await agent.workspace.claim_lease(
+lease = await agent.record_store.claim_lease(
     execution.run_context.run_id,
     "worker-1",
     ttl=30.0,
     expected_state_version=snapshot_state_version,
 )
-await agent.workspace.heartbeat_lease(
+await agent.record_store.heartbeat_lease(
     execution.run_context.run_id,
     "worker-1",
     lease["lease_token"],
@@ -342,7 +343,7 @@ await execution.async_save(
 
 被选中的 snapshot provider 必须报告 CAS、lease、range-read 和 retention
 能力，并暴露对应的 snapshot、lease 和 artifact methods；execution 也必须配置一个
-报告 event sequencing 的 RuntimeEvent store。local Workspace backend 会通过这个
+报告 event sequencing 的 RuntimeEvent store。local RecordStore backend 会通过这个
 fail-closed provider check，用于单节点开发和本地重启恢复，但它不是生产级跨 worker
 Redis/Postgres/object-storage backend。
 
@@ -350,14 +351,14 @@ Redis/Postgres/object-storage backend。
 
 ```python
 execution = flow.create_execution(
-    runtime_resources={"runtime_event_store": agent.workspace}
+    runtime_resources={"runtime_event_store": agent.record_store}
 )
 await execution.async_start(request)
-events = await agent.workspace.query_runtime_events(execution.id)
+events = await agent.record_store.query_runtime_events(execution.id)
 ```
 
 TriggerFlow 仍然拥有 event identity、pause/resume 语义、DAG readiness 和
-replay validation。Workspace 只存 canonical RuntimeEvent records 与
+replay validation。RecordStore 只存 canonical RuntimeEvent records 与
 snapshot refs，不会变成 workflow control plane。
 
 持久 RuntimeEvent record 会包含 execution 内 sequence、`state_version`、
@@ -389,7 +390,7 @@ await data.async_pause_for(
 ```
 
 该 template 会保存在 execution snapshot 的 `interrupt.external_wait_request` 中。
-如果提供了 `audit_metadata.exchange_id`，TriggerFlow 会把它投影到 Workspace
+如果提供了 `audit_metadata.exchange_id`，TriggerFlow 会把它投影到 RecordStore
 或兼容 runtime event provider 的 durable RuntimeEvent record `exchange_id`
 字段。
 
@@ -468,7 +469,7 @@ await execution.async_save(step_id="auto-compacted")
 
 `inspect_load(...)` 会把 retained lineage anchor mismatch、required
 artifact ref 缺失、load read limit 非法报告为 snapshot diagnostics。
-TriggerFlow 只记录 execution facts 和 provider refs；Workspace 或 enterprise
+TriggerFlow 只记录 execution facts 和 provider refs；RecordStore 或 enterprise
 provider 负责 artifact storage、retention anchors 和 bounded runtime-event read。
 
 `execution.inspect_load(...)` 会返回 typed recovery diagnostics，用于

@@ -7,6 +7,7 @@ from itertools import repeat
 
 from agently import Agently
 from agently.core.session import Session
+from agently.core.storage import RecordStore
 
 
 @pytest.mark.asyncio
@@ -109,39 +110,39 @@ async def test_session_legacy_execution_aliases():
     assert len(session.context_window) == 0
 
 
-def test_agent_session_memory_binds_agent_workspace(tmp_path):
+def test_agent_session_memory_binds_agent_record_store(tmp_path):
     agent = Agently.create_agent("memory-bind")
-    agent.use_workspace(tmp_path / "memory-bind-a")
+    agent.use_record_store(tmp_path / "memory-bind-a", mode="read_write")
     agent.activate_session(session_id="support-demo")
 
     assert agent.activated_session is not None
     agent.activated_session.use_memory(mode="AgentlyMemory")
 
     assert agent.activated_session.memory is not None
-    assert agent.activated_session.memory.workspace is agent.workspace
+    assert agent.activated_session.memory.memory_store is agent.record_store
 
-    agent.use_workspace(tmp_path / "memory-bind-b")
-    assert agent.activated_session.memory.workspace is agent.workspace
+    agent.use_record_store(tmp_path / "memory-bind-b", mode="read_write")
+    assert agent.activated_session.memory.memory_store is agent.record_store
 
 
 @pytest.mark.asyncio
-async def test_standalone_session_memory_requires_workspace():
+async def test_standalone_session_memory_requires_record_store():
     agent = Agently.create_agent("memory-no-workspace-prompt")
     session = Session(plugin_manager=Agently.plugin_manager, settings=Agently.settings)
     session.use_memory(mode="AgentlyMemory")
 
-    with pytest.raises(RuntimeError, match="requires a Workspace"):
+    with pytest.raises(RuntimeError, match="requires a RecordStore"):
         await session.async_prepare_memory(agent.create_temp_request().prompt, session.settings)
 
 
 @pytest.mark.asyncio
-async def test_session_memory_stores_workspace_records_with_fixed_fields(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "session-memory-records")
+async def test_session_memory_stores_record_store_records_with_fixed_fields(tmp_path):
+    record_store = RecordStore(tmp_path / "session-memory-records", mode="read_write")
     session = Session(
         id="memory-session",
         plugin_manager=Agently.plugin_manager,
         settings=Agently.settings,
-        workspace=workspace,
+        memory_store=record_store,
     )
     session.use_memory(mode="AgentlyMemory")
 
@@ -166,7 +167,7 @@ async def test_session_memory_stores_workspace_records_with_fixed_fields(tmp_pat
     )
 
     assert diagnostics["stored"] == 1
-    refs = await workspace.grep(
+    refs = await record_store.grep(
         None,
         filters={
             "collection": "memory",
@@ -176,7 +177,7 @@ async def test_session_memory_stores_workspace_records_with_fixed_fields(tmp_pat
         },
     )
     assert len(refs) == 1
-    data = await workspace.get_data(refs[0])
+    data = await record_store.get_data(refs[0])
     assert data["memory_scope"] == "SESSION_MEMORY"
     assert data["body"] == {"preference": "concise updates"}
     assert data["tags"] == ["preference", "project"]
@@ -188,8 +189,8 @@ async def test_session_memory_stores_workspace_records_with_fixed_fields(tmp_pat
 
 @pytest.mark.asyncio
 async def test_session_memory_empty_rerank_falls_back_to_candidates(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "session-memory-empty-rerank")
-    await workspace.put(
+    record_store = RecordStore(tmp_path / "session-memory-empty-rerank", mode="read_write")
+    await record_store.put(
         {"memory": "Nimbus Retail prefers exactly two bullets plus one risk line."},
         collection="memory",
         kind="global_memory",
@@ -201,7 +202,7 @@ async def test_session_memory_empty_rerank_falls_back_to_candidates(tmp_path):
         id="memory-restart",
         plugin_manager=Agently.plugin_manager,
         settings={"session": {"memory": {"AgentlyMemory": {"retrieve": {"rerank_min_candidates": 1}}}}},
-        workspace=workspace,
+        memory_store=record_store,
     )
     session.use_memory(mode="AgentlyMemory")
 
@@ -245,8 +246,8 @@ async def test_session_memory_empty_rerank_falls_back_to_candidates(tmp_path):
 
 @pytest.mark.asyncio
 async def test_session_memory_skips_rerank_for_single_candidate(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "session-memory-skip-rerank")
-    await workspace.put(
+    record_store = RecordStore(tmp_path / "session-memory-skip-rerank", mode="read_write")
+    await record_store.put(
         {"memory": "Nimbus Retail escalation owner is Maya Chen."},
         collection="memory",
         kind="session_memory",
@@ -258,7 +259,7 @@ async def test_session_memory_skips_rerank_for_single_candidate(tmp_path):
         id="memory-restart",
         plugin_manager=Agently.plugin_manager,
         settings=Agently.settings,
-        workspace=workspace,
+        memory_store=record_store,
     )
     session.use_memory(mode="AgentlyMemory")
 

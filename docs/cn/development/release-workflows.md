@@ -146,7 +146,7 @@ line 已对齐。
 
 Foundation 层能力是 release-critical framework substrate，不是应用层 use case。
 典型例子包括 ModelRequest/ModelResponse、TriggerFlow、Dynamic Task/TaskDAG、
-ActionRuntime、ExecutionResource、Workspace/ContextBuilder/ContextPackage、RuntimeEvent/EventCenter
+ActionRuntime、ExecutionResource、TaskContext/ContextReader、TaskWorkspace、RecordStore、RuntimeEvent/EventCenter
 和 provider protocols。当某个 release 触及或声称这类 substrate 能力时，仅有测试通过
 还不够：release reviewer 还必须运行 `examples/` 下对应的核心 example，确认真实效果
 仍然能通过推荐 public API 跑通。
@@ -185,7 +185,7 @@ waiver 和残余风险。
 - 用 release candidate 实际运行这些脚本；如果 example 包含模型拥有的 routing、
   planning、verification、evaluation 或 response generation，必须使用真实 DeepSeek 或本地
   Ollama
-- 如果 release examples 可能触发 Skills、Actions、Workspace、network、Python、shell、
+- 如果 release examples 可能触发 Skills、Actions、TaskWorkspace、RecordStore、network、Python、shell、
   HTTP、browse、search 或 MCP capability loading，必须用显式全开的测试 capability
   policy 运行；不要把这个 release-test 姿态和 Agently 默认 fail-closed runtime 权限姿态混淆
 - 记录 command、解释器、provider/model、环境假设、稳定 key output，以及 artifact、stream、

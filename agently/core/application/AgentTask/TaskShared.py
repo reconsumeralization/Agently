@@ -72,7 +72,7 @@ from .EvidenceLedger import (
     source_refs_from_ledger,
     validate_evidence_use,
     value_with_normalized_evidence_use,
-    workspace_artifacts_from_ledger,
+    task_workspace_artifacts_from_ledger,
 )
 from .TaskReferences import (
     TaskReferenceCatalog,
@@ -87,11 +87,12 @@ from .TerminalConvergence import (
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
-    from agently.types.data import WorkspaceContextPackage, WorkspaceRecordRef
+    from agently.types.data import RecordRef
 else:
     BaseAgent = Any
-    WorkspaceContextPackage = dict[str, Any]
-    WorkspaceRecordRef = dict[str, Any]
+    RecordRef = dict[str, Any]
+
+TaskContextView = dict[str, Any]
 
 
 AgentTaskStatus = Literal[
@@ -124,7 +125,6 @@ _AGENT_TASK_EXECUTION_STRATEGY_ALIASES = {
 _STEP_EXECUTION_SHAPES = {
     "direct",
     "actions",
-    "skills",
     "dynamic_task",
     "execution_dag",
 }
@@ -606,12 +606,12 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
                     "search_note",
                     "generated_code",
                     "large_extraction",
-                    "workspace_note",
+                    "task_workspace_note",
                 ],
                 "default_state": "ref_only",
                 "hot_path": (
                     "Pass compact refs and bounded previews through prompts. Keep large intermediate resources in "
-                    "Workspace or Action artifacts until a later block explicitly needs scoped content."
+                    "TaskWorkspace or Action artifacts until a later block explicitly needs scoped content."
                 ),
                 "readback": (
                     "Use bounded readback with concrete refs, max_bytes, offsets, or scoped snippets when content is "
@@ -858,8 +858,8 @@ __all__ = [
     "TaskBoardRevision",
     "TriggerFlow",
     "TriggerFlowRuntimeData",
-    "WorkspaceContextPackage",
-    "WorkspaceRecordRef",
+    "TaskContextView",
+    "RecordRef",
     "WorkUnitIntent",
     "WorkUnitResult",
     "_AGENT_TASK_EXECUTION_STRATEGY_ALIASES",
@@ -921,7 +921,7 @@ __all__ = [
     "task_board_preflight_diagnostics",
     "validate_evidence_use",
     "value_with_normalized_evidence_use",
-    "workspace_artifacts_from_ledger",
+    "task_workspace_artifacts_from_ledger",
     "TaskReferenceCatalog",
     "parse_reference_tokens",
     "validate_reference_tokens",

@@ -22,7 +22,6 @@ They model the AgentTask-facing plan and evidence layer only:
     PlanBlockInstance    -> one selected occurrence of a planner-facing PlanBlock
     ExecutionPlan        -> bounded plan data for one TaskFrame
     CapabilityResolution -> needs mapped to allow/deny/pending/scoped candidates
-    SkillActivation      -> progressive Skill context and capability needs
     EvidenceEnvelope     -> compact evidence for verifier and host guards
     ReplanSignal         -> structured early repair/replan signal
 
@@ -46,8 +45,7 @@ PlanBlockInstanceKind: TypeAlias = Literal[
     "action_call",
     "mcp_tool_call",
     "script_action",
-    "workspace_operation",
-    "skill_activation",
+    "context_read",
     "approval_wait",
     "external_wait",
     "validation",
@@ -64,8 +62,7 @@ PLAN_BLOCK_INSTANCE_KINDS: frozenset[str] = frozenset(
         "action_call",
         "mcp_tool_call",
         "script_action",
-        "workspace_operation",
-        "skill_activation",
+        "context_read",
         "approval_wait",
         "external_wait",
         "validation",
@@ -172,8 +169,8 @@ def _normalize_evidence_item(value: Any, *, index: int = 0, default_kind: str = 
     operation = item.get("operation")
     if operation is None and isinstance(output, Mapping):
         operation = output.get("operation")
-    if kind == "workspace_operation" and operation not in (None, ""):
-        kind = f"workspace_operation.{ str(operation).strip() }"
+    if kind == "context_read" and operation not in (None, ""):
+        kind = f"context_read.{ str(operation).strip() }"
     raw_status = item.get("raw_status", item.get("status", item.get("success")))
     if raw_status is None and any(token in kind for token in ("diagnostic", "error", "failure", "failed")):
         raw_status = "failed"
@@ -251,7 +248,7 @@ def _legacy_evidence_items(value: Mapping[str, Any]) -> tuple[dict[str, Any], ..
     ):
         for entry in _mapping_tuple(value.get(key)):
             items.append(_normalize_evidence_item(entry, index=len(items), default_kind=default_kind))
-    for key, default_kind in (("workspace_refs", "workspace_ref"), ("artifact_refs", "artifact_ref"), ("runtime_event_refs", "runtime_event_ref")):
+    for key, default_kind in (("context_refs", "context_ref"), ("artifact_refs", "artifact_ref"), ("runtime_event_refs", "runtime_event_ref")):
         raw_refs = value.get(key)
         if raw_refs is None:
             continue
@@ -273,7 +270,7 @@ def _derive_legacy_buckets_from_evidence_items(items: Sequence[Mapping[str, Any]
         "action_evidence": [],
         "skill_evidence": [],
         "capability_evidence": [],
-        "workspace_refs": [],
+        "context_refs": [],
         "artifact_refs": [],
         "runtime_event_refs": [],
         "validation_results": [],
@@ -293,8 +290,8 @@ def _derive_legacy_buckets_from_evidence_items(items: Sequence[Mapping[str, Any]
             buckets["validation_results"].append(dict(item))
         elif "artifact" in kind:
             buckets["artifact_refs"].append(_legacy_ref_from_evidence_item(item))
-        elif "workspace" in kind or "locator" in kind or "readback" in kind or "source_ref" in kind:
-            buckets["workspace_refs"].append(_legacy_ref_from_evidence_item(item))
+        elif "context" in kind or "locator" in kind or "readback" in kind or "source_ref" in kind:
+            buckets["context_refs"].append(_legacy_ref_from_evidence_item(item))
         elif "runtime_event" in kind:
             buckets["runtime_event_refs"].append(_legacy_ref_from_evidence_item(item))
         elif any(token in kind for token in ("diagnostic", "error", "failure", "failed")):
@@ -579,58 +576,6 @@ class ExecutionPlan:
 
 
 @dataclass(frozen=True)
-class SkillActivation:
-    """Result of loading selected Skill guidance before or during planning."""
-
-    skill_id: str
-    source: Mapping[str, Any] = field(default_factory=dict)
-    loaded_guidance_refs: tuple[str, ...] = field(default_factory=tuple)
-    selected_resource_refs: tuple[str, ...] = field(default_factory=tuple)
-    capability_needs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
-    action_candidate_specs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
-    plan_block_recommendations: tuple[dict[str, Any], ...] = field(default_factory=tuple)
-    citations: tuple[str, ...] = field(default_factory=tuple)
-    diagnostics: tuple[dict[str, Any], ...] = field(default_factory=tuple)
-    schema_version: str = EXECUTION_PLAN_SCHEMA_VERSION
-
-    @classmethod
-    def from_value(cls, value: "SkillActivation | Mapping[str, Any]") -> "SkillActivation":
-        if isinstance(value, SkillActivation):
-            return value
-        if not isinstance(value, Mapping):
-            raise TypeError(f"SkillActivation must be a mapping or SkillActivation, got: { type(value) }.")
-        skill_id = value.get("skill_id")
-        if skill_id is None or not str(skill_id).strip():
-            raise ValueError("SkillActivation requires non-empty 'skill_id'.")
-        return cls(
-            skill_id=str(skill_id).strip(),
-            source=_mapping(value.get("source")),
-            loaded_guidance_refs=_str_tuple(value.get("loaded_guidance_refs")),
-            selected_resource_refs=_str_tuple(value.get("selected_resource_refs")),
-            capability_needs=_mapping_tuple(value.get("capability_needs")),
-            action_candidate_specs=_mapping_tuple(value.get("action_candidate_specs")),
-            plan_block_recommendations=_mapping_tuple(value.get("plan_block_recommendations")),
-            citations=_str_tuple(value.get("citations")),
-            diagnostics=_mapping_tuple(value.get("diagnostics")),
-            schema_version=str(value.get("schema_version") or EXECUTION_PLAN_SCHEMA_VERSION),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "skill_id": self.skill_id,
-            "source": dict(self.source),
-            "loaded_guidance_refs": list(self.loaded_guidance_refs),
-            "selected_resource_refs": list(self.selected_resource_refs),
-            "capability_needs": [dict(item) for item in self.capability_needs],
-            "action_candidate_specs": [dict(item) for item in self.action_candidate_specs],
-            "plan_block_recommendations": [dict(item) for item in self.plan_block_recommendations],
-            "citations": list(self.citations),
-            "diagnostics": [dict(item) for item in self.diagnostics],
-            "schema_version": self.schema_version,
-        }
-
-
-@dataclass(frozen=True)
 class CapabilityResolution:
     """Capability needs mapped to one policy result envelope."""
 
@@ -639,7 +584,7 @@ class CapabilityResolution:
     pending_approvals: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     scoped_action_candidates: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     execution_resource_requirements: tuple[dict[str, Any], ...] = field(default_factory=tuple)
-    workspace_boundaries: Mapping[str, Any] = field(default_factory=dict)
+    task_workspace_boundaries: Mapping[str, Any] = field(default_factory=dict)
     diagnostics: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     schema_version: str = EXECUTION_PLAN_SCHEMA_VERSION
 
@@ -657,7 +602,7 @@ class CapabilityResolution:
             pending_approvals=_mapping_tuple(value.get("pending_approvals")),
             scoped_action_candidates=_mapping_tuple(value.get("scoped_action_candidates")),
             execution_resource_requirements=_mapping_tuple(value.get("execution_resource_requirements")),
-            workspace_boundaries=_mapping(value.get("workspace_boundaries")),
+            task_workspace_boundaries=_mapping(value.get("task_workspace_boundaries")),
             diagnostics=_mapping_tuple(value.get("diagnostics")),
             schema_version=str(value.get("schema_version") or EXECUTION_PLAN_SCHEMA_VERSION),
         )
@@ -669,7 +614,7 @@ class CapabilityResolution:
             "pending_approvals": [dict(item) for item in self.pending_approvals],
             "scoped_action_candidates": [dict(item) for item in self.scoped_action_candidates],
             "execution_resource_requirements": [dict(item) for item in self.execution_resource_requirements],
-            "workspace_boundaries": dict(self.workspace_boundaries),
+            "task_workspace_boundaries": dict(self.task_workspace_boundaries),
             "diagnostics": [dict(item) for item in self.diagnostics],
             "schema_version": self.schema_version,
         }
@@ -688,7 +633,7 @@ class EvidenceEnvelope:
     action_evidence: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     skill_evidence: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     capability_evidence: tuple[dict[str, Any], ...] = field(default_factory=tuple)
-    workspace_refs: tuple[str, ...] = field(default_factory=tuple)
+    context_refs: tuple[str, ...] = field(default_factory=tuple)
     artifact_refs: tuple[str, ...] = field(default_factory=tuple)
     runtime_event_refs: tuple[str, ...] = field(default_factory=tuple)
     validation_results: tuple[dict[str, Any], ...] = field(default_factory=tuple)
@@ -724,7 +669,7 @@ class EvidenceEnvelope:
             action_evidence=_mapping_tuple(_value_or_derived(value, "action_evidence", derived)),
             skill_evidence=_mapping_tuple(_value_or_derived(value, "skill_evidence", derived)),
             capability_evidence=_mapping_tuple(_value_or_derived(value, "capability_evidence", derived)),
-            workspace_refs=_str_tuple(_value_or_derived(value, "workspace_refs", derived)),
+            context_refs=_str_tuple(_value_or_derived(value, "context_refs", derived)),
             artifact_refs=_str_tuple(_value_or_derived(value, "artifact_refs", derived)),
             runtime_event_refs=_str_tuple(_value_or_derived(value, "runtime_event_refs", derived)),
             validation_results=_mapping_tuple(_value_or_derived(value, "validation_results", derived)),
@@ -743,7 +688,7 @@ class EvidenceEnvelope:
             "action_evidence": [dict(item) for item in self.action_evidence],
             "skill_evidence": [dict(item) for item in self.skill_evidence],
             "capability_evidence": [dict(item) for item in self.capability_evidence],
-            "workspace_refs": list(self.workspace_refs),
+            "context_refs": list(self.context_refs),
             "artifact_refs": list(self.artifact_refs),
             "runtime_event_refs": list(self.runtime_event_refs),
             "validation_results": [dict(item) for item in self.validation_results],

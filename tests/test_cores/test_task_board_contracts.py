@@ -440,8 +440,8 @@ def test_task_board_evidence_view_uses_bounded_hot_preview_and_cold_refs():
         "path": "artifacts/collect.json",
         "sha256": "abc",
         "bytes": 1200,
-        "role": "workspace_artifact",
-        "source": "agent_task.taskboard.card.collect.workspace_artifact",
+        "role": "task_workspace_artifact",
+        "source": "agent_task.taskboard.card.collect.task_workspace_artifact",
         "preview": "ref preview must not enter hot path",
         "content": "full content must not enter hot path",
     }
@@ -484,9 +484,9 @@ def test_task_board_evidence_view_uses_bounded_hot_preview_and_cold_refs():
         and item.get("path") == "artifacts/collect.json"
     ]
     assert artifact_items
-    assert all(item.get("role") == "workspace_artifact" for item in artifact_items)
+    assert all(item.get("role") == "task_workspace_artifact" for item in artifact_items)
     assert all(
-        item.get("source") == "agent_task.taskboard.card.collect.workspace_artifact"
+        item.get("source") == "agent_task.taskboard.card.collect.task_workspace_artifact"
         for item in artifact_items
     )
     assert view["truncated"] is True
@@ -703,20 +703,20 @@ def test_taskboard_card_evidence_repair_prefers_direct_artifact_ref_alias():
     assert repaired_output["evidence_use"][0]["evidence_ids"] == [artifact_ref_id]
 
 
-def test_taskboard_card_evidence_repair_uses_unique_workspace_readback_for_numeric_ids():
+def test_taskboard_card_evidence_repair_uses_unique_task_workspace_readback_for_numeric_ids():
     from agently.core.application.AgentTask.EvidenceLedger import (
         collect_evidence_use,
         evidence_ledger_view,
         validate_evidence_use,
     )
 
-    readback_id = "workspace_artifact_readback:card:working/taskboard/recent_news/final.md"
+    readback_id = "task_workspace_artifact_readback:card:working/taskboard/recent_news/final.md"
     ledger = evidence_ledger_view(
         {
             "evidence_items": [
                 {
                     "id": readback_id,
-                    "kind": "workspace_artifact.readback",
+                    "kind": "task_workspace_artifact.readback",
                     "status": "ok",
                     "body_state": "truncated",
                     "path": "working/taskboard/recent_news/final.md",
@@ -908,7 +908,7 @@ def test_evidence_binding_repair_uses_deterministic_unique_ref_alias():
             ],
             "available_evidence_refs": [
                 {
-                    "id": "workspace_artifact.final_readback",
+                    "id": "task_workspace_artifact.final_readback",
                     "path": "final.md",
                     "body_state": "bounded",
                     "status": "ok",
@@ -931,7 +931,7 @@ def test_evidence_binding_repair_uses_deterministic_unique_ref_alias():
         {
             "claim_index": 0,
             "claim": "The report uses the final file.",
-            "evidence_ids": ["workspace_artifact.final_readback"],
+            "evidence_ids": ["task_workspace_artifact.final_readback"],
             "support_type": "content",
         }
     ]
@@ -949,15 +949,15 @@ def test_evidence_binding_repair_uses_unique_content_readback_for_invalid_id():
             ],
             "available_evidence_refs": [
                 {
-                    "id": "workspace_artifact_readback:agent_task.iteration.7.workspace_artifact:final.md",
-                    "kind": "workspace_artifact.targeted_readback",
+                    "id": "task_workspace_artifact_readback:agent_task.iteration.7.task_workspace_artifact:final.md",
+                    "kind": "task_workspace_artifact.targeted_readback",
                     "path": "final.md",
                     "body_state": "bounded",
                     "status": "ok",
                 },
                 {
-                    "id": "workspace_artifact_acceptance_locator:agent_task.iteration.7.workspace_artifact:final.md:heading",
-                    "kind": "workspace_artifact.acceptance_locator",
+                    "id": "task_workspace_artifact_acceptance_locator:agent_task.iteration.7.task_workspace_artifact:final.md:heading",
+                    "kind": "task_workspace_artifact.acceptance_locator",
                     "path": "final.md",
                     "body_state": "ref_only",
                     "status": "ok",
@@ -980,7 +980,7 @@ def test_evidence_binding_repair_uses_unique_content_readback_for_invalid_id():
         {
             "claim_index": 0,
             "claim": "The heading correction in final.md is present.",
-            "evidence_ids": ["workspace_artifact_readback:agent_task.iteration.7.workspace_artifact:final.md"],
+            "evidence_ids": ["task_workspace_artifact_readback:agent_task.iteration.7.task_workspace_artifact:final.md"],
             "support_type": "content",
         }
     ]
@@ -1041,31 +1041,31 @@ def test_evidence_binding_repair_replaces_ref_only_content_with_action_result_re
     ]
 
 
-def test_evidence_binding_repair_maps_workspace_readback_section_label_to_latest_readback():
+def test_evidence_binding_repair_maps_task_workspace_readback_section_label_to_latest_readback():
     latest_readback_id = (
-        "workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair-3.continue.workspace_artifact:final.md"
+        "task_workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair-3.continue.task_workspace_artifact:final.md"
     )
     guard = {
         "normalized_evidence_use": [
             {
                 "claim": "The final brief includes the non-investment-advice statement.",
                 "evidence_ids": [
-                    "workspace_artifact_readback:final-verification-repair-3.continue:final.md:non-investment-advice-section"
+                    "task_workspace_artifact_readback:final-verification-repair-3.continue:final.md:non-investment-advice-section"
                 ],
                 "support_type": "content",
             }
         ],
         "available_evidence_refs": [
             {
-                "id": "workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair.workspace_artifact:final.md",
-                "kind": "workspace_artifact.readback",
+                "id": "task_workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair.task_workspace_artifact:final.md",
+                "kind": "task_workspace_artifact.readback",
                 "status": "ok",
                 "body_state": "truncated",
                 "path": "final.md",
             },
             {
                 "id": latest_readback_id,
-                "kind": "workspace_artifact.readback",
+                "kind": "task_workspace_artifact.readback",
                 "status": "ok",
                 "body_state": "truncated",
                 "path": "final.md",
@@ -1078,7 +1078,7 @@ def test_evidence_binding_repair_maps_workspace_readback_section_label_to_latest
                 "index": 0,
                 "claim": "The final brief includes the non-investment-advice statement.",
                 "evidence_id": (
-                    "workspace_artifact_readback:final-verification-repair-3.continue:final.md:non-investment-advice-section"
+                    "task_workspace_artifact_readback:final-verification-repair-3.continue:final.md:non-investment-advice-section"
                 ),
                 "support_type": "content",
             }
@@ -1087,8 +1087,8 @@ def test_evidence_binding_repair_maps_workspace_readback_section_label_to_latest
     ledger = {
         "items": [
             {
-                "id": "workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair.workspace_artifact:final.md",
-                "kind": "workspace_artifact.readback",
+                "id": "task_workspace_artifact_readback:agent_task.taskboard.card.final-verification-repair.task_workspace_artifact:final.md",
+                "kind": "task_workspace_artifact.readback",
                 "status": "ok",
                 "body_state": "truncated",
                 "path": "final.md",
@@ -1096,7 +1096,7 @@ def test_evidence_binding_repair_maps_workspace_readback_section_label_to_latest
             },
             {
                 "id": latest_readback_id,
-                "kind": "workspace_artifact.readback",
+                "kind": "task_workspace_artifact.readback",
                 "status": "ok",
                 "body_state": "truncated",
                 "path": "final.md",
@@ -1117,10 +1117,10 @@ def test_evidence_binding_repair_maps_workspace_readback_section_label_to_latest
 
 def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readback():
     targeted_readback_id = (
-        "workspace_artifact_targeted_readback:final.md:acceptance_locator_search:Non-Investment-Advice_Statement"
+        "task_workspace_artifact_targeted_readback:final.md:acceptance_locator_search:Non-Investment-Advice_Statement"
     )
     source_locator_id = (
-        "workspace_artifact_acceptance_locator:agent_task.taskboard.card.final-verification-repair.workspace_artifact"
+        "task_workspace_artifact_acceptance_locator:agent_task.taskboard.card.final-verification-repair.task_workspace_artifact"
         ":final.md:non-investment-advice:Non-Investment-Advice_Statement"
     )
     guard = {
@@ -1134,7 +1134,7 @@ def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readbac
         "available_evidence_refs": [
             {
                 "id": source_locator_id,
-                "kind": "workspace_artifact.acceptance_locator",
+                "kind": "task_workspace_artifact.acceptance_locator",
                 "status": "ok",
                 "body_state": "ref_only",
                 "path": "final.md",
@@ -1143,7 +1143,7 @@ def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readbac
             },
             {
                 "id": targeted_readback_id,
-                "kind": "workspace_artifact.targeted_readback",
+                "kind": "task_workspace_artifact.targeted_readback",
                 "status": "ok",
                 "body_state": "bounded",
                 "path": "final.md",
@@ -1164,7 +1164,7 @@ def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readbac
         "items": [
             {
                 "id": source_locator_id,
-                "kind": "workspace_artifact.acceptance_locator",
+                "kind": "task_workspace_artifact.acceptance_locator",
                 "status": "ok",
                 "body_state": "ref_only",
                 "path": "final.md",
@@ -1173,7 +1173,7 @@ def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readbac
             },
             {
                 "id": targeted_readback_id,
-                "kind": "workspace_artifact.targeted_readback",
+                "kind": "task_workspace_artifact.targeted_readback",
                 "status": "ok",
                 "body_state": "bounded",
                 "path": "final.md",
@@ -1194,16 +1194,16 @@ def test_evidence_binding_repair_maps_artifact_locator_claim_to_targeted_readbac
 
 
 def test_evidence_binding_repair_prefers_acceptance_coverage_for_aggregate_artifact_claim():
-    coverage_id = "workspace_artifact_acceptance_coverage:agent_task.taskboard.final:final.md"
+    coverage_id = "task_workspace_artifact_acceptance_coverage:agent_task.taskboard.final:final.md"
     section_ids = [
-        "workspace_artifact_targeted_readback:final.md:date-window",
-        "workspace_artifact_targeted_readback:final.md:source-methodology",
-        "workspace_artifact_targeted_readback:final.md:risks",
+        "task_workspace_artifact_targeted_readback:final.md:date-window",
+        "task_workspace_artifact_targeted_readback:final.md:source-methodology",
+        "task_workspace_artifact_targeted_readback:final.md:risks",
     ]
     available_refs = [
         {
             "id": coverage_id,
-            "kind": "workspace_artifact.acceptance_coverage",
+            "kind": "task_workspace_artifact.acceptance_coverage",
             "status": "ok",
             "body_state": "bounded",
             "path": "final.md",
@@ -1212,7 +1212,7 @@ def test_evidence_binding_repair_prefers_acceptance_coverage_for_aggregate_artif
         *[
             {
                 "id": section_id,
-                "kind": "workspace_artifact.targeted_readback",
+                "kind": "task_workspace_artifact.targeted_readback",
                 "status": "ok",
                 "body_state": "bounded",
                 "path": "final.md",
@@ -1253,8 +1253,8 @@ def test_evidence_binding_repair_prefers_acceptance_coverage_for_aggregate_artif
     ]
 
 
-def test_workspace_artifact_output_contract_sections_are_required_acceptance_points():
-    from agently.core.application.AgentTask.AcceptanceLocator import build_workspace_artifact_acceptance_locator_items
+def test_task_workspace_artifact_output_contract_sections_are_required_acceptance_points():
+    from agently.core.application.AgentTask.AcceptanceLocator import build_task_workspace_artifact_acceptance_locator_items
 
     task = AgentTask.__new__(AgentTask)
     task.options = {
@@ -1269,8 +1269,8 @@ def test_workspace_artifact_output_contract_sections_are_required_acceptance_poi
         }
     }
 
-    points = task._workspace_artifact_acceptance_points_from_output_contracts("final.md")
-    locators = build_workspace_artifact_acceptance_locator_items(
+    points = task._task_workspace_artifact_acceptance_points_from_output_contracts("final.md")
+    locators = build_task_workspace_artifact_acceptance_locator_items(
         path="final.md",
         source="test.final",
         text="# Report\n\n## Date window\n\nToday.\n\n## Source list\n\n- https://example.test\n",
@@ -1296,8 +1296,8 @@ def test_output_contract_sections_apply_only_to_declared_deliverable_path():
         }
     }
 
-    final_points = task._workspace_artifact_acceptance_points_from_output_contracts("final.md")
-    working_points = task._workspace_artifact_acceptance_points_from_output_contracts(
+    final_points = task._task_workspace_artifact_acceptance_points_from_output_contracts("final.md")
+    working_points = task._task_workspace_artifact_acceptance_points_from_output_contracts(
         "working/taskboard/search_frameworks_tools/final.md"
     )
 
@@ -1306,9 +1306,9 @@ def test_output_contract_sections_apply_only_to_declared_deliverable_path():
 
 
 def test_acceptance_locator_matches_equivalent_heading_connectors():
-    from agently.core.application.AgentTask.AcceptanceLocator import build_workspace_artifact_acceptance_locator_items
+    from agently.core.application.AgentTask.AcceptanceLocator import build_task_workspace_artifact_acceptance_locator_items
 
-    locators = build_workspace_artifact_acceptance_locator_items(
+    locators = build_task_workspace_artifact_acceptance_locator_items(
         path="final.md",
         source="test.final",
         text="# Report\n\n## Risks & Uncertainty\n\n- Some sources were unavailable.\n",
@@ -1329,10 +1329,10 @@ def test_acceptance_locator_matches_equivalent_heading_connectors():
     assert locators[0]["requirement_level"] == "required"
 
 
-def test_workspace_artifact_targeted_readback_keeps_locator_anchors():
+def test_task_workspace_artifact_targeted_readback_keeps_locator_anchors():
     locator = {
-        "id": "workspace_artifact_acceptance_locator:test:final.md:date-window",
-        "kind": "workspace_artifact.acceptance_locator",
+        "id": "task_workspace_artifact_acceptance_locator:test:final.md:date-window",
+        "kind": "task_workspace_artifact.acceptance_locator",
         "status": "ok",
         "path": "final.md",
         "criterion_id": "output_contract:case:section:0:date-window",
@@ -1340,7 +1340,7 @@ def test_workspace_artifact_targeted_readback_keeps_locator_anchors():
         "anchor_text": "Date window",
     }
 
-    item = AgentTask._workspace_artifact_targeted_readback_evidence_item(
+    item = AgentTask._task_workspace_artifact_targeted_readback_evidence_item(
         locator,
         {
             "kind": "acceptance_locator_readback",
@@ -1719,7 +1719,7 @@ def test_task_board_acceptance_index_derives_from_criteria_cards_verifier_and_lo
                                 "items": [
                                     {
                                         "id": "locator:report:citation",
-                                        "kind": "workspace_artifact.acceptance_locator",
+                                        "kind": "task_workspace_artifact.acceptance_locator",
                                         "status": "ok",
                                         "body_state": "ref_only",
                                         "claim": "Report includes source citations.",
@@ -1784,7 +1784,7 @@ def test_task_board_acceptance_index_accepts_structured_satisfied_boolean():
                     "criterion": "The final artifact is accepted.",
                     "satisfied": True,
                     "status": "satisfied",
-                    "evidence_ids": ["workspace_artifact.readback:final.md"],
+                    "evidence_ids": ["task_workspace_artifact.readback:final.md"],
                     "summary": "The verifier accepted the final artifact.",
                 }
             ]
@@ -1886,7 +1886,7 @@ def test_task_board_acceptance_index_treats_unmatched_locator_points_as_advisory
         "evidence_items": [
             {
                 "id": "locator:extra",
-                "kind": "workspace_artifact.acceptance_locator",
+                "kind": "task_workspace_artifact.acceptance_locator",
                 "criterion": "Model-suggested extra section exists.",
                 "path": "final.md",
             }
@@ -1964,7 +1964,7 @@ def test_task_board_acceptance_index_tracks_dirty_cache_and_scoped_evidence():
                                 "items": [
                                     {
                                         "id": "readback:final.md#citations",
-                                        "kind": "workspace_artifact.targeted_readback",
+                                        "kind": "task_workspace_artifact.targeted_readback",
                                         "status": "ok",
                                         "body_state": "bounded",
                                         "path": "final.md",
@@ -1973,7 +1973,7 @@ def test_task_board_acceptance_index_tracks_dirty_cache_and_scoped_evidence():
                                     },
                                     {
                                         "id": "readback:unrelated",
-                                        "kind": "workspace_artifact.targeted_readback",
+                                        "kind": "task_workspace_artifact.targeted_readback",
                                         "status": "ok",
                                         "body_state": "bounded",
                                         "path": "notes.md",
@@ -2043,7 +2043,7 @@ def test_task_board_acceptance_index_tracks_dirty_cache_and_scoped_evidence():
                                 "items": [
                                     {
                                         "id": "readback:final.md#citations",
-                                        "kind": "workspace_artifact.targeted_readback",
+                                        "kind": "task_workspace_artifact.targeted_readback",
                                         "status": "ok",
                                         "body_state": "bounded",
                                         "path": "final.md",
@@ -2157,12 +2157,12 @@ def test_taskboard_preflight_cards_require_mounted_capabilities():
                         },
                     },
                     {
-                        "id": "workspace_readback",
+                        "id": "task_workspace_readback",
                         "objective": "Check existing artifact.",
                         "allowed_execution_shape": "readback",
                         "metadata": {
                             "preflight_kind": "readback",
-                            "requires_workspace_refs": ["artifact:report"],
+                            "requires_task_workspace_refs": ["artifact:report"],
                         },
                     },
                 ],
@@ -2173,7 +2173,7 @@ def test_taskboard_preflight_cards_require_mounted_capabilities():
     missing = task_board_preflight_diagnostics(
         revision,
         mounted_capabilities=[{"id": "filesystem"}],
-        workspace_refs=[{"id": "artifact:report"}],
+        task_workspace_refs=[{"id": "artifact:report"}],
     )
     assert missing == [
         {
@@ -2187,7 +2187,7 @@ def test_taskboard_preflight_cards_require_mounted_capabilities():
     available = task_board_preflight_diagnostics(
         revision,
         mounted_capabilities=[{"id": "browser"}, {"id": "filesystem"}],
-        workspace_refs=[{"id": "artifact:report"}],
+        task_workspace_refs=[{"id": "artifact:report"}],
     )
     assert available == []
 
@@ -2276,7 +2276,7 @@ def test_task_board_planning_result_builds_valid_revision():
                     "depends_on": ["collect"],
                     "done_when": "Decision has evidence-backed reason.",
                     "allowed_execution_shape": "model",
-                    "final_workspace_deliverables": ["final.md"],
+                    "final_task_workspace_deliverables": ["final.md"],
                 },
             ],
             "reflection_points": ["Check that billing status matches the ticket claim."],
@@ -2306,8 +2306,8 @@ def test_task_board_planning_result_builds_valid_revision():
     assert result.revision.graph.cards[1].depends_on == ("collect",)
     assert result.revision.graph.cards[1].failure_policy == "required"
     assert result.revision.graph.cards[1].allowed_execution_shape == "model"
-    assert result.revision.graph.cards[1].metadata["final_workspace_deliverables"] == ["final.md"]
-    assert result.revision.graph.cards[1].evidence_contract["final_workspace_deliverables"] == ["final.md"]
+    assert result.revision.graph.cards[1].metadata["final_task_workspace_deliverables"] == ["final.md"]
+    assert result.revision.graph.cards[1].evidence_contract["final_task_workspace_deliverables"] == ["final.md"]
     assert result.revision.metadata["completion_gate"] == "Final decision cites collected evidence."
     assert result.planning_policy.effort_profile.name == "medium"
 
@@ -2351,7 +2351,7 @@ def test_task_board_planning_exact_action_commands_override_conflicting_control_
 def test_task_board_planning_canonicalizes_optional_card_id_hints():
     schema = task_board_planning_output_schema()
     assert schema["cards"][0]["id"][2] is False
-    assert schema["cards"][0]["final_workspace_deliverables"][2] is False
+    assert schema["cards"][0]["final_task_workspace_deliverables"][2] is False
     assert schema["cards"][0]["action_commands"][2] is False
     assert "exhaustive" in schema["cards"][0]["action_commands"][1]
     assert "dependent control card" in schema["cards"][0]["action_commands"][1]
@@ -2409,7 +2409,7 @@ def test_task_board_planning_preserves_scoped_retrieval_plan():
             "cards": [
                 {
                     "id": "collect",
-                    "action_block": "Search retained Workspace records.",
+                    "action_block": "Search retained TaskWorkspace records.",
                     "objective": "Find the Atlas renewal evidence without broad reads.",
                     "depends_on": [],
                     "done_when": "Atlas evidence snippet is available.",
@@ -2419,7 +2419,7 @@ def test_task_board_planning_preserves_scoped_retrieval_plan():
                             {
                                 "query": "Atlas",
                                 "expected_role": "evidence_snippet",
-                                "search_surface": "workspace_index",
+                                "source_kinds": ["record_store"],
                                 "filters": {"collection": "retained-notes"},
                                 "max_results": 3,
                             }
@@ -2517,7 +2517,7 @@ async def test_task_board_tick_runs_through_triggerflow_and_advances_revision():
     async def handler(context: TaskBoardContext):
         contexts.append(context)
         assert context.model == "model-key"
-        assert context.workspace == "workspace-ref"
+        assert context.task_workspace == "task-workspace-ref"
         assert context.effort == "high"
         assert context.planning_policy is not None
         assert context.planning_policy.effort_profile.name == "high"
@@ -2531,7 +2531,7 @@ async def test_task_board_tick_runs_through_triggerflow_and_advances_revision():
         _revision(),
         handler=handler,
         model="model-key",
-        workspace="workspace-ref",
+        task_workspace="task-workspace-ref",
         effort="high",
     )
 
@@ -2957,7 +2957,7 @@ def test_evidence_ledger_view_budget_keeps_content_items_over_ref_only_flood():
     locator_flood = [
         {
             "id": f"locator-{index}",
-            "kind": "workspace_artifact.acceptance_locator",
+            "kind": "task_workspace_artifact.acceptance_locator",
             "status": "ok",
             "body_state": "ref_only",
             "path": "final.md",
@@ -3074,7 +3074,7 @@ def test_taskboard_final_verification_evidence_includes_pinned_cited_items():
         "evidence_items": [
             {
                 "id": "locator-1",
-                "kind": "workspace_artifact.acceptance_locator",
+                "kind": "task_workspace_artifact.acceptance_locator",
                 "status": "ok",
                 "body_state": "ref_only",
             }
@@ -3084,7 +3084,7 @@ def test_taskboard_final_verification_evidence_includes_pinned_cited_items():
         "evidence_items": [
             {
                 "id": "locator-1",
-                "kind": "workspace_artifact.acceptance_locator",
+                "kind": "task_workspace_artifact.acceptance_locator",
                 "status": "ok",
                 "body_state": "ref_only",
             },
@@ -3141,12 +3141,12 @@ def test_taskboard_final_verification_evidence_joins_pinned_stable_reference_id(
 
 
 def test_taskboard_final_verification_evidence_joins_reference_assigned_only_in_stable_ledger():
-    canonical_id = "workspace_artifact_readback:repair:final.md"
+    canonical_id = "task_workspace_artifact_readback:repair:final.md"
     board_view = {
         "evidence_items": [
             {
                 "id": canonical_id,
-                "kind": "workspace_artifact.readback",
+                "kind": "task_workspace_artifact.readback",
                 "status": "ok",
                 "body_state": "bounded",
                 "path": "final.md",
@@ -3184,9 +3184,9 @@ def test_taskboard_terminal_verifier_receives_current_ledger_without_prior_pins(
         "body": "AVGO closed at 238.4, up 0.9%.",
     }
     current_carrier = {
-        "id": "workspace_artifact_readback:final.md",
+        "id": "task_workspace_artifact_readback:final.md",
         "reference_id": "ref_final_readback",
-        "kind": "workspace_artifact.readback",
+        "kind": "task_workspace_artifact.readback",
         "status": "ok",
         "body_state": "bounded",
         "path": "final.md",

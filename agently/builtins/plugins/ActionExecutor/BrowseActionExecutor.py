@@ -42,10 +42,10 @@ class BrowseActionExecutor:
             action_input = {}
         action_id = str(spec.get("action_id", "browse"))
         url = str(action_input.get("url", ""))
-        workspace = None
+        task_workspace = None
         settings_get = getattr(settings, "get", None)
         if callable(settings_get):
-            workspace = settings_get("action.workspace", None) or settings_get("workspace", None)
+            task_workspace = settings_get("action.task_workspace", None)
         environment_resources = action_call.get("execution_resource_resources", {})
         if isinstance(environment_resources, dict):
             browser_resource = environment_resources.get(action_id) or environment_resources.get("browse")
@@ -56,5 +56,9 @@ class BrowseActionExecutor:
                 )
         action_method = getattr(self.browse, "_execute_action_method", None)
         if callable(action_method):
-            return await FunctionShifter.asyncify(action_method)("browse", workspace=workspace, **action_input)
+            return await FunctionShifter.asyncify(action_method)(
+                "browse",
+                task_workspace=task_workspace,
+                **action_input,
+            )
         return await FunctionShifter.asyncify(self.browse.browse)(**action_input)

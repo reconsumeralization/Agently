@@ -51,15 +51,15 @@ class NodeExecutionResource:
                 "error": f"Node.js binary not found: { self.node_binary }",
             }
         if self.cwd is None:
-            # No Workspace-issued working directory: fail closed rather than
+            # No TaskWorkspace-issued working directory: fail closed rather than
             # running in the process cwd (spec sections 8.6 / 9).
             return {
                 "ok": False,
                 "need_approval": True,
-                "reason": "workspace_boundary_required",
+                "reason": "task_workspace_boundary_required",
                 "detail": (
-                    "No Workspace-issued working directory for Node.js. Bind a Workspace and "
-                    "enable a Workspace-bound runner (agent.use_workspace(...) + agent.enable_nodejs(...))."
+                    "No TaskWorkspace-issued working directory for Node.js. Bind a TaskWorkspace and "
+                    "enable a TaskWorkspace-bound runner (agent.use_task_workspace(...) + agent.enable_nodejs(...))."
                 ),
             }
         result = subprocess.run(
@@ -99,14 +99,14 @@ class NodeExecutionResourceProvider:
         existing_handle: "ExecutionResourceHandle | None" = None,
     ) -> "ExecutionResourceHandle":
         _ = existing_handle
-        from ._boundary import materialize_workspace_boundary
+        from ._boundary import materialize_task_workspace_boundary
 
         config = requirement.get("config", {})
-        # Materialize the Workspace-issued file boundary in the provider context
+        # Materialize the TaskWorkspace-issued file boundary in the provider context
         # so the executor receives a ready working directory and never falls back
         # to the process cwd (spec section 8.6).
-        boundary = materialize_workspace_boundary(
-            [config.get("cwd"), policy.get("workspace_roots")],
+        boundary = materialize_task_workspace_boundary(
+            [config.get("cwd"), policy.get("task_workspace_roots")],
             label="node execution resource",
         )
         resource = NodeExecutionResource(

@@ -18,7 +18,8 @@ real, independently-authored public skill at runtime** -
 
     Cocoon-AI/architecture-diagram-generator  (subpath: architecture-diagram)
 
-- via Agently's remote-skills mechanism, and lets the goal-pursuit loop use it as the
+- materialized by host-side Git and installed into SkillLibrary from a local
+  directory. The goal-pursuit loop then uses it as the
 "how to draw" guidance. The skill dictates an HTML+SVG design system (colors, fonts,
 spacing, export toolbar), so:
     * OUTPUT is a single .html file with inline SVG, not Mermaid markdown.
@@ -38,6 +39,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -70,7 +72,6 @@ SUMMARY_FILE = "outputs/agently_architecture_diagram_cocoon_summary.json"
 COCOON_SKILL_SOURCE = "Cocoon-AI/architecture-diagram-generator"
 COCOON_SKILL_SUBPATH = "architecture-diagram"
 COCOON_SKILL_ID = "architecture-diagram"
-SKILLS_ARTIFACT_EFFORT = "agent_task_artifact_react"
 
 SOURCE_PATHS = [
     "docs/en/reference/execution-layer-selection.md",
@@ -84,7 +85,7 @@ SOURCE_PATHS = [
     "agently/core/application/AgentExecution/Result.py",
     "agently/core/orchestration/TaskDAG/TaskDAGExecutor.py",
     "agently/core/orchestration/TriggerFlow/TriggerFlow.py",
-    "agently/core/Workspace/Workspace.py",
+    "agently/core/TaskWorkspace/TaskWorkspace.py",
     "agently/core/application/SkillsExecutor/SkillsExecutor.py",
     "agently/builtins/plugins/ActionRuntime/AgentlyActionRuntime.py",
 ]
@@ -109,10 +110,10 @@ ARCHITECTURE_STATUS_FACTS = [
         "evidence": "TriggerFlow owns the lower-level workflow substrate: execution state, signals, concurrency, stream, pause/resume, persistence, and lifecycle.",
     },
     {
-        "component": "Workspace",
+        "component": "TaskWorkspace",
         "status": "current foundation",
-        "source": "docs/en/reference/execution-layer-selection.md; agently/core/Workspace/Workspace.py",
-        "evidence": "Workspace stores evidence and context; it does not decide completion.",
+        "source": "docs/en/reference/execution-layer-selection.md; agently/core/TaskWorkspace/TaskWorkspace.py",
+        "evidence": "TaskWorkspace stores evidence and context; it does not decide completion.",
     },
     {
         "component": "Deferred task-loop work",
@@ -132,7 +133,7 @@ EXCERPT_TERMS = [
     "TriggerFlow",
     "ModelRequest",
     "ModelRequestResult",
-    "Workspace",
+    "TaskWorkspace",
     "Action",
     "ActionRuntime",
     "SkillsExecutor",
@@ -219,19 +220,34 @@ def _design_system_fingerprint_hits(artifact_text: str, fingerprints: list[str])
 
 
 def install_cocoon_skill(registry_root: Path) -> dict[str, Any]:
-    """The example installs the public skill for itself, from GitHub, at runtime."""
+    """Materialize the remote source in host code, then install it locally."""
+    checkout = registry_root.parent / "skill_sources" / "architecture-diagram-generator"
+    checkout.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", f"https://github.com/{COCOON_SKILL_SOURCE}.git", str(checkout)],
+        check=True,
+    )
+    source_commit = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     Agently.skills_executor.configure(
         registry_root=str(registry_root),
-        allowed_trust_levels=["local", "remote"],
+        allowed_trust_levels=["local"],
     )
-    record = Agently.skills_executor.install_skills_pack(
-        source=COCOON_SKILL_SOURCE,
-        subpath=COCOON_SKILL_SUBPATH,
-        fetch=True,
-        trust_level="remote",
+    contract = Agently.skills_executor.install_skills(
+        checkout / COCOON_SKILL_SUBPATH,
+        trust_level="local",
         update=True,
     )
-    return record
+    return {
+        "installed_skills": [contract["skill_id"]],
+        "contracts": [contract],
+        "source_commit": source_commit,
+        "source_checkout": str(checkout),
+    }
 
 
 async def main() -> None:
@@ -244,67 +260,16 @@ async def main() -> None:
     if COCOON_SKILL_ID not in installed_skills:
         raise RuntimeError(f"Self-install did not register '{COCOON_SKILL_ID}'. Got: {installed_skills}")
 
-    agent = Agently.create_agent("agent-task-cocoon-architecture-diagram").use_workspace(workspace_dir)
+    agent = Agently.create_agent("agent-task-cocoon-architecture-diagram").use_task_workspace(workspace_dir).use_record_store(workspace_dir, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=0.0)
-    # When the planner routes a bounded step to the skills shape, the
-    # SkillsExecutor resolves its model under per-phase stage keys
-    # (planner/research/reason/executor/verifier/reflector/finalizer; see
-    # SkillsExecutor _stage_key_for_phase / _stage_model_key). Those keys must be
-    # present in the model pool or the skill's model call has no provider/key and
-    # fails with a 401. This is host model configuration (the canonical pattern in
-    # examples/skills_executor/09): map every skills stage key onto the same task
-    # model profile so the skills route uses DeepSeek with the configured key.
-    configured_pool = agent.settings.get("model_pool", {}) or {}
-    model_pool = cast("dict[str, Any]", dict(configured_pool) if isinstance(configured_pool, dict) else {})
-    task_profile = model_pool.get(TASK_MODEL_KEY)
-    if task_profile is not None:
-        for stage_key in (
-            "planner",
-            "research",
-            "reason",
-            "reason_fast",
-            "executor",
-            "verifier",
-            "reflector",
-            "finalizer",
-        ):
-            model_pool.setdefault(stage_key, task_profile)
-        agent.settings.set("model_pool", model_pool)
     agent.set_settings("action.stage_idle_timeout", 240)
     agent.set_settings("tool.stage_idle_timeout", 240)
-    raw_effort_presets = agent.settings.get("effort_presets", {})
-    effort_presets: dict[str, Any] = (
-        dict(cast(dict[str, Any], raw_effort_presets))
-        if isinstance(raw_effort_presets, dict)
-        else {}
-    )
-    effort_presets[SKILLS_ARTIFACT_EFFORT] = {
-        "strategy": "react",
-        "step_budget": 4,
-        "artifact_inline_limit": 180000,
-        "action_concurrency": 1,
-        # Explicit side-effect scope for this artifact-producing Skills route.
-        # Skills still provide guidance; ActionRuntime owns the file write/read.
-        "allowed_actions": ["write_file", "read_file"],
-        "required_actions": ["write_file", "read_file"],
-    }
-    agent.set_settings("effort_presets", effort_presets)
-    workspace = agent.workspace
-    if workspace is None:
-        raise RuntimeError("Workspace was not initialized.")
+    task_workspace = agent.task_workspace
+    record_store = agent.record_store
 
-    agent.enable_workspace_file_actions(read=True, write=True, expose_to_model=True)
+    agent.enable_task_workspace_file_actions(read=True, write=True, expose_to_model=True)
     # Make the self-installed public skill available to the goal-pursuit loop.
-    # The Cocoon skill's design system references Google Fonts and CDN export
-    # helpers, so this trusted example explicitly authorizes those read-only
-    # network capabilities instead of letting capability preparation fail closed.
     agent.use_skills([COCOON_SKILL_ID], mode="model_decision", always=True)
-    agent.configure_skill_capabilities(
-        auto_load={
-            "web_browse": "allow",
-            "http_request": "allow",
-        }
-    )
 
     @agent.action_func
     def fetch_agently_architecture_sources() -> dict[str, Any]:
@@ -322,7 +287,7 @@ async def main() -> None:
         return {"status": "ok", "sources": sources, "architecture_status_facts": ARCHITECTURE_STATUS_FACTS}
 
     agent.use_actions(fetch_agently_architecture_sources)
-    await workspace.put(
+    await record_store.put(
         content={
             "task": TASK_ID,
             "output_file": OUTPUT_FILE,
@@ -335,14 +300,14 @@ async def main() -> None:
         collection="observations",
         kind="architecture_diagram_task_brief",
         summary="Goal Pursuit task brief for an Agently architecture diagram using the self-installed Cocoon skill.",
-        scope={"task_id": TASK_ID},
+        scope={"task_id": TASK_ID, "execution_id": TASK_ID},
         source={"type": "example_script", "name": "agently_architecture_diagram_cocoon_skill_task"},
     )
 
     print("[SETUP] Agently architecture diagram (self-installed Cocoon skill) Goal Pursuit experiment")
-    print(f"[SETUP] Workspace: {workspace_dir}")
+    print(f"[SETUP] TaskWorkspace: {workspace_dir}")
     print(f"[SETUP] Provider: {provider}, model_key={TASK_MODEL_KEY}")
-    print(f"[SETUP] Installed skill: {COCOON_SKILL_ID} from {COCOON_SKILL_SOURCE} (commit pinned)")
+    print(f"[SETUP] Installed skill: {COCOON_SKILL_ID} from {COCOON_SKILL_SOURCE}")
 
     goal = (
         "Produce a design-review-ready Agently architecture diagram. First call "
@@ -354,7 +319,7 @@ async def main() -> None:
         "capabilities when the evidence makes that distinction important. Finally read the file back to confirm it."
     )
     success_criteria = [
-        f"A single-file HTML architecture diagram exists at `{OUTPUT_FILE}` in Workspace.",
+        f"A single-file HTML architecture diagram exists at `{OUTPUT_FILE}` in TaskWorkspace.",
         f"The HTML embeds inline SVG produced with the installed `{COCOON_SKILL_ID}` skill's design system.",
         "The diagram gives engineers a clear high-level view of Agently's major layers, ownership boundaries, and runtime path.",
         "The document handles uncertain, planned, or deferred areas responsibly instead of presenting everything as already landed.",
@@ -375,7 +340,7 @@ async def main() -> None:
         .strategy(
             "task",
             task_id=TASK_ID,
-            workspace=workspace_dir,
+            task_workspace=workspace_dir,
             limits={"max_model_requests": 16, "max_seconds": 900, "max_no_progress_seconds": 240},
             options={
                 "agent_task": {
@@ -385,17 +350,10 @@ async def main() -> None:
                 },
                 "routes": {
                     "model_request": {"action_loop": {"max_rounds": 8}},
-                    # Skills route output may carry long HTML/SVG text; avoid the
-                    # JSON streaming parser path for artifact-shaped content.
-                    "skills": {"effort": SKILLS_ARTIFACT_EFFORT, "output_format": "yaml_literal"},
                 },
-                # Structured capability-evidence requirement: the host guard fails
-                # verification unless this capability (the installed skill) shows
-                # up in execution evidence. This grades the OUTCOME of the model's
-                # judgment; it does NOT force the route (the skill stays
-                # mode="model_decision" above), so the judgment test is preserved.
+                # Skill use is proven by response-bound TaskContext consumption;
+                # this list is reserved for executable Action evidence.
                 "capability_evidence_requirements": [
-                    {"capability_id": COCOON_SKILL_ID, "capability_kind": "skill", "kind": "capability_used"},
                     {
                         "capability_id": "fetch_agently_architecture_sources",
                         "capability_kind": "action",
@@ -420,7 +378,7 @@ async def main() -> None:
 
     result = await execution.async_start()
     meta = await execution.async_get_meta()
-    output_path = resolve_result_artifact_path(workspace, result, OUTPUT_FILE)
+    output_path = resolve_result_artifact_path(task_workspace, result, OUTPUT_FILE)
     artifact_text = output_path.read_text(encoding="utf-8") if output_path.is_file() else ""
     model_judge = await judge_business_artifact(
         agent,
@@ -477,7 +435,7 @@ async def main() -> None:
         "iterations": result.get("iterations"),
         "model_judge_passed": bool(model_judge.get("accepted")),
         # Acceptance is driven by the framework contract only. With
-        # capability_evidence_requirements set, task acceptance proves the
+        # TaskContext consumption and Action evidence records prove the
         # selected Skill appeared in execution evidence and the required
         # fetch/write/readback host actions succeeded. Model-judge quality and
         # design-system fingerprints remain visible diagnostics, not gates, so
@@ -487,13 +445,13 @@ async def main() -> None:
         "model_judge": model_judge,
         "structural_smoke": structural_smoke,
         "replan_count": sum(1 for item in stream_items if item.path.endswith(".replan")),
-        "workspace_recovery_ref_count": len(meta.get("workspace_refs", {}).get("checkpoints", [])),
-        "workspace_process_record_count": len(meta.get("workspace_refs", {}).get("decisions", [])),
+        "record_store_recovery_ref_count": len(meta.get("record_refs", {}).get("checkpoints", [])),
+        "workspace_process_record_count": len(meta.get("record_refs", {}).get("decisions", [])),
         "task_refs": result.get("task_refs") or meta.get("task_refs"),
         "stream_trace_file": str(stream_trace_path),
         "output_file": str(output_path),
     }
-    summary_path = workspace.root / SUMMARY_FILE
+    summary_path = task_workspace.root / SUMMARY_FILE
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_summary(summary)

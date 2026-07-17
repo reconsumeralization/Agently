@@ -36,14 +36,14 @@ def _register_handler(result: Any, requests: list[PolicyApprovalRequest]) -> str
 
 
 @pytest.mark.asyncio
-async def test_default_workspace_actions_create_new_product_in_fallback_without_approval(
+async def test_default_task_workspace_actions_create_new_product_in_fallback_without_approval(
     tmp_path: Path,
 ) -> None:
     requests: list[PolicyApprovalRequest] = []
     handler = _register_handler(False, requests)
-    agent = Agently.create_agent("workspace-fallback-action").use_workspace(tmp_path)
+    agent = Agently.create_agent("workspace-fallback-action").use_task_workspace(tmp_path, mode="read_only")
     agent.configure_policy_approval(handler=handler)
-    agent.enable_workspace_file_actions()
+    agent.enable_task_workspace_file_actions()
 
     result = await agent.action.async_execute_action(
         "write_file",
@@ -67,7 +67,7 @@ async def test_default_workspace_actions_create_new_product_in_fallback_without_
         ({"status": "denied", "reason": "host denied"}, "blocked"),
     ],
 )
-async def test_external_workspace_edit_waits_for_or_obeys_policy_approval(
+async def test_external_task_workspace_edit_waits_for_or_obeys_policy_approval(
     tmp_path: Path,
     decision: dict[str, Any],
     expected_status: str,
@@ -77,9 +77,9 @@ async def test_external_workspace_edit_waits_for_or_obeys_policy_approval(
     target.write_text("before\n", encoding="utf-8")
     requests: list[PolicyApprovalRequest] = []
     handler = _register_handler(decision, requests)
-    agent = Agently.create_agent(f"workspace-{expected_status}").use_workspace(tmp_path)
+    agent = Agently.create_agent(f"workspace-{expected_status}").use_task_workspace(tmp_path, mode="read_only")
     agent.configure_policy_approval(handler=handler)
-    agent.enable_workspace_file_actions()
+    agent.enable_task_workspace_file_actions()
 
     result = await agent.action.async_execute_action(
         "write_file",
@@ -100,16 +100,16 @@ async def test_external_workspace_edit_waits_for_or_obeys_policy_approval(
     assert request.get("risk") == "filesystem_write"
     payload = request.get("payload")
     assert payload is not None
-    facts = payload["workspace_mutation"]
+    facts = payload["task_workspace_mutation"]
     assert facts["operation"] == "write_file"
     assert facts["path"] == "src/app.py"
     assert facts["canonical_path"] == str(target.resolve())
-    assert facts["workspace_id"] == agent.workspace.workspace_id
+    assert facts["task_workspace_id"] == agent.task_workspace.task_workspace_id
     assert "external_write_granted" not in payload["action_call"]["action_input"]
 
 
 @pytest.mark.asyncio
-async def test_approved_external_workspace_edit_uses_external_root_without_fallback(
+async def test_approved_external_task_workspace_edit_uses_external_root_without_fallback(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "src" / "app.py"
@@ -117,9 +117,9 @@ async def test_approved_external_workspace_edit_uses_external_root_without_fallb
     target.write_text("before\n", encoding="utf-8")
     requests: list[PolicyApprovalRequest] = []
     handler = _register_handler(True, requests)
-    agent = Agently.create_agent("workspace-approved").use_workspace(tmp_path)
+    agent = Agently.create_agent("workspace-approved").use_task_workspace(tmp_path, mode="read_only")
     agent.configure_policy_approval(handler=handler)
-    agent.enable_workspace_file_actions()
+    agent.enable_task_workspace_file_actions()
 
     result = await agent.action.async_execute_action(
         "write_file",

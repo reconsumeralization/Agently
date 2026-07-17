@@ -10,7 +10,7 @@ from agently.core.application.AgentTask.LifecycleState import (
 )
 
 
-def _workspace_carrier(
+def _task_workspace_carrier(
     carrier_id: str,
     content_version_id: str,
     *,
@@ -19,7 +19,7 @@ def _workspace_carrier(
 ) -> dict[str, object]:
     return {
         "carrier_id": carrier_id,
-        "kind": "workspace_artifact",
+        "kind": "task_workspace_artifact",
         "required": True,
         "content_version_id": content_version_id,
         "path": path,
@@ -56,7 +56,7 @@ def test_lifecycle_state_replaces_carriers_atomically_and_rejects_duplicate_ids(
     state.advance("evidence.ingest", expected_version=1, iteration=1)
 
     inventory = state.replace_carriers(
-        [_workspace_carrier("car_A", "cv_A")],
+        [_task_workspace_carrier("car_A", "cv_A")],
         expected_version=2,
     )
 
@@ -69,8 +69,8 @@ def test_lifecycle_state_replaces_carriers_atomically_and_rejects_duplicate_ids(
     with pytest.raises(ValueError, match="duplicate terminal carrier_id"):
         state.replace_carriers(
             [
-                _workspace_carrier("car_B", "cv_B"),
-                _workspace_carrier("car_B", "cv_C"),
+                _task_workspace_carrier("car_B", "cv_B"),
+                _task_workspace_carrier("car_B", "cv_C"),
             ],
             expected_version=3,
         )
@@ -78,19 +78,19 @@ def test_lifecycle_state_replaces_carriers_atomically_and_rejects_duplicate_ids(
     assert state.carrier_inventory == inventory
 
 
-def test_changed_workspace_content_replaces_current_carrier_without_reusing_identity():
+def test_changed_task_workspace_content_replaces_current_carrier_without_reusing_identity():
     state = AgentTaskLifecycleState(
         task_id="task_changed_path",
         requested_strategy="flat",
         effective_strategy="flat",
     )
     first = state.replace_carriers(
-        [_workspace_carrier("car_A", "cv_A", digest="a" * 64)],
+        [_task_workspace_carrier("car_A", "cv_A", digest="a" * 64)],
         expected_version=1,
     )
     old_carrier = first.carriers[0]
     second = state.replace_carriers(
-        [_workspace_carrier("car_B", "cv_B", digest="b" * 64)],
+        [_task_workspace_carrier("car_B", "cv_B", digest="b" * 64)],
         expected_version=2,
     )
 
@@ -110,7 +110,7 @@ def test_lifecycle_state_serialization_round_trip_preserves_current_versions_onl
     state.advance("work.execute", expected_version=1, iteration=4)
     state.replace_carriers(
         [
-            _workspace_carrier("car_file", "cv_file"),
+            _task_workspace_carrier("car_file", "cv_file"),
             {
                 "carrier_id": "car_inline",
                 "kind": "inline_final_result",
@@ -136,20 +136,86 @@ def test_lifecycle_state_serialization_round_trip_preserves_current_versions_onl
     assert isinstance(restored_inventory.carriers[0], TerminalCarrier)
 
 
+def test_lifecycle_state_preserves_skill_install_activation_and_context_facts():
+    state = AgentTaskLifecycleState(
+        task_id="task_skill_bindings",
+        requested_strategy="flat",
+        effective_strategy="flat",
+        skill_bindings={
+            "binding_A": {
+                "binding_id": "binding_A",
+                "canonical_skill_id": "agently-request",
+                "mode": "required",
+                "resolved_source": "https://example.com/skills.git",
+                "resolved_revision": "abc123",
+                "source_subpath": "skills/agently-request",
+            }
+        },
+    )
+
+    state.record_skill_context_binding(
+        request_id="request_A",
+        phase="work.plan",
+        bindings=[
+            {
+                "binding_id": "binding_A",
+                "canonical_skill_id": "agently-request",
+                "guidance_chars": 640,
+                "resource_chars": 320,
+                "selected_resource_keys": ["skill_1_resource_2"],
+                "truncated": True,
+            }
+        ],
+    )
+    restored = AgentTaskLifecycleState.from_dict(state.to_dict())
+
+    binding = restored.skill_bindings["binding_A"]
+    assert binding["install_status"] == "completed"
+    assert binding["activation_status"] == "bound"
+    assert binding["contexts"] == [
+        {
+            "request_id": "request_A",
+            "phase": "work.plan",
+            "guidance_chars": 640,
+            "resource_chars": 320,
+            "selected_resource_keys": ["skill_1_resource_2"],
+            "truncated": True,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="unknown AgentTask binding id"):
+        restored.record_skill_context_binding(
+            request_id="request_B",
+            phase="work.execute",
+            bindings=[
+                {
+                    "binding_id": "unknown",
+                    "canonical_skill_id": "agently-request",
+                    "guidance_chars": 1,
+                    "resource_chars": 0,
+                }
+            ],
+        )
+
+
 @pytest.mark.asyncio
 async def test_agent_task_resume_restores_private_lifecycle_state(tmp_path):
-    agent = Agently.create_agent("lifecycle-state-resume").use_workspace(tmp_path / "workspace")
+    agent = (
+        Agently.create_agent("lifecycle-state-resume")
+        .use_task_workspace(tmp_path / "task_workspace")
+        .use_record_store(tmp_path / "records", mode="read_write")
+    )
     task = AgentTask(
         agent,
         task_id="lifecycle-state-resume",
         goal="Produce final.md.",
         success_criteria=["final.md exists."],
         execution="flat",
-        options={"workspace_recovery": True},
+        options={"record_store_recovery": True},
     )
     task._lifecycle_state.advance("evidence.ingest", expected_version=1, iteration=1)
     task._lifecycle_state.replace_carriers(
-        [_workspace_carrier("car_resume", "cv_resume")],
+        [_task_workspace_carrier("car_resume", "cv_resume")],
         expected_version=2,
     )
     await task._write_resume_snapshot(
@@ -165,7 +231,8 @@ async def test_agent_task_resume_restores_private_lifecycle_state(tmp_path):
     resumed = await AgentTask.async_resume(
         agent,
         task.id,
-        workspace=tmp_path / "workspace",
+        task_workspace=tmp_path / "task_workspace",
+        record_store=agent.record_store,
     )
 
     assert resumed._lifecycle_state.to_dict() == task._lifecycle_state.to_dict()

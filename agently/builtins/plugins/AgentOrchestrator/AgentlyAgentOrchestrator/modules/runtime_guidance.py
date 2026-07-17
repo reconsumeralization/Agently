@@ -144,22 +144,22 @@ def _merge_task_guidance(owner: "AgentExecution", guidance_ref: dict[str, Any], 
     if not isinstance(task_guidance, dict):
         guidance_ref["status"] = "forwarded"
         return
-    for key in ("status", "workspace_ref", "checkpoint_ref", "applied_at", "applied_iteration", "applied_boundary"):
+    for key in ("status", "task_workspace_ref", "checkpoint_ref", "applied_at", "applied_iteration", "applied_boundary"):
         if key in task_guidance:
             guidance_ref[key] = DataFormatter.sanitize(task_guidance[key])
     task_id = getattr(getattr(owner, "task_record", None), "id", None)
     if task_id:
         guidance_ref["task_id"] = str(task_id)
-    workspace_ref = guidance_ref.get("workspace_ref")
-    if isinstance(workspace_ref, dict):
-        _append_workspace_ref(owner, "guidance", workspace_ref)
+    task_workspace_ref = guidance_ref.get("task_workspace_ref")
+    if isinstance(task_workspace_ref, dict):
+        _append_record_ref(owner, "guidance", task_workspace_ref)
 
 
-def _append_workspace_ref(owner: "AgentExecution", key: str, ref: dict[str, Any]) -> None:
+def _append_record_ref(owner: "AgentExecution", key: str, ref: dict[str, Any]) -> None:
     ref_id = ref.get("id")
     if not ref_id:
         return
-    refs = owner.workspace_refs.setdefault(key, [])
+    refs = owner.record_refs.setdefault(key, [])
     if isinstance(refs, list) and ref_id not in refs:
         refs.append(ref_id)
 
@@ -200,7 +200,7 @@ async def _emit_guidance(owner: "AgentExecution", path: str, guidance_ref: dict[
             "status": guidance_ref.get("status"),
             "target": guidance_ref.get("target"),
             "content_preview": guidance_ref.get("content_preview"),
-            "workspace_ref": guidance_ref.get("workspace_ref"),
+            "task_workspace_ref": guidance_ref.get("task_workspace_ref"),
         },
         route=str(owner.route_info.get("selected_route") or ""),
         source="agent_execution",

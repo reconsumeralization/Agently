@@ -22,7 +22,7 @@ EXPECTED_AGENT_TASK_LIFECYCLE_NODES = {
 
 
 def _task(tmp_path, name: str, *, execution: str) -> AgentTask:
-    agent = Agently.create_agent(name).use_workspace(tmp_path / name)
+    agent = Agently.create_agent(name).use_task_workspace(tmp_path / name)
     return AgentTask(
         agent,
         task_id=name,
@@ -141,7 +141,7 @@ async def test_flat_lifecycle_executes_visible_stages_and_allocates_short_ids(
     ):
         monkeypatch.setattr(task, method_name, stage(name))
 
-    execution = task._flow.create_execution(auto_close=False, workspace=False)
+    execution = task._flow.create_execution(auto_close=False, record_store=False)
     await execution.async_start({"task_id": task.id})
     snapshot = await execution.async_close(reason="test.lifecycle_complete")
 
@@ -212,7 +212,7 @@ async def test_taskboard_work_subflow_traverses_outer_terminal_stages(
             raising=False,
         )
 
-    execution = task._flow.create_execution(auto_close=False, workspace=False)
+    execution = task._flow.create_execution(auto_close=False, record_store=False)
     await execution.async_start({"task_id": task.id})
     snapshot = await execution.async_close(reason="test.lifecycle_complete")
 
@@ -280,7 +280,7 @@ async def test_taskboard_verifier_protocol_retry_reenters_only_terminal_verify(
     ):
         monkeypatch.setattr(task, method_name, stage(name))
 
-    execution = task._flow.create_execution(auto_close=False, workspace=False)
+    execution = task._flow.create_execution(auto_close=False, record_store=False)
     await execution.async_start({"task_id": task.id})
     snapshot = await execution.async_close(reason="test.lifecycle_complete")
 
@@ -304,8 +304,8 @@ async def test_simulated_taskboard_protocol_retry_preserves_work_and_artifact(
     """Warm simulated preflight: a malformed verifier join is verifier-owned."""
 
     task = AgentTask(
-        Agently.create_agent("simulated-taskboard-protocol-retry").use_workspace(
-            tmp_path / "workspace"
+        Agently.create_agent("simulated-taskboard-protocol-retry").use_task_workspace(
+            tmp_path / "task_workspace"
         ),
         task_id="simulated-taskboard-protocol-retry",
         goal="Write the formatted report to final.md.",
@@ -319,11 +319,11 @@ async def test_simulated_taskboard_protocol_retry_preserves_work_and_artifact(
         },
     )
     report_text = "# Formatted Report\n\nThe requested formatting is complete.\n"
-    write_result = await task.workspace.write_file("final.md", report_text)
+    write_result = await task.task_workspace.write_file("final.md", report_text)
     final_ref = {
         **write_result["file_refs"][0],
-        "role": "workspace_artifact",
-        "source": "agent_task.taskboard.card.deliver.workspace_artifact",
+        "role": "task_workspace_artifact",
+        "source": "agent_task.taskboard.card.deliver.task_workspace_artifact",
     }
     revision = TaskBoardRevision.from_value(
         {
@@ -380,6 +380,8 @@ async def test_simulated_taskboard_protocol_retry_preserves_work_and_artifact(
         return frame
 
     class FakeVerifierRequest:
+        id = "fake-verifier-request"
+
         def __init__(self):
             self.instruction = ""
             self.input_value: dict[str, Any] = {}
@@ -396,17 +398,18 @@ async def test_simulated_taskboard_protocol_retry_preserves_work_and_artifact(
             assert format == "json"
             return self
 
+        def get_result(self):
+            return self
+
         async def async_get_data(self):
             assert "Verify the task against every success criterion" in self.instruction
             calls["verifier"] += 1
+            assert calls["verifier"] <= 2, "Verifier protocol repair must converge in one retry."
             if calls["verifier"] == 2:
                 protocol_repair = self.input_value["verification_protocol_repair"]
                 assert protocol_repair["occurrence"] == 1
                 assert protocol_repair["repair_contract"]["gate_kind"] == "output_contract"
-                assert (
-                    protocol_repair["repair_contract"]["issue_code"]
-                    == "terminal_verifier_output_invalid"
-                )
+                assert protocol_repair["repair_contract"]["issue_code"] == "terminal_verifier_output_invalid"
                 assert protocol_repair["current_offered_reference_ids"] == []
             evidence_ids = ["ref_not_offered"] if calls["verifier"] == 1 else []
             return {
@@ -448,10 +451,10 @@ async def test_simulated_taskboard_protocol_retry_preserves_work_and_artifact(
         lambda *_args, **_kwargs: None,
     )
 
-    execution = task._flow.create_execution(auto_close=False, workspace=False)
+    execution = task._flow.create_execution(auto_close=False, record_store=False)
     await execution.async_start({"task_id": task.id})
     snapshot = await execution.async_close(reason="test.simulated_complete")
-    current_ref = await task.workspace._promote_file_identity(
+    current_ref = await task.task_workspace._promote_file_identity(
         "final.md",
         role="test_readback",
     )
@@ -518,7 +521,7 @@ async def test_terminal_stage_result_skips_unexecuted_lifecycle_stages(
     ):
         monkeypatch.setattr(task, method_name, fail_unexecuted)
 
-    execution = task._flow.create_execution(auto_close=False, workspace=False)
+    execution = task._flow.create_execution(auto_close=False, record_store=False)
     await execution.async_start({"task_id": task.id})
     await execution.async_close(reason="test.lifecycle_complete")
 

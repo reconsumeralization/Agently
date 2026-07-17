@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import get_args
 
 
-def test_core_root_exports_remain_stable():
+def test_core_root_exports_match_current_owner_layers():
     from agently.core import (
         Action,
         AgentExecutionResult,
@@ -23,14 +23,14 @@ def test_core_root_exports_remain_stable():
         Prompt,
         RuntimeEvent,
         Session,
-        SkillsManager,
+        SkillLibrary,
         SkillsExecutor,
+        TaskContext,
         TaskBoard,
         TaskBoardValidator,
+        TaskWorkspace,
         Tool,
         TriggerFlow,
-        Workspace,
-        WorkspaceManager,
     )
 
     assert BaseAgent.__name__ == "BaseAgent"
@@ -50,15 +50,15 @@ def test_core_root_exports_remain_stable():
     assert Prompt.__name__ == "Prompt"
     assert RuntimeEvent.__name__ == "RuntimeEvent"
     assert Session.__name__ == "Session"
-    assert SkillsManager.__name__ == "SkillsManager"
+    assert SkillLibrary.__name__ == "SkillLibrary"
     assert SkillsExecutor.__name__ == "SkillsExecutor"
+    assert TaskContext.__name__ == "TaskContext"
     assert TaskBoard.__name__ == "TaskBoard"
     assert TaskBoardValidator.__name__ == "TaskBoardValidator"
     assert Action.__name__ == "Action"
     assert Tool is Action
     assert TriggerFlow.__name__ == "TriggerFlow"
-    assert Workspace.__name__ == "Workspace"
-    assert WorkspaceManager.__name__ == "WorkspaceManager"
+    assert TaskWorkspace.__name__ == "TaskWorkspace"
 
 
 def test_execution_exchange_types_are_publicly_importable():
@@ -81,7 +81,7 @@ def test_execution_exchange_types_are_publicly_importable():
 
 def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.application.AgentExecution import AgentExecutionStream
-    from agently.core.application.SkillsManager import SkillsManager
+    from agently.core.application.SkillLibrary import SkillLibrary
     from agently.core.application.SkillsExecutor import SkillsExecutor
     from agently.core.Agent import BaseAgent
     from agently.core.operation.Action import Action, Tool
@@ -95,7 +95,8 @@ def test_core_topic_packages_expose_canonical_import_paths():
     from agently.core.model import AttemptRunner
     from agently.core.runtime import EventCenter, RuntimeEvent, bind_runtime_context
     from agently.core.session import Session
-    from agently.core.Workspace import ContextProfile, Workspace
+    from agently.core.context import ContextReader, TaskContext
+    from agently.core.TaskWorkspace import TaskWorkspace
 
     assert importlib.import_module("agently.core.Agent").BaseAgent is BaseAgent
     assert importlib.import_module("agently.core.application.AgentExecution.Stream").AgentExecutionStream is AgentExecutionStream
@@ -118,34 +119,37 @@ def test_core_topic_packages_expose_canonical_import_paths():
     assert importlib.import_module("agently.core.orchestration.TriggerFlow.TriggerFlow").TriggerFlow is TriggerFlow
     assert importlib.import_module("agently.core.operation.Action.Action").Action is Action
     assert importlib.import_module("agently.core.operation.Action").Tool is Tool
-    assert importlib.import_module("agently.core.application.SkillsManager.SkillsManager").SkillsManager is SkillsManager
+    assert importlib.import_module("agently.core.application.SkillLibrary.SkillLibrary").SkillLibrary is SkillLibrary
     assert importlib.import_module("agently.core.application.SkillsExecutor.SkillsExecutor").SkillsExecutor is SkillsExecutor
-    assert importlib.import_module("agently.core.Workspace.Workspace").Workspace is Workspace
-    assert importlib.import_module("agently.core.Workspace.ContextBuilder").ContextProfile is ContextProfile
+    assert importlib.import_module("agently.core.context.TaskContext").TaskContext is TaskContext
+    assert importlib.import_module("agently.core.context.ContextReader").ContextReader is ContextReader
+    assert importlib.import_module("agently.core.TaskWorkspace.TaskWorkspace").TaskWorkspace is TaskWorkspace
 
 
-def test_workspace_package_uses_class_owned_canonical_name_only():
-    from agently.core import Workspace as RootWorkspace
-    from agently.core.Workspace import Workspace as CanonicalWorkspace
+def test_task_workspace_package_uses_class_owned_canonical_name_only():
+    from agently.core import TaskWorkspace as RootTaskWorkspace
+    from agently.core.TaskWorkspace import TaskWorkspace as CanonicalTaskWorkspace
 
-    canonical_package = importlib.import_module("agently.core.Workspace")
+    canonical_package = importlib.import_module("agently.core.TaskWorkspace")
     assert canonical_package.__file__ is not None
     canonical_root = Path(canonical_package.__file__).resolve().parent
     core_root = canonical_root.parent
-    workspace_entries = sorted(path.name for path in core_root.iterdir() if path.name.casefold().startswith("workspace"))
-    workspace_directories = sorted(
-        path.name for path in core_root.iterdir() if path.is_dir() and path.name.casefold() == "workspace"
+    task_workspace_entries = sorted(
+        path.name for path in core_root.iterdir() if path.name.casefold().startswith("taskworkspace")
+    )
+    legacy_workspace_entries = sorted(
+        path.name for path in core_root.iterdir() if path.name.casefold() == "workspace"
     )
 
-    assert canonical_root.name == "Workspace"
-    assert workspace_entries == ["Workspace"]
-    assert (core_root / "Workspace").is_dir()
+    assert canonical_root.name == "TaskWorkspace"
+    assert task_workspace_entries == ["TaskWorkspace"]
+    assert (core_root / "TaskWorkspace").is_dir()
     assert not (core_root / "workspace.py").exists()
     assert not (core_root / "workspace.pyi").exists()
-    assert workspace_directories == ["Workspace"]
-    assert CanonicalWorkspace.__module__ == "agently.core.Workspace.Workspace"
-    assert canonical_package.Workspace is CanonicalWorkspace
-    assert RootWorkspace is CanonicalWorkspace
+    assert legacy_workspace_entries == []
+    assert CanonicalTaskWorkspace.__module__ == "agently.core.TaskWorkspace.TaskWorkspace"
+    assert canonical_package.TaskWorkspace is CanonicalTaskWorkspace
+    assert RootTaskWorkspace is CanonicalTaskWorkspace
 
 
 
@@ -157,23 +161,26 @@ def test_core_layout_keeps_only_classified_root_packages():
 
     assert root_files == ["Agent.py", "__init__.py"]
     assert root_dirs == [
-        "Workspace",
+        "TaskWorkspace",
         "application",
+        "context",
         "extension",
         "model",
         "operation",
         "orchestration",
         "runtime",
         "session",
+        "storage",
     ]
     assert (core_root / "application" / "AgentExecution").is_dir()
-    assert (core_root / "application" / "SkillsManager").is_dir()
+    assert (core_root / "application" / "SkillLibrary").is_dir()
     assert (core_root / "application" / "SkillsExecutor").is_dir()
     assert (core_root / "operation" / "Action").is_dir()
     assert (core_root / "operation" / "ExecutionResource").is_dir()
-    assert (core_root / "Workspace").is_dir()
-    assert (core_root / "Workspace" / "ContextBuilder").is_dir()
-    assert not (core_root / "Workspace" / "Recall").exists()
+    assert (core_root / "TaskWorkspace").is_dir()
+    assert not (core_root / "Workspace").exists()
+    assert not (core_root / "application" / "SkillsManager").exists()
+    assert not (core_root / "TaskWorkspace" / "ContextBuilder").exists()
     assert not (core_root / "session" / "Workspace").exists()
     assert not (core_root / "session" / "Recall").exists()
     assert (core_root / "orchestration" / "TriggerFlow").is_dir()
@@ -191,11 +198,11 @@ def test_core_layout_keeps_only_classified_root_packages():
     assert not (core_root / "operation" / "Tool").exists()
 
 
-def test_workspace_active_code_has_no_superseded_layout_symbols():
-    workspace_root = Path(__file__).resolve().parents[2] / "agently" / "core" / "Workspace"
+def test_task_workspace_active_code_has_no_superseded_layout_symbols():
+    task_workspace_root = Path(__file__).resolve().parents[2] / "agently" / "core" / "TaskWorkspace"
     active_source = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in workspace_root.rglob("*.py")
+        for path in task_workspace_root.rglob("*.py")
     )
     for symbol in (
         "content_root",

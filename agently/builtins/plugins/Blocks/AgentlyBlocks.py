@@ -28,6 +28,7 @@ from agently.types.data import (
     BlockCompileRequest,
     BlockSignal,
     CapabilityResolution,
+    ContextReadIntent,
     EvidenceEnvelope,
     EvidenceMapper,
     ExecutionBlock,
@@ -47,8 +48,7 @@ _HANDLER_REQUIRED_EXECUTION_KINDS = frozenset(
     {
         "model_request",
         "action_call",
-        "skill_activation",
-        "workspace_operation",
+        "context_read",
         "approval_wait",
         "external_wait",
         "flow_segment",
@@ -486,7 +486,7 @@ class EvidenceMapperRegistry:
                 "skill_evidence": blocks_state.get("skill_evidence", ()),
                 "action_evidence": blocks_state.get("action_evidence", ()),
                 "capability_evidence": blocks_state.get("capability_evidence", ()),
-                "workspace_refs": blocks_state.get("workspace_refs", ()),
+                "context_refs": blocks_state.get("context_refs", ()),
                 "artifact_refs": blocks_state.get("artifact_refs", ()),
                 "runtime_event_refs": blocks_state.get("runtime_event_refs", ()),
                 "validation_results": blocks_state.get("validation_results", ()),
@@ -551,8 +551,7 @@ def _default_plan_blocks() -> tuple[PlanBlock, ...]:
         "action_call": "Run one controlled Action call or bounded action segment.",
         "mcp_tool_call": "Run an MCP tool through controlled ActionRuntime policy.",
         "script_action": "Run a host-approved script resource as a scoped Action.",
-        "workspace_operation": "Perform a scoped Workspace read/write/link/checkpoint operation.",
-        "skill_activation": "Load selected Skill guidance and resources under budget.",
+        "context_read": "Read one bounded ContextPackage from a caller-bound ContextReader.",
         "approval_wait": "Open a durable policy approval wait.",
         "external_wait": "Wait for an external callback, webhook, or human event.",
         "validation": "Validate prior evidence deterministically or with a model judge.",
@@ -586,8 +585,7 @@ def _default_execution_blocks() -> tuple[ExecutionBlock, ...]:
         for kind in (
             "model_request",
             "action_call",
-            "skill_activation",
-            "workspace_operation",
+            "context_read",
             "validation",
             "approval_wait",
             "external_wait",
@@ -798,8 +796,7 @@ def _execution_kind_for_plan_kind(kind: str) -> str:
     return kind if kind in {
         "model_request",
         "action_call",
-        "skill_activation",
-        "workspace_operation",
+        "context_read",
         "validation",
         "approval_wait",
         "external_wait",
@@ -955,15 +952,13 @@ def _ledger_items_from_execution_result(result: Mapping[str, Any], *, index: int
             },
         )
     ]
-    if operation in {"search", "scoped_search"}:
-        items.extend(_ledger_items_from_workspace_search(result, output_map, start_index=len(items)))
-    elif operation == "read_bounded":
-        items.extend(_ledger_items_from_workspace_readback(result, output_map, start_index=len(items)))
+    if block_kind == "context_read":
+        items.extend(_ledger_items_from_context_read(result, output_map, start_index=len(items)))
     items.extend(_ledger_items_from_nested_execution_meta(result, output_map, start_index=len(items)))
     return items
 
 
-def _ledger_items_from_workspace_search(
+def _ledger_items_from_context_read(
     result: Mapping[str, Any],
     output: Mapping[str, Any],
     *,
@@ -978,7 +973,7 @@ def _ledger_items_from_workspace_search(
                 status="ok",
                 body_state="ref_only",
                 body=ref.get("summary") or ref.get("title") or ref.get("label"),
-                provenance=_ledger_workspace_provenance(result, ref, source="blocks.workspace_operation.search"),
+                provenance=_ledger_context_provenance(result, ref, source="blocks.context_read"),
                 raw_status="ok",
                 extra=_ledger_ref_fields(ref, evidence_role="locator_ref", query=output.get("query")),
             )
@@ -997,7 +992,7 @@ def _ledger_items_from_workspace_search(
                 status="ok",
                 body_state=body_state,
                 body=body,
-                provenance=_ledger_workspace_provenance(result, snippet, source="blocks.workspace_operation.search"),
+                provenance=_ledger_context_provenance(result, snippet, source="blocks.context_read"),
                 raw_status="ok",
                 extra=_ledger_ref_fields(snippet, evidence_role="evidence_snippet", query=output.get("query")),
             )
@@ -1005,57 +1000,15 @@ def _ledger_items_from_workspace_search(
     for diagnostic in _mapping_sequence(output.get("diagnostics")):
         items.append(
             _ledger_item(
-                "workspace_operation.diagnostic",
+                "context_read.diagnostic",
                 index=start_index + len(items),
                 status="failed",
                 body_state="bounded",
                 body=diagnostic.get("message") or diagnostic,
-                provenance=_ledger_workspace_provenance(result, diagnostic, source="blocks.workspace_operation.search"),
+                provenance=_ledger_context_provenance(result, diagnostic, source="blocks.context_read"),
                 raw_status="failed",
                 diagnostics=(diagnostic,),
                 extra=_ledger_ref_fields(diagnostic, evidence_role="diagnostic", query=output.get("query")),
-            )
-        )
-    return items
-
-
-def _ledger_items_from_workspace_readback(
-    result: Mapping[str, Any],
-    output: Mapping[str, Any],
-    *,
-    start_index: int,
-) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    locator = output.get("locator_ref")
-    if isinstance(locator, Mapping):
-        items.append(
-            _ledger_item(
-                "locator_ref",
-                index=start_index + len(items),
-                status="ok",
-                body_state="ref_only",
-                provenance=_ledger_workspace_provenance(result, locator, source="blocks.workspace_operation.read_bounded"),
-                raw_status="ok",
-                extra=_ledger_ref_fields(locator, evidence_role="locator_ref"),
-            )
-        )
-    for snippet in _mapping_sequence(output.get("evidence_snippets")):
-        body = (
-            snippet.get("content")
-            if snippet.get("content") is not None
-            else snippet.get("snippet", snippet.get("text"))
-        )
-        body_state = "truncated" if snippet.get("truncated") is True else "bounded"
-        items.append(
-            _ledger_item(
-                "readback",
-                index=start_index + len(items),
-                status="ok",
-                body_state=body_state,
-                body=body,
-                provenance=_ledger_workspace_provenance(result, snippet, source="blocks.workspace_operation.read_bounded"),
-                raw_status="ok",
-                extra=_ledger_ref_fields(snippet, evidence_role="readback"),
             )
         )
     return items
@@ -1239,14 +1192,26 @@ def _ledger_provenance(result: Mapping[str, Any], *, source: str) -> dict[str, A
     }
 
 
-def _ledger_workspace_provenance(
+def _ledger_context_provenance(
     result: Mapping[str, Any],
     ref: Mapping[str, Any],
     *,
     source: str,
 ) -> dict[str, Any]:
     provenance = _ledger_provenance(result, source=source)
-    for key in ("record_id", "path", "collection", "kind", "source_url", "selected_url", "requested_url", "url", "href"):
+    for key in (
+        "block_id",
+        "source_id",
+        "source_revision",
+        "source_ref",
+        "binding_id",
+        "path",
+        "source_url",
+        "selected_url",
+        "requested_url",
+        "url",
+        "href",
+    ):
         if ref.get(key) not in (None, "", [], {}):
             provenance[key] = ref.get(key)
     raw_ref = ref.get("ref")
@@ -1527,10 +1492,8 @@ def _dedupe_strings(values: Sequence[Any]) -> list[str]:
 def _evidence_kinds_for(kind: str) -> tuple[str, ...]:
     if kind == "action_call":
         return ("action_evidence", "capability_evidence")
-    if kind == "skill_activation":
-        return ("skill_evidence",)
-    if kind == "workspace_operation":
-        return ("workspace_refs",)
+    if kind == "context_read":
+        return ("context_refs",)
     if kind == "validation":
         return ("validation_results",)
     return ("execution_block_results",)
@@ -1562,10 +1525,8 @@ async def _execute_block(block: ExecutionBlock, data: TriggerFlowRuntimeData) ->
         if inspect.isawaitable(result):
             result = await result
         return result
-    if block.kind == "skill_activation":
-        return await _execute_skill_activation_block(block, data)
-    if block.kind == "workspace_operation":
-        return await _execute_workspace_operation_block(block, data)
+    if block.kind == "context_read":
+        return await _execute_context_read_block(block, data)
     if block.kind == "approval_wait":
         return await _execute_approval_wait_block(block, data)
     if block.kind == "external_wait":
@@ -1608,540 +1569,131 @@ async def _execute_block(block: ExecutionBlock, data: TriggerFlowRuntimeData) ->
     return {"input": data.value, "bindings": dict(block.input_bindings)}
 
 
-async def _execute_workspace_operation_block(block: ExecutionBlock, data: TriggerFlowRuntimeData) -> dict[str, Any]:
-    workspace = data.get_resource("workspace", None)
-    if workspace is None:
+
+async def _execute_context_read_block(
+    block: ExecutionBlock,
+    data: TriggerFlowRuntimeData,
+) -> dict[str, Any]:
+    """Read one bounded package from the caller-bound ContextReader."""
+
+    reader = data.get_resource("context_reader", None)
+    async_read = getattr(reader, "async_read", None)
+    if not callable(async_read):
         raise RuntimeError(
-            f"ExecutionBlock '{ block.id }' kind 'workspace_operation' requires runtime resource 'workspace'."
+            f"ExecutionBlock '{block.id}' kind 'context_read' requires runtime "
+            "resource 'context_reader'."
         )
-    bound_inputs = block.input_bindings.get("bound_inputs", {})
-    if not isinstance(bound_inputs, Mapping):
-        bound_inputs = {}
-    operation = str(bound_inputs.get("operation") or bound_inputs.get("op") or "put").strip()
-    if operation in {"put", "ingest"}:
-        ref = await workspace.put(
-            content=bound_inputs.get("content", data.value),
-            collection=str(bound_inputs.get("collection") or "observations"),
-            kind=str(bound_inputs.get("kind") or "blocks_workspace_operation"),
-            scope=dict(bound_inputs.get("scope") or {}),
-            source=dict(bound_inputs.get("source") or {"type": "blocks", "execution_block_id": block.id}),
-            summary=bound_inputs.get("summary"),
-            meta=dict(bound_inputs.get("meta") or {}),
-            profile=bound_inputs.get("profile"),
+    raw_inputs = block.input_bindings.get("bound_inputs", {})
+    bound_inputs = raw_inputs if isinstance(raw_inputs, Mapping) else {}
+    operation = str(bound_inputs.get("operation") or "read").strip().lower()
+    if operation not in {"read", "search", "scoped_search"}:
+        raise ValueError(
+            "context_read is read-only; writes, links, checkpoints, and side effects "
+            "belong to their explicit owner ports."
         )
-        result = {"operation": "put", "workspace_refs": [ref], "ref": ref}
-        if operation == "ingest":
-            result["compat_operation"] = "ingest"
-        return result
-    if operation == "put_checkpoint":
-        ref = await workspace.put_checkpoint(
-            str(bound_inputs.get("run_id") or block.source_plan_block_id or block.id),
-            bound_inputs.get("state", data.value),
-            step_id=bound_inputs.get("step_id"),
+    query = str(
+        bound_inputs.get("query")
+        or block.input_bindings.get("intent")
+        or "Read task-relevant context."
+    ).strip()
+    explicit_value = bound_inputs.get("explicit_refs", ())
+    explicit_refs = list(
+        explicit_value
+        if isinstance(explicit_value, Sequence)
+        and not isinstance(explicit_value, (str, bytes, bytearray))
+        else ()
+    )
+    source_filters = dict(bound_inputs.get("filters") or {})
+    for key in (
+        "path",
+        "pattern",
+        "source_kinds",
+        "include_hidden",
+        "max_file_bytes",
+        "context_lines",
+        "tags",
+        "method",
+        "selection",
+        "top_n",
+        "rerank",
+        "max_candidates",
+    ):
+        if bound_inputs.get(key) is not None:
+            source_filters[key] = bound_inputs[key]
+    roles_value = bound_inputs.get("roles", ())
+    roles = tuple(
+        _dedupe_strings(
+            roles_value
+            if isinstance(roles_value, Sequence)
+            and not isinstance(roles_value, (str, bytes, bytearray))
+            else ()
         )
-        return {"operation": operation, "workspace_refs": [ref], "ref": ref}
-    if operation == "get_data":
-        ref_or_path = bound_inputs.get("ref") or bound_inputs.get("path")
-        if ref_or_path is None:
-            raise ValueError(f"ExecutionBlock '{ block.id }' workspace get_data requires ref or path.")
-        return {"operation": operation, "data": await workspace.get_data(ref_or_path)}
-    if operation in {"search", "scoped_search"}:
-        query = bound_inputs.get("query")
-        filters = bound_inputs.get("filters")
-        if not isinstance(filters, Mapping):
-            filters = {}
-        max_results = _bounded_int(bound_inputs.get("max_results"), default=8, minimum=1, maximum=50)
-        snippet_limit = _bounded_int(bound_inputs.get("snippet_limit"), default=1200, minimum=1, maximum=12000)
-        snippet_offset = _bounded_int(bound_inputs.get("snippet_offset"), default=0, minimum=0, maximum=10_000_000)
-        include_snippets = bool(bound_inputs.get("include_snippets", False))
-        raw_surface = str(
-            bound_inputs.get("search_surface")
-            or bound_inputs.get("surface")
-            or filters.get("search_surface")
-            or "auto"
-        ).strip().lower()
-        surface_aliases = {
-            "records": "workspace_index",
-            "index": "workspace_index",
-            "sqlite": "workspace_index",
-            "fts": "workspace_index",
-            "files": "workspace_files",
-            "grep": "workspace_files",
-            "both": "workspace_index_and_files",
-            "records_and_files": "workspace_index_and_files",
-            "files_and_records": "workspace_index_and_files",
-        }
-        search_surface = surface_aliases.get(raw_surface, raw_surface or "auto")
-        path_scope = bound_inputs.get("path", filters.get("path", "."))
-        pattern = str(bound_inputs.get("pattern", filters.get("pattern", "*")) or "*")
-        include_hidden = bool(bound_inputs.get("include_hidden", filters.get("include_hidden", False)))
-        max_file_bytes = _bounded_int(
-            bound_inputs.get("max_file_bytes", filters.get("max_file_bytes")),
-            default=200000,
-            minimum=1,
-            maximum=5_000_000,
-        )
-        file_scope_requested = bound_inputs.get("path") is not None or bound_inputs.get("pattern") is not None
-        search_index = search_surface not in {"workspace_files"}
-        search_files = search_surface in {"workspace_files", "workspace_index_and_files"} or (
-            search_surface == "auto" and file_scope_requested
-        )
-        context_lines = _bounded_int(
-            bound_inputs.get("context_lines", filters.get("context_lines")),
-            default=3 if search_files else 0,
-            minimum=0,
-            maximum=20,
-        )
-        evidence_snippets: list[dict[str, Any]] = []
-        diagnostics: list[dict[str, Any]] = []
-        retrieve_func = getattr(workspace, "retrieve", None)
-        if not callable(retrieve_func):
-            raise RuntimeError("Workspace does not expose retrieve(...), which is required for workspace_operation.search.")
-        sources: list[str] = []
-        if search_index:
-            sources.append("records")
-        if search_files:
-            sources.append("files")
-        retrieval_selection = str(bound_inputs.get("selection") or "top_n").strip().lower()
-        if retrieval_selection not in {"length", "top_n"}:
-            retrieval_selection = "top_n"
-        top_n_value = bound_inputs.get("top_n", max_results)
-        top_n = _bounded_int(top_n_value, default=max_results, minimum=1, maximum=50)
-        max_candidates = _bounded_int(
-            bound_inputs.get("max_candidates"),
-            default=max(max_results * 3, max_results),
-            minimum=1,
-            maximum=500,
-        )
-        retrieval_snippets = include_snippets or search_files
-        retrieval_budget = {
-            "chars": max(1, max_results * max(1, snippet_limit if retrieval_snippets else 200)),
-            "item_chars": max(1, snippet_limit if retrieval_snippets else 1),
-            "max_candidates": max_candidates,
-            "top_n": top_n,
-        }
-        method = str(bound_inputs.get("method") or "auto").strip().lower()
-        if method not in {"auto", "keyword", "vector", "hybrid"}:
-            method = "auto"
-        rerank = _optional_bool(bound_inputs.get("rerank"))
-        package = retrieve_func(
-            str(query) if query is not None else None,
-            tags=_string_list(bound_inputs.get("tags", filters.get("tags"))),
-            filters=dict(filters),
-            sources=sources,
-            budget=retrieval_budget,
-            selection=cast(Any, retrieval_selection),
-            top_n=top_n,
-            method=cast(Any, method),
-            rerank=rerank,
-            file_options={
-                "path": path_scope,
-                "pattern": pattern,
-                "max_results": max_candidates,
-                "include_hidden": include_hidden,
-                "max_file_bytes": max_file_bytes,
-                "context_lines": context_lines,
-                "max_snippet_bytes": snippet_limit,
-            },
-            max_candidates=max_candidates,
-        )
-        if inspect.isawaitable(package):
-            package = await package
-        if not isinstance(package, Mapping):
-            package = {}
-        retrieval_items = [
-            dict(item)
-            for item in package.get("items", [])
-            if isinstance(item, Mapping)
-        ][:max_results]
-        retrieval_diagnostics = dict(package.get("diagnostics") or {}) if isinstance(package.get("diagnostics"), Mapping) else {}
-        retrieval_omitted = [
-            dict(item)
-            for item in package.get("omitted", [])
-            if isinstance(item, Mapping)
-        ]
-        selected_refs: list[dict[str, Any]] = []
-        file_results: list[dict[str, Any]] = []
-        locator_refs: list[dict[str, Any]] = []
-        for index, item in enumerate(retrieval_items):
-            if item.get("source") == "record" and isinstance(item.get("ref"), Mapping):
-                ref = dict(cast(Mapping[str, Any], item["ref"]))
-                selected_refs.append(ref)
-                locator_ref = _workspace_locator_ref(
-                    ref,
-                    query=query,
-                    filters=filters,
-                    index=index,
-                    source="blocks.workspace_operation.search",
-                )
-                locator_ref["workspace_source"] = "workspace.retrieve"
-                _copy_optional_retrieval_rank(locator_ref, item)
-                locator_refs.append(locator_ref)
-                if include_snippets:
-                    evidence_snippets.append(
-                        _workspace_evidence_snippet_from_retrieval_item(
-                            item,
-                            locator_ref=locator_ref,
-                            query=query,
-                            filters=filters,
-                            snippet_offset=snippet_offset,
-                            source="blocks.workspace_operation.search",
-                        )
-                    )
-                continue
-            if item.get("source") == "file" and isinstance(item.get("file"), Mapping):
-                file_result = dict(cast(Mapping[str, Any], item["file"]))
-                file_results.append(file_result)
-                locator_ref = _workspace_file_locator_ref_from_search_result(
-                    file_result,
-                    query=query,
-                    index=index,
-                    workspace_source="workspace.retrieve",
-                )
-                _copy_optional_retrieval_rank(locator_ref, item)
-                locator_refs.append(locator_ref)
-                if include_snippets or search_files:
-                    evidence_snippets.append(
-                        _workspace_file_evidence_snippet_from_retrieval_item(
-                            item,
-                            file_result=file_result,
-                            locator_ref=locator_ref,
-                        )
-                    )
-        results = [
-            {
-                **locator_ref,
-                "evidence_snippet": evidence_snippets[index] if index < len(evidence_snippets) else None,
-            }
-            for index, locator_ref in enumerate(locator_refs)
-        ]
-        returned_snippet_bytes = sum(
-            int(item.get("snippet_bytes") or len(str(item.get("content") or "").encode("utf-8")))
-            for item in evidence_snippets
-            if isinstance(item, Mapping)
-        )
-        candidate_bytes = sum(
-            int(ref.get("size") or 0) for ref in selected_refs if isinstance(ref, Mapping)
-        ) + sum(int(item.get("bytes") or 0) for item in file_results if isinstance(item, Mapping))
-        search_engines = []
-        if search_index:
-            search_engines.append("workspace_retrieve_records")
-        file_search_engines = sorted(
-            {
-                str(item.get("search_engine") or "workspace_file_search")
-                for item in file_results
-                if isinstance(item, Mapping)
-            }
-        )
-        if search_files:
-            search_engines.extend(file_search_engines or ["workspace_file_search"])
-        return {
-            "operation": "search",
-            "query": query,
-            "filters": dict(filters),
-            "bounded": {
-                "retrieval_strategy": "workspace.retrieve",
-                "retrieval_method": retrieval_diagnostics.get("effective_method", method),
-                "retrieval_requested_method": retrieval_diagnostics.get("method", method),
-                "retrieval_effective_method": retrieval_diagnostics.get("effective_method", method),
-                "retrieval_method_resolution": retrieval_diagnostics.get("method_resolution"),
-                "retrieval_selection": retrieval_selection,
-                "retrieval_rerank": retrieval_diagnostics.get("rerank"),
-                "retrieval_candidate_count": retrieval_diagnostics.get("candidate_count"),
-                "retrieval_selected_count": retrieval_diagnostics.get("selected_count"),
-                "retrieval_omitted": retrieval_omitted,
-                "search_surface": search_surface,
-                "search_engines": search_engines,
-                "max_results": max_results,
-                "total_matches": int(retrieval_diagnostics.get("candidate_count") or len(retrieval_items)),
-                "index_total_matches": int(
-                    retrieval_diagnostics.get("deterministic_record_candidates") or len(selected_refs)
+    )
+    package = await cast(Any, async_read)(
+        ContextReadIntent(
+            query=query,
+            explicit_refs=tuple(_dedupe_strings(explicit_refs)),
+            roles=cast(Any, roles),
+            filters=source_filters,
+            metadata={
+                "execution_block_id": block.id,
+                "expected_role": bound_inputs.get("expected_role"),
+                "exclude_already_in_prompt": bool(
+                    bound_inputs.get("exclude_already_in_prompt", True)
                 ),
-                "index_returned_results": len(selected_refs),
-                "file_returned_results": len(file_results),
-                "returned_results": len(locator_refs),
-                "include_snippets": include_snippets,
-                "snippet_offset": snippet_offset,
-                "snippet_limit": snippet_limit,
-                "file_path": str(path_scope),
-                    "file_pattern": pattern,
-                    "max_file_bytes": max_file_bytes,
-                    "context_lines": context_lines,
-                    "candidate_bytes": candidate_bytes,
-                    "returned_snippet_bytes": returned_snippet_bytes,
-                },
-            "locator_refs": locator_refs,
-            "evidence_snippets": evidence_snippets,
-            "file_search_results": file_results,
-            "results": results,
-            "workspace_refs": selected_refs,
-            "diagnostics": diagnostics,
-        }
-    if operation == "read_bounded":
-        ref_or_path = bound_inputs.get("ref") or bound_inputs.get("path")
-        if ref_or_path is None:
-            raise ValueError(f"ExecutionBlock '{ block.id }' workspace read_bounded requires ref or path.")
-        offset = _bounded_int(bound_inputs.get("offset"), default=0, minimum=0, maximum=10_000_000)
-        limit = _bounded_int(bound_inputs.get("limit"), default=1200, minimum=1, maximum=12000)
-        segment = await workspace.read_bounded(ref_or_path, offset=offset, limit=limit)
-        locator_ref = _workspace_locator_ref_from_segment(
-            segment,
-            ref_or_path=ref_or_path,
-            source="blocks.workspace_operation.read_bounded",
-        )
-        evidence_snippet = _workspace_evidence_snippet(
-            segment,
-            locator_ref=locator_ref,
-            source="blocks.workspace_operation.read_bounded",
-        )
-        workspace_ref = locator_ref.get("ref")
-        workspace_refs = [workspace_ref] if isinstance(workspace_ref, Mapping) else []
-        return {
-            "operation": operation,
-            "bounded": {
-                "offset": offset,
-                "limit": limit,
             },
-            "locator_ref": locator_ref,
-            "evidence_snippet": evidence_snippet,
-            "evidence_snippets": [evidence_snippet],
-            "workspace_refs": workspace_refs,
-        }
-    if operation == "link_evidence":
-        source_ref = bound_inputs.get("source_ref")
-        target_ref = bound_inputs.get("target_ref")
-        if not isinstance(source_ref, Mapping) or not isinstance(target_ref, Mapping):
-            raise ValueError(
-                f"ExecutionBlock '{ block.id }' workspace link_evidence requires source_ref and target_ref."
-            )
-        ref = await workspace.link_evidence(
-            dict(source_ref),
-            dict(target_ref),
-            relation=str(bound_inputs.get("relation") or "blocks_relation"),
-            meta=dict(bound_inputs.get("meta") or {}),
         )
-        return {"operation": operation, "workspace_refs": [ref], "ref": ref}
-    raise ValueError(f"Unsupported workspace_operation '{ operation }'.")
-
-
-def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(minimum, min(maximum, number))
-
-
-def _workspace_locator_ref(
-    ref: Mapping[str, Any],
-    *,
-    query: Any = None,
-    filters: Mapping[str, Any] | None = None,
-    index: int = 0,
-    source: str,
-) -> dict[str, Any]:
-    return {
-        "role": "locator_ref",
-        "content_state": "ref_only",
-        "source": source,
-        "query": query,
-        "filters": dict(filters or {}),
-        "rank": index + 1,
-        "ref": dict(ref),
-        "record_id": str(ref.get("id") or ""),
-        "path": ref.get("path"),
-        "collection": ref.get("collection"),
-        "kind": ref.get("kind"),
-        "summary": ref.get("summary") or "",
-        "size": ref.get("size"),
-        "sha256": ref.get("sha256"),
-    }
-
-
-def _workspace_locator_ref_from_segment(
-    segment: Mapping[str, Any],
-    *,
-    ref_or_path: Any,
-    source: str,
-) -> dict[str, Any]:
-    envelope = segment.get("ref")
-    if isinstance(ref_or_path, Mapping):
-        ref = dict(ref_or_path)
-    elif isinstance(envelope, Mapping):
-        ref = {
-            "id": str(envelope.get("record_id") or ref_or_path or ""),
-            "path": envelope.get("content_ref"),
-            "collection": envelope.get("collection"),
-            "kind": envelope.get("kind"),
-            "size": envelope.get("size"),
-            "sha256": envelope.get("digest"),
-            "created_at": envelope.get("created_at"),
-            "summary": "",
-            "scope": {},
-            "source": {},
-            "meta": {},
-        }
-    else:
-        ref = {"id": str(ref_or_path or ""), "path": str(ref_or_path or "")}
-    locator = _workspace_locator_ref(ref, source=source)
-    if isinstance(envelope, Mapping):
-        locator["ref"] = ref
-        locator["envelope"] = dict(envelope)
-        locator["record_id"] = str(envelope.get("record_id") or locator.get("record_id") or "")
-        locator["path"] = envelope.get("content_ref") or locator.get("path")
-    return locator
-
-
-def _workspace_evidence_snippet(
-    segment: Mapping[str, Any],
-    *,
-    locator_ref: Mapping[str, Any],
-    query: Any = None,
-    filters: Mapping[str, Any] | None = None,
-    source: str,
-) -> dict[str, Any]:
-    content = str(segment.get("content") or "")
-    return {
-        "role": "evidence_snippet",
-        "content_state": "bounded_readback_available",
-        "source": source,
-        "query": query,
-        "filters": dict(filters or {}),
-        "locator_ref": dict(locator_ref),
-        "content": content,
-        "snippet": content,
-        "snippet_chars": len(content),
-        "snippet_bytes": len(content.encode("utf-8")),
-        "truncated": not bool(segment.get("eof", True)),
-        "offset": segment.get("offset"),
-        "size": segment.get("size"),
-        "total_size": segment.get("total_size"),
-        "eof": segment.get("eof"),
-        "digest": segment.get("digest"),
-        "content_type": segment.get("content_type"),
-    }
-
-
-def _optional_bool(value: Any) -> bool | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    normalized = str(value).strip().lower()
-    if normalized in {"true", "1", "yes", "y", "on"}:
-        return True
-    if normalized in {"false", "0", "no", "n", "off"}:
-        return False
-    return None
-
-
-def _string_list(value: Any) -> list[str] | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        item = value.strip()
-        return [item] if item else None
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        items = [str(item).strip() for item in value if str(item).strip()]
-        return items or None
-    return None
-
-
-def _copy_optional_retrieval_rank(target: dict[str, Any], item: Mapping[str, Any]) -> None:
-    if item.get("score") is not None:
-        target["score"] = item.get("score")
-    if item.get("reason") not in (None, "", [], {}):
-        target["reason"] = item.get("reason")
-
-
-def _workspace_evidence_snippet_from_retrieval_item(
-    item: Mapping[str, Any],
-    *,
-    locator_ref: Mapping[str, Any],
-    query: Any = None,
-    filters: Mapping[str, Any] | None = None,
-    snippet_offset: int = 0,
-    source: str,
-) -> dict[str, Any]:
-    content = str(item.get("content") or "")
-    truncated = bool(item.get("truncated")) or content.endswith("\n[truncated]")
-    snippet = {
-        "role": "evidence_snippet",
-        "content_state": item.get("content_state") or "bounded_readback_available",
-        "source": source,
-        "workspace_source": "workspace.retrieve",
-        "query": query,
-        "filters": dict(filters or {}),
-        "locator_ref": dict(locator_ref),
-        "record_id": locator_ref.get("record_id"),
-        "path": locator_ref.get("path"),
-        "collection": locator_ref.get("collection"),
-        "kind": locator_ref.get("kind"),
-        "content": content,
-        "snippet": content,
-        "snippet_chars": len(content),
-        "snippet_bytes": len(content.encode("utf-8")),
-        "truncated": truncated,
-        "offset": snippet_offset,
-        "size": len(content.encode("utf-8")),
-        "total_size": item.get("raw_chars", item.get("chars")),
-        "eof": not truncated,
-        "digest": locator_ref.get("sha256"),
-    }
-    for key in ("body_state", "raw_chars", "projected_chars"):
-        if item.get(key) not in (None, "", [], {}):
-            snippet[key] = item.get(key)
-    for key in ("projection", "original_ref"):
-        value = item.get(key)
-        if isinstance(value, Mapping):
-            snippet[key] = dict(value)
-    return snippet
-
-
-def _workspace_file_locator_ref_from_search_result(
-    item: Mapping[str, Any],
-    *,
-    query: Any,
-    index: int,
-    workspace_source: str,
-) -> dict[str, Any]:
-    raw_locator = item.get("locator_ref")
-    locator_ref = dict(raw_locator) if isinstance(raw_locator, Mapping) else {}
-    locator_ref.update(
-        {
-            "role": "locator_ref",
-            "content_state": "ref_only",
-            "source": "blocks.workspace_operation.search_files",
-            "workspace_source": workspace_source,
-            "query": query,
-            "index": index,
-        }
     )
-    return locator_ref
-
-
-def _workspace_file_evidence_snippet_from_retrieval_item(
-    item: Mapping[str, Any],
-    *,
-    file_result: Mapping[str, Any],
-    locator_ref: Mapping[str, Any],
-) -> dict[str, Any]:
-    content = str(item.get("content") or file_result.get("snippet") or file_result.get("text") or "")
-    snippet = dict(file_result)
-    snippet.update(
-        {
-            "role": "evidence_snippet",
-            "content_state": "bounded_readback_available",
-            "source": "blocks.workspace_operation.search_files",
-            "workspace_source": "workspace.retrieve",
-            "content": content,
-            "snippet": content,
-            "snippet_chars": len(content),
-            "snippet_bytes": len(content.encode("utf-8")),
-            "locator_ref": locator_ref,
-        }
-    )
-    return snippet
+    package_view = package.to_dict()
+    locator_refs: list[dict[str, Any]] = []
+    evidence_snippets: list[dict[str, Any]] = []
+    for item in package_view.get("blocks", []):
+        if not isinstance(item, Mapping):
+            continue
+        locator_refs.append(
+            {
+                "role": "locator_ref",
+                "content_state": "bounded_readback_available",
+                "source": "blocks.context_read",
+                "block_id": item.get("block_id"),
+                "source_id": item.get("source_id"),
+                "source_revision": item.get("source_revision"),
+                "source_ref": item.get("source_ref"),
+                "binding_id": item.get("binding_id"),
+                "refs": list(item.get("refs") or ()),
+            }
+        )
+        evidence_snippets.append(
+            {
+                "role": "evidence_snippet",
+                "content_state": item.get("completeness"),
+                "source": "blocks.context_read",
+                "source_ref": item.get("source_ref"),
+                "content": item.get("content"),
+                "chars": item.get("content_chars"),
+                "refs": list(item.get("refs") or ()),
+            }
+        )
+    return {
+        "operation": "read",
+        "query": query,
+        "context_package": package_view,
+        "locator_refs": locator_refs,
+        "evidence_snippets": evidence_snippets,
+        "results": [
+            {"locator_ref": locator, "evidence_snippet": snippet}
+            for locator, snippet in zip(locator_refs, evidence_snippets)
+        ],
+        "bounded": {
+            "package_id": package_view.get("package_id"),
+            "task_context_id": package_view.get("task_context_id"),
+            "context_revision": package_view.get("context_revision"),
+            "returned_results": len(locator_refs),
+            "used_chars": package_view.get("used_chars", 0),
+            "omitted_count": len(package_view.get("omissions", [])),
+        },
+        "diagnostics": list(package_view.get("diagnostics", [])),
+    }
 
 
 async def _execute_approval_wait_block(block: ExecutionBlock, data: TriggerFlowRuntimeData) -> Any:
@@ -2238,115 +1790,6 @@ async def _execute_external_wait_block(block: ExecutionBlock, data: TriggerFlowR
     )
 
 
-async def _execute_skill_activation_block(block: ExecutionBlock, data: TriggerFlowRuntimeData) -> dict[str, Any]:
-    adapter = (
-        data.get_resource("skills.capability_adapter", None)
-        or data.get_resource("skills.adapter", None)
-    )
-    skills_manager = (
-        data.get_resource("skills.manager", None)
-        or data.get_resource("skills.executor", None)
-        or data.get_resource("skills_executor", None)
-    )
-    if adapter is None and skills_manager is not None:
-        factory = getattr(skills_manager, "capability_adapter", None)
-        adapter = factory() if callable(factory) else skills_manager
-    activate = getattr(adapter, "activate", None)
-    if adapter is None or not callable(activate):
-        raise RuntimeError(
-            f"ExecutionBlock '{ block.id }' kind 'skill_activation' requires "
-            "runtime resource 'skills.capability_adapter' or 'skills.manager'."
-        )
-
-    bound_inputs = block.input_bindings.get("bound_inputs", {})
-    if not isinstance(bound_inputs, Mapping):
-        bound_inputs = {}
-    skill_ids = _skill_ids_from_bound_inputs(bound_inputs)
-    if not skill_ids:
-        raise ValueError(f"ExecutionBlock '{ block.id }' skill_activation requires skill_id or skill_ids.")
-    task = str(bound_inputs.get("task") or block.input_bindings.get("intent") or "").strip() or None
-    raw_budget = bound_inputs.get("budget_chars")
-    try:
-        budget_chars = int(raw_budget) if raw_budget is not None else 4000
-    except (TypeError, ValueError):
-        budget_chars = 4000
-
-    activations: list[dict[str, Any]] = []
-    skill_evidence: list[dict[str, Any]] = []
-    capability_needs: list[dict[str, Any]] = []
-    plan_block_recommendations: list[dict[str, Any]] = []
-    recorder = getattr(adapter, "evidence_recorder", None)
-    record_activation = getattr(recorder, "record_activation", None)
-    for skill_id in skill_ids:
-        activation = activate(skill_id, task=task, budget_chars=budget_chars)
-        if inspect.isawaitable(activation):
-            activation = await activation
-        activation_dict = _dict_from_mapping_like(activation)
-        activations.append(activation_dict)
-        if callable(record_activation):
-            evidence = _dict_from_mapping_like(record_activation(activation))
-        else:
-            evidence = {
-                "skill_id": activation_dict.get("skill_id"),
-                "loaded_guidance_refs": activation_dict.get("loaded_guidance_refs", []),
-                "selected_resource_refs": activation_dict.get("selected_resource_refs", []),
-                "capability_needs": activation_dict.get("capability_needs", []),
-                "citations": activation_dict.get("citations", []),
-                "proves_side_effect": False,
-                "evidence_kind": "skill_context",
-            }
-        skill_evidence.append(evidence)
-        capability_needs.extend(
-            dict(item)
-            for item in activation_dict.get("capability_needs", [])
-            if isinstance(item, Mapping)
-        )
-        plan_block_recommendations.extend(
-            dict(item)
-            for item in activation_dict.get("plan_block_recommendations", [])
-            if isinstance(item, Mapping)
-        )
-    return {
-        "activations": activations,
-        "skill_evidence": skill_evidence,
-        "capability_needs": capability_needs,
-        "plan_block_recommendations": plan_block_recommendations,
-        "proves_side_effect": False,
-    }
-
-
-def _dict_from_mapping_like(value: Any) -> dict[str, Any]:
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        value = to_dict()
-    if isinstance(value, Mapping):
-        return {str(key): item for key, item in value.items()}
-    return {"value": value}
-
-
-def _skill_ids_from_bound_inputs(bound_inputs: Mapping[str, Any]) -> list[str]:
-    raw = (
-        bound_inputs.get("skill_ids")
-        or bound_inputs.get("skills")
-        or bound_inputs.get("skill_id")
-        or bound_inputs.get("selected_skill_ids")
-    )
-    if raw is None:
-        return []
-    if isinstance(raw, str):
-        values = [raw]
-    elif isinstance(raw, (list, tuple, set)):
-        values = list(raw)
-    else:
-        values = [raw]
-    skill_ids: list[str] = []
-    for value in values:
-        text = str(value or "").strip()
-        if text and text not in skill_ids:
-            skill_ids.append(text)
-    return skill_ids
-
-
 def _dependency_results_for_block(block: ExecutionBlock, blocks_state: Mapping[str, Any]) -> dict[str, Any]:
     task = block.input_bindings.get("task")
     if not isinstance(task, Mapping):
@@ -2410,26 +1853,25 @@ async def _record_block_result(data: TriggerFlowRuntimeData, result: Mapping[str
     kind = result.get("kind")
     evidence_key = {
         "action_call": "blocks.action_evidence",
-        "skill_activation": "blocks.skill_evidence",
-        "workspace_operation": "blocks.workspace_refs",
+        "context_read": "blocks.context_refs",
         "validation": "blocks.validation_results",
     }.get(str(kind))
     if evidence_key:
         evidence_items = _evidence_items_for_result(result)
         for evidence_item in evidence_items:
-            if evidence_key == "blocks.workspace_refs":
-                await _append_unique_state_item(data, evidence_key, _workspace_ref_id(evidence_item))
+            if evidence_key == "blocks.context_refs":
+                await _append_unique_state_item(data, evidence_key, _context_ref_id(evidence_item))
             else:
                 await _append_state_item(data, evidence_key, evidence_item)
     for extra_key, state_key in (
         ("action_evidence", "blocks.action_evidence"),
         ("capability_evidence", "blocks.capability_evidence"),
         ("validation_results", "blocks.validation_results"),
-        ("workspace_refs", "blocks.workspace_refs"),
+        ("context_refs", "blocks.context_refs"),
     ):
         for evidence_item in _explicit_evidence_items(result, extra_key):
-            if state_key == "blocks.workspace_refs":
-                await _append_unique_state_item(data, state_key, _workspace_ref_id(evidence_item))
+            if state_key == "blocks.context_refs":
+                await _append_unique_state_item(data, state_key, _context_ref_id(evidence_item))
             else:
                 await _append_state_item(data, state_key, evidence_item)
 
@@ -2439,8 +1881,7 @@ def _evidence_items_for_result(result: Mapping[str, Any]) -> list[dict[str, Any]
     kind = str(result.get("kind") or "")
     source_key = {
         "action_call": "action_evidence",
-        "skill_activation": "skill_evidence",
-        "workspace_operation": "workspace_refs",
+        "context_read": "context_refs",
         "validation": "validation_results",
     }.get(kind)
     records: Any = None
@@ -2483,7 +1924,10 @@ def _explicit_evidence_items(result: Mapping[str, Any], source_key: str) -> list
     return items
 
 
-def _workspace_ref_id(value: Mapping[str, Any]) -> str:
+def _context_ref_id(value: Mapping[str, Any]) -> str:
+    for key in ("block_id", "source_ref", "binding_id"):
+        if value.get(key) is not None:
+            return str(value.get(key))
     ref = value.get("ref")
     if isinstance(ref, Mapping) and ref.get("id") is not None:
         return str(ref.get("id"))

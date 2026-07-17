@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from agently.types.data import ContextConsumption, ContextPackage
+
 from .TaskShared import *
 
 
@@ -25,13 +27,13 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         *,
         iteration: int | None = None,
         phase: str | None = None,
-    ) -> "WorkspaceRecordRef":
-        """Return a compact run-local locator without touching Workspace storage."""
+    ) -> "RecordRef":
+        """Return a compact run-local locator without writing TaskWorkspace or RecordStore state."""
 
         sequence = len(getattr(self, "_stream_items", []))
         suffix = phase or kind
         return cast(
-            WorkspaceRecordRef,
+            RecordRef,
             {
                 "id": f"{self.id}:{suffix}:{iteration if iteration is not None else sequence}",
                 "kind": kind,
@@ -45,8 +47,8 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         self,
         iteration_index: int,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
-    ) -> "WorkspaceRecordRef":
+        context_pack: "TaskContextView",
+    ) -> "RecordRef":
         _ = plan, context_pack
         return self._memory_process_ref("agent_task_decision", iteration=iteration_index, phase="decision")
 
@@ -55,10 +57,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         iteration_index: int,
         *,
         plan: dict[str, Any],
-        decision_ref: "WorkspaceRecordRef",
+        decision_ref: "RecordRef",
         execution_result: Any,
         execution_meta: dict[str, Any],
-    ) -> tuple["WorkspaceRecordRef", "WorkspaceRecordRef | None"]:
+    ) -> tuple["RecordRef", "RecordRef | None"]:
         _ = plan, decision_ref, execution_result
         record_ref = self._memory_process_ref(
             "agent_task_observation", iteration=iteration_index, phase="observation"
@@ -75,7 +77,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         runtime_topology: Mapping[str, Any] | None = None,
         terminal_reason: str | None = None,
         final_result: Mapping[str, Any] | None = None,
-    ) -> tuple["WorkspaceRecordRef | None", "WorkspaceRecordRef | None"]:
+    ) -> tuple["RecordRef | None", "RecordRef | None"]:
         try:
             effective_revision = TaskBoardRevision.from_value(revision)
             evidence_view = build_task_board_evidence_view(effective_revision).to_dict()
@@ -132,8 +134,8 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         self,
         iteration_index: int,
         verification: dict[str, Any],
-        observation_ref: "WorkspaceRecordRef",
-    ) -> "WorkspaceRecordRef":
+        observation_ref: "RecordRef",
+    ) -> "RecordRef":
         _ = verification, observation_ref
         return self._memory_process_ref(
             "agent_task_verification", iteration=iteration_index, phase="verification"
@@ -197,9 +199,9 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         iteration_index: int,
         *,
         phase: str,
-        subject_ref: "WorkspaceRecordRef | None",
+        subject_ref: "RecordRef | None",
         summary: dict[str, Any],
-    ) -> "WorkspaceRecordRef | None":
+    ) -> "RecordRef | None":
         content = {
             "task_id": self.id,
             "iteration": iteration_index,
@@ -243,10 +245,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             },
         )
 
-    def _append_workspace_ref(self, collection: str, ref: dict[str, Any] | None):
+    def _append_record_ref(self, collection: str, ref: dict[str, Any] | None):
         if not ref:
             return
-        bucket = self.workspace_refs.setdefault(collection, [])
+        bucket = self.record_refs.setdefault(collection, [])
         ref_id = str(ref.get("id") or "")
         if ref_id and ref_id not in bucket:
             bucket.append(ref_id)
@@ -266,12 +268,26 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "iterations": DataFormatter.sanitize(self.iterations),
             "reflections": DataFormatter.sanitize(self.reflections),
             "guidance_items": DataFormatter.sanitize(getattr(self, "guidance_items", [])),
-            "guidance_refs": DataFormatter.sanitize(self.workspace_refs.get("guidance", [])),
+            "guidance_refs": DataFormatter.sanitize(self.record_refs.get("guidance", [])),
+            "context_packages": DataFormatter.sanitize(
+                [
+                    package.to_dict()
+                    for package in self.context_packages
+                    if isinstance(package, ContextPackage)
+                ]
+            ),
+            "context_consumptions": DataFormatter.sanitize(
+                [
+                    consumption.to_dict()
+                    for consumption in self.context_consumptions
+                    if isinstance(consumption, ContextConsumption)
+                ]
+            ),
             "resumed_from_iteration": self._resumed_from_iteration,
             "resumed_iteration_summaries": DataFormatter.sanitize(self._resumed_iteration_summaries),
             "result": DataFormatter.sanitize(self.result),
             "diagnostics": DataFormatter.sanitize(self.diagnostics),
-            "workspace_refs": DataFormatter.sanitize(self.workspace_refs),
+            "record_refs": DataFormatter.sanitize(self.record_refs),
             "started_at": self.started_at,
             "completed_at": self.completed_at,
         }
@@ -732,8 +748,18 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         approval_required_actions = cls._action_ids_by_final_status(action_statuses, {"approval_required"})
         required_actions, required_skills = cls._required_capability_constraints(execution_meta)
         missing_required_actions = [action_id for action_id in required_actions if action_id not in action_ids]
-        selected_skill_ids = cls._selected_skill_ids(logs)
-        missing_required_skills = [skill_id for skill_id in required_skills if skill_id not in selected_skill_ids]
+        skill_context_consumptions = cls._skill_context_consumptions(logs)
+        consumed_skill_ids = list(
+            dict.fromkeys(
+                str(item.get("skill_id") or "").strip()
+                for item in skill_context_consumptions
+                if str(item.get("skill_id") or "").strip()
+                and str(item.get("request_id") or "").strip()
+            )
+        )
+        missing_required_skill_context = [
+            skill_id for skill_id in required_skills if skill_id not in consumed_skill_ids
+        ]
         succeeded_actions = list(
             dict.fromkeys(
                 cls._action_ids_by_status(
@@ -744,7 +770,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         route = execution_meta.get("route", {})
         artifact_refs = logs.get("artifact_refs", [])
         artifact_readbacks = cls._artifact_readback_evidence_ids(artifact_refs)
-        workspace_refs = execution_meta.get("workspace_refs") or logs.get("workspace_refs", {})
+        record_refs = execution_meta.get("record_refs") or logs.get("record_refs", {})
+        task_workspace_refs = execution_meta.get("task_workspace_refs") or logs.get(
+            "task_workspace_refs", {}
+        )
         raw_errors = logs.get("errors", [])
         execution_errors: list[Any]
         if isinstance(raw_errors, list):
@@ -772,15 +801,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             )
             if callable(merge_evidence_requirements):
                 capability_evidence_requirements = merge_evidence_requirements(capability_evidence_requirements)
-        # Unified capability-evidence view (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
-        # one capability id space across kinds plus per-kind evidence buckets. A
-        # capability is "used" when it ran (action) or was selected (skill). The
-        # artifacts/validations buckets are reserved: no structural producer feeds
-        # them yet, so the verifier guard does not enforce those evidence kinds.
-        capabilities_used: list[str] = []
-        for capability_id in [*action_ids, *selected_skill_ids]:
-            if capability_id and capability_id not in capabilities_used:
-                capabilities_used.append(capability_id)
+        capabilities_used = list(dict.fromkeys(action_ids))
         return {
             "model_response_count": (
                 len(logs.get("model_responses", [])) if isinstance(logs.get("model_responses", []), list) else 0
@@ -796,18 +817,24 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "required_actions": required_actions,
             "capability_evidence_requirements": capability_evidence_requirements,
             "missing_required_actions": missing_required_actions,
-            "selected_skill_ids": selected_skill_ids,
+            "consumed_skill_ids": consumed_skill_ids,
             "required_skills": required_skills,
-            "missing_required_skills": missing_required_skills,
+            "missing_required_skill_context": missing_required_skill_context,
             "capabilities_used": capabilities_used,
             "capability_evidence": {
                 "actions": {"succeeded": succeeded_actions, "failed": failed_actions},
-                "skills": {"selected": selected_skill_ids},
                 "artifacts": {"readback": artifact_readbacks},
                 "validations": {"passed": [], "failed": []},
             },
+            "context_evidence": {
+                "skills": {
+                    "consumed": consumed_skill_ids,
+                    "consumptions": skill_context_consumptions,
+                }
+            },
             "artifact_refs": DataFormatter.sanitize(artifact_refs),
-            "workspace_refs": DataFormatter.sanitize(workspace_refs),
+            "record_refs": DataFormatter.sanitize(record_refs),
+            "task_workspace_refs": DataFormatter.sanitize(task_workspace_refs),
             "route": DataFormatter.sanitize(route),
             "status": str(execution_meta.get("status") or ""),
             "errors": DataFormatter.sanitize(execution_errors),
@@ -889,26 +916,17 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         )
 
     @staticmethod
-    def _selected_skill_ids(logs: dict[str, Any]) -> list[str]:
-        route_logs = logs.get("route_logs", {})
-        if not isinstance(route_logs, dict):
+    def _skill_context_consumptions(logs: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = logs.get("skill_context_consumptions", [])
+        if not isinstance(raw, Sequence) or isinstance(raw, str | bytes | bytearray):
             return []
-        skill_ids: list[str] = []
-        selected_groups: list[Any] = []
-        plan = route_logs.get("plan", {})
-        if isinstance(plan, dict):
-            selected_groups.append(plan.get("selected_skills", []))
-        selected_groups.append(route_logs.get("prompt_bound_skills", []))
-        for selected in selected_groups:
-            if not isinstance(selected, list):
-                continue
-            for item in selected:
-                if not isinstance(item, dict):
-                    continue
-                skill_id = str(item.get("skill_id") or item.get("id") or item.get("name") or "").strip()
-                if skill_id and skill_id not in skill_ids:
-                    skill_ids.append(skill_id)
-        return skill_ids
+        return [
+            dict(DataFormatter.sanitize(item))
+            for item in raw
+            if isinstance(item, Mapping)
+            and str(item.get("skill_id") or "").strip()
+            and str(item.get("request_id") or "").strip()
+        ]
 
     @classmethod
     def _collect_execution_action_records(
@@ -1252,7 +1270,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
     async def _public_action_file_refs(self, refs: Any) -> list[dict[str, Any]]:
         if not isinstance(refs, Sequence) or isinstance(refs, str | bytes | bytearray):
             return []
-        workspace = getattr(self, "workspace", None)
+        task_workspace = getattr(self, "task_workspace", None)
         projected: list[dict[str, Any]] = []
         for raw_ref in refs[:8]:
             if not isinstance(raw_ref, Mapping):
@@ -1266,7 +1284,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             expected_sha256 = str(ref.get("sha256") or "").strip()
             expected_bytes = ref.get("bytes")
             if (
-                workspace is None
+                task_workspace is None
                 or not path
                 or not expected_sha256
                 or not isinstance(expected_bytes, int)
@@ -1276,10 +1294,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             ):
                 continue
             try:
-                target = workspace.resolve_file_path(path)
+                target = task_workspace.resolve_file_path(path)
                 if not target.is_file():
                     continue
-                readback = await workspace.read_file(path, max_bytes=1)
+                readback = await task_workspace.read_file(path, max_bytes=1)
                 if (
                     readback.get("ok") is not True
                     or str(readback.get("sha256") or "") != expected_sha256
@@ -1288,7 +1306,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                     continue
                 ref["open_path"] = str(target.resolve())
                 ref["open_path_verified"] = True
-                ref["display_path"] = self._workspace_artifact_display_path(path)
+                ref["display_path"] = self._task_workspace_artifact_display_path(path)
             except Exception:
                 continue
         return projected

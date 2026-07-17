@@ -21,7 +21,7 @@ from agently.core.application.AgentExecution import AgentExecutionLimitExceeded,
 from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import DataFormatter
 
-from .routes import run_model_request_route, run_skills_route
+from .routes import run_model_request_route
 from .runtime_guidance import mark_pending_guidance_not_applied
 from .task_strategy import run_agent_task_route
 from .terminal_retention import (
@@ -83,9 +83,7 @@ async def async_execute_route(
                 ),
                 "route_policy": route_meta.get("route_policy"),
             }
-        if route == "skills":
-            result = await run_skills_route(owner, route_meta)
-        elif route == "agent_task":
+        if route == "agent_task":
             result = await run_agent_task_route(owner, route_meta)
         else:
             result = await run_model_request_route(
@@ -128,6 +126,7 @@ async def start_execution(
         owner._started = True
         owner.status = "running"
         try:
+            await owner.async_prepare_task_context()
             await owner._async_emit_agent_execution_started_once()
             owner.execution_context.raise_if_nesting_exceeded()
             owner.execution_context.record_progress(
@@ -293,7 +292,7 @@ async def _finalize_terminal_execution(
                 code="agent_execution.retention.terminal_event_delivery_failed",
                 error=error,
             )
-        async with owner._workspace_record_lock:
+        async with owner._record_store_write_lock:
             await apply_agent_execution_terminal_retention(owner, status=terminal_status)
     finally:
         action = getattr(owner.agent, "action", None)

@@ -9,28 +9,23 @@ Environment:
 
 What this demonstrates
 ----------------------
-A real task driven by the default single_shot compatibility route:
+A real task using direct AgentExecution Skill binding:
 
     * The capability is a single standard ``SKILL.md`` (frontmatter ``name`` /
       ``description`` / ``keywords`` + a Markdown design system). This example
-      intentionally declares no execution metadata, so it stays on the default
-      single_shot route label, lowered through Blocks to a model_request block.
+      intentionally declares no execution metadata.
     * ``agent.use_skills(["architecture-diagram"], mode="required")`` selects it.
       (``mode`` defaults to ``"model_decision"``; we force it here because we know
       exactly which skill must run.)
-    * ``run_skills_task(...)`` builds a Blocks ExecutionPlan with
-      ``skill_activation`` plus a ``model_request`` block, injects the full
-      SKILL.md body as instructions, and returns a structured result shaped by
-      ``output``.
+    * ``run_skills_task(...)`` is only a result-shaped adapter over an ordinary
+      AgentExecution. AgentExecution binds the immutable Skill revision into
+      TaskContext; the normal model-request route consumes the ContextPackage.
     * The HOST owns the side effect: it writes the returned HTML to disk. The skill
       never touches the filesystem.
 
 The task: draw a real architecture diagram for the current Agently development line. The
 architecture brief below is grounded in this repository (agently/core +
 agently/builtins), so the diagram describes the actual framework, not a guess.
-Release example tests run with explicit all-allowed Skills capability policy so
-the test proves the Skill execution path rather than the default fail-closed
-permission posture.
 
 Expected key output from one real DeepSeek run on 2026-07-08:
     selected skill: architecture-diagram (required)
@@ -59,18 +54,6 @@ ARTIFACTS_DIR = Path(__file__).resolve().parent / "_artifacts"
 # ── The skill: a standard SKILL.md, guidance only ───────────────────────────
 SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "architecture-diagram"
 
-RELEASE_EXAMPLE_CAPABILITIES: dict[str, str] = {
-    "web_search": "allow",
-    "web_browse": "allow",
-    "workspace_read": "allow",
-    "workspace_write": "allow",
-    "script_run": "allow",
-    "python": "allow",
-    "http_request": "allow",
-    "mcp": "allow",
-}
-
-
 # ── The task: a repo-grounded brief of the current Agently architecture ──────
 AGENTLY_ARCHITECTURE_BRIEF = """\
 Draw the architecture of the current Agently framework development line. Agently is
@@ -83,12 +66,12 @@ top to bottom, with the listed components:
    Agent, TriggerFlow, plus Agent Extensions (Skills, Action, Session/ChatSession,
    ConfigurePrompt, AutoFunc, KeyWaiter, StreamingPrint).
 3. Core Contracts (core colour, from agently/core): Agent, Session, Prompt,
-   ModelRequest, ModelRequestResult, DynamicTask, TaskDAGExecutor, TriggerFlow,
-   ExecutionResource, Action, Tool, SkillsExecutor, PluginManager, EventCenter.
+   ModelRequest, ModelRequestResult, AgentExecution, TaskContext, ContextReader,
+   TaskWorkspace, RecordStore, SkillLibrary, DynamicTask, TaskDAGExecutor,
+   TriggerFlow, ExecutionResource, Action, Tool, PluginManager, EventCenter.
 4. Plugins / Providers (plugin colour, from agently/builtins/plugins):
    ModelRequester (OpenAICompatible), PromptGenerator, ResponseParser,
-   AgentOrchestrator, SkillsExecutor (SKILL.md compatibility labels backed by Blocks),
-   TaskDAGPlanner,
+   AgentOrchestrator, TaskDAGPlanner,
    ActionExecutor, ActionFlow, ActionRuntime, ExecutionResourceProvider,
    ToolManager.
 5. ExecutionResourceManager & Capabilities (capability colour): Sandbox,
@@ -121,9 +104,9 @@ async def main() -> None:
     runtime_dir = Path(tempfile.mkdtemp(prefix="agently_archdiagram_"))
     skill_id = install_skill(runtime_dir)
 
-    agent = Agently.create_agent("architecture-diagrammer").configure_skill_capabilities(
-        auto_load=RELEASE_EXAMPLE_CAPABILITIES,
-        workspace_root=str(runtime_dir / "workspace"),
+    agent = Agently.create_agent("architecture-diagrammer").use_task_workspace(
+        runtime_dir / "task-workspace",
+        mode="read_write",
     )
 
     execution = await agent.async_run_skills_task(

@@ -74,7 +74,7 @@ it is not an execution-local snapshot. Loading that snapshot clears and restores
 the owning flow object's shared `flow_data`. This can overwrite newer values or
 interfere with concurrent executions; save/load does not add isolation, CAS, or
 merge semantics. Do not use `flow_data` as a recovery boundary. Put per-run
-state in execution `state`, and put durable shared state in a host/Workspace
+state in execution `state`, and put durable shared state in a host/RecordStore
 provider with the required consistency policy.
 
 API (each emits the warning unless suppressed):

@@ -18,15 +18,19 @@ import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, TYPE_CHECKING, TypedDict, cast
-
-from agently.types.data import WorkspaceRetentionResult
+from typing import Any, Literal, TYPE_CHECKING, TypedDict, cast
 
 if TYPE_CHECKING:
     from .Execution import TriggerFlowExecution
 
 
 _TERMINAL_INLINE_RESULT_LIMIT = 4096
+TriggerFlowRecoverySnapshotStatus = Literal[
+    "deleted",
+    "not_configured",
+    "delete_unsupported",
+    "deferred",
+]
 
 
 class TriggerFlowTerminalRetention(TypedDict):
@@ -42,7 +46,17 @@ class TriggerFlowTerminalRetention(TypedDict):
     inline_result: Any
     retained_refs: list[dict[str, Any]]
     event_result: Any
-    result: WorkspaceRetentionResult | None
+    result: "TriggerFlowRetentionResult | None"
+
+
+class TriggerFlowRetentionResult(TypedDict):
+    """TriggerFlow-owned terminal cleanup facts, independent from file storage."""
+
+    status: Literal["applied", "noop", "deferred"]
+    execution_id: str
+    retained_refs: list[dict[str, Any]]
+    recovery_snapshot_status: TriggerFlowRecoverySnapshotStatus
+    diagnostics: list[dict[str, Any]]
 
 
 def _collect_file_refs(value: Any, collected: list[dict[str, Any]]) -> None:
@@ -84,7 +98,7 @@ async def prepare_triggerflow_terminal_retention(
     _collect_file_refs(serialized_result, retained_refs)
     deduplicated = {
         (
-            str(ref.get("workspace_id") or ""),
+            str(ref.get("task_workspace_id") or ""),
             str(ref.get("execution_id") or ""),
             str(ref.get("path") or ""),
             str(ref.get("sha256") or ""),
@@ -135,16 +149,19 @@ async def apply_triggerflow_terminal_retention(
     execution: "TriggerFlowExecution[Any, Any, Any]",
     prepared: TriggerFlowTerminalRetention,
 ) -> TriggerFlowTerminalRetention:
-    """Reclaim only the bound execution's fallback files; never persist audit."""
+    """Clean execution recovery state; TaskWorkspace owns every file decision."""
     diagnostics: list[dict[str, Any]] = []
     snapshot_store = execution._snapshot_store
+    recovery_snapshot_status: TriggerFlowRecoverySnapshotStatus = "not_configured"
     if snapshot_store is not None:
         delete_snapshot = getattr(snapshot_store, "delete_snapshot", None)
         if callable(delete_snapshot):
             run_id = execution.run_context.run_id or execution.id
             try:
                 await cast(Callable[[str], Awaitable[Any]], delete_snapshot)(run_id)
+                recovery_snapshot_status = "deleted"
             except Exception as error:
+                recovery_snapshot_status = "deferred"
                 diagnostics.append(
                     {
                         "code": "triggerflow.recovery_cleanup_failed",
@@ -152,42 +169,20 @@ async def apply_triggerflow_terminal_retention(
                         "retryable": True,
                     }
                 )
+        else:
+            recovery_snapshot_status = "delete_unsupported"
 
-    workspace = execution._get_runtime_resource("workspace", None)
-    close_files = getattr(workspace, "_close_execution_files", None)
-    if not callable(close_files):
-        return prepared
-    status = execution.get_status()
-    if status not in {"failed", "cancelled"}:
-        status = "completed"
-    try:
-        cleanup = await cast(Callable[..., Awaitable[dict[str, Any]]], close_files)(
-            retained_refs=prepared["retained_refs"],
-            status=status,
-        )
-    except Exception as error:
-        diagnostics.append(
-            {
-                "code": "triggerflow.file_cleanup_failed",
-                "message": str(error).strip() or error.__class__.__name__,
-                "retryable": True,
-            }
-        )
-        cleanup = {
-            "status": "deferred",
-            "execution_id": execution.id,
-            "retained_refs": list(prepared["retained_refs"]),
-            "retained_bytes": 0,
-            "deleted_bytes": 0,
-            "diagnostics": [],
-        }
-    if diagnostics:
-        cleanup["status"] = "deferred"
-        cleanup["diagnostics"] = [*cleanup.get("diagnostics", []), *diagnostics]
-    prepared["retained_refs"] = [
-        dict(item)
-        for item in cleanup.get("retained_refs", [])
-        if isinstance(item, dict)
-    ]
-    prepared["result"] = cast(WorkspaceRetentionResult, cleanup)
+    prepared["result"] = {
+        "status": (
+            "deferred"
+            if diagnostics
+            else "applied"
+            if recovery_snapshot_status == "deleted"
+            else "noop"
+        ),
+        "execution_id": execution.id,
+        "retained_refs": list(prepared["retained_refs"]),
+        "recovery_snapshot_status": recovery_snapshot_status,
+        "diagnostics": diagnostics,
+    }
     return prepared

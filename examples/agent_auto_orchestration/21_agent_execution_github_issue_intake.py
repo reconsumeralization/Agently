@@ -14,7 +14,7 @@ action that can run read-only `gh search repos` and `gh issue list` commands.
 Step 1 searches GitHub and selects the official repository. Step 2 pulls the
 latest open issue list through `gh`. The host reads the framework-owned
 ActionRuntime records exposed by AgentExecution, validates the raw `gh` stdout,
-and persists the result to Workspace.
+and persists the result to TaskWorkspace.
 
 Expected key output from one real DeepSeek run on 2026-06-01 after closing
 #277 and #280:
@@ -149,8 +149,11 @@ async def main():
     if RUNTIME_ROOT.exists():
         shutil.rmtree(RUNTIME_ROOT)
 
-    agent = Agently.create_agent("github-issue-intake").use_workspace(RUNTIME_ROOT)
-    assert agent.workspace is not None
+    agent = (
+        Agently.create_agent("github-issue-intake")
+        .use_task_workspace(RUNTIME_ROOT)
+        .use_record_store(RUNTIME_ROOT, mode="read_write")
+    )
     agent.set_action_loop(max_rounds=1, timeout=45)
     agent.enable_shell(
         commands=["gh search repos", "gh issue list"],
@@ -288,7 +291,7 @@ async def main():
         "issues": issues,
     }
 
-    workspace_record = await issue_intake.async_record_workspace(
+    intake_ref = await issue_intake.record_store.put(
         collection="observations",
         kind="github_issue_intake",
         content={
@@ -306,19 +309,20 @@ async def main():
         summary=f"{TASK_ID} latest open GitHub issue intake",
         scope={"task_id": TASK_ID, "repo": issue_batch["repo"]},
         source={"step": "agent-owned-gh-issue-intake", "external_system": "github", "capability": "gh"},
-        checkpoint=True,
+    )
+    await issue_intake.record_store.checkpoint(
+        TASK_ID,
+        {"issue_batch": issue_batch, "intake": intake_result},
+        step_id="agent-owned-gh-issue-intake",
     )
     intake_meta = await issue_intake.async_get_meta()
-    context_pack = await agent.workspace.build_context(
-        goal="",
-        scope={"task_id": TASK_ID},
-        budget={"chars": 1600},
-        profile="auto",
+    context_package = await issue_intake.async_read_task_context(
+        consumer_id="github-issue-intake-summary",
+        phase="verification",
     )
 
     all_items_are_open_issues = bool(issues) and all(item.get("state") == "open" for item in issues)
-    workspace_refs = intake_meta.get("workspace_refs", {})
-    context_items = context_pack.get("items", []) if isinstance(context_pack, dict) else []
+    context_items = context_package.blocks
 
     print(f"provider={provider}")
     print(f"gh_available={gh_available()}")
@@ -327,13 +331,13 @@ async def main():
     print(f"selected_repo={selected['selected_repo']}")
     print(f"fetched_open_issue_count={len(issues)}")
     print(f"intake_lineage_task_id={intake_meta['lineage']['task_id']}")
-    print(f"workspace_issue_ref_recorded={workspace_record['record']['id'] in workspace_refs.get('observations', [])}")
-    print(f"workspace_context_item_count={len(context_items)}")
+    print(f"record_store_issue_ref_recorded={bool(intake_ref.get('id'))}")
+    print(f"task_context_item_count={len(context_items)}")
     print(f"all_items_are_open_issues={all_items_are_open_issues}")
     print(f"search_stream_lineage_ok={search_stream['lineage_ok']}")
     print(f"issue_stream_lineage_ok={issue_stream['lineage_ok']}")
     print(f"latest_issue_numbers={[item['number'] for item in issues]}")
-    print(f"workspace_record_id={workspace_record['record']['id']}")
+    print(f"record_store_record_id={intake_ref['id']}")
     print(f"intake_summary={DataFormatter.sanitize(intake_result).get('intake_summary')}")
 
 
