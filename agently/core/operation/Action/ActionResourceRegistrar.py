@@ -38,13 +38,13 @@ class ActionResourceRegistrar:
         self._action = action
 
     @staticmethod
-    def _normalize_code_sandbox(value: Literal["auto", "docker", "seatbelt", "trusted_local"] | str) -> Literal["auto", "docker", "seatbelt", "trusted_local"]:
+    def _normalize_code_sandbox(value: Literal["auto", "docker", "trusted_local"] | str) -> Literal["auto", "docker", "trusted_local"]:
         normalized = str(value or "trusted_local").strip().lower().replace("-", "_")
         if normalized in {"local", "python", "node", "bash"}:
             normalized = "trusted_local"
-        if normalized not in {"auto", "docker", "seatbelt", "trusted_local"}:
-            raise ValueError("sandbox must be one of: 'auto', 'docker', 'seatbelt', 'trusted_local'.")
-        return cast(Literal["auto", "docker", "seatbelt", "trusted_local"], normalized)
+        if normalized not in {"auto", "docker", "trusted_local"}:
+            raise ValueError("sandbox must be one of: 'auto', 'docker', 'trusted_local'.")
+        return cast(Literal["auto", "docker", "trusted_local"], normalized)
 
     @staticmethod
     def _normalize_dependency_policy(value: Literal["deny", "request", "install"] | dict[str, Any] | str) -> dict[str, Any]:
