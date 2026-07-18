@@ -38,13 +38,14 @@ The companion repo does not become a runtime dependency of your Agently app. It 
 | Skill | Use when the user is |
 |---|---|
 | `agently` | starting fresh — picking the right structure for a new Agently project |
+| `agently-design` | designing or auditing a non-trivial cross-layer ModelRequest, evidence, lifecycle, concurrency, or observability topology |
 | `agently-request` | model setup, prompt management, structured output, response reuse, session memory, embeddings, retrieval |
 | `agently-runtime` | Action Runtime, built-in actions, MCP, ExecutionResource, FastAPI exposure, DevTools wiring |
 | `agently-dynamic-task` | model-generated or app-submitted DAG planning, validation, and execution |
 | `agently-triggerflow` | needing branching, concurrency, pause/resume, save/load |
 | `agently-migration` | migrating from LangChain, LangGraph, LlamaIndex, CrewAI, or similar systems |
 
-The current public catalog generation is `v2`. The actual default skill list lives in `Agently-Skills/skills/` and should contain only these 6 skills.
+The current public catalog generation is `v2`. The actual default skill list lives in `Agently-Skills/skills/` and should contain only these 7 skills.
 
 ## Installing the skills
 
@@ -65,6 +66,7 @@ For CLI-based installs, the default `app` bundle is:
 ```bash
 for skill in \
   agently \
+  agently-design \
   agently-request \
   agently-runtime \
   agently-dynamic-task \

@@ -38,13 +38,14 @@ skill **不是**纯文档。它为 coding agent 结构化：每个 skill 告诉 
 | Skill | 用户在做的事 |
 |---|---|
 | `agently` | 从零开始 —— 选合适的项目结构 |
+| `agently-design` | 设计或审计跨 ModelRequest、证据、生命周期、并发或可观测性的非简单系统拓扑 |
 | `agently-request` | 模型接入、Prompt 管理、结构化输出、响应复用、session memory、embedding、检索 |
 | `agently-runtime` | Action Runtime、内置 actions、MCP、ExecutionResource、FastAPI 暴露、DevTools 接入 |
 | `agently-dynamic-task` | 模型生成或应用提交的 DAG 规划、校验和执行 |
 | `agently-triggerflow` | 需要分支、并发、pause/resume、save/load |
 | `agently-migration` | 从 LangChain、LangGraph、LlamaIndex、CrewAI 或类似系统迁移 |
 
-当前公开 catalog generation 是 `v2`。实际默认 skill 列表见 `Agently-Skills/skills/`，应只包含这 6 个 skills。
+当前公开 catalog generation 是 `v2`。实际默认 skill 列表见 `Agently-Skills/skills/`，应只包含这 7 个 skills。
 
 ## 安装
 
@@ -65,6 +66,7 @@ skill 是纯文本 + 脚本；安装时不跑 Agently 特定的东西。
 ```bash
 for skill in \
   agently \
+  agently-design \
   agently-request \
   agently-runtime \
   agently-dynamic-task \
