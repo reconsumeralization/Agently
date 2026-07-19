@@ -10,7 +10,6 @@ from agently.core import AgentTask, SkillLibrary
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
 from agently.core.application.AgentTask.BlockCarrier import scoped_retrieval_policy
 from agently.core.context import TaskContext
-from agently.types.data import ContextReadIntent
 from agently.types.data import ContextBlock, ContextPackage
 
 

@@ -108,12 +108,12 @@ async def test_invalid_model_skill_key_fails_closed_without_binding(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_required_skill_pack_resolves_to_exact_library_revisions(tmp_path: Path) -> None:
     library = SkillLibrary(tmp_path / "library")
-    first = _write_skill(
+    _write_skill(
         tmp_path / "pack" / "first",
         name="First Pack Skill",
         description="First procedure.",
     )
-    second = _write_skill(
+    _write_skill(
         tmp_path / "pack" / "second",
         name="Second Pack Skill",
         description="Second procedure.",
