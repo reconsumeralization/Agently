@@ -136,7 +136,11 @@ class OpenAIResponsesCompatibleRequestBuilderMixin:
         return {}
 
     @classmethod
-    def _kwargs_to_json_schema(cls, kwargs_schema: dict[str, Any] | None) -> dict[str, Any]:
+    def _kwargs_to_json_schema(
+        cls,
+        kwargs_schema: dict[str, Any] | None,
+        required_input_keys: Any = None,
+    ) -> dict[str, Any]:
         properties: dict[str, Any] = {}
         additional_properties: bool | dict[str, Any] = False
         if not isinstance(kwargs_schema, dict) or len(kwargs_schema) == 0:
@@ -166,6 +170,13 @@ class OpenAIResponsesCompatibleRequestBuilderMixin:
             "type": "object",
             "properties": properties,
         }
+        required = [
+            str(key)
+            for key in required_input_keys
+            if isinstance(key, str) and key in properties
+        ] if isinstance(required_input_keys, (list, tuple, set)) else []
+        if required:
+            result["required"] = required
         if additional_properties is not False:
             result["additionalProperties"] = additional_properties
         else:
@@ -188,7 +199,10 @@ class OpenAIResponsesCompatibleRequestBuilderMixin:
             if name is None:
                 continue
             description = tool.get("desc", tool.get("description", ""))
-            parameters = cls._kwargs_to_json_schema(cast(dict[str, Any] | None, tool.get("kwargs")))
+            parameters = cls._kwargs_to_json_schema(
+                cast(dict[str, Any] | None, tool.get("kwargs")),
+                tool.get("required_input_keys"),
+            )
             result.append(
                 {
                     "type": "function",

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Mapping
 from typing import Any, cast
@@ -102,6 +103,61 @@ class RuntimeStageStallError(TimeoutError):
         return diagnostic
 
 
+class _ModelRequestBudget:
+    """One execution-local counter linked to every constraining ancestor."""
+
+    def __init__(
+        self,
+        *,
+        execution_id: str,
+        limit: int | None,
+        parent: "_ModelRequestBudget | None" = None,
+    ) -> None:
+        self.execution_id = execution_id
+        self.limit = limit
+        self.parent = parent
+        self.count = 0
+        self.limit_events: list[dict[str, Any]] = []
+        self._lock = parent._lock if parent is not None else threading.RLock()
+
+    def _lineage(self) -> list["_ModelRequestBudget"]:
+        lineage: list[_ModelRequestBudget] = []
+        current: _ModelRequestBudget | None = self
+        while current is not None:
+            lineage.append(current)
+            current = current.parent
+        return lineage
+
+    def try_consume(
+        self,
+        *,
+        response_id: str | None,
+        run_id: str | None,
+    ) -> dict[str, Any] | None:
+        lineage = self._lineage()
+        with self._lock:
+            # Ancestor authorization is checked first so an exhausted root
+            # budget remains the canonical failure even when a child has the
+            # same numeric limit.
+            for budget in reversed(lineage):
+                if budget.limit is None or budget.count < budget.limit:
+                    continue
+                event = {
+                    "type": "limit_exceeded",
+                    "limit_name": "max_model_requests",
+                    "limit_value": budget.limit,
+                    "used": budget.count,
+                    "response_id": response_id,
+                    "run_id": run_id,
+                    "budget_execution_id": budget.execution_id,
+                }
+                budget.limit_events.append(event)
+                return event
+            for budget in lineage:
+                budget.count += 1
+        return None
+
+
 def normalize_execution_lineage(value: AgentExecutionLineage | dict[str, Any] | None = None) -> AgentExecutionLineage:
     source = dict(value or {})
     scope = source.get("scope")
@@ -163,11 +219,17 @@ class AgentExecutionContext:
         effective_task_execution_strategy: str | None = None,
         strategy_context_source: str | None = None,
         task_workspace: Any | None = None,
+        parent_model_request_budget: _ModelRequestBudget | None = None,
     ):
         self.execution_id = execution_id
         self.lineage = cast(AgentExecutionLineage, dict(lineage))
         self.limits = cast(AgentExecutionLimits, dict(limits))
-        self.model_request_count = 0
+        raw_model_limit = self.limits.get("max_model_requests")
+        self._model_request_budget = _ModelRequestBudget(
+            execution_id=self.execution_id,
+            limit=(int(raw_model_limit) if raw_model_limit is not None else None),
+            parent=parent_model_request_budget,
+        )
         self.limit_events: list[dict[str, Any]] = []
         self.started_at = time.monotonic()
         self.last_progress_at = self.started_at
@@ -188,6 +250,14 @@ class AgentExecutionContext:
         self.effective_task_execution_strategy = _optional_str(effective_task_execution_strategy)
         self.strategy_context_source = _optional_str(strategy_context_source)
         self.task_workspace = task_workspace
+
+    @property
+    def model_request_budget(self) -> _ModelRequestBudget:
+        return self._model_request_budget
+
+    @property
+    def model_request_count(self) -> int:
+        return self._model_request_budget.count
 
     def raise_if_nesting_exceeded(self):
         if self.nesting_budget is None:
@@ -211,27 +281,22 @@ class AgentExecutionContext:
             )
 
     def consume_model_request(self, *, response_id: str | None = None, run_id: str | None = None):
-        limit = self.limits.get("max_model_requests")
-        if limit is not None and self.model_request_count >= int(limit):
-            event = {
-                "type": "limit_exceeded",
-                "limit_name": "max_model_requests",
-                "limit_value": limit,
-                "used": self.model_request_count,
-                "response_id": response_id,
-                "run_id": run_id,
-            }
-            self.limit_events.append(event)
+        event = self._model_request_budget.try_consume(
+            response_id=response_id,
+            run_id=run_id,
+        )
+        if event is not None:
+            if event.get("budget_execution_id") != self.execution_id:
+                self.limit_events.append(dict(event))
             raise AgentExecutionLimitExceeded(
                 (
                     "AgentExecution model request budget exceeded: "
-                    f"max_model_requests={ limit }, used={ self.model_request_count }."
+                    f"max_model_requests={ event['limit_value'] }, used={ event['used'] }."
                 ),
                 limit_name="max_model_requests",
-                limit_value=limit,
-                used=self.model_request_count,
+                limit_value=event["limit_value"],
+                used=int(event["used"]),
             )
-        self.model_request_count += 1
 
     def diagnostics(self) -> dict[str, Any]:
         last_progress = dict(self.last_progress_event or {})
@@ -242,7 +307,13 @@ class AgentExecutionContext:
                 "model_requests_used": self.model_request_count,
                 "max_model_requests": self.limits.get("max_model_requests"),
             },
-            "limit_events": [dict(item) for item in self.limit_events],
+            "limit_events": [
+                dict(item)
+                for item in [
+                    *self._model_request_budget.limit_events,
+                    *self.limit_events,
+                ]
+            ],
             "action_scope": DataFormatter.sanitize(dict(self.action_scope)),
             "action_artifact_recall": {
                 "record_count": len(self.action_artifact_recall_records),
@@ -471,9 +542,13 @@ class AgentExecutionContext:
             return
 
     def raise_if_limit_exceeded(self):
-        if not self.limit_events:
+        limit_events = [
+            *self._model_request_budget.limit_events,
+            *self.limit_events,
+        ]
+        if not limit_events:
             return
-        event = self.limit_events[-1]
+        event = limit_events[-1]
         raw_used = event.get("used", 0)
         used = raw_used if isinstance(raw_used, int) else int(str(raw_used or 0))
         raise AgentExecutionLimitExceeded(

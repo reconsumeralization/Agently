@@ -355,6 +355,7 @@ def _candidate(
     required: bool = False,
     estimated_chars: int = 80,
     summary: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> ContextCandidate:
     return ContextCandidate(
         block_key=f"untrusted-source-key:{source_ref}",
@@ -366,6 +367,7 @@ def _candidate(
         summary=summary or source_ref,
         estimated_chars=estimated_chars,
         required=required,
+        metadata=dict(metadata or {}),
     )
 
 
@@ -391,6 +393,388 @@ def _source_block(
         content_chars=len(resolved),
         required=required,
     )
+
+
+class MediaContextSource(MemoryContextSource):
+    def __init__(self, candidate: ContextCandidate, content: Any) -> None:
+        super().__init__(
+            [candidate],
+            {
+                candidate.source_ref: ContextBlock(
+                    block_id=f"media:{candidate.source_ref}",
+                    block_key=candidate.block_key,
+                    source_id="source:memory",
+                    source_revision="rev:1",
+                    source_ref=candidate.source_ref,
+                    binding_id="untrusted-source-binding",
+                    role=candidate.role,
+                    content="placeholder",
+                    completeness="complete",
+                    content_chars=11,
+                    metadata=candidate.metadata,
+                )
+            },
+        )
+        self._media_content = content
+        self.representations: list[str | None] = []
+
+    async def async_read_exact(
+        self,
+        source_ref: str,
+        *,
+        max_chars: int,
+        representation: str | None = None,
+        range_start: int = 0,
+    ) -> ContextSourceRead:
+        del max_chars, range_start
+        self.read_refs.append(source_ref)
+        self.representations.append(representation)
+        return ContextSourceRead(
+            source_id=self.source_id,
+            source_revision=self.source_revision,
+            source_ref=source_ref,
+            content=self._media_content,
+            completeness="complete",
+            metadata={
+                **dict(self._candidates[0].metadata),
+                "context_representation": representation or "text",
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_context_reader_hides_image_body_and_untrusted_summary_without_vlm_capability() -> None:
+    candidate = _candidate(
+        "assets/chart.png",
+        summary="\ufffdPNG guessed revenue chart content",
+        estimated_chars=40_000,
+        metadata={
+            "path": "assets/chart.png",
+            "media_type": "image/png",
+            "content_kind": "image",
+            "total_bytes": 40_000,
+            "summary": "guessed chart contents",
+            "ocr_text": "invented labels",
+        },
+    )
+    source = MediaContextSource(
+        candidate,
+        [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}],
+    )
+    selector = RecordingSelector("all")
+    context = TaskContext("task-image-ref-only")
+    context.attach(source, binding_id="binding:image")
+
+    package = await context.reader(
+        consumer=ContextConsumer(
+            "text-only-worker",
+            capabilities={"attachments": {"image": False}},
+        ),
+        semantic_selector=selector,
+    ).async_read("inspect the chart")
+
+    assert selector.calls[0][1][0].summary == "assets/chart.png"
+    assert len(package.blocks) == 1
+    assert package.blocks[0].source_ref == "assets/chart.png"
+    assert package.blocks[0].content is None
+    assert package.blocks[0].completeness == "ref_only"
+    assert "summary" not in package.blocks[0].metadata
+    assert "ocr_text" not in package.blocks[0].metadata
+    assert source.read_refs == []
+    assert any(
+        item.code == "context.media_content_ref_only"
+        for item in package.diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_reader_delivers_image_attachment_only_to_capable_consumer() -> None:
+    attachment = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    }
+    candidate = _candidate(
+        "assets/chart.png",
+        estimated_chars=40_000,
+        metadata={
+            "path": "assets/chart.png",
+            "media_type": "image/png",
+            "content_kind": "image",
+            "total_bytes": 40_000,
+            "summary": "guessed chart contents",
+            "ocr_text": "invented labels",
+        },
+    )
+    source = MediaContextSource(candidate, [attachment])
+    context = TaskContext("task-image-vlm")
+    context.attach(source, binding_id="binding:image")
+
+    package = await context.reader(
+        consumer=ContextConsumer(
+            "vlm-worker",
+            capabilities={"attachments": {"image": True}},
+        )
+    ).async_read("inspect the chart")
+
+    assert source.representations == ["image_attachment"]
+    assert package.blocks[0].content == (attachment,)
+    assert package.blocks[0].content_chars == 0
+    assert package.blocks[0].metadata["context_representation"] == (
+        "image_attachment"
+    )
+    assert "summary" not in package.blocks[0].metadata
+    assert "ocr_text" not in package.blocks[0].metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_content",
+    [
+        [],
+        [{"type": "image_url", "image_url": {"url": ""}}],
+        [
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,%%%%"},
+            }
+        ],
+        [{"type": "text", "text": "guessed image contents"}],
+    ],
+)
+async def test_context_reader_rejects_invalid_image_attachment_payloads(
+    invalid_content: Any,
+) -> None:
+    candidate = _candidate(
+        "assets/chart.png",
+        metadata={
+            "path": "assets/chart.png",
+            "media_type": "image/png",
+            "content_kind": "image",
+        },
+    )
+    source = MediaContextSource(candidate, invalid_content)
+    context = TaskContext("task-image-invalid-attachment")
+    context.attach(source, binding_id="binding:image")
+
+    package = await context.reader(
+        consumer=ContextConsumer(
+            "vlm-worker",
+            capabilities={"attachments": {"image": True}},
+        )
+    ).async_read("inspect the chart")
+
+    assert package.blocks == ()
+    assert package.omissions[0].reason == "source_read_failed"
+    assert any(
+        item.code == "context.image_attachment_read_failed"
+        for item in package.diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_generic_attachment_capability_does_not_imply_image_understanding() -> None:
+    candidate = _candidate(
+        "assets/chart.png",
+        metadata={
+            "path": "assets/chart.png",
+            "media_type": "image/png",
+            "content_kind": "image",
+        },
+    )
+    source = MediaContextSource(
+        candidate,
+        [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}],
+    )
+    context = TaskContext("task-generic-attachment-not-vlm")
+    context.attach(source, binding_id="binding:image")
+
+    package = await context.reader(
+        consumer=ContextConsumer(
+            "attachment-worker",
+            capabilities={"attachments": True},
+        )
+    ).async_read("inspect the chart")
+
+    assert package.blocks[0].content is None
+    assert package.blocks[0].completeness == "ref_only"
+    assert source.read_refs == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_ref", "content_kind", "media_type"),
+    [
+        ("artifacts/archive.zip", "binary", "application/zip"),
+        ("artifacts/custom.pkg", "archive", "application/x-custom"),
+        ("artifacts/cache.bin", "unknown", "application/octet-stream"),
+    ],
+)
+async def test_context_reader_keeps_unknown_binary_as_filename_only(
+    source_ref: str,
+    content_kind: str,
+    media_type: str,
+) -> None:
+    candidate = _candidate(
+        source_ref,
+        summary="decoded binary guess",
+        metadata={
+            "path": source_ref,
+            "media_type": media_type,
+            "content_kind": content_kind,
+        },
+    )
+    source = MediaContextSource(candidate, "must not be read")
+    context = TaskContext(f"task-{content_kind}-ref-only")
+    context.attach(source, binding_id=f"binding:{content_kind}")
+
+    package = await context.reader(consumer="worker").async_read("inspect files")
+
+    assert package.blocks[0].content is None
+    assert package.blocks[0].source_ref == source_ref
+    assert source.read_refs == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_ref", "media_type"),
+    [
+        ("assets/unlabeled.png", ""),
+        ("artifacts/unlabeled.zip", ""),
+        ("artifacts/payload", "application/octet-stream"),
+    ],
+)
+async def test_context_reader_classifies_non_text_files_without_source_kind_hint(
+    source_ref: str,
+    media_type: str,
+) -> None:
+    metadata = {"path": source_ref}
+    if media_type:
+        metadata["media_type"] = media_type
+    candidate = _candidate(
+        source_ref,
+        summary="untrusted decoded payload guess",
+        metadata=metadata,
+    )
+    source = MediaContextSource(candidate, b"raw bytes must not be read")
+    selector = RecordingSelector("all")
+    context = TaskContext(f"task-conservative-file-kind-{source_ref}")
+    context.attach(source, binding_id="binding:unlabeled-media")
+
+    package = await context.reader(
+        consumer="text-worker",
+        semantic_selector=selector,
+    ).async_read("inspect available files")
+
+    assert selector.calls[0][1][0].summary == source_ref
+    assert package.blocks[0].content is None
+    assert package.blocks[0].completeness == "ref_only"
+    assert source.read_refs == []
+
+
+@pytest.mark.asyncio
+async def test_context_reader_rejects_unparsed_document_bytes() -> None:
+    candidate = _candidate(
+        "reports/raw.pdf",
+        metadata={
+            "path": "reports/raw.pdf",
+            "media_type": "application/pdf",
+        },
+    )
+    source = MediaContextSource(candidate, b"%PDF raw bytes")
+    context = TaskContext("task-unparsed-pdf")
+    context.attach(source, binding_id="binding:pdf")
+
+    package = await context.reader(consumer="text-worker").async_read("read report")
+
+    assert package.blocks == ()
+    assert package.omissions[0].reason == "source_read_failed"
+    assert any(
+        item.code == "context.source_read_failed"
+        for item in package.diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_reader_keeps_direct_image_bytes_ref_only_without_vlm() -> None:
+    context = TaskContext("task-direct-image")
+    context.put(
+        role="information",
+        content=b"\x89PNG raw bytes",
+        entry_id="entry:image",
+        source_ref="assets/direct.png",
+        metadata={
+            "path": "assets/direct.png",
+            "media_type": "image/png",
+            "summary": "guessed direct image contents",
+        },
+    )
+
+    package = await context.reader(consumer="text-worker").async_read("inspect image")
+
+    assert package.blocks[0].source_ref == "assets/direct.png"
+    assert package.blocks[0].content is None
+    assert package.blocks[0].completeness == "ref_only"
+
+
+@pytest.mark.asyncio
+async def test_context_reader_rejects_direct_raw_image_bytes_even_for_vlm() -> None:
+    context = TaskContext("task-direct-image-vlm")
+    context.put(
+        role="information",
+        content=b"\x89PNG raw bytes",
+        entry_id="entry:image",
+        source_ref="assets/direct.png",
+        metadata={
+            "path": "assets/direct.png",
+            "media_type": "image/png",
+        },
+    )
+
+    package = await context.reader(
+        consumer=ContextConsumer(
+            "vlm-worker",
+            capabilities={"attachments": {"image": True}},
+        )
+    ).async_read("inspect image")
+
+    assert package.blocks == ()
+    assert package.omissions[0].reason == "source_read_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_ref", "content_kind", "media_type"),
+    [
+        ("report.pdf", "pdf", "application/pdf"),
+        (
+            "forecast.xlsx",
+            "office",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    ],
+)
+async def test_context_reader_accepts_source_parsed_document_text(
+    source_ref: str,
+    content_kind: str,
+    media_type: str,
+) -> None:
+    candidate = _candidate(
+        source_ref,
+        estimated_chars=24,
+        metadata={
+            "path": source_ref,
+            "media_type": media_type,
+            "content_kind": content_kind,
+        },
+    )
+    source = MediaContextSource(candidate, "authoritative parsed text")
+    context = TaskContext(f"task-{content_kind}-text")
+    context.attach(source, binding_id=f"binding:{content_kind}")
+
+    package = await context.reader(consumer="worker").async_read("read report")
+
+    assert package.blocks[0].content == "authoritative parsed text"
+    assert source.representations == [None]
 
 
 @pytest.mark.asyncio

@@ -199,6 +199,13 @@ profile 时，应通过需要审批的 action 或 ExecutionExchange provider 路
 `meta={"host_only_input_keys": [...]}` 声明；Action Runtime 会从模型计划出的
 `structured_plan` 和 native tool-call 输入里清洗这些 key，同时保留 host/direct call。
 
+Action spec 还会携带 `required_input_keys`。`@agent.action_func` 会从没有默认值的
+函数参数自动推导；基于 executor 的注册应通过
+`register_action(..., required_input_keys=[...])` 显式声明，或者在 kwargs 描述元组中
+使用第三个布尔值，例如 `(str, "Search query", True)`。Agently 会把同一约束写入
+native tool JSON Schema，并在 dispatch 前拒绝缺少必填 key 的结构化或原生模型命令。
+host 直接调用仍保留 executor 或 Python 函数原本的校验语义。
+
 内置能力 package 位于 `agently.builtins.actions`。例如：
 
 ```python

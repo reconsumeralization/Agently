@@ -15,7 +15,12 @@
 from __future__ import annotations
 
 from agently.core.context import ModelRequestContextSelector
-from agently.types.data import ContextBudget, ContextConsumption, ContextReadIntent
+from agently.types.data import (
+    ContextBudget,
+    ContextConsumer,
+    ContextConsumption,
+    ContextReadIntent,
+)
 
 from .TaskShared import *
 
@@ -42,7 +47,12 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         except (TypeError, ValueError):
             max_chars = 6000
         reader = self.task_context.reader(
-            consumer=consumer_id,
+            consumer=ContextConsumer(
+                consumer_id=str(consumer_id),
+                model=str(getattr(self.agent, "_active_model_key", "") or "")
+                or None,
+                capabilities=self._task_context_consumer_capabilities(),
+            ),
             phase=phase,
             budget=ContextBudget(
                 max_chars=max_chars,
@@ -53,6 +63,97 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         )
         self.context_readers[key] = reader
         return reader
+
+    def _task_context_consumer_capabilities(self) -> dict[str, Any]:
+        """Resolve explicit model-input capabilities without guessing by name."""
+
+        candidates: list[Any] = []
+        candidates.append(self.options.get("context_consumer_capabilities"))
+        agent_task_options = self.options.get("agent_task")
+        if isinstance(agent_task_options, Mapping):
+            candidates.append(
+                agent_task_options.get("context_consumer_capabilities")
+            )
+        settings = getattr(self.agent, "settings", None)
+        get_setting = getattr(settings, "get", None)
+        if callable(get_setting):
+            candidates.append(get_setting("model_capabilities", None))
+            provider = str(
+                get_setting(
+                    "plugins.ModelRequester.activate",
+                    "",
+                )
+                or ""
+            ).strip()
+            if provider:
+                candidates.append(
+                    get_setting(
+                        f"plugins.ModelRequester.{provider}.capabilities",
+                        None,
+                    )
+                )
+        for candidate in candidates:
+            if isinstance(candidate, Mapping):
+                return DataFormatter.sanitize(dict(candidate))
+        return {}
+
+    @staticmethod
+    def _bind_task_context_attachments(request: Any, package: Any) -> None:
+        """Bind disclosed image blocks through ModelRequest rich content only."""
+
+        def plain(value: Any) -> Any:
+            if isinstance(value, Mapping):
+                return {str(key): plain(item) for key, item in value.items()}
+            if isinstance(value, Sequence) and not isinstance(
+                value,
+                str | bytes | bytearray,
+            ):
+                return [plain(item) for item in value]
+            return value
+
+        attachments: list[dict[str, Any]] = []
+        for block in getattr(package, "blocks", ()):
+            if (
+                str(block.metadata.get("context_representation") or "")
+                != "image_attachment"
+            ):
+                continue
+            content = block.content
+            if not isinstance(content, Sequence) or isinstance(
+                content,
+                str | bytes | bytearray,
+            ):
+                continue
+            for item in content:
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("type") or "") != "image_url":
+                    continue
+                attachments.append(cast(dict[str, Any], plain(item)))
+        if not attachments:
+            return
+        prompt = getattr(request, "prompt", None)
+        current = prompt.get("attachment") if prompt is not None else None
+        rich_content = (
+            [dict(item) for item in current if isinstance(item, Mapping)]
+            if isinstance(current, Sequence)
+            and not isinstance(current, str | bytes | bytearray)
+            else []
+        )
+        rich_content.extend(
+            [
+                {
+                    "type": "text",
+                    "text": (
+                        "The following image inputs were disclosed by TaskContext. "
+                        "Use their source_ref entries in the accompanying context pack; "
+                        "do not infer content from filenames."
+                    ),
+                },
+                *attachments,
+            ]
+        )
+        request.attachment(rich_content)
 
     async def _context_pack_with_task_context(self, context_pack: Any) -> "TaskContextView":
         projected, _package = await self._read_task_context_view(
@@ -144,7 +245,14 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
             {
                 "id": block.block_id,
                 "role": block.role,
-                "content": DataFormatter.sanitize(block.content),
+                "content": (
+                    None
+                    if str(
+                        block.metadata.get("context_representation") or ""
+                    )
+                    == "image_attachment"
+                    else DataFormatter.sanitize(block.content)
+                ),
                 "source_ref": block.source_ref,
                 "completeness": block.completeness,
                 "required": block.required,

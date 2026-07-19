@@ -241,6 +241,108 @@ async def test_task_workspace_context_source_enumerates_without_query_and_reads_
     assert readback.source_revision == page.source_revision
 
 
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_indexes_image_name_without_preparing_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Minimal valid PNG signature is sufficient for deterministic media
+    # classification; enumeration must not base64-prepare it.
+    (tmp_path / "chart.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    )
+    workspace = TaskWorkspace(
+        tmp_path,
+        mode="read_only",
+        execution_id="image-context-source",
+    )
+    source = TaskWorkspaceContextSource(workspace)
+
+    async def fail_if_read(*_args, **_kwargs):
+        raise AssertionError("image enumeration must not prepare attachment bytes")
+
+    monkeypatch.setattr(workspace, "read_file", fail_if_read)
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=10,
+    )
+
+    descriptor = page.descriptors[0]
+    assert descriptor.source_ref == "chart.png"
+    assert descriptor.summary == "chart.png"
+    assert descriptor.index_text == "chart.png"
+    assert descriptor.metadata["content_kind"] == "image"
+    assert descriptor.metadata["media_type"] == "image/png"
+    assert "base64" not in descriptor.index_text
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_returns_image_attachment_only_on_exact_representation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "chart.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    )
+    source = TaskWorkspaceContextSource(
+        TaskWorkspace(
+            tmp_path,
+            mode="read_only",
+            execution_id="image-context-exact-read",
+        )
+    )
+
+    readback = await source.async_read_exact(
+        "chart.png",
+        max_chars=1,
+        representation="image_attachment",
+    )
+
+    assert readback.content[0]["type"] == "image_url"
+    assert readback.content[0]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
+    assert readback.metadata["context_representation"] == "image_attachment"
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_parses_xlsx_for_context(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "课程规划"
+    sheet.append(["课程", "说明"])
+    sheet.append(["AI 能力边界与银行责任", "只交付解析后的文本"])
+    workbook.save(tmp_path / "curriculum.xlsx")
+    workbook.close()
+    source = TaskWorkspaceContextSource(
+        TaskWorkspace(
+            tmp_path,
+            mode="read_only",
+            execution_id="xlsx-context-source",
+        )
+    )
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=10,
+    )
+    descriptor = page.descriptors[0]
+    readback = await source.async_read_exact(
+        "curriculum.xlsx",
+        max_chars=20_000,
+    )
+
+    assert descriptor.metadata["content_kind"] == "office"
+    assert descriptor.metadata["context_representation"] == "parsed_text"
+    assert readback.metadata["context_representation"] == "parsed_text"
+    assert "AI 能力边界与银行责任" in readback.content
+    assert not isinstance(readback.content, bytes)
+
+
 def test_task_workspace_has_no_cross_source_context_builder(tmp_path: Path) -> None:
     workspace = TaskWorkspace(tmp_path)
 

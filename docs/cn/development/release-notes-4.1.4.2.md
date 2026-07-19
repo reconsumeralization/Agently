@@ -72,6 +72,20 @@ hybrid partition；ContextReader 负责 consumer-local query offset、精确 sou
 语义选择与 ContextPackage 构造。`source_kinds` 是当前 TaskContext 实际挂载 source 的
 开放 vocabulary，不是框架硬编码列表。
 
+ContextReader 现在执行保守媒体边界。文本以及成功解析的
+PDF/DOCX/XLSX/PPTX 内容可以进入 ContextPackage。图片只有在具体 consumer 显式声明
+支持图片附件时才进入附件通道；具备该能力的 AgentTask 请求会通过 ModelRequest
+attachment channel 绑定经过校验的图片块。二进制、未知、未解析、非法或空媒体只保留
+引用或使本次选中读取失败，不会根据文件名猜测内容。
+
+Action spec 暴露 `required_input_keys`，可从本地函数签名推导，也可由 executor/MCP
+adapter 声明。native tool schema 携带同一要求；模型生成的调用缺少必填 key 时会在
+dispatch 前失败。TaskBoard 的 scoped retrieval 在初始 planning 与 repair 中都保持为
+ContextReader 路径；纯 retrieval support card 不再被标成 Action card。
+
+`max_model_requests` 现在是一份原子共享的 lineage budget。descendant execution 会
+消耗 ancestor allowance，而不是重新计数；child-local limit 只约束该 child subtree。
+
 required TaskWorkspace delivery path 在 terminal verification 期间表示为 digest-pinned
 暂存候选。verifier 拒绝时旧目标保持不变；验收通过后才原子提升目标并进行完整的
 提升后 readback。提升、digest 或 readback 任一失败都会把任务转为 blocked。

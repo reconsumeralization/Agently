@@ -258,6 +258,11 @@ class ActionResourceRegistrar:
                         action_id=tool.name,
                         desc=tool.description,
                         kwargs=DataFormatter.from_schema_to_kwargs_format(tool.inputSchema),
+                        required_input_keys=(
+                            list(tool.inputSchema.get("required", []))
+                            if isinstance(tool.inputSchema, dict)
+                            else []
+                        ),
                         returns=DataFormatter.from_schema_to_kwargs_format(tool.outputSchema),
                         executor=action._create_executor(
                             "MCPActionExecutor",

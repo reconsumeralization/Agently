@@ -170,6 +170,44 @@ deduplication, optional ModelRequest selection, exact readback, and package
 budgets. The returned package exposes per-binding `source_coverage` and index
 diagnostics, never internal cache keys or provider vectors.
 
+Context delivery is media-aware. Plain text and source-parsed text may enter a
+package; the built-in TaskWorkspace source parses supported PDF, DOCX, XLSX,
+and PPTX files before disclosure. A document whose parser or optional
+dependency is unavailable is ref-only. Images, archives, executables, audio,
+video, unknown formats, and arbitrary bytes are never coerced into guessed
+text. Their index projection is limited to the canonical filename/ref.
+
+An image is ref-only unless the exact consumer explicitly declares image
+attachment support:
+
+```python
+from agently.types.data import ContextConsumer
+
+reader = task_context.reader(
+    consumer=ContextConsumer(
+        "visual-reviewer",
+        capabilities={"attachments": {"image": True}},
+    ),
+)
+```
+
+For AgentTask, declare the same capability on the selected task strategy:
+
+```python
+execution = agent.goal("Review the attached chart").strategy(
+    "taskboard",
+    context_consumer_capabilities={"attachments": {"image": True}},
+)
+```
+
+Agently does not infer vision support from a model name or from a generic
+`attachments=True` flag. When explicitly supported, ContextReader emits a
+validated image attachment block and AgentTask binds it through the
+ModelRequest attachment channel; the data URL is not serialized into the text
+context pack. Image interpretation remains model-owned. An invalid or empty
+attachment fails the selected read instead of falling back to a filename-based
+guess.
+
 Required content remains fail-closed when it cannot fit. A caller that has
 explicitly accepted a lossy projection may request
 `metadata={"required_overflow": "lossy_digest"}`. Skill sources then return a

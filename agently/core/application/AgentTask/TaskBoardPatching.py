@@ -994,7 +994,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if not current_id:
             return None
         task_workspace_target_refs, action_target_refs = cls._split_taskboard_target_refs(target_ref_list)
-        support_card_requires_action = bool(scoped_retrieval_plan or action_target_refs)
+        support_card_needed = bool(scoped_retrieval_plan or action_target_refs)
 
         def safe_id(raw: str) -> str:
             text = "".join(ch if ch.isalnum() or ch in {"_", ".", "-"} else "-" for ch in raw.strip())
@@ -1048,19 +1048,19 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             if target_ref_list
             else "agent_task.taskboard.control_auto_readback"
         )
-        action_evidence_card_id = (
+        evidence_acquisition_card_id = (
             unique_id(f"{current_id}.evidence")
-            if support_card_requires_action
+            if support_card_needed
             else ""
         )
         local_readback_card_id = (
             unique_id(f"{current_id}.readback")
-            if task_workspace_target_refs or not support_card_requires_action
+            if task_workspace_target_refs or not support_card_needed
             else ""
         )
         support_card_ids = [
             card_id
-            for card_id in (action_evidence_card_id, local_readback_card_id)
+            for card_id in (evidence_acquisition_card_id, local_readback_card_id)
             if card_id
         ]
         primary_evidence_card_id = support_card_ids[0]
@@ -1082,14 +1082,14 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         gaps = cls._normalize_string_list(card_output.get("gaps"))
         remaining_work = cls._normalize_string_list(card_output.get("remaining_work"))
         if scoped_retrieval_plan:
-            action_objective = "Run expanded bounded scoped retrieval before continuing the setback card."
+            evidence_objective = "Run expanded bounded scoped retrieval before continuing the setback card."
             if action_target_refs:
-                action_objective = (
-                    f"{action_objective} Also collect explicit external target refs: "
+                evidence_objective = (
+                    f"{evidence_objective} Also collect explicit external target refs: "
                     f"{'; '.join(cls._taskboard_target_ref_label(ref) for ref in action_target_refs)}"
                 )
         else:
-            action_objective = (
+            evidence_objective = (
                 "Collect scoped evidence from the explicit external target refs required before continuing the "
                 "setback control card. Target refs: "
                 f"{'; '.join(cls._taskboard_target_ref_label(ref) for ref in action_target_refs)}"
@@ -1105,7 +1105,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 "Read scoped cold evidence required before continuing the setback control card."
             )
         if gaps:
-            action_objective = f"{action_objective} Gaps: {'; '.join(gaps[:3])}"
+            evidence_objective = f"{evidence_objective} Gaps: {'; '.join(gaps[:3])}"
             local_readback_objective = (
                 f"{local_readback_objective} Gaps: {'; '.join(gaps[:3])}"
             )
@@ -1126,13 +1126,13 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "source_card_id": current_id,
             "terminal_convergence_subject": convergence_subject,
         }
-        action_evidence_metadata = dict(shared_evidence_metadata)
+        evidence_acquisition_metadata = dict(shared_evidence_metadata)
         if action_target_refs:
-            action_evidence_metadata["target_refs"] = action_target_refs
-            action_evidence_metadata["external_target_refs"] = action_target_refs
+            evidence_acquisition_metadata["target_refs"] = action_target_refs
+            evidence_acquisition_metadata["external_target_refs"] = action_target_refs
         if scoped_retrieval_plan:
-            action_evidence_metadata["scoped_retrieval"] = DataFormatter.sanitize(scoped_retrieval_plan)
-            action_evidence_metadata["retrieval_policy"] = scoped_retrieval_policy()
+            evidence_acquisition_metadata["scoped_retrieval"] = DataFormatter.sanitize(scoped_retrieval_plan)
+            evidence_acquisition_metadata["retrieval_policy"] = scoped_retrieval_policy()
         local_readback_metadata = dict(shared_evidence_metadata)
         if task_workspace_target_refs:
             local_readback_metadata["target_refs"] = task_workspace_target_refs
@@ -1141,7 +1141,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "generated_by": patch_source,
             "continues_card_id": current_id,
             "readback_card_id": local_readback_card_id or primary_evidence_card_id,
-            "evidence_card_id": action_evidence_card_id,
+            "evidence_card_id": evidence_acquisition_card_id,
             "terminal_convergence_subject": convergence_subject,
         }
         if target_ref_list:
@@ -1149,20 +1149,20 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if final_task_workspace_deliverables:
             continuation_metadata["final_task_workspace_deliverables"] = final_task_workspace_deliverables
         evidence_cards: list[dict[str, Any]] = []
-        if action_evidence_card_id:
+        if evidence_acquisition_card_id:
             evidence_cards.append(
                 {
-                    "id": action_evidence_card_id,
-                    "objective": action_objective,
+                    "id": evidence_acquisition_card_id,
+                    "objective": evidence_objective,
                     "depends_on": readback_dependencies,
                     "required_outputs": (
                         ["Expanded bounded scoped retrieval evidence or diagnostics explaining why it remains insufficient."]
                         if scoped_retrieval_plan
                         else ["Evidence gathered from external target refs or diagnostics explaining inaccessible refs."]
                     ),
-                    "allowed_execution_shape": "actions",
+                    "allowed_execution_shape": "actions" if action_target_refs else "auto",
                     "failure_policy": "required",
-                    "metadata": action_evidence_metadata,
+                    "metadata": evidence_acquisition_metadata,
                 }
             )
         if local_readback_card_id:
@@ -1206,7 +1206,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                         "source_code": diagnostic_code,
                         "card_id": current_id,
                         "readback_card_id": local_readback_card_id or primary_evidence_card_id,
-                        "evidence_card_id": action_evidence_card_id,
+                        "evidence_card_id": evidence_acquisition_card_id,
                         "continuation_card_id": continuation_id,
                         "target_ref_count": len(target_ref_list),
                         "task_workspace_target_ref_count": len(task_workspace_target_refs),
@@ -1221,7 +1221,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                     "code": diagnostic_code,
                     "card_id": current_id,
                     "readback_card_id": local_readback_card_id or primary_evidence_card_id,
-                    "evidence_card_id": action_evidence_card_id,
+                    "evidence_card_id": evidence_acquisition_card_id,
                     "continuation_card_id": continuation_id,
                     "target_ref_count": len(target_ref_list),
                     "task_workspace_target_ref_count": len(task_workspace_target_refs),

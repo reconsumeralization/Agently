@@ -98,6 +98,7 @@ class ActionSpec(TypedDict, total=False):
     name: str
     desc: str
     kwargs: KwargsType
+    required_input_keys: list[str]
     returns: ReturnType
     tags: list[str]
     default_policy: ActionPolicy

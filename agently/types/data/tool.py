@@ -18,7 +18,7 @@ from typing_extensions import TypedDict, NotRequired
 from pydantic import AnyUrl
 from httpx import Auth, AsyncClient
 
-ArgumentDesc: TypeAlias = type | str | tuple[str | type | Any, str]
+ArgumentDesc: TypeAlias = type | str | tuple[str | type | Any, str] | tuple[str | type | Any, str, bool]
 KwargsType: TypeAlias = dict[str, ArgumentDesc]
 ReturnType: TypeAlias = KwargsType | ArgumentDesc | dict[str, "ReturnType"] | list["ReturnType"]
 

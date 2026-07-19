@@ -170,13 +170,15 @@ class AgentTaskTaskBoardStrategyMixin(
             }
             state_digest = relevant_state_digest(
                 {
-                    "candidate_content_version_ids": [str(result.output_digest)] if result.output_digest else [],
                     "source_reference_targets": self._taskboard_card_reference_targets(result),
                     "capability_facts": {capability_id: "required" for capability_id in requires_capability_ids},
                     "output_subjects": [contract_subject],
                     # setback/failed/blocked and regenerated repair-card ids are
                     # equivalent observations of the same unresolved contract.
-                    # They must not masquerade as relevant-state progress.
+                    # Model-authored output_digest prose is not a content
+                    # identity and must not masquerade as relevant-state
+                    # progress. Actual new artifacts still reset convergence
+                    # through their versioned source_reference_targets.
                     "repair_contract": {
                         "allowed_execution_shape": str(
                             getattr(card, "allowed_execution_shape", "") or "auto"
@@ -949,6 +951,7 @@ class AgentTaskTaskBoardStrategyMixin(
         )
         language_policy = self._language_policy()
         request = self.agent.create_temp_request()
+        self._bind_task_context_attachments(request, context_package)
         self._apply_language_policy_to_request(request, language_policy)
         previous_iterations = self._iteration_prompt_summaries()
         repair_context = self._planner_repair_context(previous_iterations)
@@ -981,6 +984,7 @@ class AgentTaskTaskBoardStrategyMixin(
                         ],
                     },
                 },
+                "retrieval_policy": self._task_context_retrieval_policy(),
                 "planner_capabilities": self._planner_capabilities(),
                 "capability_evidence_requirements": self._capability_evidence_requirements(),
                 "repair_context": repair_context,
@@ -1009,8 +1013,12 @@ class AgentTaskTaskBoardStrategyMixin(
             "Card ids are optional short hints only; keep them readable and do not spend tokens inventing opaque ids. "
             "Use allowed_execution_shape='control' for synthesis, verification, finalization, or board-continuation "
             "decision cards that should be handled by one structured model request. Use allowed_execution_shape='readback' "
-            "for cards whose only job is bounded cold artifact readback. Use an action-capable shape such as 'actions' "
-            "or 'auto' for cards that need external tools, Context reads, side effects, or mixed action/readback work. "
+            "for cards whose only job is bounded cold artifact readback. Use retrieval_policy and scoped_retrieval for "
+            "TaskContext reads, selecting only exact source kinds offered by retrieval_policy.source_kinds. ContextReader "
+            "performs those reads before the card carrier; they do not require a file Action. TaskWorkspace Actions cannot read "
+            "a pinned repository, RecordStore, Skill, or any other Context source unless that content was actually materialized "
+            "inside the bound TaskWorkspace. Use an action-capable shape such as 'actions' or 'auto' only for mounted external "
+            "Actions, TaskWorkspace side effects, or genuinely mixed Action/readback work. "
             "For an actions card, include action_commands only when the exact offered Action ids and every required "
             "argument are already known now. Omit action_commands when any argument depends on a future card result; "
             "do not invent placeholders, copy opaque ids, or guess arguments. "

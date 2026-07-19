@@ -238,6 +238,43 @@ def test_model_sourced_action_input_strips_spec_host_only_kwargs():
     assert received[-1] == {"value": 4, "privileged": True}
 
 
+def test_action_contract_derives_required_input_keys_and_rejects_missing_input():
+    action = Agently.create_agent().action
+    action_id = f"required_input_{ uuid.uuid4().hex[:8] }"
+    received: list[dict[str, Any]] = []
+
+    def capture(query: str, limit: int = 20):
+        received.append({"query": query, "limit": limit})
+        return received[-1]
+
+    action.register_action(
+        action_id=action_id,
+        desc="Capture a required query and optional limit.",
+        kwargs={
+            "query": (str, "Search query."),
+            "limit": (int, "Maximum results. Default: 20."),
+        },
+        func=capture,
+        expose_to_model=True,
+    )
+
+    spec = action.action_registry.get_spec(action_id)
+    assert spec["required_input_keys"] == ["query"]
+
+    result = action.execute_action(
+        action_id,
+        {"limit": 5},
+        source_protocol="structured_plan",
+    )
+
+    assert result["status"] == "error"
+    assert received == []
+    assert any(
+        diagnostic.get("code") == "action.input.required_keys_missing"
+        for diagnostic in result.get("diagnostics", [])
+    )
+
+
 def test_model_sourced_bash_action_input_strips_allow_unsafe(tmp_path):
     agent = Agently.create_agent()
     action_id = f"bash_input_safety_{ uuid.uuid4().hex[:8] }"
@@ -296,9 +333,13 @@ def test_action_dispatcher_parameter_error_has_structured_diagnostic():
     assert result.get("status") == "error"
     diagnostics = result.get("diagnostics")
     assert isinstance(diagnostics, list)
-    error_diagnostic = next(item for item in diagnostics if item.get("code") == "action.input.type_error")
+    error_diagnostic = next(
+        item
+        for item in diagnostics
+        if item.get("code") == "action.input.required_keys_missing"
+    )
     error_meta = error_diagnostic.get("meta", {})
-    assert error_meta["exception_type"] == "TypeError"
+    assert error_meta["missing_input_keys"] == ["value"]
 
 
 def test_action_dispatcher_timeout_has_structured_diagnostic():

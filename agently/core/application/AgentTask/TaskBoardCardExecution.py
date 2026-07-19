@@ -234,6 +234,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             ),
         )
         request = self.agent.create_temp_request()
+        self._bind_task_context_attachments(request, context_package)
         self._apply_language_policy_to_request(request)
         request.input(
             {
@@ -2165,6 +2166,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 intent=f"Execute TaskBoard control card {context.card.id}: {context.card.objective}",
             )
             request = self.agent.create_temp_request()
+            self._bind_task_context_attachments(request, context_package)
             self._apply_language_policy_to_request(request, language_policy)
             request_payload = dict(control_input_payload)
             request_payload["context_pack"] = DataFormatter.sanitize(request_context_pack)

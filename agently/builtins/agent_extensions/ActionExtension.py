@@ -118,6 +118,7 @@ class ActionExtension(BaseAgent):
             kwargs=copied_spec.get("kwargs", {}),
             func=global_registry.get_func(action_id),
             executor=executor,
+            required_input_keys=copied_spec.get("required_input_keys"),
             returns=copied_spec.get("returns"),
             tags=copied_spec.get("tags", []),
             default_policy=copied_spec.get("default_policy", {}),

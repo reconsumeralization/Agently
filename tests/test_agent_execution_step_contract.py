@@ -2636,7 +2636,7 @@ def test_taskboard_blocked_scoped_retrieval_card_adds_continuation_patch(tmp_pat
     assert cards["review"].status == "setback"
     assert "review.evidence" in cards
     assert "review.continue" in cards
-    assert cards["review.evidence"].allowed_execution_shape == "actions"
+    assert cards["review.evidence"].allowed_execution_shape == "auto"
     scoped_plan = cards["review.evidence"].metadata["scoped_retrieval"]
     assert scoped_plan["query_groups"][0]["snippet_limit"] == 1200
     assert cards["review.evidence"].metadata["generated_by"] == "agent_task.taskboard.scoped_retrieval_continuation"
@@ -9202,6 +9202,69 @@ def test_agent_execution_context_enforces_nesting_budget():
     with pytest.raises(AgentExecutionLimitExceeded) as raised:
         nested_over.raise_if_nesting_exceeded()
     assert raised.value.limit_name == "max_nested_agent_steps"
+
+
+def test_nested_agent_executions_share_root_model_request_budget(tmp_path):
+    from agently.core.application.AgentExecution import (
+        AgentExecutionContext,
+        AgentExecutionLimitExceeded,
+    )
+    from agently.core.runtime.RuntimeContext import bind_runtime_context
+
+    root = AgentExecutionContext(
+        execution_id="root-budget",
+        lineage={},
+        limits={"max_model_requests": 2},
+    )
+    agent = _create_agent("nested-shared-root-budget").use_task_workspace(
+        tmp_path / "workspace"
+    )
+    with bind_runtime_context(agent_execution_context=root):
+        first = agent.create_execution(limits={"max_model_requests": 2})
+        second = agent.create_execution(limits={"max_model_requests": 2})
+
+    first.execution_context.consume_model_request(response_id="first")
+    second.execution_context.consume_model_request(response_id="second")
+    with pytest.raises(AgentExecutionLimitExceeded) as raised:
+        second.execution_context.consume_model_request(response_id="third")
+
+    assert raised.value.limit_name == "max_model_requests"
+    assert raised.value.limit_value == 2
+    assert raised.value.used == 2
+    assert root.diagnostics()["budget"]["model_requests_used"] == 2
+    assert first.execution_context.diagnostics()["budget"]["model_requests_used"] == 1
+    assert second.execution_context.diagnostics()["budget"]["model_requests_used"] == 1
+    assert root.diagnostics()["limit_events"][0]["response_id"] == "third"
+
+
+def test_nested_agent_execution_local_budget_does_not_constrain_sibling(tmp_path):
+    from agently.core.application.AgentExecution import (
+        AgentExecutionContext,
+        AgentExecutionLimitExceeded,
+    )
+    from agently.core.runtime.RuntimeContext import bind_runtime_context
+
+    root = AgentExecutionContext(
+        execution_id="root-budget",
+        lineage={},
+        limits={"max_model_requests": 3},
+    )
+    agent = _create_agent("nested-independent-child-budget").use_task_workspace(
+        tmp_path / "workspace"
+    )
+    with bind_runtime_context(agent_execution_context=root):
+        constrained = agent.create_execution(limits={"max_model_requests": 1})
+        sibling = agent.create_execution(limits={"max_model_requests": 2})
+
+    constrained.execution_context.consume_model_request(response_id="child-one")
+    with pytest.raises(AgentExecutionLimitExceeded) as raised:
+        constrained.execution_context.consume_model_request(response_id="child-two")
+    assert raised.value.limit_value == 1
+
+    sibling.execution_context.consume_model_request(response_id="sibling-one")
+    sibling.execution_context.consume_model_request(response_id="sibling-two")
+    assert root.diagnostics()["budget"]["model_requests_used"] == 3
+    assert sibling.execution_context.diagnostics()["budget"]["model_requests_used"] == 2
 
 
 @pytest.mark.asyncio

@@ -335,6 +335,7 @@ class Action:
         action_id: str,
         desc: str | None,
         kwargs: "KwargsType | None",
+        required_input_keys: list[str],
         returns: "ReturnType | None",
         tags: list[str],
         default_policy: "ActionPolicy | None",
@@ -363,9 +364,61 @@ class Action:
             "execution_resources": execution_resources if execution_resources is not None else [],
             "meta": meta if meta is not None else {},
         })
+        if required_input_keys:
+            spec["required_input_keys"] = required_input_keys
         if returns is not None:
             spec["returns"] = returns
         return spec
+
+    @staticmethod
+    def _resolve_required_input_keys(
+        *,
+        kwargs: "KwargsType | None",
+        func: Callable[..., Any] | None,
+        required_input_keys: Sequence[str] | None,
+    ) -> list[str]:
+        declared = list(kwargs or {})
+        declared_set = {str(key) for key in declared if str(key) != "<*>"}
+        if required_input_keys is not None:
+            required = [str(key) for key in required_input_keys]
+            unknown = sorted(set(required) - declared_set)
+            if unknown:
+                raise ValueError(
+                    "required_input_keys contains undeclared Action kwargs: "
+                    + ", ".join(unknown)
+                    + "."
+                )
+            return [key for key in declared if key in set(required)]
+
+        markers: dict[str, bool] = {}
+        for key, descriptor in (kwargs or {}).items():
+            if (
+                isinstance(descriptor, tuple)
+                and len(descriptor) >= 3
+                and isinstance(descriptor[2], bool)
+            ):
+                markers[str(key)] = descriptor[2]
+
+        signature_required: set[str] = set()
+        if func is not None:
+            signature = inspect.signature(func)
+            signature_required = {
+                name
+                for name, parameter in signature.parameters.items()
+                if name in declared_set
+                and parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                }
+                and parameter.default is inspect.Parameter.empty
+            }
+        return [
+            key
+            for key in declared
+            if key != "<*>"
+            and markers.get(key, key in signature_required)
+        ]
 
     def register_action(
         self,
@@ -375,6 +428,7 @@ class Action:
         kwargs: "KwargsType | None",
         func: Callable[..., Any] | None = None,
         executor=None,
+        required_input_keys: Sequence[str] | None = None,
         returns: "ReturnType | None" = None,
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
@@ -392,10 +446,16 @@ class Action:
             executor = self._create_executor("LocalFunctionActionExecutor", func=func)
         normalized_tags = self._normalize_tags(tags)
         executor_type = str(getattr(executor, "kind", "function"))
+        resolved_required_input_keys = self._resolve_required_input_keys(
+            kwargs=kwargs,
+            func=func,
+            required_input_keys=required_input_keys,
+        )
         spec = self._sanitize_action_spec(
             action_id=action_id,
             desc=desc,
             kwargs=kwargs,
+            required_input_keys=resolved_required_input_keys,
             returns=returns,
             tags=normalized_tags,
             default_policy=default_policy,

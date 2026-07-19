@@ -1155,6 +1155,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             intent=f"Verify iteration {iteration_index}: {self.goal}",
         )
         request = self.agent.create_temp_request()
+        self._bind_task_context_attachments(request, context_package)
         self._apply_language_policy_to_request(request, language_policy)
         model_evidence_ledger = self._model_evidence_ledger_projection(
             evidence_ledger,

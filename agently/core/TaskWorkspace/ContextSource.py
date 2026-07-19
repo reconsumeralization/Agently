@@ -83,14 +83,32 @@ class TaskWorkspaceContextSource:
         descriptors: list[ContextSourceDescriptor] = []
         for relative in page_paths:
             info = self.task_workspace.inspect_file(relative)
-            readback = await self.task_workspace.read_file(
-                relative,
-                max_bytes=projection_max_chars,
-            )
+            content_kind = str(info.get("content_kind") or "unknown")
+            projection = ""
+            readback = None
+            if content_kind in {"text", "pdf", "office"}:
+                readback = await self.task_workspace.read_file(
+                    relative,
+                    max_bytes=projection_max_chars,
+                )
+                projection = readback.content
             total_bytes = int(
-                str(info.get("bytes") or info.get("size") or readback.total_bytes)
+                str(
+                    info.get("bytes")
+                    or info.get("size")
+                    or (readback.total_bytes if readback is not None else 0)
+                )
             )
-            projection = readback.content
+            media_type = info.get("media_type") or (
+                readback.media_type if readback is not None else None
+            )
+            sha256 = info.get("sha256") or (
+                readback.sha256 if readback is not None else None
+            )
+            metadata_only = content_kind in {"image", "binary", "unknown"} or (
+                content_kind in {"pdf", "office"}
+                and (readback is None or not readback.readable)
+            )
             descriptors.append(
                 ContextSourceDescriptor(
                     descriptor_key=f"task-workspace:{relative}",
@@ -100,15 +118,28 @@ class TaskWorkspaceContextSource:
                     role="information",
                     title=relative,
                     summary=(projection or relative)[:500],
-                    estimated_chars=total_bytes,
-                    index_text=f"{relative}\n{projection}",
-                    content_digest=str(info.get("sha256") or readback.sha256),
+                    estimated_chars=(len(relative) if metadata_only else total_bytes),
+                    index_text=(
+                        relative
+                        if metadata_only or not projection
+                        else f"{relative}\n{projection}"
+                    ),
+                    content_digest=str(sha256 or ""),
                     metadata={
                         "path": relative,
-                        "sha256": info.get("sha256") or readback.sha256,
+                        "sha256": sha256,
                         "total_bytes": total_bytes,
-                        "media_type": info.get("media_type") or readback.media_type,
-                        "content_kind": info.get("content_kind") or readback.content_kind,
+                        "media_type": media_type,
+                        "content_kind": content_kind,
+                        "context_representation": (
+                            "image_attachment_or_metadata"
+                            if content_kind == "image"
+                            else "metadata_only"
+                            if metadata_only
+                            else "parsed_text"
+                            if content_kind in {"pdf", "office"}
+                            else "text"
+                        ),
                     },
                 )
             )
@@ -128,18 +159,48 @@ class TaskWorkspaceContextSource:
         representation: str | None = None,
         range_start: int = 0,
     ) -> ContextSourceRead:
-        del representation
+        info = self.task_workspace.inspect_file(source_ref)
+        content_kind = str(info.get("content_kind") or "unknown")
+        if content_kind in {"binary", "unknown"} or (
+            content_kind == "image" and representation != "image_attachment"
+        ):
+            return ContextSourceRead(
+                source_id=self.source_id,
+                source_revision=self.source_revision,
+                source_ref=source_ref,
+                content=None,
+                completeness="ref_only",
+                content_digest=str(info.get("sha256") or ""),
+                refs=(source_ref,),
+                metadata={
+                    "path": source_ref,
+                    "sha256": info.get("sha256"),
+                    "total_bytes": int(str(info.get("bytes") or 0)),
+                    "media_type": info.get("media_type"),
+                    "content_kind": content_kind,
+                    "context_representation": "metadata_only",
+                },
+            )
         readback = await self.task_workspace.read_file(
             source_ref,
             max_bytes=max_chars,
             offset=range_start,
         )
+        content: Any = readback.content
+        context_representation = (
+            "parsed_text"
+            if content_kind in {"pdf", "office"}
+            else "text"
+        )
+        if content_kind == "image" and representation == "image_attachment":
+            content = list(readback.attachments)
+            context_representation = "image_attachment"
         next_range_start = range_start + len(readback.data)
         return ContextSourceRead(
             source_id=self.source_id,
             source_revision=self.source_revision,
             source_ref=source_ref,
-            content=readback.content,
+            content=content,
             completeness="truncated" if readback.truncated else "complete",
             next_range_start=(next_range_start if readback.truncated else None),
             content_digest=readback.sha256,
@@ -149,6 +210,7 @@ class TaskWorkspaceContextSource:
                 "total_bytes": readback.total_bytes,
                 "media_type": readback.media_type,
                 "content_kind": readback.content_kind,
+                "context_representation": context_representation,
             },
         )
 

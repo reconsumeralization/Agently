@@ -1056,6 +1056,10 @@ execution = agent.input("Try one bounded fix step.").create_execution(
 This is still one AgentExecution, not a multi-turn loop. `lineage` provides
 stable correlation, while `limits` provides shared model-request budget counting
 across direct model and AgentTask requests.
+Nested AgentExecution contexts consume the same ancestor budget atomically;
+creating a child does not reset the root allowance. A child may additionally
+set a smaller local allowance for its own subtree without lowering a sibling's
+local allowance.
 Use `None` for an unlimited budget.
 
 If a bounded execution exceeds its model-request budget, Agently raises

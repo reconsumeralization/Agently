@@ -144,8 +144,9 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 )
 
             spec = get_spec(action_id) if callable(get_spec) else None
-            kwargs = spec.get("kwargs") if isinstance(spec, Mapping) else None
-            meta = spec.get("meta") if isinstance(spec, Mapping) else None
+            spec_mapping: Mapping[str, Any] = spec if isinstance(spec, Mapping) else {}
+            kwargs = spec_mapping.get("kwargs")
+            meta = spec_mapping.get("meta")
             if isinstance(kwargs, Mapping):
                 declared_keys = {str(key) for key in kwargs}
                 host_only_keys = set(
@@ -163,6 +164,16 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         "invalid_input_keys",
                         f"{unit_label} action command '{action_id}' includes undeclared or host-only "
                         f"input keys: {', '.join(unexpected_keys)}.",
+                    )
+                required_input_keys = set(
+                    self._normalize_string_list(spec_mapping.get("required_input_keys"))
+                )
+                missing_input_keys = sorted(required_input_keys - set(action_input))
+                if missing_input_keys:
+                    return [], (
+                        "missing_input_keys",
+                        f"{unit_label} action command '{action_id}' is missing required "
+                        f"input keys: {', '.join(missing_input_keys)}.",
                     )
 
             commands.append(
@@ -405,6 +416,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         "name",
                         "desc",
                         "kwargs",
+                        "required_input_keys",
                         "returns",
                         "side_effect_level",
                         "read_only",
@@ -684,6 +696,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             resolved_info_payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
         else:
             payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
+        self._bind_task_context_attachments(execution, context_package)
         execution.input(payload)
         if resolved_info_payload:
             execution.info(resolved_info_payload)

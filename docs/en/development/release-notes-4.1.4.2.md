@@ -82,6 +82,25 @@ consumer-local query offsets, exact source reads, semantic selection and
 ContextPackage construction. `source_kinds` is the open vocabulary of sources
 actually attached to the TaskContext, not a hard-coded framework list.
 
+ContextReader now applies a conservative media boundary. Text and successfully
+parsed PDF/DOCX/XLSX/PPTX content may enter a ContextPackage. Images are
+ref-only unless the exact consumer explicitly declares image attachment
+support; capable AgentTask requests bind validated image blocks through the
+ModelRequest attachment channel. Binary, unknown, unparsed, invalid, or empty
+media remains ref-only or fails the selected read, never filename-based guessed
+content.
+
+Action specs expose `required_input_keys`, derived from local function
+signatures or declared by executor/MCP adapters. Native tool schemas carry the
+same requirement, and model-authored calls missing required keys fail before
+dispatch. TaskBoard scoped retrieval remains a ContextReader path during both
+initial planning and repair; a retrieval-only support card is not relabeled as
+an Action card.
+
+`max_model_requests` is one atomically shared lineage budget. Descendant
+executions consume ancestor allowance instead of resetting it; child-local
+limits remain scoped to that child subtree.
+
 Required TaskWorkspace delivery paths are represented by digest-pinned staged
 candidates during terminal verification. Verifier rejection leaves the prior
 target unchanged. Acceptance triggers atomic target promotion and complete

@@ -1783,6 +1783,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             intent=f"Plan iteration {iteration_index}: {self.goal}",
         )
         request = self.agent.create_temp_request()
+        self._bind_task_context_attachments(request, context_package)
         language_policy = self._language_policy()
         self._apply_language_policy_to_request(request, language_policy)
         planner_capabilities = self._planner_capabilities()
@@ -2015,6 +2016,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             )
 
         request = self.agent.create_temp_request()
+        self._bind_task_context_attachments(request, context_package)
         language_policy = self._language_policy()
         self._apply_language_policy_to_request(request, language_policy)
         repair_context = self._active_repair_context()

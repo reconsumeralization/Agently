@@ -139,6 +139,15 @@ class ActionDispatcher:
             return {str(key) for key in raw_keys if str(key)}
         return set()
 
+    @staticmethod
+    def _required_action_input_keys(spec: ActionSpec) -> set[str]:
+        raw_keys: Any = spec.get("required_input_keys", [])
+        if isinstance(raw_keys, str):
+            return {raw_keys}
+        if isinstance(raw_keys, (list, tuple, set)):
+            return {str(key) for key in raw_keys if str(key)}
+        return set()
+
     @classmethod
     def _sanitize_action_input(
         cls,
@@ -745,6 +754,33 @@ class ActionDispatcher:
             "tool_kwargs": dict(action_input),
             "diagnostics": call_diagnostics,
         }
+        missing_input_keys = (
+            sorted(self._required_action_input_keys(spec) - set(action_input))
+            if source_protocol in self.MODEL_PLANNING_PROTOCOLS
+            else []
+        )
+        if missing_input_keys:
+            message = (
+                f"Action '{action_id}' is missing required input keys: "
+                + ", ".join(missing_input_keys)
+                + "."
+            )
+            call_diagnostics.append(
+                self._exception_diagnostic(
+                    code="action.input.required_keys_missing",
+                    message=message,
+                    meta={
+                        "source_protocol": source_protocol,
+                        "missing_input_keys": missing_input_keys,
+                    },
+                )
+            )
+            return self._execution_resource_error_result(
+                spec=spec,
+                action_call=action_call,
+                status="error",
+                error=message,
+            )
         policy = self._merge_policy(execution_settings, spec, sanitized_override)
         if isinstance(trusted_policy_override, dict) and trusted_policy_override:
             # Host-trusted grants (e.g. a policy approval resolved through the

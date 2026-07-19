@@ -155,6 +155,38 @@ ContextReader 负责 consumer-local offset、去重、可选 ModelRequest select
 readback 与 package budget。返回 package 暴露逐 binding 的 `source_coverage` 与 index
 diagnostic，不暴露内部 cache key 或 provider vector。
 
+Context 交付会区分媒体类型。纯文本以及由来源解析出的文本可以进入 package；内置
+TaskWorkspace source 会先解析受支持的 PDF、DOCX、XLSX 与 PPTX 文件。若解析器或
+可选依赖不可用，该文档只交付引用。图片、压缩包、可执行文件、音视频、未知格式和
+任意二进制字节都不会被强制转换为猜测文本；它们进入索引的投影只包含规范文件名/引用。
+
+图片只有在具体 consumer 显式声明支持图片附件时才会进入附件通道，否则只交付引用：
+
+```python
+from agently.types.data import ContextConsumer
+
+reader = task_context.reader(
+    consumer=ContextConsumer(
+        "visual-reviewer",
+        capabilities={"attachments": {"image": True}},
+    ),
+)
+```
+
+AgentTask 使用同一能力声明：
+
+```python
+execution = agent.goal("Review the attached chart").strategy(
+    "taskboard",
+    context_consumer_capabilities={"attachments": {"image": True}},
+)
+```
+
+Agently 不根据模型名推断视觉能力，通用的 `attachments=True` 也不代表支持图片理解。
+显式支持时，ContextReader 生成经过校验的图片附件块，AgentTask 通过 ModelRequest
+附件通道绑定；data URL 不会序列化进文本 context pack。图片理解仍由模型负责。附件
+为空或格式非法时，本次读取失败，不会退化为根据文件名猜测内容。
+
 required 内容超出预算时默认仍然 fail closed。只有 Skill 或调用方显式接受有损投影
 时，才可设置 `metadata={"required_overflow": "lossy_digest"}`。此时 Skill source
 返回有界、`completeness="lossy"` 的结构化纲要，并保留不可变全文 ref、有序 section

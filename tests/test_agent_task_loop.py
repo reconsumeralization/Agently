@@ -2489,6 +2489,7 @@ def test_taskboard_required_repair_converges_across_non_satisfying_statuses(tmp_
                 card_id: TaskBoardCardResult(
                     card_id=card_id,
                     status=status,
+                    output_digest=f"regenerated repair prose {index}: {status}",
                     preview={"status": status, "remaining_work": ["The terminal gap remains."]},
                 )
             },
@@ -5413,6 +5414,20 @@ async def test_taskboard_initial_plan_receives_capability_contract_and_normalize
         "_apply_language_policy_to_request",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_task_context_retrieval_policy",
+        lambda: {
+            "schema_version": "agent_task_scoped_retrieval/v2",
+            "source_kinds": {
+                "pinned_repository": {
+                    "binding_ids": ("binding:repo",),
+                    "required": True,
+                    "description": "Pinned repository snapshot",
+                }
+            },
+        },
+    )
 
     result = await task._request_taskboard_plan(
         {
@@ -5426,6 +5441,9 @@ async def test_taskboard_initial_plan_receives_capability_contract_and_normalize
 
     requirements = captured["input"]["capability_evidence_requirements"]
     assert {item["capability_id"] for item in requirements} == {"write_file", "read_file"}
+    assert "pinned_repository" in captured["input"]["retrieval_policy"]["source_kinds"]
+    assert "TaskWorkspace Actions cannot read" in captured["instruct"]
+    assert "retrieval_policy.source_kinds" in str(captured["output"])
     assert "exhaustive command batch" in captured["instruct"]
     assert "final_task_workspace_deliverables" in captured["instruct"]
     final_card = result.revision.graph.cards[0]
@@ -5759,6 +5777,49 @@ async def test_bounded_action_commands_reject_undeclared_input_before_dispatch(
         "taskboard.action_commands.invalid_input_keys"
     )
     assert "filepath" in execution_meta["diagnostics"][0]["message"]
+
+
+def test_bounded_action_contract_exposes_and_validates_required_input_keys(tmp_path):
+    task_workspace_root = tmp_path / "task_workspace"
+    agent = _create_agent("agent-task-bounded-action-required-input").use_task_workspace(
+        task_workspace_root,
+        mode="read_write",
+    )
+    agent.enable_task_workspace_file_actions(
+        root=task_workspace_root,
+        read=True,
+        write=False,
+        search=True,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="bounded-action-required-input",
+        goal="Search the TaskWorkspace.",
+        success_criteria=["The query is searched."],
+        execution="taskboard",
+    )
+
+    contracts, unavailable = task._bounded_action_contracts(["search_files"])
+    commands, validation_error = task._normalize_bounded_action_commands(
+        raw_commands=[
+            {
+                "purpose": "Search files.",
+                "action_id": "search_files",
+                "action_input": {"path": "."},
+            }
+        ],
+        required_action_ids=["search_files"],
+        unit_label="TaskBoard",
+    )
+
+    assert unavailable is None
+    assert contracts[0]["required_input_keys"] == ["query"]
+    assert commands == []
+    assert validation_error is not None
+    assert validation_error[0] == "missing_input_keys"
+    assert "query" in validation_error[1]
 
 
 @pytest.mark.asyncio

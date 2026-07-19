@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import uuid
@@ -42,6 +44,85 @@ from ._Index import (
     _RequiredVectorUnavailableError,
     _UnknownContextSourceKindError,
 )
+
+
+_TEXT_FILE_EXTENSIONS = {
+    "",
+    ".cfg",
+    ".conf",
+    ".css",
+    ".csv",
+    ".env",
+    ".html",
+    ".ini",
+    ".js",
+    ".json",
+    ".jsx",
+    ".log",
+    ".md",
+    ".py",
+    ".rst",
+    ".sh",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+_OFFICE_FILE_EXTENSIONS = {".docx", ".xlsx", ".pptx"}
+_IMAGE_FILE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
+_BINARY_FILE_EXTENSIONS = {
+    ".7z",
+    ".bin",
+    ".db",
+    ".dll",
+    ".doc",
+    ".dylib",
+    ".exe",
+    ".gz",
+    ".jar",
+    ".mp3",
+    ".mp4",
+    ".parquet",
+    ".ppt",
+    ".rar",
+    ".sqlite",
+    ".sqlite3",
+    ".tar",
+    ".wav",
+    ".xls",
+    ".zip",
+}
+_TEXT_MEDIA_TYPES = {
+    "application/json",
+    "application/json5",
+    "application/javascript",
+    "application/toml",
+    "application/x-yaml",
+    "application/xml",
+}
+_BINARY_MEDIA_TYPES = {
+    "application/gzip",
+    "application/octet-stream",
+    "application/x-7z-compressed",
+    "application/x-rar-compressed",
+    "application/zip",
+}
+_SAFE_NON_TEXT_METADATA_KEYS = {
+    "bytes",
+    "content_kind",
+    "content_type",
+    "context_representation",
+    "filename",
+    "media_type",
+    "mime_type",
+    "path",
+    "sha256",
+    "size_bytes",
+    "total_bytes",
+}
 
 
 class ContextStaleError(RuntimeError):
@@ -346,6 +427,194 @@ class ContextReader:
         )
 
     @staticmethod
+    def _descriptor_content_kind(
+        metadata: Mapping[str, Any],
+        source_ref: str = "",
+    ) -> str:
+        content_kind = str(metadata.get("content_kind") or "").strip().lower()
+        if content_kind:
+            if content_kind in {"text", "pdf", "office", "image", "binary", "unknown"}:
+                return content_kind
+            if content_kind.startswith("image/"):
+                return "image"
+            if content_kind == "application/pdf":
+                return "pdf"
+            if content_kind.startswith(
+                "application/vnd.openxmlformats-officedocument"
+            ):
+                return "office"
+            if content_kind.startswith("text/") or content_kind in _TEXT_MEDIA_TYPES:
+                return "text"
+            if (
+                content_kind in _BINARY_MEDIA_TYPES
+                or content_kind.startswith("audio/")
+                or content_kind.startswith("video/")
+            ):
+                return "binary"
+            return "unknown"
+        media_type = str(
+            metadata.get("media_type")
+            or metadata.get("mime_type")
+            or metadata.get("content_type")
+            or ""
+        ).split(";", 1)[0].strip().lower()
+        if media_type.startswith("image/"):
+            return "image"
+        if media_type == "application/pdf":
+            return "pdf"
+        if media_type.startswith("application/vnd.openxmlformats-officedocument"):
+            return "office"
+        if media_type.startswith("text/") or media_type in _TEXT_MEDIA_TYPES:
+            return "text"
+        if (
+            media_type in _BINARY_MEDIA_TYPES
+            or media_type.startswith("audio/")
+            or media_type.startswith("video/")
+        ):
+            return "binary"
+        if media_type:
+            return "unknown"
+
+        locator = str(
+            source_ref
+            or metadata.get("path")
+            or metadata.get("filename")
+            or ""
+        ).split("?", 1)[0].split("#", 1)[0].lower()
+        filename = locator.rsplit("/", 1)[-1]
+        suffix = f".{filename.rsplit('.', 1)[-1]}" if "." in filename else ""
+        if suffix == ".pdf":
+            return "pdf"
+        if suffix in _OFFICE_FILE_EXTENSIONS:
+            return "office"
+        if suffix in _IMAGE_FILE_EXTENSIONS:
+            return "image"
+        if suffix in _BINARY_FILE_EXTENSIONS:
+            return "binary"
+        if suffix in _TEXT_FILE_EXTENSIONS:
+            return "text" if suffix else ""
+        if suffix:
+            return "unknown"
+        return ""
+
+    def _supports_image_attachments(self) -> bool:
+        capabilities = self.consumer.capabilities
+        attachments = capabilities.get("attachments")
+        if isinstance(attachments, Mapping) and attachments.get("image") is True:
+            return True
+        return capabilities.get("image_attachments") is True
+
+    @staticmethod
+    def _valid_image_attachment_content(content: Any) -> bool:
+        if not isinstance(content, Sequence) or isinstance(
+            content,
+            str | bytes | bytearray,
+        ):
+            return False
+        if not content:
+            return False
+        for item in content:
+            if not isinstance(item, Mapping) or str(item.get("type") or "") != "image_url":
+                return False
+            image_url = item.get("image_url")
+            if not isinstance(image_url, Mapping):
+                return False
+            url = str(image_url.get("url") or "").strip()
+            if url.startswith(("https://", "http://")):
+                continue
+            if not url.startswith("data:image/") or ";base64," not in url:
+                return False
+            payload = url.split(";base64,", 1)[1].strip()
+            if not payload:
+                return False
+            try:
+                decoded = base64.b64decode(payload, validate=True)
+            except (binascii.Error, ValueError):
+                return False
+            if not decoded:
+                return False
+        return True
+
+    def _candidate_representation(self, candidate: ContextCandidate) -> str:
+        declared = str(
+            candidate.metadata.get("context_representation") or ""
+        ).strip().lower()
+        if declared == "metadata_only":
+            return "metadata_only"
+        content_kind = self._descriptor_content_kind(
+            candidate.metadata,
+            candidate.source_ref,
+        )
+        if content_kind == "image":
+            return (
+                "image_attachment"
+                if self._supports_image_attachments()
+                else "metadata_only"
+            )
+        if content_kind in {"binary", "unknown"}:
+            return "metadata_only"
+        return "text"
+
+    @classmethod
+    def _safe_non_text_metadata(
+        cls,
+        metadata: Mapping[str, Any],
+        source_ref: str,
+        *,
+        representation: str,
+    ) -> dict[str, Any]:
+        """Keep only host-verifiable file facts for opaque media."""
+
+        safe = {
+            str(key): value
+            for key, value in metadata.items()
+            if str(key) in _SAFE_NON_TEXT_METADATA_KEYS
+        }
+        content_kind = cls._descriptor_content_kind(metadata, source_ref)
+        if content_kind:
+            safe["content_kind"] = content_kind
+        safe["context_representation"] = representation
+        return safe
+
+    @classmethod
+    def _safe_descriptor_projection(
+        cls,
+        descriptor: ContextSourceDescriptor,
+    ) -> tuple[str, int, dict[str, Any]]:
+        metadata = dict(descriptor.metadata)
+        content_kind = cls._descriptor_content_kind(
+            metadata,
+            descriptor.source_ref,
+        )
+        declared = str(
+            metadata.get("context_representation") or ""
+        ).strip().lower()
+        if declared == "metadata_only" or content_kind in {
+            "image",
+            "binary",
+            "unknown",
+        }:
+            # A descriptor is an index projection, not authority to interpret
+            # arbitrary bytes. For non-text media, only the canonical ref/name
+            # may participate in semantic selection.
+            representation = (
+                "image_attachment_or_metadata"
+                if content_kind == "image"
+                else "metadata_only"
+            )
+            metadata = cls._safe_non_text_metadata(
+                metadata,
+                descriptor.source_ref,
+                representation=representation,
+            )
+            return (
+                descriptor.source_ref,
+                len(descriptor.source_ref),
+                metadata,
+            )
+        return descriptor.summary, descriptor.estimated_chars, metadata
+
+    @staticmethod
     def _coerce_intent(intent: str | ContextReadIntent) -> ContextReadIntent:
         if isinstance(intent, ContextReadIntent):
             return intent
@@ -378,6 +647,26 @@ class ContextReader:
                 continue
             sequence += 1
             source_ref = entry.source_ref or entry.entry_id
+            entry_metadata = dict(entry.metadata)
+            entry_content_kind = self._descriptor_content_kind(
+                entry_metadata,
+                source_ref,
+            )
+            entry_summary = str(entry_metadata.get("summary") or source_ref)
+            entry_estimated_chars = _content_chars(entry.content)
+            if entry_content_kind in {"image", "binary", "unknown"}:
+                entry_summary = source_ref
+                entry_estimated_chars = len(source_ref)
+                representation = (
+                    "image_attachment_or_metadata"
+                    if entry_content_kind == "image"
+                    else "metadata_only"
+                )
+                entry_metadata = self._safe_non_text_metadata(
+                    entry_metadata,
+                    source_ref,
+                    representation=representation,
+                )
             offered = ContextCandidate(
                 block_key=f"context-block:{sequence}",
                 source_id=f"task-context:{self._snapshot.context_id}",
@@ -385,11 +674,11 @@ class ContextReader:
                 source_ref=source_ref,
                 binding_id=entry.entry_id,
                 role=entry.role,
-                summary=str(entry.metadata.get("summary") or source_ref),
-                estimated_chars=_content_chars(entry.content),
+                summary=entry_summary,
+                estimated_chars=entry_estimated_chars,
                 required=entry.required,
                 priority=entry.priority,
-                metadata=entry.metadata,
+                metadata=entry_metadata,
             )
             collected.append(
                 _CollectedCandidate(
@@ -489,6 +778,9 @@ class ContextReader:
             binding = match.binding
             descriptor = match.descriptor
             sequence += 1
+            summary, estimated_chars, descriptor_metadata = (
+                self._safe_descriptor_projection(descriptor)
+            )
             offered = ContextCandidate(
                 block_key=f"context-block:{sequence}",
                 source_id=binding.source_id,
@@ -496,11 +788,11 @@ class ContextReader:
                 source_ref=descriptor.source_ref,
                 binding_id=binding.binding_id,
                 role=descriptor.role,
-                summary=descriptor.summary,
-                estimated_chars=descriptor.estimated_chars,
+                summary=summary,
+                estimated_chars=estimated_chars,
                 required=descriptor.required,
                 priority=max(binding.priority, descriptor.priority),
-                metadata=descriptor.metadata,
+                metadata=descriptor_metadata,
             )
             collected.append(
                 _CollectedCandidate(
@@ -632,6 +924,25 @@ class ContextReader:
         candidate = item.offered
         if item.direct_entry is not None:
             entry = item.direct_entry
+            content = entry.content
+            metadata = dict(candidate.metadata)
+            if representation == "image_attachment":
+                if not self._valid_image_attachment_content(content):
+                    raise ValueError(
+                        "Direct TaskContext image content is not a non-empty image attachment payload."
+                    )
+                metadata = self._safe_non_text_metadata(
+                    metadata,
+                    candidate.source_ref,
+                    representation="image_attachment",
+                )
+                content_chars = 0
+            else:
+                if isinstance(content, bytes | bytearray):
+                    raise ValueError(
+                        "Direct TaskContext content returned unparsed binary bytes for textual disclosure."
+                    )
+                content_chars = _content_chars(content)
             return ContextBlock(
                 block_id=f"context_block:{uuid.uuid4().hex}",
                 block_key=candidate.block_key,
@@ -640,12 +951,12 @@ class ContextReader:
                 source_ref=candidate.source_ref,
                 binding_id=candidate.binding_id,
                 role=candidate.role,
-                content=entry.content,
+                content=content,
                 completeness="complete",
-                content_chars=_content_chars(entry.content),
+                content_chars=content_chars,
                 required=candidate.required,
                 refs=(candidate.source_ref,),
-                metadata=entry.metadata,
+                metadata=metadata,
             )
         if item.source_descriptor is None:
             raise RuntimeError("Collected Context candidate has no readable source.")
@@ -664,7 +975,32 @@ class ContextReader:
             or raw.source_ref != candidate.source_ref
         ):
             raise ValueError("Context exact read identity changed.")
+        if representation != "image_attachment" and isinstance(
+            raw.content,
+            bytes | bytearray,
+        ):
+            raise ValueError(
+                "Context exact read returned unparsed binary bytes for a textual disclosure."
+            )
+        if representation == "image_attachment" and not self._valid_image_attachment_content(
+            raw.content
+        ):
+            raise ValueError(
+                "Context image exact read did not return a non-empty image attachment payload."
+            )
         self._assert_current()
+        content_chars = (
+            0
+            if representation == "image_attachment"
+            else _content_chars(raw.content)
+        )
+        metadata = raw.metadata
+        if representation == "image_attachment":
+            metadata = self._safe_non_text_metadata(
+                {**dict(candidate.metadata), **dict(raw.metadata)},
+                candidate.source_ref,
+                representation="image_attachment",
+            )
         return ContextBlock(
             block_id=f"context_block:{uuid.uuid4().hex}",
             block_key=candidate.block_key,
@@ -675,10 +1011,10 @@ class ContextReader:
             role=candidate.role,
             content=raw.content,
             completeness=raw.completeness,
-            content_chars=_content_chars(raw.content),
+            content_chars=content_chars,
             required=candidate.required,
             refs=raw.refs or (candidate.source_ref,),
-            metadata=raw.metadata,
+            metadata=metadata,
         )
 
     async def _materialize_candidates(
@@ -712,6 +1048,106 @@ class ContextReader:
                         source_ref=candidate.source_ref,
                         required=candidate.required,
                         reason="block_budget_exhausted",
+                    )
+                )
+                continue
+            representation = self._candidate_representation(candidate)
+            if representation == "metadata_only" or (
+                delivery_mode == "refs_only" and not candidate.required
+            ):
+                descriptor_metadata = candidate.metadata
+                blocks.append(
+                    ContextBlock(
+                        block_id=f"context_block:{uuid.uuid4().hex}",
+                        block_key=candidate.block_key,
+                        source_id=candidate.source_id,
+                        source_revision=candidate.source_revision,
+                        source_ref=candidate.source_ref,
+                        binding_id=candidate.binding_id,
+                        role=candidate.role,
+                        content=None,
+                        completeness="ref_only",
+                        content_chars=0,
+                        required=candidate.required,
+                        refs=(candidate.source_ref,),
+                        metadata=descriptor_metadata,
+                    )
+                )
+                self._disclosed.add(self._identity(candidate))
+                if representation == "metadata_only":
+                    diagnostics.append(
+                        ContextDiagnostic(
+                            code="context.media_content_ref_only",
+                            message=(
+                                "Non-text Context content was withheld; only its "
+                                "canonical source ref is disclosed to this consumer."
+                            ),
+                            details={
+                                "binding_id": candidate.binding_id,
+                                "source_ref": candidate.source_ref,
+                                "content_kind": self._descriptor_content_kind(
+                                    candidate.metadata,
+                                    candidate.source_ref,
+                                )
+                                or "unspecified",
+                                "image_attachment_supported": (
+                                    self._supports_image_attachments()
+                                ),
+                            },
+                        )
+                    )
+                continue
+            if representation == "image_attachment":
+                try:
+                    block = await self._read_block(
+                        item,
+                        max_chars=1,
+                        representation="image_attachment",
+                    )
+                except ContextStaleError:
+                    raise
+                except Exception as error:
+                    omissions.append(
+                        ContextOmission(
+                            block_key=candidate.block_key,
+                            source_ref=candidate.source_ref,
+                            required=candidate.required,
+                            reason="source_read_failed",
+                            details={
+                                "error_type": error.__class__.__name__,
+                                "error": str(error),
+                            },
+                        )
+                    )
+                    diagnostics.append(
+                        ContextDiagnostic(
+                            code="context.image_attachment_read_failed",
+                            message=(
+                                "The selected image could not be prepared as an "
+                                "attachment for the capable consumer."
+                            ),
+                            details={
+                                "binding_id": candidate.binding_id,
+                                "source_ref": candidate.source_ref,
+                                "error_type": error.__class__.__name__,
+                                "error": str(error),
+                            },
+                        )
+                    )
+                    continue
+                blocks.append(block)
+                self._disclosed.add(self._identity(candidate))
+                diagnostics.append(
+                    ContextDiagnostic(
+                        code="context.image_attachment_delivered",
+                        message=(
+                            "Image bytes were prepared as a consumer-supported "
+                            "attachment; interpretation remains model-owned."
+                        ),
+                        details={
+                            "binding_id": candidate.binding_id,
+                            "source_ref": candidate.source_ref,
+                        },
                     )
                 )
                 continue

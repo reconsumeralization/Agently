@@ -11,6 +11,7 @@ from agently.core.application.SkillLibrary import SkillBinding, SkillContextSour
 from agently.core.application.AgentTask.BlockCarrier import scoped_retrieval_policy
 from agently.core.context import TaskContext
 from agently.types.data import ContextReadIntent
+from agently.types.data import ContextBlock, ContextPackage
 
 
 def _write_skill(root: Path) -> Path:
@@ -58,6 +59,84 @@ def test_scoped_retrieval_policy_projects_task_context_source_catalog() -> None:
     assert policy["source_kinds"]["pinned_repository"]["binding_ids"] == (
         "binding:repo",
     )
+
+
+def test_agent_task_context_reader_uses_explicit_model_attachment_capability(
+    tmp_path: Path,
+) -> None:
+    agent = Agently.create_agent("task-context-vlm-capability").use_task_workspace(
+        tmp_path / "work"
+    )
+    task = AgentTask(
+        agent,
+        goal="Inspect an image.",
+        success_criteria=["The image is interpreted only when supported."],
+        options={
+            "agent_task": {
+                "context_consumer_capabilities": {
+                    "attachments": {"image": True}
+                }
+            }
+        },
+    )
+
+    reader = task._task_context_reader(
+        phase="planning",
+        consumer_id="agent_task:test:planner",
+    )
+
+    assert reader.consumer.capabilities["attachments"]["image"] is True
+
+
+def test_agent_task_binds_context_image_as_attachment_without_serializing_data_url(
+    tmp_path: Path,
+) -> None:
+    attachment = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    }
+    block = ContextBlock(
+        block_id="context-block:image",
+        block_key="image-key",
+        source_id="source:image",
+        source_revision="rev:1",
+        source_ref="assets/chart.png",
+        binding_id="binding:image",
+        role="information",
+        content=[attachment],
+        completeness="complete",
+        content_chars=0,
+        refs=("assets/chart.png",),
+        metadata={"context_representation": "image_attachment"},
+    )
+    package = ContextPackage(
+        package_id="package:image",
+        task_context_id="task-context:image",
+        context_revision=1,
+        consumer_id="agent_task:test:planner",
+        phase="planning",
+        source_revisions={"binding:image": "rev:1"},
+        source_coverage={},
+        blocks=(block,),
+    )
+    agent = Agently.create_agent("task-context-vlm-binding").use_task_workspace(
+        tmp_path / "work"
+    )
+    task = AgentTask(
+        agent,
+        goal="Inspect an image.",
+        success_criteria=["The image is interpreted."],
+    )
+    request = agent.create_temp_request()
+
+    projected = task._project_task_context_package(package)
+    task._bind_task_context_attachments(request, package)
+
+    assert projected["items"][0]["content"] is None
+    assert "data:image/png;base64" not in str(projected)
+    prompt = request.prompt.get(inherit=False)
+    assert prompt["attachment"][0]["type"] == "text"
+    assert prompt["attachment"][1] == attachment
 
 
 def test_flat_scoped_retrieval_normalization_preserves_open_source_kind() -> None:

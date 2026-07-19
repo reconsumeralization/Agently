@@ -216,6 +216,15 @@ Custom actions that need direct-call-only parameters can mark them with
 model-planned `structured_plan` and native tool-call inputs while preserving
 host/direct calls.
 
+Action specs also carry `required_input_keys`. `@agent.action_func` derives
+them from function parameters without defaults. Executor-backed registrations
+should declare them explicitly with
+`register_action(..., required_input_keys=[...])`, or use a third boolean in a
+kwargs descriptor tuple such as `(str, "Search query", True)`. Agently emits
+the same requirement in native tool JSON Schema and rejects a structured or
+native model command with missing required keys before dispatch. Direct host
+calls keep the executor or Python function's ordinary validation behavior.
+
 Built-in capability packages live under `agently.builtins.actions`. For example:
 
 ```python

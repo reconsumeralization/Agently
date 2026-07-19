@@ -830,6 +830,9 @@ execution = agent.input("Try one bounded fix step.").create_execution(
 
 这仍然只是一次 AgentExecution，不是多轮循环本身。`lineage` 提供稳定关联，
 `limits` 提供跨普通模型请求和 AgentTask 请求共享的模型请求预算计数。
+嵌套 AgentExecution context 会原子地消耗同一份祖先预算；创建 child 不会重置
+root allowance。child 可以额外为自己的 subtree 设置更小的本地 allowance，但不会
+降低 sibling 的本地 allowance。
 无限预算用 `None` 表达。
 
 如果有边界的 execution 超出模型请求预算，Agently 会抛出

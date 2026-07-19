@@ -217,6 +217,7 @@ class AgentExecution:
         self.context_packages: list[Any] = []
         self.context_consumptions: list[ContextConsumption] = []
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
+        self._parent_model_request_budget = self._resolve_parent_model_request_budget()
         self._load_inherited_strategy_context()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
@@ -228,6 +229,7 @@ class AgentExecution:
             effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
             strategy_context_source=self.inherited_strategy_context_source,
             task_workspace=self.task_workspace,
+            parent_model_request_budget=self._parent_model_request_budget,
         )
         self.parent_run_context = parent_run_context
         self.agent_execution_run_context: "RunContext | None" = None
@@ -409,8 +411,22 @@ class AgentExecution:
         self.inherited_strategy_context_source = getattr(parent_context, "strategy_context_source", None)
         return self
 
+    def _resolve_parent_model_request_budget(self):
+        from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
+
+        parent_context = get_current_agent_execution_context()
+        parent_budget = (
+            getattr(parent_context, "model_request_budget", None)
+            if parent_context is not getattr(self, "execution_context", None)
+            else None
+        )
+        if parent_budget is not None:
+            return parent_budget
+        return getattr(self, "_parent_model_request_budget", None)
+
     def _replace_runtime_context(self):
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
+        self._parent_model_request_budget = self._resolve_parent_model_request_budget()
         self._load_inherited_strategy_context()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
@@ -422,6 +438,7 @@ class AgentExecution:
             effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
             strategy_context_source=self.inherited_strategy_context_source,
             task_workspace=self.task_workspace,
+            parent_model_request_budget=self._parent_model_request_budget,
         )
         self.stream = AgentExecutionStream(
             execution_id=self.id,
