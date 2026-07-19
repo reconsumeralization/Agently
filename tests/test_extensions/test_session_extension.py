@@ -3,6 +3,7 @@ import json
 
 from agently import Agently
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
+from agently.core.runtime import bind_runtime_context
 from agently.types.data import RunContext
 
 
@@ -155,6 +156,29 @@ async def test_session_extension_request_prefix_syncs_context_window():
     assert isinstance(synced_history, list)
     assert len(synced_history) == 1
     assert synced_history[0].content == "from-session"
+
+
+@pytest.mark.asyncio
+async def test_session_extension_does_not_duplicate_memory_recall_inside_agent_execution():
+    agent = Agently.create_agent()
+    agent.activate_session(session_id="session-extension-agent-execution-memory")
+    assert agent.activated_session is not None
+    calls = 0
+
+    async def prepare_memory(_prompt, _settings):
+        nonlocal calls
+        calls += 1
+        return {}
+
+    agent.activated_session.async_prepare_memory = prepare_memory  # type: ignore[method-assign]
+    execution_run = RunContext.create(
+        run_kind="agent_execution",
+        agent_name=agent.name,
+    )
+    with bind_runtime_context(agent_execution_run_context=execution_run):
+        await agent._session_request_prefix(agent.request_prompt, agent.settings)
+
+    assert calls == 0
 
 
 @pytest.mark.asyncio

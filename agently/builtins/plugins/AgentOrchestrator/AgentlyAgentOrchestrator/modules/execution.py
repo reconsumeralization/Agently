@@ -47,6 +47,7 @@ from agently.types.data import (
     ContextReadIntent,
     SkillMode,
 )
+from agently.types.plugins import ContextSource
 from agently.utils import DataFormatter, FunctionShifter
 
 from .bridges import (
@@ -57,7 +58,6 @@ from .bridges import (
     record_model_response_id as record_model_response_id_entry,
 )
 from .diagnostics import (
-    build_execution_meta,
     initial_diagnostics,
     initial_record_refs,
     record_error_diagnostic,
@@ -210,6 +210,7 @@ class AgentExecution:
         self.skill_library = getattr(self.agent, "skill_library", None)
         self.skill_bindings: list[SkillBinding] = []
         self._skill_context_binding_id: str | None = None
+        self._session_memory_context_binding_id: str | None = None
         self._task_context_prompt_entry_ids: set[str] = set()
         self._task_context_prepared = False
         self.context_readers: dict[tuple[str, str], Any] = {}
@@ -1097,6 +1098,9 @@ class AgentExecution:
         if self._skill_context_binding_id is not None:
             self.task_context.remove(self._skill_context_binding_id)
             self._skill_context_binding_id = None
+        if self._session_memory_context_binding_id is not None:
+            self.task_context.remove(self._session_memory_context_binding_id)
+            self._session_memory_context_binding_id = None
         self.skill_bindings = []
         self.context_readers.clear()
 
@@ -1148,6 +1152,27 @@ class AgentExecution:
                     "modes": [item.mode for item in self.skill_bindings],
                 },
             )
+
+        active_session = getattr(self.agent, "activated_session", None)
+        create_memory_source = getattr(
+            active_session,
+            "create_memory_context_source",
+            None,
+        )
+        if callable(create_memory_source):
+            memory_source = cast(
+                ContextSource | None,
+                create_memory_source(settings=self.request.settings),
+            )
+            if memory_source is not None:
+                self._session_memory_context_binding_id = self.task_context.attach(
+                    memory_source,
+                    binding_id=f"session_memory_binding:{self.id}",
+                    scope="session",
+                    metadata={
+                        "session_id": str(getattr(active_session, "id", "")),
+                    },
+                )
 
         self.prompt_snapshot = dict(prompt_snapshot)
         self.execution_prompt_snapshot = self._snapshot_execution_prompt()

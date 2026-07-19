@@ -76,6 +76,21 @@ async def test_agent_execution_prepares_prompt_facts_as_task_context_entries(
 
 
 @pytest.mark.asyncio
+async def test_agent_execution_binds_active_session_memory_source(tmp_path: Path) -> None:
+    agent = Agently.create_agent("task-context-session-memory")
+    agent.use_record_store(tmp_path / "records", mode="read_write")
+    agent.use_task_workspace(tmp_path / "workspace")
+    agent.activate_session(session_id="session-memory")
+    assert agent.activated_session is not None
+    agent.activated_session.use_memory(mode="AgentlyMemory")
+    execution = agent.create_execution().input("Use the remembered delivery promise")
+
+    context = await execution.async_prepare_task_context()
+
+    assert "session_memory" in context.source_catalog()
+
+
+@pytest.mark.asyncio
 async def test_required_skill_is_bound_by_exact_revision_into_execution_task_context(
     tmp_path: Path,
 ) -> None:

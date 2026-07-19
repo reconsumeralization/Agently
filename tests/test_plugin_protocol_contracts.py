@@ -38,6 +38,7 @@ from agently.types.plugins import (
     AgentOrchestrator,
     ContextSource,
     ExecutionResourceProvider,
+    SessionMemory,
 )
 from agently.utils.Settings import Settings
 
@@ -61,6 +62,15 @@ def test_context_source_protocol_is_descriptor_and_exact_read_only():
     assert {"source_id", "source_kind"}.issubset(ContextSource.__annotations__)
     assert change_feed is not None
     assert _method_names(change_feed) == ["async_changes"]
+
+
+def test_session_memory_protocol_exposes_context_source_instead_of_retrieval_policy():
+    methods = _method_names(SessionMemory)
+
+    assert "create_context_source" in methods
+    assert "prepare_request" in methods
+    assert "retrieve" not in methods
+    assert "rerank" not in methods
 
 
 def test_builtin_execution_resource_providers_match_protocol():
