@@ -233,8 +233,17 @@ async def test_reader_continuation_advances_index_not_source_cursor() -> None:
     intent = ContextReadIntent("same", metadata={"optional_selection": "none"})
     first = await reader.async_read(intent)
     second = await reader.async_read(intent)
+    changed_intent = await reader.async_read(
+        ContextReadIntent("different", metadata={"optional_selection": "none"})
+    )
 
     assert first.source_coverage != second.source_coverage
+    first_coverage = next(iter(first.source_coverage.values()))
+    second_coverage = next(iter(second.source_coverage.values()))
+    changed_coverage = next(iter(changed_intent.source_coverage.values()))
+    assert first_coverage["scope"]["offset"] == 0
+    assert second_coverage["scope"]["offset"] > 0
+    assert changed_coverage["scope"]["offset"] == 0
     assert source.enumeration_count == 1
     assert all("query" not in profile for profile in source.received_profiles)
 
