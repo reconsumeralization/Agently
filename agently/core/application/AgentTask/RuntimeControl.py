@@ -349,22 +349,64 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         return cast(dict[str, Any], meta) if isinstance(meta, Mapping) else None
 
     async def _await_task_request(self, awaitable, *, stage: str):
-        timeout_info = self._task_request_wait_timeout()
         task = asyncio.ensure_future(awaitable)
         heartbeat_task = self._start_heartbeat(stage=stage)
+        request_started_monotonic = time.monotonic()
+        request_timeout = self._task_request_timeout()
+        no_progress_timeout = self._task_no_progress_timeout()
         try:
-            if timeout_info is None:
-                return await task
-            timeout, limit_name = timeout_info
-            return await asyncio.wait_for(task, timeout=timeout)
-        except (asyncio.TimeoutError, TimeoutError) as error:
-            task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await task
+            while True:
+                now = time.monotonic()
+                latest_progress = max(
+                    request_started_monotonic,
+                    self._last_stream_emit_monotonic,
+                )
+                deadline_candidates: list[tuple[float, str, float | None]] = []
+                task_remaining = self._task_deadline_remaining()
+                if task_remaining is not None:
+                    deadline_candidates.append(
+                        (task_remaining, "max_seconds", self._task_max_seconds())
+                    )
+                if request_timeout is not None:
+                    deadline_candidates.append(
+                        (
+                            request_timeout - (now - request_started_monotonic),
+                            "request_timeout_seconds",
+                            request_timeout,
+                        )
+                    )
+                if no_progress_timeout is not None:
+                    deadline_candidates.append(
+                        (
+                            no_progress_timeout - (now - latest_progress),
+                            "max_no_progress_seconds",
+                            no_progress_timeout,
+                        )
+                    )
+                if not deadline_candidates:
+                    return await task
+                expired = [item for item in deadline_candidates if item[0] <= 0]
+                if expired:
+                    _, limit_name, timeout = min(expired, key=lambda item: item[0])
+                    break
+                wait_seconds = min(item[0] for item in deadline_candidates)
+                done, _ = await asyncio.wait({task}, timeout=wait_seconds)
+                if task in done:
+                    return await task
+
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
             if limit_name == "max_no_progress_seconds":
                 reason = (
                     f"AgentTask {stage} request made no progress before idle deadline: "
                     f"max_no_progress_seconds={timeout}."
+                )
+            elif limit_name == "max_seconds":
+                reason = (
+                    f"AgentTask {stage} request exceeded task max_seconds="
+                    f"{timeout}."
                 )
             else:
                 reason = f"AgentTask {stage} request timed out after {timeout} seconds."
@@ -373,7 +415,13 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 reason=reason,
                 limit_name=limit_name,
                 timeout_seconds=timeout,
-            ) from error
+            )
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
+            raise
         finally:
             await self._stop_heartbeat(heartbeat_task)
 

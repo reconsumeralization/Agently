@@ -18,6 +18,7 @@ from agently.core.application.AgentExecution import AgentExecutionLimitExceeded,
 from agently.core.application.AgentExecution.Stream import project_agent_execution_text_delta
 from agently.core.application.AgentTask import AgentTask
 from agently.core.application.AgentTask.BlockCarrier import WorkUnitResult
+from agently.core.application.AgentTask.TaskShared import _AgentTaskDeadlineExceeded
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
 from agently.types.data import AgentExecutionStreamData, AgentlyRequestData
 from agently.types.options import ExecutionOptions
@@ -7192,6 +7193,136 @@ async def test_flat_plan_no_progress_timeout_is_reported_as_idle_guard(tmp_path)
     assert terminal_phase["diagnostics"]["stage"] == "plan"
     assert terminal_phase["diagnostics"]["limit_name"] == "max_no_progress_seconds"
     assert "no progress" in terminal_phase["diagnostics"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_agent_task_request_progress_resets_only_idle_deadline(tmp_path):
+    agent = _create_agent("request-progress-resets-idle").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Complete a progressing request.",
+        success_criteria=["The request finishes after several progress events."],
+        execution="flat",
+        limits={"max_no_progress_seconds": 0.06},
+        options={"heartbeat_interval_seconds": 0.01},
+    )
+
+    async def progressing_request() -> str:
+        for sequence in range(5):
+            await asyncio.sleep(0.03)
+            await task._emit(
+                "agent_task.test.request_progress",
+                {"sequence": sequence},
+                meta={
+                    "task_id": task.id,
+                    "status": task.status,
+                    "stream_kind": "progress",
+                },
+            )
+        return "completed"
+
+    started = time.monotonic()
+    result = await task._await_task_request(progressing_request(), stage="plan")
+
+    assert result == "completed"
+    assert time.monotonic() - started > 0.12
+
+
+@pytest.mark.asyncio
+async def test_agent_task_request_heartbeat_does_not_reset_idle_deadline(tmp_path):
+    agent = _create_agent("request-heartbeat-idle").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Detect an idle request.",
+        success_criteria=["Heartbeat remains observational."],
+        execution="flat",
+        limits={"max_no_progress_seconds": 0.05},
+        options={"heartbeat_interval_seconds": 0.01},
+    )
+
+    with pytest.raises(_AgentTaskDeadlineExceeded) as caught:
+        await task._await_task_request(asyncio.sleep(1), stage="plan")
+
+    assert caught.value.limit_name == "max_no_progress_seconds"
+    assert any(item.path == "agent_task.heartbeat" for item in task._stream_items)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_request_timeout_stays_fixed_while_progress_continues(tmp_path):
+    agent = _create_agent("request-fixed-timeout").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Respect a fixed request timeout.",
+        success_criteria=["Progress cannot extend the request deadline."],
+        execution="flat",
+        limits={"max_no_progress_seconds": 0.05},
+        options={"agent_task": {"request_timeout_seconds": 0.13}},
+    )
+    cancellations = 0
+
+    async def progressing_request() -> None:
+        nonlocal cancellations
+        try:
+            while True:
+                await asyncio.sleep(0.025)
+                await task._emit(
+                    "agent_task.test.request_progress",
+                    {"status": "running"},
+                    meta={
+                        "task_id": task.id,
+                        "status": task.status,
+                        "stream_kind": "progress",
+                    },
+                )
+        except asyncio.CancelledError:
+            cancellations += 1
+            raise
+
+    with pytest.raises(_AgentTaskDeadlineExceeded) as caught:
+        await task._await_task_request(progressing_request(), stage="verify")
+
+    assert caught.value.limit_name == "request_timeout_seconds"
+    assert cancellations == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_task_max_seconds_stays_fixed_while_progress_continues(tmp_path):
+    agent = _create_agent("request-fixed-task-deadline").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Respect the task deadline.",
+        success_criteria=["Progress cannot extend max_seconds."],
+        execution="flat",
+        limits={"max_seconds": 0.13, "max_no_progress_seconds": 0.05},
+        options={"agent_task": {"request_timeout_seconds": 1.0}},
+    )
+    task.started_at = time.time()
+
+    async def progressing_request() -> None:
+        while True:
+            await asyncio.sleep(0.025)
+            await task._emit(
+                "agent_task.test.request_progress",
+                {"status": "running"},
+                meta={
+                    "task_id": task.id,
+                    "status": task.status,
+                    "stream_kind": "progress",
+                },
+            )
+
+    with pytest.raises(_AgentTaskDeadlineExceeded) as caught:
+        await task._await_task_request(progressing_request(), stage="finalize")
+
+    assert caught.value.limit_name == "max_seconds"
 
 
 @pytest.mark.asyncio
