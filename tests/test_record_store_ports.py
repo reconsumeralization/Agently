@@ -5,7 +5,6 @@ import inspect
 import pytest
 
 from agently.core.storage import RecordStore, RecordStoreContextSource
-from agently.types.data import ContextReadIntent
 
 
 @pytest.mark.asyncio
@@ -55,31 +54,39 @@ async def test_record_store_scope_isolation(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_record_store_context_source_obeys_source_kind_filter(tmp_path) -> None:
+async def test_record_store_context_source_enumerates_bound_scope_without_retrieval_method(
+    tmp_path,
+) -> None:
     store = RecordStore(tmp_path, mode="read_write")
     await store.put("Revenue increased", collection="evidence", kind="fact")
     source = RecordStoreContextSource(store)
 
-    window = await source.async_list_candidates(
-        ContextReadIntent(
-            query="Revenue",
-            filters={"source_kinds": ["record_store"]},
-        ),
-        limit=5,
-    )
-    excluded = await source.async_list_candidates(
-        ContextReadIntent(
-            query="Revenue",
-            filters={"source_kinds": ["task_workspace"]},
-        ),
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
         limit=5,
     )
 
-    assert [candidate.metadata["collection"] for candidate in window.candidates] == ["evidence"]
-    assert window.exhaustive is True
-    assert window.next_cursor is None
-    assert window.scope["selection"] == "top_n"
-    assert window.scope["top_n"] == 5
-    assert window.scope["source_wide_exhaustive"] is False
-    assert excluded.candidates == ()
-    assert excluded.exhaustive is True
+    assert [item.metadata["collection"] for item in page.descriptors] == ["evidence"]
+    assert page.next_cursor is None
+    assert all("method" not in item.metadata for item in page.descriptors)
+
+
+@pytest.mark.asyncio
+async def test_record_store_context_source_enumerates_descriptors_without_intent(
+    tmp_path,
+) -> None:
+    store = RecordStore(tmp_path, mode="read_write")
+    ref = await store.put("Revenue increased", collection="evidence", kind="fact")
+    source = RecordStoreContextSource(store)
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=5,
+    )
+    readback = await source.async_read_exact(ref["id"], max_chars=100)
+
+    assert source.source_kind == "record_store"
+    assert [item.source_ref for item in page.descriptors] == [ref["id"]]
+    assert readback.content == "Revenue increased"

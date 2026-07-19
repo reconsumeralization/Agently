@@ -10,7 +10,6 @@ from agently.core.TaskWorkspace import (
     TaskWorkspacePolicyError,
 )
 from agently.core.application.SkillLibrary import SkillLibrary
-from agently.types.data import ContextReadIntent
 
 
 @pytest.mark.asyncio
@@ -82,7 +81,7 @@ async def test_task_workspace_enforces_path_containment(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_workspace_context_source_performs_source_local_search_and_exact_read(
+async def test_task_workspace_context_source_enumerates_all_files_and_exact_reads(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "report.md").write_text(
@@ -93,30 +92,21 @@ async def test_task_workspace_context_source_performs_source_local_search_and_ex
     workspace = TaskWorkspace(tmp_path, mode="read_only", execution_id="task-1")
     source = TaskWorkspaceContextSource(workspace)
 
-    window = await source.async_list_candidates(
-        ContextReadIntent(query="Revenue"),
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
         limit=20,
     )
-    candidates = window.candidates
+    descriptors = page.descriptors
 
-    assert [item.source_ref for item in candidates] == ["report.md"]
-    assert candidates[0].role == "information"
-    assert candidates[0].metadata["line"] == 1
-    block = await source.async_read(candidates[0], max_chars=200)
+    assert [item.source_ref for item in descriptors] == ["notes.md", "report.md"]
+    report = next(item for item in descriptors if item.source_ref == "report.md")
+    assert report.role == "information"
+    block = await source.async_read_exact(report.source_ref, max_chars=200)
     assert block.content == "Revenue increased by 12 percent.\nMargin was stable."
     assert block.completeness == "complete"
     assert block.source_ref == "report.md"
     assert block.metadata["sha256"]
-
-    excluded = await source.async_list_candidates(
-        ContextReadIntent(
-            query="Revenue",
-            filters={"source_kinds": ["record_store"]},
-        ),
-        limit=20,
-    )
-    assert excluded.candidates == ()
-    assert excluded.exhaustive is True
 
 
 @pytest.mark.asyncio
@@ -129,27 +119,28 @@ async def test_task_workspace_context_source_pages_matching_files(tmp_path: Path
     source = TaskWorkspaceContextSource(
         TaskWorkspace(tmp_path, mode="read_only", execution_id="task-pages")
     )
-    intent = ContextReadIntent(query="shared marker")
-
-    first = await source.async_list_candidates(intent, limit=2)
-    second = await source.async_list_candidates(
-        intent,
+    first = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
         limit=2,
+    )
+    second = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
         cursor=first.next_cursor,
+        limit=2,
     )
 
-    assert [item.source_ref for item in first.candidates] == [
+    assert [item.source_ref for item in first.descriptors] == [
         "report-0.md",
         "report-1.md",
     ]
-    assert [item.source_ref for item in second.candidates] == [
+    assert [item.source_ref for item in second.descriptors] == [
         "report-2.md",
         "report-3.md",
     ]
-    assert first.exhaustive is False
     assert first.next_cursor is not None
-    assert set(item.source_ref for item in first.candidates).isdisjoint(
-        item.source_ref for item in second.candidates
+    assert set(item.source_ref for item in first.descriptors).isdisjoint(
+        item.source_ref for item in second.descriptors
     )
 
 
@@ -163,6 +154,29 @@ def test_task_workspace_source_revision_observes_external_file_change(tmp_path: 
     second = source.source_revision
 
     assert first != second
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_enumerates_without_query_and_reads_exact(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "report.md").write_text("Revenue increased", encoding="utf-8")
+    source = TaskWorkspaceContextSource(
+        TaskWorkspace(tmp_path, mode="read_only", execution_id="descriptor-source")
+    )
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=10,
+    )
+    readback = await source.async_read_exact("report.md", max_chars=100)
+
+    assert source.source_kind == "task_workspace"
+    assert [item.source_ref for item in page.descriptors] == ["report.md"]
+    assert page.descriptors[0].index_text
+    assert readback.content == "Revenue increased"
+    assert readback.source_revision == page.source_revision
 
 
 def test_task_workspace_has_no_cross_source_context_builder(tmp_path: Path) -> None:

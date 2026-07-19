@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
@@ -18,80 +19,120 @@ from agently.types.data import (
     ContextCandidate,
     ContextConsumer,
     ContextReadIntent,
+    ContextSourceDescriptor,
+    ContextSourceDescriptorPage,
+    ContextSourceRead,
 )
-from agently.types.plugins import ContextSourceCandidateWindow
 
 
 class MemoryContextSource:
+    source_kind = "memory_fixture"
+
     def __init__(
         self,
         candidates: Sequence[ContextCandidate],
         blocks: Mapping[str, ContextBlock],
         *,
-        source_id: str = "source:memory",
+        source_id: str | None = None,
         source_revision: str = "rev:1",
     ) -> None:
-        self.source_id = source_id
+        identity = hashlib.sha256(
+            repr(
+                (
+                    self.__class__.__qualname__,
+                    [(item.source_ref, item.summary, item.estimated_chars) for item in candidates],
+                    [(key, block.content, block.completeness) for key, block in blocks.items()],
+                )
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        self.source_id = source_id or f"source:memory:{identity}"
         self.source_revision = source_revision
         self._candidates = list(candidates)
         self._blocks = dict(blocks)
-        self.list_calls = 0
+        self.enumerate_calls = 0
         self.read_refs: list[str] = []
 
-    async def async_list_candidates(
+    async def async_enumerate_descriptors(
         self,
-        intent: ContextReadIntent,
         *,
+        profile: Mapping[str, Any],
+        cursor: str | None,
         limit: int,
-        cursor: str | None = None,
-        filters: Mapping[str, Any] | None = None,
-    ) -> ContextSourceCandidateWindow:
-        self.list_calls += 1
-        candidates = tuple(self._candidates[:limit])
-        return ContextSourceCandidateWindow(
+    ) -> ContextSourceDescriptorPage:
+        del profile
+        self.enumerate_calls += 1
+        offset = int(cursor or 0)
+        candidates = tuple(self._candidates[offset : offset + limit])
+        descriptors = tuple(
+            ContextSourceDescriptor(
+                descriptor_key=candidate.block_key,
+                source_id=self.source_id,
+                source_revision=self.source_revision,
+                source_ref=candidate.source_ref,
+                role=candidate.role,
+                title=candidate.source_ref,
+                summary=candidate.summary,
+                estimated_chars=candidate.estimated_chars,
+                required=candidate.required,
+                priority=candidate.priority,
+                index_text=candidate.summary,
+                metadata=candidate.metadata,
+            )
+            for candidate in candidates
+        )
+        next_offset = offset + len(candidates)
+        return ContextSourceDescriptorPage(
             source_id=self.source_id,
             source_revision=self.source_revision,
-            scope={"query": intent.query, "filters": dict(filters or {})},
-            candidates=candidates,
-            returned_candidates=len(candidates),
-            exhaustive=len(candidates) == len(self._candidates),
-            cursor=cursor,
-            next_cursor=None,
+            descriptors=descriptors,
+            next_cursor=(str(next_offset) if next_offset < len(self._candidates) else None),
         )
 
-    async def async_read(
+    async def async_read_exact(
         self,
-        candidate: ContextCandidate,
+        source_ref: str,
         *,
         max_chars: int,
         representation: str | None = None,
-    ) -> ContextBlock:
-        self.read_refs.append(candidate.source_ref)
-        return self._blocks[candidate.source_ref]
+        range_start: int = 0,
+    ) -> ContextSourceRead:
+        del representation
+        self.read_refs.append(source_ref)
+        block = self._blocks[source_ref]
+        content = str(block.content)[range_start : range_start + max_chars]
+        complete = range_start + len(content) >= len(str(block.content))
+        return ContextSourceRead(
+            source_id=self.source_id,
+            source_revision=self.source_revision,
+            source_ref=source_ref,
+            content=content,
+            completeness=(block.completeness if complete else "truncated"),
+            next_range_start=(None if complete else range_start + len(content)),
+            refs=block.refs,
+            metadata=block.metadata,
+        )
 
 
 class SelfRevisingListSource(MemoryContextSource):
-    async def async_list_candidates(
+    async def async_enumerate_descriptors(
         self,
-        intent: ContextReadIntent,
         *,
+        profile: Mapping[str, Any],
+        cursor: str | None,
         limit: int,
-        cursor: str | None = None,
-        filters: Mapping[str, Any] | None = None,
-    ) -> ContextSourceCandidateWindow:
-        window = await super().async_list_candidates(
-            intent,
+    ) -> ContextSourceDescriptorPage:
+        page = await super().async_enumerate_descriptors(
+            profile=profile,
             limit=limit,
             cursor=cursor,
-            filters=filters,
         )
-        if self.list_calls == 1:
+        if self.enumerate_calls == 1:
             self.source_revision = "rev:2"
             self._candidates = [
                 replace(candidate, source_revision="rev:2")
                 for candidate in self._candidates
             ]
-        return window
+        return page
 
 
 class RecordingSelector:
@@ -114,61 +155,6 @@ class RecordingSelector:
         else:
             keys = tuple(self.selected)
         return ContextSelection(selected_keys=keys)
-
-
-class PagingContextSource(MemoryContextSource):
-    def __init__(self) -> None:
-        candidates = [
-            _candidate("guide", role="instruction", required=True),
-            _candidate("docs/a"),
-            _candidate("docs/b"),
-            _candidate("docs/c"),
-            _candidate("docs/d"),
-        ]
-        super().__init__(
-            candidates,
-            {
-                item.source_ref: _source_block(
-                    item.source_ref,
-                    role=item.role,
-                    required=item.required,
-                )
-                for item in candidates
-            },
-        )
-        self.cursors: list[str | None] = []
-
-    async def async_list_candidates(
-        self,
-        intent: ContextReadIntent,
-        *,
-        limit: int,
-        cursor: str | None = None,
-        filters: Mapping[str, Any] | None = None,
-    ) -> ContextSourceCandidateWindow:
-        del intent, limit, filters
-        self.list_calls += 1
-        self.cursors.append(cursor)
-        if cursor is None:
-            page = (self._candidates[0], self._candidates[1], self._candidates[2])
-            next_cursor = "page:2"
-            exhaustive = False
-        elif cursor == "page:2":
-            page = (self._candidates[0], self._candidates[3], self._candidates[4])
-            next_cursor = None
-            exhaustive = True
-        else:
-            raise ValueError("unexpected cursor")
-        return ContextSourceCandidateWindow(
-            source_id=self.source_id,
-            source_revision=self.source_revision,
-            scope={"query": "repository owner", "path": "."},
-            candidates=page,
-            returned_candidates=len(page),
-            exhaustive=exhaustive,
-            cursor=cursor,
-            next_cursor=next_cursor,
-        )
 
 
 class ToggleFailSelector(RecordingSelector):
@@ -196,21 +182,118 @@ class ToggleFailSelector(RecordingSelector):
 
 class FailingListContextSource:
     source_id = "source:failing"
+    source_kind = "failing_fixture"
     source_revision = "rev:1"
 
-    async def async_list_candidates(
+    async def async_enumerate_descriptors(
         self,
-        intent: ContextReadIntent,
         *,
+        profile: Mapping[str, Any],
+        cursor: str | None,
         limit: int,
-        cursor: str | None = None,
-        filters: Mapping[str, Any] | None = None,
-    ) -> ContextSourceCandidateWindow:
-        del intent, limit, cursor, filters
+    ) -> ContextSourceDescriptorPage:
+        del profile, limit, cursor
         raise RuntimeError("source unavailable")
 
-    async def async_read(self, *_args: Any, **_kwargs: Any) -> ContextBlock:
+    async def async_read_exact(self, *_args: Any, **_kwargs: Any) -> ContextSourceRead:
         raise AssertionError("failing list source cannot read")
+
+
+@pytest.mark.asyncio
+async def test_one_source_index_failure_does_not_hide_healthy_source_content() -> None:
+    required = _candidate(
+        "healthy/core",
+        role="instruction",
+        required=True,
+        estimated_chars=12,
+    )
+    healthy = MemoryContextSource(
+        [required],
+        {
+            required.source_ref: _source_block(
+                required.source_ref,
+                role=required.role,
+                content="healthy core",
+                required=True,
+            )
+        },
+        source_id="source:healthy-isolation",
+    )
+    context = TaskContext("task-source-isolation")
+    context.attach(healthy, binding_id="binding:healthy", required=True)
+    context.attach(
+        FailingListContextSource(),
+        binding_id="binding:failing",
+        required=False,
+    )
+
+    package = await context.reader(consumer="worker").async_read("execute")
+
+    assert [block.content for block in package.blocks] == ["healthy core"]
+    failures = [
+        item
+        for item in package.diagnostics
+        if item.code == "context.source_candidates_failed"
+    ]
+    assert [item.details["binding_id"] for item in failures] == ["binding:failing"]
+
+
+@pytest.mark.asyncio
+async def test_read_intent_can_bound_candidates_and_exact_read_chars() -> None:
+    candidates = [_candidate(f"doc/{index}") for index in range(4)]
+    source = MemoryContextSource(
+        candidates,
+        {
+            item.source_ref: _source_block(
+                item.source_ref,
+                content=f"content-{index}-" + ("x" * 40),
+            )
+            for index, item in enumerate(candidates)
+        },
+    )
+    selector = RecordingSelector("all")
+    context = TaskContext("task-read-bounds")
+    context.attach(source)
+
+    package = await context.reader(
+        consumer="worker",
+        budget=ContextBudget(max_chars=1000, max_blocks=8, max_block_chars=500),
+        semantic_selector=selector,
+    ).async_read(
+        ContextReadIntent(
+            "read bounded evidence",
+            metadata={"candidate_limit": 2, "max_block_chars": 12},
+        )
+    )
+
+    assert len(selector.calls[0][1]) == 2
+    assert len(package.blocks) == 2
+    assert all(block.content_chars == 12 for block in package.blocks)
+    assert all(block.completeness == "truncated" for block in package.blocks)
+
+
+@pytest.mark.asyncio
+async def test_ref_only_read_returns_descriptor_identity_without_exact_read() -> None:
+    candidate = _candidate("docs/large.md", estimated_chars=100_000)
+    source = MemoryContextSource(
+        [candidate],
+        {candidate.source_ref: _source_block(candidate.source_ref, content="cold body")},
+    )
+    context = TaskContext("task-ref-only")
+    context.attach(source)
+
+    package = await context.reader(consumer="locator").async_read(
+        ContextReadIntent(
+            "locate the document",
+            metadata={"delivery_mode": "refs_only", "candidate_limit": 1},
+        )
+    )
+
+    assert len(package.blocks) == 1
+    assert package.blocks[0].source_ref == "docs/large.md"
+    assert package.blocks[0].content is None
+    assert package.blocks[0].completeness == "ref_only"
+    assert source.read_refs == []
 
 
 def test_context_reader_cannot_be_constructed_outside_task_context() -> None:
@@ -255,111 +338,6 @@ def test_context_reader_state_cannot_be_restored_outside_task_context() -> None:
 
     with pytest.raises(TypeError, match="TaskContext.restore_reader"):
         reader._restore_state(state)
-
-
-@pytest.mark.asyncio
-async def test_reader_advances_same_intent_across_source_windows() -> None:
-    source = PagingContextSource()
-    context = TaskContext("task-progressive-windows")
-    context.attach(source, binding_id="binding:memory", required=True)
-    reader = context.reader(
-        consumer="planner",
-        phase="planning",
-        semantic_selector=RecordingSelector("all"),
-    )
-
-    first = await reader.async_read("repository owner")
-    second = await reader.async_read("repository owner")
-
-    assert source.cursors == [None, "page:2"]
-    assert [block.source_ref for block in first.blocks] == ["guide", "docs/a", "docs/b"]
-    assert [block.source_ref for block in second.blocks] == ["guide", "docs/c", "docs/d"]
-    assert first.source_coverage["binding:memory"] == {
-        "scope": {"query": "repository owner", "path": "."},
-        "returned_candidates": 3,
-        "exhaustive": False,
-        "continuation_available": True,
-    }
-    assert second.source_coverage["binding:memory"]["exhaustive"] is True
-
-
-@pytest.mark.asyncio
-async def test_reader_does_not_advance_window_when_selection_fails() -> None:
-    source = PagingContextSource()
-    selector = ToggleFailSelector()
-    context = TaskContext("task-window-selection-failure")
-    context.attach(source, binding_id="binding:memory")
-    reader = context.reader(consumer="planner", semantic_selector=selector)
-
-    failed = await reader.async_read("repository owner")
-    selector.fail = False
-    retried = await reader.async_read("repository owner")
-    advanced = await reader.async_read("repository owner")
-
-    assert any(item.code == "context.selection_failed" for item in failed.diagnostics)
-    assert source.cursors == [None, None, "page:2"]
-    assert [block.source_ref for block in retried.blocks] == ["guide", "docs/a", "docs/b"]
-    assert [block.source_ref for block in advanced.blocks] == ["guide", "docs/c", "docs/d"]
-
-
-@pytest.mark.asyncio
-async def test_reader_does_not_advance_window_without_semantic_selector() -> None:
-    source = PagingContextSource()
-    context = TaskContext("task-window-selector-unavailable")
-    context.attach(source, binding_id="binding:memory")
-    reader = context.reader(consumer="planner")
-
-    failed = await reader.async_read("repository owner")
-    reader.semantic_selector = RecordingSelector("all")
-    retried = await reader.async_read("repository owner")
-
-    assert any(
-        item.code == "context.semantic_selector_unavailable"
-        for item in failed.diagnostics
-    )
-    assert source.cursors == [None, None]
-    assert [block.source_ref for block in retried.blocks] == ["guide", "docs/a", "docs/b"]
-
-
-@pytest.mark.asyncio
-async def test_reader_advances_successful_source_when_another_source_fails() -> None:
-    source = PagingContextSource()
-    context = TaskContext("task-independent-source-windows")
-    context.attach(source, binding_id="binding:memory")
-    context.attach(FailingListContextSource(), binding_id="binding:failing")
-    reader = context.reader(
-        consumer="planner",
-        semantic_selector=RecordingSelector("all"),
-    )
-
-    first = await reader.async_read("repository owner")
-    second = await reader.async_read("repository owner")
-
-    assert any(item.code == "context.source_candidates_failed" for item in first.diagnostics)
-    assert source.cursors == [None, "page:2"]
-    assert [block.source_ref for block in second.blocks] == ["guide", "docs/c", "docs/d"]
-
-
-@pytest.mark.asyncio
-async def test_task_context_restored_reader_continues_at_saved_window() -> None:
-    source = PagingContextSource()
-    context = TaskContext("task-window-resume")
-    context.attach(source, binding_id="binding:memory")
-    reader = context.reader(
-        consumer="planner",
-        semantic_selector=RecordingSelector("all"),
-    )
-    await reader.async_read("repository owner")
-    state = reader._export_state()
-
-    restored = context.restore_reader(
-        state,
-        semantic_selector=RecordingSelector("all"),
-    )
-    package = await restored.async_read("repository owner")
-
-    assert source.cursors == [None, "page:2"]
-    assert [block.source_ref for block in package.blocks] == ["guide", "docs/c", "docs/d"]
 
 
 def test_task_context_reader_restore_rejects_foreign_context() -> None:
@@ -685,35 +663,31 @@ async def test_explicit_lossy_required_overflow_returns_auditable_digest() -> No
     )
 
     class LossySource(MemoryContextSource):
-        async def async_read(
+        async def async_read_exact(
             self,
-            candidate: ContextCandidate,
+            source_ref: str,
             *,
             max_chars: int,
             representation: str | None = None,
-        ) -> ContextBlock:
+            range_start: int = 0,
+        ) -> ContextSourceRead:
             if representation != "lossy_digest":
-                return await super().async_read(
-                    candidate,
+                return await super().async_read_exact(
+                    source_ref,
                     max_chars=max_chars,
                     representation=representation,
+                    range_start=range_start,
                 )
             content = "Lossy core digest with scoped refs"[:max_chars]
-            return ContextBlock(
-                block_id="lossy-core-block",
-                block_key=candidate.block_key,
+            return ContextSourceRead(
                 source_id=self.source_id,
                 source_revision=self.source_revision,
-                source_ref=candidate.source_ref,
-                binding_id=candidate.binding_id,
-                role="instruction",
+                source_ref=source_ref,
                 content=content,
                 completeness="lossy",
-                content_chars=len(content),
-                required=True,
-                refs=(candidate.source_ref, "skill/oversized-core#section-1"),
+                refs=(source_ref, "skill/oversized-core#section-1"),
                 metadata={
-                    "original_chars": candidate.estimated_chars,
+                    "original_chars": 10000,
                     "representation": "lossy_digest",
                 },
             )
@@ -780,7 +754,7 @@ async def test_reader_rebases_once_when_source_revision_changes_during_listing()
 
     package = await reader.async_read("Read the source")
 
-    assert source.list_calls == 2
+    assert source.enumerate_calls == 2
     assert package.source_revisions == {"binding:memory": "rev:2"}
     assert [block.source_ref for block in package.blocks] == ["docs/one"]
 
@@ -791,27 +765,25 @@ async def test_reader_does_not_rebase_structural_task_context_mutation_during_li
     context = TaskContext("task-1")
 
     class StructurallyMutatingListSource(MemoryContextSource):
-        async def async_list_candidates(
+        async def async_enumerate_descriptors(
             self,
-            intent: ContextReadIntent,
             *,
+            profile: Mapping[str, Any],
+            cursor: str | None,
             limit: int,
-            cursor: str | None = None,
-            filters: Mapping[str, Any] | None = None,
-        ) -> ContextSourceCandidateWindow:
-            window = await super().async_list_candidates(
-                intent,
+        ) -> ContextSourceDescriptorPage:
+            page = await super().async_enumerate_descriptors(
+                profile=profile,
                 limit=limit,
                 cursor=cursor,
-                filters=filters,
             )
-            if self.list_calls == 1:
+            if self.enumerate_calls == 1:
                 context.put(
                     role="information",
                     content="concurrent structural entry",
                     entry_id="entry:concurrent",
                 )
-            return window
+            return page
 
     source = StructurallyMutatingListSource(
         [candidate],
@@ -823,7 +795,7 @@ async def test_reader_does_not_rebase_structural_task_context_mutation_during_li
     with pytest.raises(ContextStaleError, match="TaskContext revision"):
         await reader.async_read("Read the source")
 
-    assert source.list_calls == 1
+    assert source.enumerate_calls == 1
 
 
 @pytest.mark.asyncio

@@ -17,35 +17,52 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
-from agently.types.data import ContextBlock, ContextCandidate, ContextReadIntent
-from agently.types.data.context import ContextSourceCandidateWindow
+from agently.types.data import (
+    ContextSourceChangeSet,
+    ContextSourceDescriptorPage,
+    ContextSourceRead,
+)
 
 
 @runtime_checkable
 class ContextSource(Protocol):
-    """Source-native candidate and exact-read port used by ContextReader."""
+    """Source truth port used by TaskContext's internal index and readers."""
 
     source_id: str
+    source_kind: str
 
     @property
     def source_revision(self) -> str: ...
 
-    async def async_list_candidates(
+    async def async_enumerate_descriptors(
         self,
-        intent: ContextReadIntent,
         *,
+        profile: Mapping[str, Any],
+        cursor: str | None,
         limit: int,
-        cursor: str | None = None,
-        filters: Mapping[str, Any] | None = None,
-    ) -> ContextSourceCandidateWindow: ...
+    ) -> ContextSourceDescriptorPage: ...
 
-    async def async_read(
+    async def async_read_exact(
         self,
-        candidate: ContextCandidate,
+        source_ref: str,
         *,
         max_chars: int,
         representation: str | None = None,
-    ) -> ContextBlock: ...
+        range_start: int = 0,
+    ) -> ContextSourceRead: ...
 
 
-__all__ = ["ContextSource", "ContextSourceCandidateWindow"]
+@runtime_checkable
+class ContextSourceChangeFeed(Protocol):
+    """Optional trustworthy descriptor-delta capability."""
+
+    async def async_changes(
+        self,
+        *,
+        from_revision: str,
+        to_revision: str,
+        profile: Mapping[str, Any],
+    ) -> ContextSourceChangeSet: ...
+
+
+__all__ = ["ContextSource", "ContextSourceChangeFeed"]

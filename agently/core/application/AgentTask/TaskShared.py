@@ -261,6 +261,16 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
 
+    def _task_context_retrieval_policy(self) -> dict[str, Any]:
+        task_context = getattr(self, "task_context", None)
+        catalog = (
+            task_context.source_catalog()
+            if task_context is not None
+            and callable(getattr(task_context, "source_catalog", None))
+            else {}
+        )
+        return scoped_retrieval_policy(catalog)
+
     def _task_references(self) -> TaskReferenceCatalog:
         catalog = cast(TaskReferenceCatalog | None, getattr(self, "_task_reference_catalog", None))
         if catalog is None:

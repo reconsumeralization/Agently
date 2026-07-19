@@ -456,7 +456,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "plan": DataFormatter.sanitize(plan),
                 "execution_prompt": self._execution_prompt_context(),
                 "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-                "retrieval_policy": scoped_retrieval_policy(),
+                "retrieval_policy": self._task_context_retrieval_policy(),
                 "context_summary": {
                     "item_count": len(context_pack.get("items", [])),
                     "profile": context_pack.get("profile"),
@@ -488,6 +488,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 for capability_id in scoped_ids
             ),
             delivery_contract=delivery_contract,
+            retrieval_policy=self._task_context_retrieval_policy(),
             runtime_preferences={
                 "handler": (
                     "agent_task_material_claim_patch"
@@ -956,13 +957,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "source_kinds",
                 "include_hidden",
                 "max_file_bytes",
-                "context_lines",
                 "tags",
-                "method",
-                "selection",
-                "top_n",
-                "rerank",
-                "max_candidates",
             ):
                 value = raw_group.get(key)
                 if value is not None:
@@ -979,11 +974,11 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         "evidence_snippets": "bounded source text when requested",
                     },
                     evidence_contract={
-                        "role_policy": scoped_retrieval_policy(),
+                        "role_policy": dict(work_unit.retrieval_policy),
                         "semantic_acceptance_owner": "planner_or_verifier",
                     },
                     runtime_preferences={
-                        "retrieval_policy": scoped_retrieval_policy(),
+                        "retrieval_policy": dict(work_unit.retrieval_policy),
                         "query_group_index": index,
                     },
                 )

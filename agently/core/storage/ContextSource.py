@@ -15,18 +15,16 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
 from agently.types.data import (
-    ContextBlock,
-    ContextCandidate,
-    ContextReadIntent,
-    RecordRetrievalMethod,
-    RecordRetrievalSelection,
+    ContextSourceDescriptor,
+    ContextSourceDescriptorPage,
+    ContextSourceRead,
+    ContextRole,
 )
-from agently.types.plugins import ContextSourceCandidateWindow
 
 from .RecordStore import RecordStore
 
@@ -40,38 +38,10 @@ _CONTEXT_ROLES = {
     "capability",
     "index",
 }
-_ADAPTER_FILTERS = {
-    "context_binding_scope",
-    "path",
-    "pattern",
-    "source_kinds",
-    "include_hidden",
-    "max_file_bytes",
-    "context_lines",
-    "tags",
-    "method",
-    "selection",
-    "top_n",
-    "rerank",
-    "max_candidates",
-}
-
-
-def _source_kind_enabled(filters: Mapping[str, Any], kind: str) -> bool:
-    raw = filters.get("source_kinds")
-    if raw is None:
-        return True
-    if isinstance(raw, str):
-        offered = {raw.strip()}
-    elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
-        offered = {str(item).strip() for item in raw if str(item).strip()}
-    else:
-        return False
-    return not offered or kind in offered
-
-
 class RecordStoreContextSource:
-    """Structural candidate and exact-read adapter for one RecordStore view."""
+    """Structural descriptor and exact-read port for one RecordStore view."""
+
+    source_kind = "record_store"
 
     def __init__(self, record_store: RecordStore) -> None:
         self.record_store = record_store
@@ -104,102 +74,60 @@ class RecordStoreContextSource:
         return tuple(path for path in candidates if path.exists())
 
     @staticmethod
-    def _record_role(ref: Mapping[str, Any]) -> str:
+    def _record_role(ref: Mapping[str, Any]) -> ContextRole:
         meta = ref.get("meta")
         role = str(meta.get("context_role") or "") if isinstance(meta, Mapping) else ""
-        return role if role in _CONTEXT_ROLES else "information"
+        return cast(ContextRole, role if role in _CONTEXT_ROLES else "information")
 
-    async def async_list_candidates(
+    async def async_enumerate_descriptors(
         self,
-        intent: ContextReadIntent,
         *,
+        profile: Mapping[str, Any],
+        cursor: str | None,
         limit: int,
-        cursor: str | None = None,
-        filters: Mapping[str, Any] | None = None,
-    ) -> ContextSourceCandidateWindow:
+    ) -> ContextSourceDescriptorPage:
         page_size = int(limit)
         if page_size <= 0:
             raise ValueError("limit must be a positive integer.")
-        if cursor is not None:
-            raise ValueError("RecordStore top-N Context windows do not continue.")
-        raw_filters = filters or intent.filters
-        requested_top_n = int(raw_filters.get("top_n") or page_size)
-        top_n = max(1, min(page_size, requested_top_n))
-        selection = str(raw_filters.get("selection") or "top_n")
-        if selection not in {"length", "top_n"}:
-            selection = "top_n"
-        method = str(raw_filters.get("method") or "auto")
-        if method not in {"auto", "keyword", "vector", "hybrid"}:
-            method = "auto"
-        scope = {
-            "query": intent.query,
-            "selection": selection,
-            "top_n": top_n,
-            "method": method,
-            "tags": list(raw_filters.get("tags") or ()),
-            "source_wide_exhaustive": False,
-        }
+        try:
+            offset = int(cursor or 0)
+        except (TypeError, ValueError) as error:
+            raise ValueError("RecordStore descriptor cursor is invalid.") from error
+        if offset < 0:
+            raise ValueError("RecordStore descriptor cursor cannot be negative.")
+        projection_max_chars = int(profile.get("projection_max_chars") or 2000)
+        if projection_max_chars <= 0:
+            raise ValueError("projection_max_chars must be positive.")
         revision = self.source_revision
-        if not _source_kind_enabled(raw_filters, "record_store"):
-            return ContextSourceCandidateWindow(
-                source_id=self.source_id,
-                source_revision=revision,
-                scope={**scope, "enabled": False},
-                candidates=(),
-                returned_candidates=0,
-                exhaustive=True,
-            )
-        resolved_filters = {
-            str(key): value
-            for key, value in dict(raw_filters).items()
-            if str(key) not in _ADAPTER_FILTERS
-        }
-        tags_value = raw_filters.get("tags")
-        tags = (
-            tuple(str(item) for item in tags_value if str(item).strip())
-            if isinstance(tags_value, Sequence) and not isinstance(tags_value, (str, bytes, bytearray))
-            else None
-        )
-        package = await self.record_store.retrieve(
-            intent.query,
-            tags=tags,
-            filters=resolved_filters,
-            selection=cast(RecordRetrievalSelection, selection),
-            top_n=top_n,
-            method=cast(RecordRetrievalMethod, method),
-            rerank=bool(raw_filters.get("rerank", False)),
-            max_candidates=raw_filters.get("max_candidates"),
-            budget={"max_items": top_n, "max_chars": max(4000, top_n * 2000)},
-        )
-        candidates: list[ContextCandidate] = []
-        seen_content: set[tuple[str, str, str, str]] = set()
-        for item in package.get("items", ()):
-            ref = item.get("ref")
-            if item.get("source") != "record" or not isinstance(ref, Mapping):
-                continue
+        refs = tuple(await self.record_store.search(query=None))
+        page_refs = refs[offset : offset + page_size]
+        descriptors: list[ContextSourceDescriptor] = []
+        for ref in page_refs:
             record_id = str(ref.get("id") or "").strip()
             if not record_id:
-                continue
-            content_identity = (
-                str(ref.get("sha256") or record_id),
-                str(ref.get("collection") or ""),
-                str(ref.get("kind") or ""),
-                repr(sorted(dict(ref.get("source") or {}).items())),
+                raise ValueError("RecordStore search returned a record without id.")
+            projection = await self.record_store.read_bounded(
+                record_id,
+                offset=0,
+                limit=projection_max_chars,
             )
-            if content_identity in seen_content:
-                continue
-            seen_content.add(content_identity)
-            summary = str(item.get("summary") or ref.get("summary") or record_id)
-            candidates.append(
-                ContextCandidate(
-                    block_key=f"record-store-source:{record_id}",
+            content = str(projection.get("content") or "")
+            summary = str(ref.get("summary") or content[:500] or record_id)
+            descriptors.append(
+                ContextSourceDescriptor(
+                    descriptor_key=f"record-store:{record_id}",
                     source_id=self.source_id,
                     source_revision=revision,
                     source_ref=record_id,
-                    binding_id=self.source_id,
-                    role=self._record_role(ref),  # type: ignore[arg-type]
+                    role=self._record_role(ref),
+                    title=summary[:200] or record_id,
                     summary=summary[:500],
-                    estimated_chars=max(0, int(ref.get("size") or item.get("raw_chars") or 0)),
+                    estimated_chars=max(
+                        0,
+                        int(ref.get("size") or projection.get("total_size") or len(content)),
+                    ),
+                    index_text=f"{summary}\n{content}",
+                    content_digest=str(ref.get("sha256") or projection.get("digest") or "") or None,
                     metadata={
                         "record_id": record_id,
                         "collection": ref.get("collection"),
@@ -210,48 +138,40 @@ class RecordStoreContextSource:
                     },
                 )
             )
-            if len(candidates) >= top_n:
-                break
-        return ContextSourceCandidateWindow(
+        next_offset = offset + len(page_refs)
+        return ContextSourceDescriptorPage(
             source_id=self.source_id,
             source_revision=revision,
-            scope=scope,
-            candidates=tuple(candidates),
-            returned_candidates=len(candidates),
-            exhaustive=True,
+            descriptors=tuple(descriptors),
+            next_cursor=(str(next_offset) if next_offset < len(refs) else None),
         )
 
-    async def async_read(
+    async def async_read_exact(
         self,
-        candidate: ContextCandidate,
+        source_ref: str,
         *,
         max_chars: int,
         representation: str | None = None,
-    ) -> ContextBlock:
+        range_start: int = 0,
+    ) -> ContextSourceRead:
         del representation
-        if candidate.source_id != self.source_id:
-            raise ValueError("RecordStore candidate belongs to a different source.")
         segment = await self.record_store.read_bounded(
-            candidate.source_ref,
-            offset=0,
+            source_ref,
+            offset=range_start,
             limit=max_chars,
         )
         content = str(segment.get("content") or "")
-        return ContextBlock(
-            block_id=f"record_store_block:{candidate.source_ref}:{segment.get('digest')}",
-            block_key=candidate.block_key,
+        eof = bool(segment.get("eof"))
+        size = int(segment.get("size") or len(content))
+        return ContextSourceRead(
             source_id=self.source_id,
-            source_revision=candidate.source_revision,
-            source_ref=candidate.source_ref,
-            binding_id=candidate.binding_id,
-            role=candidate.role,
+            source_revision=self.source_revision,
+            source_ref=source_ref,
             content=content,
-            completeness="complete" if bool(segment.get("eof")) else "truncated",
-            content_chars=len(content),
-            required=candidate.required,
-            refs=(candidate.source_ref,),
+            completeness="complete" if eof else "truncated",
+            next_range_start=(range_start + size if not eof else None),
+            content_digest=str(segment.get("digest") or "") or None,
             metadata={
-                **dict(candidate.metadata),
                 "offset": segment.get("offset"),
                 "size": segment.get("size"),
                 "total_size": segment.get("total_size"),

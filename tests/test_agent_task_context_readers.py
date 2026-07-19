@@ -8,6 +8,7 @@ import pytest
 from agently import Agently
 from agently.core import AgentTask, SkillLibrary
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
+from agently.core.application.AgentTask.BlockCarrier import scoped_retrieval_policy
 from agently.core.context import TaskContext
 from agently.types.data import ContextReadIntent
 
@@ -27,20 +28,53 @@ def _write_skill(root: Path) -> Path:
 
 class _FailingRequiredContextSource:
     source_id = "source:failing-required"
+    source_kind = "failing_required"
     source_revision = "rev:1"
 
-    async def async_list_candidates(
+    async def async_enumerate_descriptors(
         self,
-        _intent: ContextReadIntent,
         *,
+        profile,
+        cursor,
         limit: int,
-        filters=None,
     ):
-        del limit, filters
+        del profile, cursor, limit
         raise RuntimeError("required source unavailable")
 
-    async def async_read(self, *_args, **_kwargs):
-        raise AssertionError("candidate reads must not start after list failure")
+    async def async_read_exact(self, *_args, **_kwargs):
+        raise AssertionError("exact reads must not start after enumeration failure")
+
+
+def test_scoped_retrieval_policy_projects_task_context_source_catalog() -> None:
+    context = TaskContext("catalog-task")
+    source = _FailingRequiredContextSource()
+    source.source_kind = "pinned_repository"
+    context.attach(source, binding_id="binding:repo", required=True)
+
+    policy = scoped_retrieval_policy(context.source_catalog())
+
+    assert policy["schema_version"] == "agent_task_scoped_retrieval/v2"
+    assert tuple(policy["source_kinds"]) == ("pinned_repository",)
+    assert policy["source_kinds"]["pinned_repository"]["binding_ids"] == (
+        "binding:repo",
+    )
+
+
+def test_flat_scoped_retrieval_normalization_preserves_open_source_kind() -> None:
+    normalized = AgentTask._normalize_scoped_retrieval_plan(
+        {
+            "query_groups": [
+                {
+                    "query": "entrypoint",
+                    "source_kinds": ["pinned_repository"],
+                }
+            ]
+        }
+    )
+
+    assert normalized["query_groups"][0]["source_kinds"] == [
+        "pinned_repository"
+    ]
 
 
 @pytest.mark.asyncio

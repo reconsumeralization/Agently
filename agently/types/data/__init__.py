@@ -47,6 +47,11 @@ from .context import (
     ContextReadIntent,
     ContextRole,
     ContextSourceBindingSnapshot,
+    ContextSourceChange,
+    ContextSourceChangeSet,
+    ContextSourceDescriptor,
+    ContextSourceDescriptorPage,
+    ContextSourceRead,
     TaskContextEntrySnapshot,
     TaskContextSnapshot,
 )

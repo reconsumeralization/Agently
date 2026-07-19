@@ -1164,7 +1164,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "available_readback": self._taskboard_available_readback(evidence_view),
                 "source_ref_policy": self._taskboard_source_ref_policy(),
                 "scoped_retrieval": self._taskboard_card_scoped_retrieval(context.card),
-                "retrieval_policy": scoped_retrieval_policy(),
+                "retrieval_policy": self._task_context_retrieval_policy(),
                 "task_workspace_delivery_policy": self._taskboard_task_workspace_delivery_policy(context),
                 "source_refs": source_refs,
                 "previous_attempt_errors": previous_errors,
@@ -1348,6 +1348,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "task_context_contract": self._task_context_contract_for_model_prompt(),
                     "scoped_retrieval": DataFormatter.sanitize(self._taskboard_card_scoped_retrieval(context.card)),
                 },
+                retrieval_policy=self._task_context_retrieval_policy(),
                 quality_gates=(
                     {
                         "kind": "taskboard_card_status",
@@ -2038,6 +2039,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 },
                 "task_context_contract": self._task_context_contract_for_model_prompt(),
             },
+            retrieval_policy=self._task_context_retrieval_policy(),
             quality_gates=(
                 {
                     "kind": "taskboard_control_card_status",

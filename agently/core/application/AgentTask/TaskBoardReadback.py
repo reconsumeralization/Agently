@@ -381,6 +381,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "card": DataFormatter.sanitize(context.card.to_dict()),
                 "execution_prompt": {"output_format": "json"},
             },
+            retrieval_policy=self._task_context_retrieval_policy(),
             quality_gates=(
                 {
                     "kind": "taskboard_artifact_readback_status",
@@ -1204,6 +1205,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 if isinstance(ref, Mapping)
             ),
             delivery_contract={"execution_prompt": {"output_format": "json"}},
+            retrieval_policy=self._task_context_retrieval_policy(),
             quality_gates=(
                 {
                     "kind": "taskboard_dependency_readback_status",

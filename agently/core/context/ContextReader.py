@@ -30,12 +30,18 @@ from agently.types.data import (
     ContextOmission,
     ContextPackage,
     ContextReadIntent,
+    ContextSourceDescriptor,
+    ContextSourceRead,
     TaskContextEntrySnapshot,
     TaskContextSnapshot,
 )
-from agently.types.plugins import ContextSourceCandidateWindow
 
 from .Selection import ContextSelection, ContextSemanticSelector
+from ._Index import (
+    _InvalidContextIndexQueryError,
+    _RequiredVectorUnavailableError,
+    _UnknownContextSourceKindError,
+)
 
 
 class ContextStaleError(RuntimeError):
@@ -45,13 +51,13 @@ class ContextStaleError(RuntimeError):
 @dataclass(frozen=True)
 class _CollectedCandidate:
     offered: ContextCandidate
-    source_candidate: ContextCandidate | None
+    source_descriptor: ContextSourceDescriptor | None
     direct_entry: TaskContextEntrySnapshot | None
 
 
 @dataclass(frozen=True)
 class _ContinuationState:
-    cursor: str | None
+    offset: int
     exhaustive: bool
     scope: Mapping[str, Any]
 
@@ -162,7 +168,17 @@ class ContextReader:
         Prior packages remain available as the audit history for this reader.
         """
 
-        self._snapshot = self.task_context.snapshot()
+        previous = self._snapshot
+        current = self.task_context.snapshot()
+        current_revisions = dict(current.source_revisions)
+        previous_revisions = dict(previous.source_revisions)
+        self._continuations = {
+            key: continuation
+            for key, continuation in self._continuations.items()
+            if previous_revisions.get(key[0]) == key[1]
+            and current_revisions.get(key[0]) == key[1]
+        }
+        self._snapshot = current
 
     def ensure_required_delivery(self, package: ContextPackage) -> ContextPackage:
         """Fail closed when a required binding or block was not delivered."""
@@ -215,7 +231,7 @@ class ContextReader:
                     "binding_id": binding_id,
                     "source_revision": source_revision,
                     "intent_fingerprint": intent_fingerprint,
-                    "cursor": continuation.cursor,
+                    "offset": continuation.offset,
                     "exhaustive": continuation.exhaustive,
                     "scope": dict(continuation.scope),
                 }
@@ -288,13 +304,13 @@ class ContextReader:
                 ).strip()
                 if not binding_id or not source_revision or len(intent_fingerprint) != 64:
                     raise ValueError("ContextReader continuation identity is invalid.")
-                cursor = raw_continuation.get("cursor")
-                if cursor is not None and (
-                    not isinstance(cursor, str)
-                    or not cursor.strip()
-                    or len(cursor) > 4096
+                offset = raw_continuation.get("offset")
+                if (
+                    not isinstance(offset, int)
+                    or isinstance(offset, bool)
+                    or offset < 0
                 ):
-                    raise ValueError("ContextReader continuation cursor is invalid.")
+                    raise ValueError("ContextReader continuation offset is invalid.")
                 exhaustive = raw_continuation.get("exhaustive")
                 if not isinstance(exhaustive, bool):
                     raise ValueError("ContextReader continuation exhaustive must be boolean.")
@@ -305,7 +321,7 @@ class ContextReader:
                 if key in continuations:
                     raise ValueError("ContextReader continuation identities cannot repeat.")
                 continuations[key] = _ContinuationState(
-                    cursor=cursor,
+                    offset=offset,
                     exhaustive=exhaustive,
                     scope=dict(scope),
                 )
@@ -378,48 +394,53 @@ class ContextReader:
             collected.append(
                 _CollectedCandidate(
                     offered=offered,
-                    source_candidate=None,
+                    source_descriptor=None,
                     direct_entry=entry,
                 )
             )
 
         source_limit = max(self.budget.max_blocks * 4, self.budget.max_blocks)
+        requested_candidate_limit = intent.metadata.get("candidate_limit")
+        if requested_candidate_limit is not None:
+            if (
+                not isinstance(requested_candidate_limit, int)
+                or isinstance(requested_candidate_limit, bool)
+                or requested_candidate_limit <= 0
+            ):
+                raise ValueError("Context candidate_limit must be a positive integer.")
+            source_limit = min(source_limit, requested_candidate_limit)
         intent_fingerprint = _intent_fingerprint(intent)
+        offsets: dict[str, int] = {}
         for binding in self._snapshot.bindings:
-            source = self.task_context._binding_source(binding.binding_id)
-            continuation_key = (
-                binding.binding_id,
-                binding.source_revision,
-                intent_fingerprint,
-            )
-            continuation = self._continuations.get(continuation_key)
-            cursor = continuation.cursor if continuation is not None else None
-            try:
-                window = await source.async_list_candidates(
-                    intent,
-                    limit=source_limit,
-                    cursor=cursor,
-                    filters={
-                        **dict(intent.filters),
-                        "context_binding_scope": binding.scope,
-                    },
+            continuation = self._continuations.get(
+                (
+                    binding.binding_id,
+                    binding.source_revision,
+                    intent_fingerprint,
                 )
-                if not isinstance(window, ContextSourceCandidateWindow):
-                    raise TypeError(
-                        "ContextSource.async_list_candidates must return "
-                        "ContextSourceCandidateWindow."
-                    )
-                if window.source_id != binding.source_id:
-                    raise ValueError("Context source window identity changed.")
-                if window.source_revision != binding.source_revision:
-                    raise ValueError("Context source window revision changed.")
-                if window.cursor != cursor:
-                    raise ValueError("Context source window cursor does not match the request.")
-            except Exception as error:
+            )
+            offsets[binding.binding_id] = (
+                continuation.offset if continuation is not None else 0
+            )
+        try:
+            result = await self.task_context._query_index(
+                self._snapshot,
+                intent,
+                offsets=offsets,
+                limit=source_limit,
+            )
+        except (
+            _InvalidContextIndexQueryError,
+            _RequiredVectorUnavailableError,
+            _UnknownContextSourceKindError,
+        ):
+            raise
+        except Exception as error:
+            for binding in self._snapshot.bindings:
                 diagnostics.append(
                     ContextDiagnostic(
                         code="context.source_candidates_failed",
-                        message="A Context source could not list candidates.",
+                        message="A Context source could not build or query its index.",
                         details={
                             "binding_id": binding.binding_id,
                             "source_id": binding.source_id,
@@ -428,47 +449,66 @@ class ContextReader:
                         },
                     )
                 )
-                continue
-            source_coverage[binding.binding_id] = {
-                "scope": dict(window.scope),
-                "returned_candidates": window.returned_candidates,
-                "exhaustive": window.exhaustive,
-                "continuation_available": window.next_cursor is not None,
+            return collected, diagnostics, source_coverage, pending_continuations
+        source_coverage.update(
+            {
+                str(binding_id): dict(coverage)
+                for binding_id, coverage in result.source_coverage.items()
             }
-            pending_continuations[continuation_key] = _ContinuationState(
-                cursor=(
-                    window.next_cursor
-                    if window.next_cursor is not None
-                    else window.cursor
-                ),
-                exhaustive=window.exhaustive,
-                scope=dict(window.scope),
+        )
+        for binding_id, failure in result.source_failures.items():
+            diagnostics.append(
+                ContextDiagnostic(
+                    code="context.source_candidates_failed",
+                    message="A Context source could not build or query its index.",
+                    details={"binding_id": binding_id, **dict(failure)},
+                )
             )
-            for source_candidate in window.candidates:
-                if intent.roles and source_candidate.role not in intent.roles:
-                    continue
-                sequence += 1
-                offered = ContextCandidate(
-                    block_key=f"context-block:{sequence}",
-                    source_id=binding.source_id,
-                    source_revision=binding.source_revision,
-                    source_ref=source_candidate.source_ref,
-                    binding_id=binding.binding_id,
-                    role=source_candidate.role,
-                    summary=source_candidate.summary,
-                    estimated_chars=source_candidate.estimated_chars,
-                    required=bool(source_candidate.required),
-                    priority=max(binding.priority, source_candidate.priority),
-                    completeness=source_candidate.completeness,
-                    metadata=source_candidate.metadata,
+        diagnostics.append(
+            ContextDiagnostic(
+                code="context.index_query",
+                message="TaskContext internal index query facts.",
+                details=result.diagnostics,
+            )
+        )
+        for binding in self._snapshot.bindings:
+            coverage = result.source_coverage.get(binding.binding_id)
+            if coverage is None:
+                continue
+            continuation_key = (
+                binding.binding_id,
+                binding.source_revision,
+                intent_fingerprint,
+            )
+            pending_continuations[continuation_key] = _ContinuationState(
+                offset=int(result.next_offsets[binding.binding_id]),
+                exhaustive=bool(coverage["exhaustive"]),
+                scope=dict(coverage["scope"]),
+            )
+        for match in result.matches:
+            binding = match.binding
+            descriptor = match.descriptor
+            sequence += 1
+            offered = ContextCandidate(
+                block_key=f"context-block:{sequence}",
+                source_id=binding.source_id,
+                source_revision=binding.source_revision,
+                source_ref=descriptor.source_ref,
+                binding_id=binding.binding_id,
+                role=descriptor.role,
+                summary=descriptor.summary,
+                estimated_chars=descriptor.estimated_chars,
+                required=descriptor.required,
+                priority=max(binding.priority, descriptor.priority),
+                metadata=descriptor.metadata,
+            )
+            collected.append(
+                _CollectedCandidate(
+                    offered=offered,
+                    source_descriptor=descriptor,
+                    direct_entry=None,
                 )
-                collected.append(
-                    _CollectedCandidate(
-                        offered=offered,
-                        source_candidate=source_candidate,
-                        direct_entry=None,
-                    )
-                )
+            )
         return collected, diagnostics, source_coverage, pending_continuations
 
     @staticmethod
@@ -607,14 +647,23 @@ class ContextReader:
                 refs=(candidate.source_ref,),
                 metadata=entry.metadata,
             )
-        if item.source_candidate is None:
+        if item.source_descriptor is None:
             raise RuntimeError("Collected Context candidate has no readable source.")
         source = self.task_context._binding_source(candidate.binding_id)
-        raw = await source.async_read(
-            item.source_candidate,
+        raw = await source.async_read_exact(
+            candidate.source_ref,
             max_chars=max_chars,
             representation=representation,
+            range_start=0,
         )
+        if not isinstance(raw, ContextSourceRead):
+            raise TypeError("ContextSource.async_read_exact must return ContextSourceRead.")
+        if (
+            raw.source_id != candidate.source_id
+            or raw.source_revision != candidate.source_revision
+            or raw.source_ref != candidate.source_ref
+        ):
+            raise ValueError("Context exact read identity changed.")
         self._assert_current()
         return ContextBlock(
             block_id=f"context_block:{uuid.uuid4().hex}",
@@ -626,7 +675,7 @@ class ContextReader:
             role=candidate.role,
             content=raw.content,
             completeness=raw.completeness,
-            content_chars=raw.content_chars,
+            content_chars=_content_chars(raw.content),
             required=candidate.required,
             refs=raw.refs or (candidate.source_ref,),
             metadata=raw.metadata,
@@ -646,6 +695,9 @@ class ContextReader:
             intent.metadata.get("required_overflow") or "fail"
         ).strip()
         allow_lossy_required = required_overflow == "lossy_digest"
+        delivery_mode = str(intent.metadata.get("delivery_mode") or "content").strip()
+        if delivery_mode not in {"content", "refs_only"}:
+            raise ValueError("Context delivery_mode must be content or refs_only.")
         required_remaining = sum(1 for item in items if item.offered.required)
 
         for item in items:
@@ -663,7 +715,46 @@ class ContextReader:
                     )
                 )
                 continue
-            read_limit = min(self.budget.max_block_chars, remaining_chars)
+            if delivery_mode == "refs_only" and not candidate.required:
+                descriptor_metadata = (
+                    item.source_descriptor.metadata
+                    if item.source_descriptor is not None
+                    else candidate.metadata
+                )
+                blocks.append(
+                    ContextBlock(
+                        block_id=f"context_block:{uuid.uuid4().hex}",
+                        block_key=candidate.block_key,
+                        source_id=candidate.source_id,
+                        source_revision=candidate.source_revision,
+                        source_ref=candidate.source_ref,
+                        binding_id=candidate.binding_id,
+                        role=candidate.role,
+                        content=None,
+                        completeness="ref_only",
+                        content_chars=0,
+                        required=False,
+                        refs=(candidate.source_ref,),
+                        metadata=descriptor_metadata,
+                    )
+                )
+                continue
+            requested_block_chars = intent.metadata.get("max_block_chars")
+            if requested_block_chars is not None and (
+                not isinstance(requested_block_chars, int)
+                or isinstance(requested_block_chars, bool)
+                or requested_block_chars <= 0
+            ):
+                raise ValueError("Context max_block_chars must be a positive integer.")
+            read_limit = min(
+                self.budget.max_block_chars,
+                (
+                    requested_block_chars
+                    if isinstance(requested_block_chars, int)
+                    else self.budget.max_block_chars
+                ),
+                remaining_chars,
+            )
             if candidate.required and allow_lossy_required and read_limit > 0:
                 read_limit = min(
                     read_limit,
@@ -675,7 +766,10 @@ class ContextReader:
                 and candidate.estimated_chars > read_limit
                 and read_limit > 0
             )
-            if read_limit <= 0 or candidate.estimated_chars > read_limit:
+            if read_limit <= 0 or (
+                candidate.estimated_chars > read_limit
+                and (candidate.required or requested_block_chars is None)
+            ):
                 if use_lossy_digest:
                     try:
                         block = await self._read_block(

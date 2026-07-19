@@ -19,30 +19,21 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from agently.core.context._Cursor import decode_source_cursor, encode_source_cursor
-from agently.types.data import ContextBlock, ContextCandidate, ContextReadIntent
-from agently.types.plugins import ContextSourceCandidateWindow
+from agently.types.data import (
+    ContextSourceDescriptor,
+    ContextSourceDescriptorPage,
+    ContextSourceRead,
+)
 
 from .Binding import SkillBinding, SkillBindingError
 from .Package import SkillPackageRevision, SkillResourceDescriptor
 from .SkillLibrary import SkillLibrary
 
 
-def _source_kind_enabled(filters: Mapping[str, Any], kind: str) -> bool:
-    raw = filters.get("source_kinds")
-    if raw is None:
-        return True
-    if isinstance(raw, str):
-        offered = {raw.strip()}
-    elif isinstance(raw, Sequence) and not isinstance(raw, bytes | bytearray):
-        offered = {str(item).strip() for item in raw if str(item).strip()}
-    else:
-        return False
-    return not offered or kind in offered
-
-
 class SkillContextSource:
     """ContextSource adapter for exact trusted Skill revision bindings."""
+
+    source_kind = "skill_library"
 
     def __init__(
         self,
@@ -184,7 +175,7 @@ class SkillContextSource:
             **extra,
         }
 
-    def _candidate(
+    def _descriptor(
         self,
         *,
         binding: SkillBinding,
@@ -195,32 +186,40 @@ class SkillContextSource:
         estimated_chars: int,
         required: bool,
         completeness: str,
+        index_text: str | None = None,
         metadata: Mapping[str, Any] | None = None,
-    ) -> ContextCandidate:
-        return ContextCandidate(
-            block_key=f"skill-source:{binding.binding_id}:{path}",
+    ) -> ContextSourceDescriptor:
+        del completeness
+        domain_metadata = self._domain_metadata(
+            binding,
+            package,
+            path,
+            **dict(metadata or {}),
+        )
+        return ContextSourceDescriptor(
+            descriptor_key=f"skill-source:{binding.binding_id}:{path}",
             source_id=self.source_id,
             source_revision=self.source_revision,
             source_ref=self._source_ref(package, path),
-            binding_id=binding.binding_id,
             role=role,  # type: ignore[arg-type]
+            title=str(domain_metadata.get("section_title") or path),
             summary=summary,
             estimated_chars=estimated_chars,
             required=required,
-            completeness=completeness,  # type: ignore[arg-type]
-            metadata=self._domain_metadata(
-                binding,
-                package,
-                path,
-                **dict(metadata or {}),
+            index_text=str(index_text if index_text is not None else summary),
+            content_digest=(
+                str(domain_metadata.get("sha256"))
+                if domain_metadata.get("sha256")
+                else None
             ),
+            metadata=domain_metadata,
         )
 
-    def _all_candidates(self) -> tuple[ContextCandidate, ...]:
-        candidates: list[ContextCandidate] = []
+    def _all_descriptors(self) -> tuple[ContextSourceDescriptor, ...]:
+        descriptors: list[ContextSourceDescriptor] = []
         for binding, package in zip(self.bindings, self.packages):
-            candidates.append(
-                self._candidate(
+            descriptors.append(
+                self._descriptor(
                     binding=binding,
                     package=package,
                     path="SKILL.md",
@@ -229,11 +228,15 @@ class SkillContextSource:
                     estimated_chars=len(package.instruction_body),
                     required=True,
                     completeness="complete",
+                    index_text=(
+                        f"{package.name}\n{package.description}\n"
+                        f"{package.instruction_body}"
+                    ),
                 )
             )
             for section_path, section_title, section_body in self._instruction_sections(package):
-                candidates.append(
-                    self._candidate(
+                descriptors.append(
+                    self._descriptor(
                         binding=binding,
                         package=package,
                         path=section_path,
@@ -242,6 +245,7 @@ class SkillContextSource:
                         estimated_chars=len(section_body),
                         required=False,
                         completeness="complete",
+                        index_text=f"{section_title}\n{section_body}",
                         metadata={"section_title": section_title},
                     )
                 )
@@ -256,8 +260,8 @@ class SkillContextSource:
                 if resource.path != "SKILL.md"
             ]
             if index_items:
-                candidates.append(
-                    self._candidate(
+                descriptors.append(
+                    self._descriptor(
                         binding=binding,
                         package=package,
                         path="resource-index",
@@ -266,14 +270,15 @@ class SkillContextSource:
                         estimated_chars=len(str(index_items)),
                         required=False,
                         completeness="complete",
+                        index_text=f"Resource index for {package.name}\n{index_items}",
                         metadata={"resource_index": index_items},
                     )
                 )
             for resource in package.resources:
                 if resource.path == "SKILL.md":
                     continue
-                candidates.append(
-                    self._candidate(
+                descriptors.append(
+                    self._descriptor(
                         binding=binding,
                         package=package,
                         path=resource.path,
@@ -308,8 +313,8 @@ class SkillContextSource:
                     estimated_chars = int(raw_section.get("estimated_chars") or 0)
                     if not section_path or not section_title or estimated_chars <= 0:
                         continue
-                    candidates.append(
-                        self._candidate(
+                    descriptors.append(
+                        self._descriptor(
                             binding=binding,
                             package=package,
                             path=section_path,
@@ -333,126 +338,80 @@ class SkillContextSource:
                             },
                         )
                     )
-        return tuple(candidates)
+        return tuple(descriptors)
 
-    async def async_list_candidates(
+    async def async_enumerate_descriptors(
         self,
-        intent: ContextReadIntent,
         *,
+        profile: Mapping[str, Any],
+        cursor: str | None,
         limit: int,
-        cursor: str | None = None,
-        filters: Mapping[str, Any] | None = None,
-    ) -> ContextSourceCandidateWindow:
+    ) -> ContextSourceDescriptorPage:
+        del profile
         page_size = int(limit)
         if page_size <= 0:
             raise ValueError("limit must be a positive integer.")
-        resolved_filters = dict(filters or intent.filters)
-        explicit_refs = set(intent.explicit_refs)
-        scope = {
-            "query": intent.query,
-            "explicit_refs": sorted(explicit_refs),
-            "roles": list(intent.roles),
-            "skill_revision_refs": [
-                package.revision_ref for package in self.packages
-            ],
-        }
-        if not _source_kind_enabled(resolved_filters, "skill_library"):
-            return ContextSourceCandidateWindow(
-                source_id=self.source_id,
-                source_revision=self.source_revision,
-                scope={**scope, "enabled": False},
-                candidates=(),
-                returned_candidates=0,
-                exhaustive=True,
-                cursor=cursor,
-            )
-        offset = decode_source_cursor(
-            cursor,
-            source_id=self.source_id,
-            source_revision=self.source_revision,
-            scope=scope,
-        )
-        all_candidates = self._all_candidates()
-        anchors = tuple(
-            candidate
-            for candidate in all_candidates
-            if candidate.required or candidate.source_ref in explicit_refs
-        )
-        optional = tuple(
-            candidate
-            for candidate in all_candidates
-            if not candidate.required and candidate.source_ref not in explicit_refs
-        )
-        page = optional[offset : offset + page_size]
+        try:
+            offset = int(cursor or 0)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Skill descriptor cursor is invalid.") from error
+        if offset < 0:
+            raise ValueError("Skill descriptor cursor cannot be negative.")
+        descriptors = self._all_descriptors()
+        page = descriptors[offset : offset + page_size]
         next_offset = offset + len(page)
-        has_more = next_offset < len(optional)
-        next_cursor = (
-            encode_source_cursor(
-                source_id=self.source_id,
-                source_revision=self.source_revision,
-                scope=scope,
-                offset=next_offset,
-            )
-            if has_more
-            else None
-        )
-        candidates = (*anchors, *page)
-        return ContextSourceCandidateWindow(
+        return ContextSourceDescriptorPage(
             source_id=self.source_id,
             source_revision=self.source_revision,
-            scope=scope,
-            candidates=candidates,
-            returned_candidates=len(candidates),
-            exhaustive=not has_more,
-            cursor=cursor,
-            next_cursor=next_cursor,
+            descriptors=page,
+            next_cursor=(str(next_offset) if next_offset < len(descriptors) else None),
         )
 
-    def _resolve_candidate(
+    def _resolve_source_ref(
         self,
-        candidate: ContextCandidate,
+        source_ref: str,
     ) -> tuple[SkillBinding, SkillPackageRevision, str]:
-        revision_ref = str(candidate.metadata.get("revision_ref") or "")
-        path = str(candidate.metadata.get("resource_path") or "")
-        package = self._package_by_revision_ref.get(revision_ref)
-        binding = self._binding_by_revision_ref.get(revision_ref)
-        if package is None or binding is None or not path:
-            raise SkillBindingError("Skill Context candidate is not part of this exact binding set.")
-        expected_ref = self._source_ref(package, path)
-        if candidate.source_ref != expected_ref:
-            raise SkillBindingError("Skill Context candidate source_ref does not match its binding.")
-        return binding, package, path
+        for revision_ref, package in self._package_by_revision_ref.items():
+            prefix = f"{revision_ref}/"
+            if not source_ref.startswith(prefix):
+                continue
+            path = source_ref[len(prefix) :]
+            binding = self._binding_by_revision_ref[revision_ref]
+            if not path:
+                break
+            return binding, package, path
+        raise SkillBindingError(
+            "Skill Context source_ref is not part of this exact binding set."
+        )
 
-    async def async_read(
+    async def async_read_exact(
         self,
-        candidate: ContextCandidate,
+        source_ref: str,
         *,
         max_chars: int,
         representation: str | None = None,
-    ) -> ContextBlock:
-        binding, package, path = self._resolve_candidate(candidate)
-        common = {
-            "block_id": self._block_id(package, path),
-            "block_key": candidate.block_key,
+        range_start: int = 0,
+    ) -> ContextSourceRead:
+        binding, package, path = self._resolve_source_ref(source_ref)
+        if range_start < 0:
+            raise ValueError("range_start cannot be negative.")
+        common: dict[str, Any] = {
             "source_id": self.source_id,
             "source_revision": self.source_revision,
-            "source_ref": candidate.source_ref,
-            "binding_id": binding.binding_id,
-            "role": candidate.role,
-            "required": candidate.required,
-            "refs": (candidate.source_ref,),
+            "source_ref": source_ref,
         }
         if path == "SKILL.md":
             if representation == "lossy_digest":
+                if range_start:
+                    raise ValueError("lossy Skill digest does not support range_start.")
                 content, refs, sections = self._lossy_instruction_digest(
                     package,
                     max_chars=max_chars,
                 )
-                return ContextBlock(
-                    **{key: value for key, value in common.items() if key != "refs"},
+                return ContextSourceRead(
+                    **common,
                     content=content,
                     completeness="lossy",
-                    content_chars=len(content),
                     refs=refs,
                     metadata=self._domain_metadata(
                         binding,
@@ -472,11 +431,15 @@ class SkillContextSource:
                         ],
                     ),
                 )
-            return ContextBlock(
+            body = package.instruction_body
+            content = body[range_start : range_start + max_chars]
+            next_range_start = range_start + len(content)
+            complete = next_range_start >= len(body)
+            return ContextSourceRead(
                 **common,
-                content=package.instruction_body,
-                completeness="complete",
-                content_chars=len(package.instruction_body),
+                content=content,
+                completeness="complete" if complete else "truncated",
+                next_range_start=None if complete else next_range_start,
                 metadata=self._domain_metadata(
                     binding,
                     package,
@@ -496,13 +459,15 @@ class SkillContextSource:
             if section is None:
                 raise SkillBindingError("Skill instruction section no longer matches the bound revision.")
             section_title, section_body = section
-            content = section_body[:max_chars]
-            return ContextBlock(
-                **{key: value for key, value in common.items() if key != "refs"},
+            content = section_body[range_start : range_start + max_chars]
+            next_range_start = range_start + len(content)
+            complete = next_range_start >= len(section_body)
+            return ContextSourceRead(
+                **common,
                 content=content,
-                completeness="truncated" if len(section_body) > max_chars else "complete",
-                content_chars=len(content),
-                refs=(candidate.source_ref, self._source_ref(package, "SKILL.md")),
+                completeness="complete" if complete else "truncated",
+                next_range_start=None if complete else next_range_start,
+                refs=(source_ref, self._source_ref(package, "SKILL.md")),
                 metadata=self._domain_metadata(
                     binding,
                     package,
@@ -512,12 +477,20 @@ class SkillContextSource:
                 ),
             )
         if path == "resource-index":
-            index = candidate.metadata.get("resource_index", ())
-            return ContextBlock(
+            index = tuple(
+                {
+                    "path": resource.path,
+                    "kind": resource.kind,
+                    "size": resource.size,
+                    "sha256": resource.sha256,
+                }
+                for resource in package.resources
+                if resource.path != "SKILL.md"
+            )
+            return ContextSourceRead(
                 **common,
                 content=index,
                 completeness="complete",
-                content_chars=len(str(index)),
                 metadata=self._domain_metadata(binding, package, path),
             )
         resource_section = re.match(r"^(.+\.md)#section-\d+$", path)
@@ -548,13 +521,16 @@ class SkillContextSource:
                 offset=byte_offset,
             )
             section_body = readback.text.strip()
-            content = section_body[:max_chars]
-            return ContextBlock(
-                **{key: value for key, value in common.items() if key != "refs"},
+            content = section_body[range_start : range_start + max_chars]
+            next_range_start = range_start + len(content)
+            complete = next_range_start >= len(section_body)
+            return ContextSourceRead(
+                **common,
                 content=content,
-                completeness="truncated" if len(section_body) > max_chars else "complete",
-                content_chars=len(content),
-                refs=(candidate.source_ref, self._source_ref(package, parent_path)),
+                completeness="complete" if complete else "truncated",
+                next_range_start=None if complete else next_range_start,
+                content_digest=resource.sha256,
+                refs=(source_ref, self._source_ref(package, parent_path)),
                 metadata=self._domain_metadata(
                     binding,
                     package,
@@ -577,11 +553,11 @@ class SkillContextSource:
                 "sha256": resource.sha256,
                 "size": resource.size,
             }
-            return ContextBlock(
+            return ContextSourceRead(
                 **common,
                 content=descriptor,
                 completeness="ref_only",
-                content_chars=len(str(descriptor)),
+                content_digest=resource.sha256,
                 metadata=self._domain_metadata(
                     binding,
                     package,
@@ -598,11 +574,11 @@ class SkillContextSource:
                 "size": resource.size,
                 "media_type": resource.media_type,
             }
-            return ContextBlock(
+            return ContextSourceRead(
                 **common,
                 content=descriptor,
                 completeness="ref_only",
-                content_chars=len(str(descriptor)),
+                content_digest=resource.sha256,
                 metadata=self._domain_metadata(
                     binding,
                     package,
@@ -614,12 +590,15 @@ class SkillContextSource:
             package.revision_ref,
             path,
             max_bytes=max_chars,
+            offset=range_start,
         )
-        return ContextBlock(
+        next_range_start = range_start + len(readback.text.encode("utf-8"))
+        return ContextSourceRead(
             **common,
             content=readback.text,
             completeness="truncated" if readback.truncated else "complete",
-            content_chars=len(readback.text),
+            next_range_start=(next_range_start if readback.truncated else None),
+            content_digest=resource.sha256,
             metadata=self._domain_metadata(
                 binding,
                 package,

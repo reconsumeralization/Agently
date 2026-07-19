@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from .base import AgentlyPlugin, AgentlyPluginType
-from .ContextSource import ContextSource, ContextSourceCandidateWindow
+from .ContextSource import ContextSource, ContextSourceChangeFeed
 from .ActionFlow import ActionFlow, ActionFlowObservationHandler
 from .ActionExecutor import ActionExecutor
 from .ExecutionResourceProvider import CodeExecutionResource, ExecutionResourceProvider

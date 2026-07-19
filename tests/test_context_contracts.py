@@ -4,6 +4,7 @@ import json
 from dataclasses import FrozenInstanceError
 
 import pytest
+import agently.types.data as context_data
 
 from agently.types.data import (
     ContextBlock,
@@ -21,7 +22,6 @@ from agently.types.data import (
     TaskContextEntrySnapshot,
     TaskContextSnapshot,
 )
-from agently.types.plugins import ContextSourceCandidateWindow
 
 
 def _block(
@@ -207,59 +207,92 @@ def test_context_package_exposes_coverage_without_cursor_capability() -> None:
         package.source_coverage["binding:repo"]["scope"]["path"] = "src"  # type: ignore[index]
 
 
-def test_context_source_candidate_window_validates_source_page_contract() -> None:
-    candidate = ContextCandidate(
-        block_key="candidate:1",
+def test_context_source_descriptor_values_replace_candidate_windows() -> None:
+    descriptor_type = getattr(context_data, "ContextSourceDescriptor", None)
+    page_type = getattr(context_data, "ContextSourceDescriptorPage", None)
+    change_type = getattr(context_data, "ContextSourceChange", None)
+    change_set_type = getattr(context_data, "ContextSourceChangeSet", None)
+    read_type = getattr(context_data, "ContextSourceRead", None)
+
+    assert descriptor_type is not None
+    assert page_type is not None
+    assert change_type is not None
+    assert change_set_type is not None
+    assert read_type is not None
+    assert not hasattr(context_data, "ContextSourceCandidateWindow")
+
+    descriptor = descriptor_type(
+        descriptor_key="descriptor:1",
         source_id="source:repo",
         source_revision="commit:abc",
         source_ref="agently/core/Agent.py",
-        binding_id="source:repo",
         role="information",
+        title="Agent implementation",
         summary="Agent implementation",
         estimated_chars=100,
+        index_text="Agent implementation owner",
+        metadata={"path": "agently/core/Agent.py"},
     )
-
-    window = ContextSourceCandidateWindow(
+    page = page_type(
         source_id="source:repo",
         source_revision="commit:abc",
-        scope={"path": "agently/core", "query": "owner"},
-        candidates=(candidate,),
-        returned_candidates=1,
-        exhaustive=False,
-        cursor="page:1",
+        descriptors=(descriptor,),
         next_cursor="page:2",
     )
+    change = change_type(
+        operation="upsert",
+        descriptor_key=descriptor.descriptor_key,
+        descriptor=descriptor,
+    )
+    changes = change_set_type(
+        source_id="source:repo",
+        from_revision="commit:old",
+        to_revision="commit:abc",
+        changes=(change,),
+    )
+    read = read_type(
+        source_id="source:repo",
+        source_revision="commit:abc",
+        source_ref="agently/core/Agent.py",
+        content="class Agent: ...",
+        completeness="complete",
+        content_digest="sha256:abc",
+        refs=("agently/core/Agent.py",),
+        metadata={"path": "agently/core/Agent.py"},
+    )
 
-    assert window.candidates == (candidate,)
-    assert window.next_cursor == "page:2"
+    assert page.descriptors == (descriptor,)
+    assert page.next_cursor == "page:2"
+    assert changes.changes == (change,)
+    assert read.content == "class Agent: ..."
+    assert read.refs == ("agently/core/Agent.py",)
     with pytest.raises(TypeError):
-        window.scope["path"] = "."  # type: ignore[index]
+        descriptor.metadata["path"] = "."  # type: ignore[index]
 
 
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"returned_candidates": -1}, "returned_candidates"),
-        ({"exhaustive": True, "next_cursor": "page:2"}, "next_cursor"),
-        ({"cursor": ""}, "cursor"),
+        ({"descriptors": (object(),)}, "descriptors"),
+        ({"next_cursor": ""}, "next_cursor"),
         ({"next_cursor": "x" * 4097}, "next_cursor"),
     ],
 )
-def test_context_source_candidate_window_rejects_invalid_coverage(
+def test_context_source_descriptor_page_rejects_invalid_values(
     overrides: dict[str, object],
     message: str,
 ) -> None:
+    page_type = getattr(context_data, "ContextSourceDescriptorPage", None)
+    assert page_type is not None
     values: dict[str, object] = {
         "source_id": "source:repo",
         "source_revision": "commit:abc",
-        "scope": {"path": "."},
-        "returned_candidates": 0,
-        "exhaustive": False,
+        "descriptors": (),
     }
     values.update(overrides)
 
     with pytest.raises(ValueError, match=message):
-        ContextSourceCandidateWindow(**values)  # type: ignore[arg-type]
+        page_type(**values)
 
 
 def test_budget_consumer_intent_and_snapshot_are_explicit_values() -> None:
@@ -282,6 +315,7 @@ def test_budget_consumer_intent_and_snapshot_are_explicit_values() -> None:
             ContextSourceBindingSnapshot(
                 binding_id="binding:docs",
                 source_id="source:docs",
+                source_kind="documentation",
                 source_revision="rev:17",
                 required=False,
                 priority=2,

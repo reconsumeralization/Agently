@@ -4,6 +4,8 @@ import inspect
 import importlib
 from pathlib import Path
 
+import agently.types.plugins as plugin_types
+
 from agently.builtins.plugins.ActionExecutor import (
     BashSandboxActionExecutor,
     BrowseActionExecutor,
@@ -34,6 +36,7 @@ from agently.types.plugins import (
     ActionRuntime,
     AgentExecution,
     AgentOrchestrator,
+    ContextSource,
     ExecutionResourceProvider,
 )
 from agently.utils.Settings import Settings
@@ -45,6 +48,19 @@ def _method_names(protocol: type) -> list[str]:
         for name, value in protocol.__dict__.items()
         if not name.startswith("_") and inspect.isfunction(value)
     ]
+
+
+def test_context_source_protocol_is_descriptor_and_exact_read_only():
+    change_feed = getattr(plugin_types, "ContextSourceChangeFeed", None)
+
+    assert not hasattr(plugin_types, "ContextSourceCandidateWindow")
+    assert not hasattr(ContextSource, "async_list_candidates")
+    assert not hasattr(ContextSource, "async_read")
+    assert hasattr(ContextSource, "async_enumerate_descriptors")
+    assert hasattr(ContextSource, "async_read_exact")
+    assert {"source_id", "source_kind"}.issubset(ContextSource.__annotations__)
+    assert change_feed is not None
+    assert _method_names(change_feed) == ["async_changes"]
 
 
 def test_builtin_execution_resource_providers_match_protocol():

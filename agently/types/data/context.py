@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -260,16 +260,60 @@ class ContextCandidate:
 
 
 @dataclass(frozen=True)
-class ContextSourceCandidateWindow:
-    """Internal ContextSource page carrier with source-scoped coverage."""
+class ContextSourceDescriptor:
+    """Source-owned structural projection used to build a Context index."""
+
+    descriptor_key: str
+    source_id: str
+    source_revision: str
+    source_ref: str
+    role: ContextRole
+    title: str
+    summary: str
+    estimated_chars: int
+    parent_key: str | None = None
+    required: bool = False
+    priority: int = 0
+    index_text: str = ""
+    content_digest: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "descriptor_key",
+            "source_id",
+            "source_revision",
+            "source_ref",
+            "title",
+        ):
+            object.__setattr__(self, name, _require_text(getattr(self, name), name))
+        object.__setattr__(self, "role", _validate_role(str(self.role)))
+        if (
+            not isinstance(self.estimated_chars, int)
+            or isinstance(self.estimated_chars, bool)
+            or self.estimated_chars < 0
+        ):
+            raise ValueError("estimated_chars must be a non-negative integer.")
+        if self.parent_key is not None:
+            object.__setattr__(self, "parent_key", _require_text(self.parent_key, "parent_key"))
+        if self.content_digest is not None:
+            object.__setattr__(
+                self,
+                "content_digest",
+                _require_text(self.content_digest, "content_digest"),
+            )
+        object.__setattr__(self, "summary", str(self.summary or ""))
+        object.__setattr__(self, "index_text", str(self.index_text or ""))
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+
+
+@dataclass(frozen=True)
+class ContextSourceDescriptorPage:
+    """Revision-pinned descriptor enumeration page."""
 
     source_id: str
     source_revision: str
-    scope: Mapping[str, Any]
-    candidates: tuple[ContextCandidate, ...] = ()
-    returned_candidates: int = 0
-    exhaustive: bool = True
-    cursor: str | None = None
+    descriptors: tuple[ContextSourceDescriptor, ...] = ()
     next_cursor: str | None = None
 
     def __post_init__(self) -> None:
@@ -279,40 +323,123 @@ class ContextSourceCandidateWindow:
             "source_revision",
             _require_text(self.source_revision, "source_revision"),
         )
-        object.__setattr__(self, "scope", _freeze_mapping(self.scope))
-        candidates = tuple(self.candidates)
-        for candidate in candidates:
-            if not isinstance(candidate, ContextCandidate):
-                raise ValueError("candidates must contain ContextCandidate values.")
-            if candidate.source_id != self.source_id:
-                raise ValueError("candidate source_id does not match its source window.")
-            if candidate.source_revision != self.source_revision:
+        descriptors = tuple(self.descriptors)
+        for descriptor in descriptors:
+            if not isinstance(descriptor, ContextSourceDescriptor):
                 raise ValueError(
-                    "candidate source_revision does not match its source window."
+                    "descriptors must contain ContextSourceDescriptor values."
                 )
-        object.__setattr__(self, "candidates", candidates)
-        if (
-            not isinstance(self.returned_candidates, int)
-            or isinstance(self.returned_candidates, bool)
-            or self.returned_candidates < 0
+            if descriptor.source_id != self.source_id:
+                raise ValueError("descriptor source_id does not match its page.")
+            if descriptor.source_revision != self.source_revision:
+                raise ValueError("descriptor source_revision does not match its page.")
+        object.__setattr__(self, "descriptors", descriptors)
+        if self.next_cursor is not None:
+            cursor = str(self.next_cursor)
+            if not cursor.strip():
+                raise ValueError("next_cursor must be a non-empty string when provided.")
+            if len(cursor) > 4096:
+                raise ValueError("next_cursor cannot exceed 4096 characters.")
+            object.__setattr__(self, "next_cursor", cursor)
+
+
+@dataclass(frozen=True)
+class ContextSourceChange:
+    """One trusted descriptor mutation in a source-provided change feed."""
+
+    operation: Literal["upsert", "remove"]
+    descriptor_key: str
+    descriptor: ContextSourceDescriptor | None = None
+
+    def __post_init__(self) -> None:
+        if self.operation not in {"upsert", "remove"}:
+            raise ValueError("operation must be 'upsert' or 'remove'.")
+        object.__setattr__(
+            self,
+            "descriptor_key",
+            _require_text(self.descriptor_key, "descriptor_key"),
+        )
+        if self.operation == "upsert":
+            if not isinstance(self.descriptor, ContextSourceDescriptor):
+                raise ValueError("upsert changes require a descriptor.")
+            if self.descriptor.descriptor_key != self.descriptor_key:
+                raise ValueError("change descriptor_key does not match its descriptor.")
+        elif self.descriptor is not None:
+            raise ValueError("remove changes cannot include a descriptor.")
+
+
+@dataclass(frozen=True)
+class ContextSourceChangeSet:
+    """Validated descriptor delta between two immutable source revisions."""
+
+    source_id: str
+    from_revision: str
+    to_revision: str
+    changes: tuple[ContextSourceChange, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("source_id", "from_revision", "to_revision"):
+            object.__setattr__(self, name, _require_text(getattr(self, name), name))
+        if self.from_revision == self.to_revision:
+            raise ValueError("from_revision and to_revision must differ.")
+        changes = tuple(self.changes)
+        for change in changes:
+            if not isinstance(change, ContextSourceChange):
+                raise ValueError("changes must contain ContextSourceChange values.")
+            descriptor = change.descriptor
+            if descriptor is not None:
+                if descriptor.source_id != self.source_id:
+                    raise ValueError("changed descriptor source_id does not match change set.")
+                if descriptor.source_revision != self.to_revision:
+                    raise ValueError(
+                        "changed descriptor source_revision must equal to_revision."
+                    )
+        keys = [change.descriptor_key for change in changes]
+        if len(keys) != len(set(keys)):
+            raise ValueError("changes cannot repeat descriptor_key values.")
+        object.__setattr__(self, "changes", changes)
+
+
+@dataclass(frozen=True)
+class ContextSourceRead:
+    """Bounded exact readback from canonical source truth."""
+
+    source_id: str
+    source_revision: str
+    source_ref: str
+    content: Any
+    completeness: ContextCompleteness
+    next_range_start: int | None = None
+    content_digest: str | None = None
+    refs: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in ("source_id", "source_revision", "source_ref"):
+            object.__setattr__(self, name, _require_text(getattr(self, name), name))
+        object.__setattr__(self, "content", _freeze_value(self.content))
+        object.__setattr__(
+            self,
+            "completeness",
+            _validate_completeness(str(self.completeness)),
+        )
+        if self.next_range_start is not None and (
+            not isinstance(self.next_range_start, int)
+            or isinstance(self.next_range_start, bool)
+            or self.next_range_start < 0
         ):
-            raise ValueError("returned_candidates must be a non-negative integer.")
-        if self.returned_candidates != len(candidates):
-            raise ValueError("returned_candidates must equal the candidate count.")
-        if not isinstance(self.exhaustive, bool):
-            raise ValueError("exhaustive must be boolean.")
-        for name in ("cursor", "next_cursor"):
-            value = getattr(self, name)
-            if value is None:
-                continue
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{name} must be a non-empty string when provided.")
-            if len(value) > 4096:
-                raise ValueError(f"{name} cannot exceed 4096 characters.")
-        if self.exhaustive and self.next_cursor is not None:
-            raise ValueError("next_cursor cannot be set for an exhaustive window.")
-        if self.cursor is not None and self.cursor == self.next_cursor:
-            raise ValueError("next_cursor must advance beyond the current cursor.")
+            raise ValueError("next_range_start must be a non-negative integer.")
+        if self.content_digest is not None:
+            object.__setattr__(
+                self,
+                "content_digest",
+                _require_text(self.content_digest, "content_digest"),
+            )
+        refs = tuple(_require_text(item, "ref") for item in self.refs)
+        if len(refs) != len(set(refs)):
+            raise ValueError("refs cannot contain duplicates.")
+        object.__setattr__(self, "refs", refs)
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -419,6 +546,7 @@ class ContextDiagnostic:
 class ContextSourceBindingSnapshot:
     binding_id: str
     source_id: str
+    source_kind: str
     source_revision: str
     required: bool = False
     priority: int = 0
@@ -426,7 +554,13 @@ class ContextSourceBindingSnapshot:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for name in ("binding_id", "source_id", "source_revision", "scope"):
+        for name in (
+            "binding_id",
+            "source_id",
+            "source_kind",
+            "source_revision",
+            "scope",
+        ):
             object.__setattr__(self, name, _require_text(getattr(self, name), name))
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
@@ -434,6 +568,7 @@ class ContextSourceBindingSnapshot:
         return {
             "binding_id": self.binding_id,
             "source_id": self.source_id,
+            "source_kind": self.source_kind,
             "source_revision": self.source_revision,
             "required": self.required,
             "priority": self.priority,
@@ -601,7 +736,11 @@ __all__ = [
     "ContextReadIntent",
     "ContextRole",
     "ContextSourceBindingSnapshot",
-    "ContextSourceCandidateWindow",
+    "ContextSourceChange",
+    "ContextSourceChangeSet",
+    "ContextSourceDescriptor",
+    "ContextSourceDescriptorPage",
+    "ContextSourceRead",
     "TaskContextEntrySnapshot",
     "TaskContextSnapshot",
 ]

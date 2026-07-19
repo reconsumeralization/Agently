@@ -1610,13 +1610,7 @@ async def _execute_context_read_block(
         "source_kinds",
         "include_hidden",
         "max_file_bytes",
-        "context_lines",
         "tags",
-        "method",
-        "selection",
-        "top_n",
-        "rerank",
-        "max_candidates",
     ):
         if bound_inputs.get(key) is not None:
             source_filters[key] = bound_inputs[key]
@@ -1638,6 +1632,17 @@ async def _execute_context_read_block(
             metadata={
                 "execution_block_id": block.id,
                 "expected_role": bound_inputs.get("expected_role"),
+                "candidate_limit": bound_inputs.get("max_results", 8),
+                "max_block_chars": (
+                    bound_inputs.get("snippet_limit", 1200)
+                    if bool(bound_inputs.get("include_snippets", True))
+                    else None
+                ),
+                "delivery_mode": (
+                    "content"
+                    if bool(bound_inputs.get("include_snippets", True))
+                    else "refs_only"
+                ),
                 "exclude_already_in_prompt": bool(
                     bound_inputs.get("exclude_already_in_prompt", True)
                 ),

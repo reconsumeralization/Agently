@@ -1,38 +1,42 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
 
 from agently.core.context import TaskContext
-from agently.types.data import ContextBlock, ContextCandidate, ContextReadIntent
-
-
 class RecordingSource:
-    def __init__(self, source_id: str = "source:docs", revision: str = "rev:1") -> None:
+    def __init__(
+        self,
+        source_id: str = "source:docs",
+        revision: str = "rev:1",
+        source_kind: str = "documentation",
+    ) -> None:
         self.source_id = source_id
+        self.source_kind = source_kind
         self.source_revision = revision
-        self.list_calls = 0
+        self.enumerate_calls = 0
         self.read_calls = 0
 
-    async def async_list_candidates(
+    async def async_enumerate_descriptors(
         self,
-        intent: ContextReadIntent,
         *,
+        profile: Mapping[str, Any],
+        cursor: str | None,
         limit: int,
-        filters: Mapping[str, Any] | None = None,
-    ) -> Sequence[ContextCandidate]:
-        self.list_calls += 1
-        return []
+    ) -> object:
+        self.enumerate_calls += 1
+        raise AssertionError("TaskContext must not enumerate a source while binding or snapshotting it.")
 
-    async def async_read(
+    async def async_read_exact(
         self,
-        candidate: ContextCandidate,
+        source_ref: str,
         *,
         max_chars: int,
         representation: str | None = None,
-    ) -> ContextBlock:
+        range_start: int = 0,
+    ) -> object:
         self.read_calls += 1
         raise AssertionError("TaskContext must not read a source while binding or snapshotting it.")
 
@@ -65,6 +69,7 @@ def test_task_context_manages_revisioned_source_bindings_and_direct_entries() ->
     assert snapshot.task_id == "task-1"
     assert snapshot.revision == 2
     assert snapshot.bindings[0].source_id == "source:docs"
+    assert snapshot.bindings[0].source_kind == "documentation"
     assert snapshot.bindings[0].source_revision == "rev:1"
     assert snapshot.bindings[0].priority == 3
     assert snapshot.bindings[0].metadata["trust"] == "authoritative"
@@ -144,6 +149,18 @@ def test_task_context_detects_context_and_source_revision_staleness() -> None:
     assert context.is_snapshot_current(fresh) is False
 
 
+@pytest.mark.parametrize("field", ["source_id", "source_kind"])
+def test_task_context_detects_source_identity_staleness(field: str) -> None:
+    source = RecordingSource()
+    context = TaskContext(task_id="task-source-identity")
+    context.attach(source, binding_id="binding:docs")
+    snapshot = context.snapshot()
+
+    setattr(source, field, f"changed-{field}")
+
+    assert context.is_snapshot_current(snapshot) is False
+
+
 def test_task_context_tracks_revisions_per_binding_when_sources_share_an_id() -> None:
     first = RecordingSource(source_id="source:shared", revision="rev:first")
     second = RecordingSource(source_id="source:shared", revision="rev:second")
@@ -169,10 +186,28 @@ def test_binding_and_snapshot_do_not_trigger_source_or_model_work() -> None:
     context.attach(source)
     context.snapshot()
 
-    assert source.list_calls == 0
+    assert source.enumerate_calls == 0
     assert source.read_calls == 0
     assert not hasattr(context, "model")
     assert not hasattr(context, "request")
+
+
+def test_task_context_exposes_dynamic_source_catalog() -> None:
+    context = TaskContext(task_id="task-catalog")
+    context.attach(
+        RecordingSource(source_kind="pinned_repository"),
+        binding_id="binding:repo",
+        required=True,
+        metadata={"description": "Pinned repository at an immutable commit."},
+    )
+
+    assert context.source_catalog() == {
+        "pinned_repository": {
+            "binding_ids": ("binding:repo",),
+            "required": True,
+            "description": "Pinned repository at an immutable commit.",
+        }
+    }
 
 
 @pytest.mark.parametrize(

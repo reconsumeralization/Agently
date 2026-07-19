@@ -3622,7 +3622,7 @@ def test_block_carrier_exposes_compact_scoped_retrieval_policy():
     serialized = intent.to_dict()
 
     assert serialized["retrieval_policy"] == policy
-    assert policy["schema_version"] == "agent_task_scoped_retrieval/v1"
+    assert policy["schema_version"] == "agent_task_scoped_retrieval/v2"
     assert policy["roles"]["locator_ref"] == "discovered target; content not read"
     assert policy["roles"]["evidence_snippet"] == "bounded readable excerpt"
     assert policy["query_owner"] == "planner_or_control_model"
@@ -3713,17 +3713,22 @@ def test_scoped_retrieval_normalizes_structured_content_contains_and_globs(tmp_p
     assert query_groups[0]["source_kinds"] == ["task_workspace"]
 
 
-def test_taskboard_source_ref_policy_reuses_scoped_retrieval_policy():
-    policy = AgentTask._taskboard_source_ref_policy()
+def test_taskboard_source_ref_policy_reuses_scoped_retrieval_policy(tmp_path):
+    task = AgentTask(
+        _create_agent("taskboard-source-policy").use_task_workspace(tmp_path),
+        task_id="taskboard-source-policy",
+        goal="Read scoped evidence.",
+        success_criteria=["Evidence is grounded."],
+    )
+    policy = task._taskboard_source_ref_policy()
 
-    assert policy["scoped_retrieval_policy"] == scoped_retrieval_policy()
+    assert policy["scoped_retrieval_policy"] == task._task_context_retrieval_policy()
     assert "locator_ref" in policy["scoped_retrieval_policy"]["roles"]
     assert "evidence_snippet" in policy["scoped_retrieval_policy"]["roles"]
-    assert any("filters.collection" in rule for rule in policy["scoped_retrieval_policy"]["rules"])
-    assert any("never infer a generic kind" in rule for rule in policy["scoped_retrieval_policy"]["rules"])
+    assert policy["scoped_retrieval_policy"]["source_kinds"]
     assert any("truncated evidence snippets" in rule for rule in policy["scoped_retrieval_policy"]["rules"])
-    assert any("filters.collection" in rule for rule in policy["rules"])
-    assert any("never infer a generic kind" in rule for rule in policy["rules"])
+    assert any("offered" in rule for rule in policy["rules"])
+    assert any("never select lexical" in rule for rule in policy["rules"])
     assert any("truncated evidence snippets" in rule for rule in policy["rules"])
 
 
@@ -3786,7 +3791,7 @@ def test_block_carrier_compiles_scoped_retrieval_before_agent_step(tmp_path):
     assert execution_plan.edges[0].binding["target_input"] == "scoped_retrieval_results"
 
 
-def test_block_carrier_keeps_file_path_out_of_record_filters_for_mixed_retrieval(tmp_path):
+def test_block_carrier_keeps_source_specific_filters_in_separate_query_groups(tmp_path):
     agent = _create_agent("agent-task-scoped-retrieval-mixed-path").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
@@ -3803,8 +3808,13 @@ def test_block_carrier_keeps_file_path_out_of_record_filters_for_mixed_retrieval
                     {
                         "query": "alpha deadline",
                         "expected_role": "evidence_snippet",
-                        "source_kinds": ["record_store", "task_workspace"],
+                        "source_kinds": ["record_store"],
                         "collection": "observations",
+                    },
+                    {
+                        "query": "alpha deadline",
+                        "expected_role": "evidence_snippet",
+                        "source_kinds": ["task_workspace"],
                         "path": "notes",
                         "pattern": "*.md",
                     }
@@ -3822,11 +3832,16 @@ def test_block_carrier_keeps_file_path_out_of_record_filters_for_mixed_retrieval
     work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
 
     execution_plan = task._build_blocks_execution_plan(work_unit, plan, cast(Any, context_pack))
-    inputs = execution_plan.plan_blocks[0].bound_inputs
+    record_inputs = execution_plan.plan_blocks[0].bound_inputs
+    file_inputs = execution_plan.plan_blocks[1].bound_inputs
 
-    assert inputs["path"] == "notes"
-    assert inputs["pattern"] == "*.md"
-    assert inputs["filters"] == {"collection": "observations"}
+    assert record_inputs["source_kinds"] == ["record_store"]
+    assert record_inputs["filters"] == {"collection": "observations"}
+    assert "path" not in record_inputs
+    assert file_inputs["source_kinds"] == ["task_workspace"]
+    assert file_inputs["path"] == "notes"
+    assert file_inputs["pattern"] == "*.md"
+    assert file_inputs["filters"] == {}
 
 
 def test_block_carrier_model_hot_snippets_preserve_projection_metadata():
@@ -3867,7 +3882,7 @@ def test_block_carrier_model_hot_snippets_preserve_projection_metadata():
     assert snippets[0]["original_ref"]["content_state"] == "raw_readback_available"
 
 
-def test_block_carrier_passes_task_workspace_retrieve_options(tmp_path):
+def test_block_carrier_discards_caller_selected_retrieval_mechanisms(tmp_path):
     agent = _create_agent("agent-task-scoped-retrieval-options").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
@@ -3909,11 +3924,11 @@ def test_block_carrier_passes_task_workspace_retrieve_options(tmp_path):
     inputs = execution_plan.plan_blocks[0].bound_inputs
 
     assert inputs["tags"] == ["alpha", "deadline"]
-    assert inputs["method"] == "hybrid"
-    assert inputs["selection"] == "top_n"
-    assert inputs["top_n"] == 2
-    assert inputs["rerank"] is False
-    assert inputs["max_candidates"] == 9
+    assert "method" not in inputs
+    assert "selection" not in inputs
+    assert "top_n" not in inputs
+    assert "rerank" not in inputs
+    assert "max_candidates" not in inputs
 
 
 def test_block_carrier_normalizes_singleton_record_filters(tmp_path):
@@ -16358,11 +16373,11 @@ async def test_agent_task_loop_progress_model_omits_developer_diagnostics(tmp_pa
         },
     )
 
-    async def noisy_candidates(*_args, **_kwargs):
+    async def noisy_descriptors(*_args, **_kwargs):
         raise RuntimeError('fts5: syntax error near "."; no such column: question')
 
     source = task.task_context._binding_source(task._task_workspace_context_binding_id)
-    monkeypatch.setattr(source, "async_list_candidates", noisy_candidates)
+    monkeypatch.setattr(source, "async_enumerate_descriptors", noisy_descriptors)
 
     stream_items = [item async for item in task.get_async_generator(type="instant")]
     progress_calls = [call for call in MockAgentTaskRequester.calls if "Summarize AgentTask progress" in call]

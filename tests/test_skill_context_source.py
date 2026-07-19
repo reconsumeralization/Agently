@@ -82,25 +82,47 @@ async def test_skill_context_source_exposes_typed_progressive_candidates(tmp_pat
     binding = SkillBinding.create(package, task_id="task-1", mode="required")
     source = SkillContextSource(library, bindings=(binding,))
 
-    window = await source.async_list_candidates(
-        ContextReadIntent(query="Create the report"),
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
         limit=100,
     )
-    candidates = window.candidates
-    by_path = {item.metadata.get("resource_path", "core"): item for item in candidates}
+    descriptors = page.descriptors
+    by_path = {item.metadata.get("resource_path", "core"): item for item in descriptors}
 
     assert source.source_id == "skill-context:task-1"
     assert package.revision in source.source_revision
     assert by_path["SKILL.md"].role == "instruction"
     assert by_path["SKILL.md"].required is True
-    assert by_path["SKILL.md"].completeness == "complete"
     assert by_path["resource-index"].role == "index"
     assert by_path["references/criteria.md"].role == "information"
-    assert by_path["references/criteria.md"].completeness == "ref_only"
     assert by_path["examples/accepted.md"].role == "example"
     assert by_path["assets/report.txt"].role == "artifact"
     assert by_path["scripts/validate.py"].role == "capability"
-    assert by_path["scripts/validate.py"].completeness == "ref_only"
+
+
+@pytest.mark.asyncio
+async def test_skill_context_source_enumerates_descriptors_without_task_intent(
+    tmp_path: Path,
+) -> None:
+    library = SkillLibrary(tmp_path / "library-descriptor")
+    package = library.install(_write_skill(tmp_path / "skill-descriptor"), trust="trusted")
+    binding = SkillBinding.create(package, task_id="task-descriptor", mode="required")
+    source = SkillContextSource(library, bindings=(binding,))
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=100,
+    )
+    instruction = next(
+        item for item in page.descriptors if item.metadata.get("resource_path") == "SKILL.md"
+    )
+    readback = await source.async_read_exact(instruction.source_ref, max_chars=1000)
+
+    assert source.source_kind == "skill_library"
+    assert instruction.required is True
+    assert readback.content == "Always verify the report before delivery."
 
 
 @pytest.mark.asyncio
@@ -125,11 +147,12 @@ async def test_skill_without_resources_does_not_offer_an_empty_optional_index(
             SkillBinding.create(installed, task_id="minimal-task", mode="required"),
         ),
     )
-    window = await source.async_list_candidates(
-        ContextReadIntent(query="Apply the procedure"),
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
         limit=100,
     )
-    candidates = window.candidates
+    descriptors = page.descriptors
     context = TaskContext("minimal-task")
     context.attach(source, required=True)
     package = await context.reader(
@@ -137,9 +160,9 @@ async def test_skill_without_resources_does_not_offer_an_empty_optional_index(
         semantic_selector=FailIfSelected(),
     ).async_read("Apply the procedure")
 
-    assert [item.metadata["resource_path"] for item in candidates] == ["SKILL.md"]
+    assert [item.metadata["resource_path"] for item in descriptors] == ["SKILL.md"]
     assert [block.content for block in package.blocks] == ["Apply the minimal procedure."]
-    assert package.diagnostics == ()
+    assert not any(item.code == "context.selection_failed" for item in package.diagnostics)
 
 
 @pytest.mark.asyncio
@@ -191,19 +214,20 @@ async def test_oversized_markdown_reference_discloses_selected_section_within_bu
         library,
         bindings=(SkillBinding.create(package, task_id="section-task", mode="required"),),
     )
-    window = await source.async_list_candidates(
-        ContextReadIntent(query="Use the exact Search Action API"),
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
         limit=100,
     )
-    candidates = window.candidates
+    descriptors = page.descriptors
     whole = next(
         item
-        for item in candidates
+        for item in descriptors
         if item.metadata.get("resource_path") == "references/runtime.md"
     )
     search_section = next(
         item
-        for item in candidates
+        for item in descriptors
         if item.metadata.get("section_title") == "Search Action"
     )
 
@@ -250,24 +274,25 @@ async def test_oversized_skill_can_build_explicit_lossy_outline_with_section_ref
         library,
         bindings=(SkillBinding.create(package, task_id="large-task", mode="required"),),
     )
-    window = await source.async_list_candidates(
-        ContextReadIntent(query="Execute and verify"),
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
         limit=100,
     )
-    candidates = window.candidates
-    core = next(item for item in candidates if item.metadata["resource_path"] == "SKILL.md")
+    descriptors = page.descriptors
+    core = next(item for item in descriptors if item.metadata["resource_path"] == "SKILL.md")
     sections = [
-        item for item in candidates if str(item.metadata["resource_path"]).startswith("SKILL.md#section-")
+        item for item in descriptors if str(item.metadata["resource_path"]).startswith("SKILL.md#section-")
     ]
 
-    digest = await source.async_read(
-        core,
+    digest = await source.async_read_exact(
+        core.source_ref,
         max_chars=900,
         representation="lossy_digest",
     )
 
     assert digest.completeness == "lossy"
-    assert 0 < digest.content_chars <= 900
+    assert 0 < len(str(digest.content)) <= 900
     assert digest.metadata["representation"] == "lossy_digest"
     assert digest.metadata["original_chars"] == len(package.instruction_body)
     assert {item.metadata["section_title"] for item in sections} >= {
@@ -358,13 +383,16 @@ async def test_skill_script_read_returns_descriptor_not_executable_object(tmp_pa
         library,
         bindings=(SkillBinding.create(package, task_id="task-1", mode="required"),),
     )
-    window = await source.async_list_candidates(ContextReadIntent(query="Validate"), limit=100)
-    candidates = window.candidates
-    script = next(item for item in candidates if item.role == "capability")
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=100,
+    )
+    script = next(item for item in page.descriptors if item.role == "capability")
 
-    block = await source.async_read(script, max_chars=1000)
+    block = await source.async_read_exact(script.source_ref, max_chars=1000)
 
-    assert block.role == "capability"
+    assert script.role == "capability"
     assert block.completeness == "ref_only"
     assert block.content == {
         "descriptor_kind": "skill_script",
@@ -379,7 +407,7 @@ async def test_skill_script_read_returns_descriptor_not_executable_object(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_skill_context_source_keeps_required_core_on_every_optional_page(
+async def test_skill_context_source_enumerates_descriptors_once_across_pages(
     tmp_path: Path,
 ) -> None:
     library = SkillLibrary(tmp_path / "library")
@@ -388,26 +416,22 @@ async def test_skill_context_source_keeps_required_core_on_every_optional_page(
         library,
         bindings=(SkillBinding.create(package, task_id="paged-skill", mode="required"),),
     )
-    intent = ContextReadIntent(query="Apply and verify")
-
-    first = await source.async_list_candidates(intent, limit=1)
-    second = await source.async_list_candidates(
-        intent,
+    first = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
         limit=1,
+    )
+    second = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
         cursor=first.next_cursor,
+        limit=1,
     )
 
-    assert [item.metadata["resource_path"] for item in first.candidates if item.required] == [
+    assert [item.metadata["resource_path"] for item in first.descriptors if item.required] == [
         "SKILL.md"
     ]
-    assert [item.metadata["resource_path"] for item in second.candidates if item.required] == [
-        "SKILL.md"
-    ]
-    first_optional = [item.source_ref for item in first.candidates if not item.required]
-    second_optional = [item.source_ref for item in second.candidates if not item.required]
-    assert len(first_optional) == 1
-    assert len(second_optional) == 1
-    assert first_optional != second_optional
+    assert not any(item.required for item in second.descriptors)
+    assert first.descriptors[0].descriptor_key != second.descriptors[0].descriptor_key
     assert first.next_cursor is not None
 
 
