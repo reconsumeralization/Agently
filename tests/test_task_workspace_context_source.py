@@ -31,6 +31,44 @@ async def test_task_workspace_edits_caller_directory_with_direct_root(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_terminal_target_write_guard_allows_only_digest_pinned_promotion(
+    tmp_path: Path,
+) -> None:
+    workspace = TaskWorkspace(tmp_path, mode="read_write", execution_id="task-guard")
+    await workspace.write_file("final.md", "previous accepted body\n")
+    staged = await workspace.write_file(
+        "working/taskboard/finalize/terminal-candidates/final.md",
+        "verified candidate body\n",
+    )
+
+    with workspace._protect_terminal_targets(["final.md"]):
+        with pytest.raises(TaskWorkspacePolicyError, match="terminal target"):
+            await workspace.write_file("final.md", "premature overwrite")
+        with pytest.raises(TaskWorkspacePolicyError, match="terminal target"):
+            await workspace.edit_file("final.md", "previous", "premature")
+        with pytest.raises(TaskWorkspacePolicyError, match="terminal target"):
+            await workspace.apply_patch(
+                """diff --git a/final.md b/final.md
+--- a/final.md
++++ b/final.md
+@@ -1 +1 @@
+-previous accepted body
++premature patch body
+"""
+            )
+        promoted = await workspace.atomic_promote_file(
+            staged.path,
+            "final.md",
+            expected_sha256=staged.sha256,
+        )
+
+    assert promoted["sha256"] == staged.sha256
+    assert (tmp_path / "final.md").read_text(encoding="utf-8") == (
+        "verified candidate body\n"
+    )
+
+
+@pytest.mark.asyncio
 async def test_read_only_task_workspace_creates_task_artifact_in_private_fallback(
     tmp_path: Path,
 ) -> None:

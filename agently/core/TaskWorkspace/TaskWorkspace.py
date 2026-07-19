@@ -21,8 +21,9 @@ import re
 import shutil
 import subprocess
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Iterator, cast
 
 from agently.types.data import (
     TaskWorkspaceFileRead,
@@ -73,6 +74,7 @@ class TaskWorkspace:
         from .ExecutionAccess import TaskWorkspaceExecutionAccess
 
         self._execution_access = TaskWorkspaceExecutionAccess(self)
+        self._terminal_target_protections: dict[str, frozenset[Path]] = {}
 
     @property
     def task_workspace_id(self) -> str:
@@ -159,7 +161,40 @@ class TaskWorkspace:
     def _relative(self, path: Path) -> str:
         return path.relative_to(self.root).as_posix()
 
-    def _write_target(self, requested: Path, requested_path: str) -> tuple[Path, bool]:
+    @contextmanager
+    def _protect_terminal_targets(
+        self,
+        paths: list[str] | tuple[str, ...],
+    ) -> Iterator[None]:
+        """Block ordinary writes to terminal targets while one card is running."""
+
+        token = uuid.uuid4().hex
+        targets = frozenset(self.resolve_path(path) for path in paths)
+        self._terminal_target_protections[token] = targets
+        try:
+            yield
+        finally:
+            self._terminal_target_protections.pop(token, None)
+
+    def _assert_terminal_target_writable(self, requested: Path) -> None:
+        if any(
+            requested in targets
+            for targets in self._terminal_target_protections.values()
+        ):
+            raise TaskWorkspacePolicyError(
+                "A protected terminal target can only change through "
+                "digest-pinned TaskWorkspace promotion."
+            )
+
+    def _write_target(
+        self,
+        requested: Path,
+        requested_path: str,
+        *,
+        allow_terminal_target: bool = False,
+    ) -> tuple[Path, bool]:
+        if not allow_terminal_target:
+            self._assert_terminal_target_writable(requested)
         fallback_root = self.fallback_root.resolve()
         if requested == fallback_root or fallback_root in requested.parents:
             # A task may continue or replace the private carrier returned by a
@@ -277,6 +312,7 @@ class TaskWorkspace:
         expected_sha256: str | None = None,
     ) -> TaskWorkspaceFileWrite:
         target = self.resolve_file_path(path)
+        self._assert_terminal_target_writable(target)
         if self.mode != "read_write" and not (
             target == self.fallback_root or self.fallback_root in target.parents
         ):
@@ -530,7 +566,9 @@ class TaskWorkspace:
                 continue
             if raw_path.startswith(("a/", "b/")):
                 raw_path = raw_path[2:]
-            normalized = self._relative(self.resolve_path(raw_path))
+            resolved = self.resolve_path(raw_path)
+            self._assert_terminal_target_writable(resolved)
+            normalized = self._relative(resolved)
             if normalized not in paths:
                 paths.append(normalized)
         if not paths:
@@ -595,7 +633,11 @@ class TaskWorkspace:
 
         requested_path = Path(target_path).as_posix()
         requested = self.resolve_path(target_path)
-        target, _fallback = self._write_target(requested, requested_path)
+        target, _fallback = self._write_target(
+            requested,
+            requested_path,
+            allow_terminal_target=True,
+        )
         if source == target:
             return cast(
                 TaskWorkspaceFileRef,

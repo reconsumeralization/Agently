@@ -3251,7 +3251,9 @@ def test_taskboard_control_continuations_inherit_one_terminal_convergence_subjec
     ] == "task:final-grounding"
 
 
-def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readback():
+def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readback(
+    tmp_path,
+):
     discovered_refs = AgentTask._collect_taskboard_source_refs(
         {
             "url": "https://example.test/source.pdf",
@@ -3277,7 +3279,15 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
             "sha256": "0" * 64,
         }
     )
-    policy = AgentTask._taskboard_source_ref_policy()
+    task = AgentTask(
+        _create_agent("taskboard-source-ref-policy").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        goal="Inspect source refs.",
+        success_criteria=["Source-ref states are explicit."],
+        execution="taskboard",
+    )
+    policy = task._taskboard_source_ref_policy()
 
     assert discovered_refs[0]["content_state"] == "ref_only"
     assert read_refs[0]["content_state"] == "bounded_readback_available"
@@ -5284,7 +5294,9 @@ async def test_taskboard_remaining_work_leaf_card_relocates_required_final_deliv
 
 
 @pytest.mark.asyncio
-async def test_taskboard_final_repair_card_keeps_required_final_deliverable_path(tmp_path):
+async def test_taskboard_final_repair_card_stages_required_deliverable_candidate(
+    tmp_path,
+):
     agent = _create_agent("execution-taskboard-final-repair-final-path").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
@@ -5335,11 +5347,15 @@ async def test_taskboard_final_repair_card_keeps_required_final_deliverable_path
         card_context=context,
     )
 
-    assert task._task_workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
+    assert task._task_workspace_artifact_display_path(
+        delivered["file_refs"][0]["path"]
+    ) == "working/taskboard/repair/terminal-candidates/final.md"
     assert task.task_workspace.resolve_file_path(delivered["file_refs"][0]["path"]).is_file()
+    assert not (task.task_workspace.root / "final.md").exists()
     assert not (task.task_workspace.root / "working/taskboard/repair/final.md").exists()
     assert any(
-        item.get("code") == "taskboard.task_workspace_artifact.final_path_authorized"
+        item.get("code")
+        == "taskboard.task_workspace_artifact.terminal_candidate_staged"
         for item in delivered["diagnostics"]
         if isinstance(item, dict)
     )
@@ -6697,7 +6713,7 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
             }
         },
     )
-    source_path = "working/taskboard/synthesize/final.md"
+    source_path = "working/taskboard/synthesize/terminal-candidates/final.md"
     source_content = (
         "# Final Report\n\n"
         "## Required Evidence Section\n\n"
@@ -6747,11 +6763,15 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
     async def fake_request_verification(*args: Any, **kwargs: Any) -> dict[str, Any]:
         verification_calls.append(DataFormatter.sanitize(kwargs))
         file_refs = kwargs["execution_result"]["file_refs"]
-        assert task._task_workspace_artifact_display_path(file_refs[0]["path"]) == "final.md"
+        assert task._task_workspace_artifact_display_path(file_refs[0]["path"]) == source_path
+        assert task._task_workspace_artifact_display_path(
+            file_refs[0]["staged_target_path"]
+        ) == "final.md"
         evidence_items = kwargs["execution_meta"]["blocks"]["evidence"]["evidence_items"]
         assert any(
             item.get("kind") == "task_workspace_artifact.readback"
-            and task._task_workspace_artifact_display_path(item.get("path")) == "final.md"
+            and task._task_workspace_artifact_display_path(item.get("path"))
+            == source_path
             for item in evidence_items
         )
         return {

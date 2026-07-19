@@ -5072,6 +5072,135 @@ async def test_taskboard_action_card_separates_work_unit_input_from_task_orienta
     assert child_execution.route_policies[-1]["allowed_routes"] == ["model_request"]
 
 
+def test_taskboard_preplanned_terminal_write_is_redirected_to_candidate(tmp_path):
+    agent = _create_agent("agent-taskboard-command-staging").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
+    )
+    agent.enable_task_workspace_file_actions(
+        root=tmp_path / "task_workspace",
+        read=True,
+        write=True,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-command-staging",
+        goal="Write final.md.",
+        success_criteria=["final.md is verified before delivery."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "finalize",
+            "objective": "Write the terminal candidate.",
+            "metadata": {"final_task_workspace_deliverables": ["final.md"]},
+        }
+    )
+    context = SimpleNamespace(card=card, revision=None)
+
+    commands, redirects = task._taskboard_stage_terminal_action_commands(
+        context,
+        [
+            {
+                "action_id": "write_file",
+                "action_input": {
+                    "path": "final.md",
+                    "content": "candidate",
+                    "append": False,
+                },
+            }
+        ],
+    )
+
+    candidate_path = "working/taskboard/finalize/terminal-candidates/final.md"
+    assert commands[0]["action_input"]["path"] == candidate_path
+    assert redirects == [
+        {
+            "action_id": "write_file",
+            "target_path": "final.md",
+            "candidate_path": candidate_path,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_child_execution_cannot_overwrite_terminal_target(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-target-guard").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-target-guard",
+        goal="Produce final.md.",
+        success_criteria=["final.md changes only after verification."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    await task.task_workspace.write_file("final.md", "previous accepted body")
+    card = TaskBoardCard.from_value(
+        {
+            "id": "finalize",
+            "objective": "Produce the terminal candidate.",
+            "allowed_execution_shape": "control",
+            "metadata": {"final_task_workspace_deliverables": ["final.md"]},
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+
+    async def premature_target_write(**_kwargs):
+        await task.task_workspace.write_file("final.md", "unverified candidate")
+        raise AssertionError("terminal target guard did not reject the write")
+
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_run_bounded_child_execution",
+        premature_target_write,
+    )
+
+    result = await task._run_taskboard_agent_card(
+        context,
+        cast(
+            Any,
+            {
+                "goal": task.goal,
+                "profile": "",
+                "items": [],
+                "omitted": [],
+                "diagnostics": {},
+            },
+        ),
+    )
+
+    assert result.status == "failed"
+    assert task.task_workspace.resolve_file_path("final.md").read_text(
+        encoding="utf-8"
+    ) == "previous accepted body"
+    assert any(
+        "protected terminal target" in str(item.get("message") or "")
+        for item in result.diagnostics
+        if isinstance(item, Mapping)
+    )
+
+
 @pytest.mark.asyncio
 async def test_taskboard_task_workspace_artifact_action_card_dispatches_without_actionloop(tmp_path, monkeypatch):
     task_workspace_root = tmp_path / "task_workspace"
@@ -5104,6 +5233,7 @@ async def test_taskboard_task_workspace_artifact_action_card_dispatches_without_
     source_path = "working/taskboard/synthesize/final.md"
     source_body = "# Final report\n\nCanonical synthesized body.\n"
     await task.task_workspace.write_file(source_path, source_body)
+    await task.task_workspace.write_file("final.md", "# Previously accepted report\n")
     dependency = TaskBoardCard.from_value(
         {"id": "synthesize", "objective": "Synthesize the final report."}
     )
@@ -5172,8 +5302,12 @@ async def test_taskboard_task_workspace_artifact_action_card_dispatches_without_
     assert direct is not None
     card_output, execution_meta = direct
     assert card_output["status"] == "completed"
-    assert card_output["artifact_manifest"]["path"] == "final.md"
-    assert task.task_workspace.inspect_file("final.md")["sha256"] == task.task_workspace.inspect_file(source_path)["sha256"]
+    staging_path = "working/taskboard/write_output/terminal-candidates/final.md"
+    assert card_output["artifact_manifest"]["path"] == staging_path
+    assert task.task_workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == (
+        "# Previously accepted report\n"
+    )
+    assert task.task_workspace.inspect_file(staging_path)["sha256"] == task.task_workspace.inspect_file(source_path)["sha256"]
     action_logs = execution_meta["logs"]["action_logs"]
     assert [record["action_id"] for record in action_logs] == ["write_file", "read_file"]
     assert all(record["status"] in {"success", "succeeded"} for record in action_logs)
@@ -5202,7 +5336,10 @@ async def test_taskboard_task_workspace_artifact_action_card_dispatches_without_
     )
 
     assert result.status == "completed"
-    assert task.task_workspace.inspect_file("final.md")["sha256"] == task.task_workspace.inspect_file(source_path)["sha256"]
+    assert task.task_workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == (
+        "# Previously accepted report\n"
+    )
+    assert task.task_workspace.inspect_file(staging_path)["sha256"] == task.task_workspace.inspect_file(source_path)["sha256"]
     assert result.metadata["block_carrier"]["work_unit"]["runtime_preferences"]["plan_block_kind"] == ("action_call")
     assert result.metadata["block_carrier"]["block_graph"]["execution_block_kinds"] == ["action_call"]
 
@@ -5674,6 +5811,7 @@ async def test_taskboard_control_delivery_uses_required_task_workspace_actions(t
         planning_policy=None,
     )
     assert task._set_taskboard_planned_task_workspace_deliverables(revision) == ["final.md"]
+    await task.task_workspace.write_file("final.md", "# Previously accepted report\n")
     body = "# Final report\n\nGrounded synthesized body.\n"
     card_output = {
         "status": "completed",
@@ -5694,19 +5832,29 @@ async def test_taskboard_control_delivery_uses_required_task_workspace_actions(t
 
     assert direct is not None
     assert direct["status"] == "completed"
+    staging_path = "working/taskboard/finalize/terminal-candidates/final.md"
+    assert direct["path"] == staging_path
     action_logs = execution_meta["logs"]["action_logs"]
     assert [record["action_id"] for record in action_logs] == ["write_file", "read_file"]
     assert all(task._taskboard_direct_action_succeeded(record) for record in action_logs)
-    assert task.task_workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == body.strip()
+    assert task.task_workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == (
+        "# Previously accepted report\n"
+    )
+    assert task.task_workspace.resolve_file_path(staging_path).read_text(encoding="utf-8") == body.strip()
 
-    delivered = await task._deliver_task_workspace_artifact(
+    prepared, delivery_plan = task._prepare_taskboard_task_workspace_artifact_delivery(
         card_output,
-        plan={"deliverable_mode": "task_workspace_artifact"},
+        context,
+        deliverable_mode="task_workspace_artifact",
+    )
+    delivered = await task._deliver_task_workspace_artifact(
+        prepared,
+        plan=delivery_plan,
         execution_meta=execution_meta,
         source="test.taskboard.control.task_workspace_actions",
     )
     assert delivered["task_workspace_artifact_delivery"]["status"] == "adopted_existing"
-    assert task._task_workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
+    assert task._task_workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == staging_path
 
 
 @pytest.mark.asyncio
@@ -8418,6 +8566,7 @@ async def test_taskboard_completed_sufficient_leaf_materializes_declared_path_be
         goal="Write the final report.",
         success_criteria=["The report is available through trusted TaskWorkspace readback."],
         execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
     )
     card = TaskBoardCard.from_value(
         {
@@ -8449,6 +8598,7 @@ async def test_taskboard_completed_sufficient_leaf_materializes_declared_path_be
         "remaining_work": ["Materialize and read back final.md before terminal verification."],
         "ready_for_final_verification": False,
     }
+    await task.task_workspace.write_file("final.md", "# Previously accepted report\n")
 
     assert task._taskboard_control_output_allows_task_workspace_delivery(output) is True
     prepared, plan = task._prepare_taskboard_task_workspace_artifact_delivery(
@@ -8456,7 +8606,8 @@ async def test_taskboard_completed_sufficient_leaf_materializes_declared_path_be
         context,
         deliverable_mode="task_workspace_artifact",
     )
-    assert prepared["artifact_manifest"]["path"] == "final.md"
+    staging_path = "working/taskboard/synthesize/terminal-candidates/final.md"
+    assert prepared["artifact_manifest"]["path"] == staging_path
 
     delivered = await task._deliver_task_workspace_artifact(
         prepared,
@@ -8466,9 +8617,11 @@ async def test_taskboard_completed_sufficient_leaf_materializes_declared_path_be
         card_context=context,
     )
 
-    assert task.task_workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == body.strip()
-    assert not task.task_workspace.resolve_file_path("working/taskboard/synthesize/final.md").exists()
-    assert task._task_workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == "final.md"
+    assert task.task_workspace.resolve_file_path("final.md").read_text(encoding="utf-8") == (
+        "# Previously accepted report\n"
+    )
+    assert task.task_workspace.resolve_file_path(staging_path).read_text(encoding="utf-8") == body.strip()
+    assert task._task_workspace_artifact_display_path(delivered["file_refs"][0]["path"]) == staging_path
     assert delivered["remaining_work"] == []
     assert delivered["ready_for_final_verification"] is True
     assert delivered["task_workspace_artifact_delivery"]["remaining_work_handoff"]["status"] == (
@@ -10811,7 +10964,11 @@ async def test_taskboard_action_card_retries_retryable_result_protocol_failure(t
     assert retry_diagnostics[0]["code"] == "taskboard.card.result_protocol_retry"
     assert "agent_task.task_workspace_artifact.empty_body" in retry_diagnostics[0]["retryable_codes"]
     assert result.metadata["attempt_index"] == 2
-    readback = await task.task_workspace.read_file("final.md")
+    with pytest.raises(FileNotFoundError):
+        await task.task_workspace.read_file("final.md")
+    readback = await task.task_workspace.read_file(
+        "working/taskboard/draft/terminal-candidates/final.md"
+    )
     assert readback["content"] == "# Final Report\n\nRecovered body."
 
 
