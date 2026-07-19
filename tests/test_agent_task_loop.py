@@ -8040,7 +8040,7 @@ async def test_taskboard_final_artifact_readback_reads_small_tail_sections_for_v
 
 
 @pytest.mark.asyncio
-async def test_taskboard_required_final_deliverable_promotion_replaces_stale_target(tmp_path):
+async def test_taskboard_required_final_deliverable_stages_candidate_without_replacing_target(tmp_path):
     agent = _create_agent("agent-taskboard-final-deliverable-promotion").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
@@ -8078,18 +8078,45 @@ async def test_taskboard_required_final_deliverable_promotion_replaces_stale_tar
         await ref_for("working/taskboard/coverage-and-finalize/final.md"),
     ]
 
-    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs([*refs, dict(refs[0])])
+    staged_refs, promotions = await task._taskboard_stage_required_final_deliverable_refs(
+        [*refs, dict(refs[0])]
+    )
 
     final_read = await task.task_workspace.read_file("final.md", max_bytes=len(full_body.encode("utf-8")) + 1)
-    assert final_read["content"] == full_body
-    assert task._task_workspace_artifact_display_path(promoted_refs[0]["path"]) == "final.md"
-    assert promoted_refs[0]["source_path"] == "working/taskboard/coverage-and-finalize/final.md"
-    assert promoted_refs[0]["sha256"] == final_read["sha256"]
-    assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "delivered"
+    assert final_read["content"] == "Summary only."
+    assert task._task_workspace_artifact_display_path(staged_refs[0]["path"]) == (
+        "working/taskboard/coverage-and-finalize/final.md"
+    )
+    assert staged_refs[0]["staged_target_path"] == "final.md"
+    assert promotions == [
+        {
+            "source_path": "working/taskboard/coverage-and-finalize/final.md",
+            "target_path": "final.md",
+            "source_sha256": staged_refs[0]["sha256"],
+            "source_content_version_id": staged_refs[0]["content_version_id"],
+        }
+    ]
+    terminal_refs = task._taskboard_terminal_candidate_refs(None, staged_refs)
+    assert len(terminal_refs) == 1
+    assert terminal_refs[0]["staged_target_path"] == "final.md"
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "staged"
+
+    promoted_refs = await task._taskboard_promote_staged_deliverables(
+        promotions,
+        terminal_refs,
+    )
+    promoted_read = await task.task_workspace.read_file(
+        "final.md",
+        max_bytes=len(full_body.encode("utf-8")) + 1,
+    )
+    assert promoted_read.content == full_body
+    assert promoted_refs[0]["path"] == promoted_read.path
+    assert promoted_refs[0]["sha256"] == promoted_read.sha256
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][-1]["status"] == "promoted"
 
 
 @pytest.mark.asyncio
-async def test_taskboard_required_final_deliverable_promotion_uses_unique_trusted_source(tmp_path):
+async def test_taskboard_required_final_deliverable_stage_uses_unique_trusted_source(tmp_path):
     agent = _create_agent("agent-taskboard-final-deliverable-unique-source").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
@@ -8117,18 +8144,20 @@ async def test_taskboard_required_final_deliverable_promotion_uses_unique_truste
         }
     ]
 
-    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs([*refs, dict(refs[0])])
+    staged_refs, promotions = await task._taskboard_stage_required_final_deliverable_refs(
+        [*refs, dict(refs[0])]
+    )
 
-    target_read = await task.task_workspace.read_file("support_reply.md", max_bytes=4000)
-    assert target_read["content"] == body
-    assert task._task_workspace_artifact_display_path(promoted_refs[0]["path"]) == "support_reply.md"
-    assert promoted_refs[0]["source_path"] == "final.md"
+    assert not task.task_workspace.resolve_file_path("support_reply.md").exists()
+    assert task._task_workspace_artifact_display_path(staged_refs[0]["path"]) == "final.md"
+    assert staged_refs[0]["staged_target_path"] == "support_reply.md"
+    assert promotions[0]["target_path"] == "support_reply.md"
     assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["status"] == "selected"
-    assert task.diagnostics["taskboard_final_deliverable_promotion"][1]["status"] == "delivered"
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][1]["status"] == "staged"
 
 
 @pytest.mark.asyncio
-async def test_taskboard_required_final_deliverable_promotion_uses_repair_source_over_existing_target(tmp_path):
+async def test_taskboard_required_final_deliverable_stage_uses_repair_source_over_existing_target(tmp_path):
     agent = _create_agent("agent-taskboard-final-deliverable-repair-source").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
         agent,
@@ -8168,7 +8197,7 @@ async def test_taskboard_required_final_deliverable_promotion_uses_repair_source
             "truncated": bool(read_result.get("truncated")),
         }
 
-    promoted_refs = await task._taskboard_materialize_required_final_deliverable_refs(
+    staged_refs, promotions = await task._taskboard_stage_required_final_deliverable_refs(
         [
             await ref_for("incident_learning.md", "agent_task.taskboard.card.write_incident_note.task_workspace_artifact"),
             await ref_for("final.md", "agent_task.taskboard.card.final-verification-repair.task_workspace_artifact"),
@@ -8176,13 +8205,14 @@ async def test_taskboard_required_final_deliverable_promotion_uses_repair_source
     )
 
     target_read = await task.task_workspace.read_file("incident_learning.md", max_bytes=4000)
-    assert target_read["content"] == repaired_body
-    assert task._task_workspace_artifact_display_path(promoted_refs[0]["path"]) == "incident_learning.md"
-    assert promoted_refs[0]["source_path"] == "final.md"
+    assert target_read["content"] == stale_body
+    assert task._task_workspace_artifact_display_path(staged_refs[0]["path"]) == "final.md"
+    assert staged_refs[0]["staged_target_path"] == "incident_learning.md"
+    assert promotions[0]["target_path"] == "incident_learning.md"
     assert task.diagnostics["taskboard_final_deliverable_promotion"][0]["reason"] == (
         "unique_final_verification_repair_source_for_required_deliverable"
     )
-    assert task.diagnostics["taskboard_final_deliverable_promotion"][1]["status"] == "delivered"
+    assert task.diagnostics["taskboard_final_deliverable_promotion"][1]["status"] == "staged"
 
 
 @pytest.mark.asyncio

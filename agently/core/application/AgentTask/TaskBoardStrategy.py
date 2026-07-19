@@ -838,8 +838,8 @@ class AgentTaskTaskBoardStrategyMixin(
         final_refs = self._prioritize_taskboard_final_refs(
             self._taskboard_final_refs_from_evidence_view(evidence_view)
         )
-        final_refs = await self._taskboard_materialize_required_final_deliverable_refs(
-            final_refs
+        final_refs, staged_promotions = (
+            await self._taskboard_stage_required_final_deliverable_refs(final_refs)
         )
         final_refs = await self._taskboard_refresh_current_required_final_refs(final_refs)
         final_refs = self._taskboard_terminal_candidate_refs(revision, final_refs)
@@ -850,6 +850,7 @@ class AgentTaskTaskBoardStrategyMixin(
             "evidence_view": evidence_view,
             "candidate_final_result": candidate_final_result,
             "final_refs": final_refs,
+            "staged_promotions": staged_promotions,
             "trusted_terminal_refs": self._trusted_terminal_refs(final_refs),
         }
         return frame

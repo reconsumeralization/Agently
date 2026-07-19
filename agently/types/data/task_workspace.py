@@ -140,6 +140,18 @@ class TaskWorkspaceFileRef(TypedDict):
     content_version_id: NotRequired[str]
     segment_id: NotRequired[str]
     link_id: NotRequired[str]
+    encoding: NotRequired[str | None]
+    handler_id: NotRequired[str | None]
+    source: NotRequired[str]
+    source_path: NotRequired[str]
+    source_content_version_id: NotRequired[str]
+    staged_target_path: NotRequired[str]
+    promotion_state: NotRequired[Literal["staged", "accepted"]]
+    read_bytes: NotRequired[int]
+    truncated: NotRequired[bool]
+    preview: NotRequired[str]
+    preview_truncated: NotRequired[bool]
+    complete_readback_verified: NotRequired[bool]
 
 
 class TaskWorkspaceFileInfo(TypedDict):

@@ -22,9 +22,13 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from agently.types.data import TaskWorkspaceFileRead, TaskWorkspaceFileWrite
+from agently.types.data import (
+    TaskWorkspaceFileRead,
+    TaskWorkspaceFileRef,
+    TaskWorkspaceFileWrite,
+)
 from agently.types.data import (
     CodeExecutionBundle,
     TaskWorkspaceAccessGrant,
@@ -570,6 +574,50 @@ class TaskWorkspace:
             raise ValueError(f"TaskWorkspace export kind is unsupported: {export_kind}")
         result = await self.copy_from(self.resolve_path(source_path), output_path)
         return result.to_dict()
+
+    async def atomic_promote_file(
+        self,
+        source_path: str | os.PathLike[str],
+        target_path: str | os.PathLike[str],
+        *,
+        expected_sha256: str,
+    ) -> TaskWorkspaceFileRef:
+        """Atomically replace one logical target with digest-pinned staged bytes."""
+
+        expected_digest = str(expected_sha256 or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+            raise ValueError("expected_sha256 must be a lowercase or uppercase SHA-256 digest.")
+        source = self.resolve_file_path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Staged TaskWorkspace file not found: {source_path}")
+        if await asyncio.to_thread(self._sha256, source) != expected_digest:
+            raise ValueError("staged TaskWorkspace file digest changed")
+
+        requested_path = Path(target_path).as_posix()
+        requested = self.resolve_path(target_path)
+        target, _fallback = self._write_target(requested, requested_path)
+        if source == target:
+            return cast(
+                TaskWorkspaceFileRef,
+                await self._promote_file_identity(target, role="task_workspace_artifact"),
+            )
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            await asyncio.to_thread(shutil.copyfile, source, temporary)
+            if await asyncio.to_thread(self._sha256, temporary) != expected_digest:
+                raise ValueError("temporary promotion digest mismatch")
+            await asyncio.to_thread(os.replace, temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+        if await asyncio.to_thread(self._sha256, target) != expected_digest:
+            raise ValueError("promoted TaskWorkspace file digest mismatch")
+        return cast(
+            TaskWorkspaceFileRef,
+            await self._promote_file_identity(target, role="task_workspace_artifact"),
+        )
 
     async def _promote_file_identity(
         self,

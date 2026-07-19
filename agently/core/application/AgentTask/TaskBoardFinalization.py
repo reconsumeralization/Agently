@@ -111,7 +111,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
 
         def priority(item: tuple[int, Mapping[str, Any]]) -> tuple[int, int]:
             index, ref = item
-            path = self._taskboard_task_workspace_path_key(ref.get("path"))
+            path = self._taskboard_task_workspace_path_key(
+                ref.get("staged_target_path") or ref.get("path")
+            )
             required_path_keys = {
                 self._taskboard_task_workspace_path_key(required_path)
                 for required_path in required_paths
@@ -142,15 +144,22 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             for ref in refs
             if isinstance(ref, Mapping)
         ]
-        sources = self._taskboard_promotable_deliverable_sources(revision)
-        if len(sources) != 1:
-            return current_refs
         required_path_keys = {
             self._taskboard_task_workspace_path_key(path)
             for path in self._required_task_workspace_deliverables()
             if self._taskboard_task_workspace_path_key(path)
         }
         if required_path_keys:
+            staged = [
+                ref
+                for ref in current_refs
+                if self._taskboard_task_workspace_path_key(
+                    ref.get("staged_target_path")
+                )
+                in required_path_keys
+            ]
+            if staged:
+                return self._dedupe_ref_records(staged)
             return self._dedupe_ref_records(
                 [
                     ref
@@ -158,6 +167,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     if self._taskboard_task_workspace_path_key(ref.get("path")) in required_path_keys
                 ]
             )
+
+        sources = self._taskboard_promotable_deliverable_sources(revision)
+        if len(sources) != 1:
+            return current_refs
 
         declared_path_keys = {
             self._taskboard_task_workspace_path_key(path)
@@ -320,6 +333,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         current_refs: Sequence[Mapping[str, Any]],
         target_refs: Sequence[Mapping[str, Any]],
         missing_required: bool,
+        allow_unique_fallback: bool = True,
     ) -> dict[str, Any] | None:
         target_name = self._taskboard_task_workspace_path_name(target_path_key)
         if not target_name:
@@ -387,7 +401,12 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     }
                 )
             )
-        if not candidates and missing_required and not target_refs:
+        if (
+            not candidates
+            and missing_required
+            and not target_refs
+            and allow_unique_fallback
+        ):
             if len(fallback_candidates) == 1:
                 candidates = fallback_candidates
                 self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
@@ -460,10 +479,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 unique[key] = candidate
         return list(unique.values())
 
-    async def _taskboard_materialize_required_final_deliverable_refs(
+    async def _taskboard_stage_required_final_deliverable_refs(
         self,
         refs: Sequence[Mapping[str, Any]],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         current_refs = self._dedupe_ref_records(
             [dict(DataFormatter.sanitize(ref)) for ref in refs if isinstance(ref, Mapping)]
         )
@@ -479,122 +498,338 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             if self._taskboard_task_workspace_path_key(path)
         }
         if not required_by_key:
-            return self._prioritize_taskboard_final_refs(current_refs)
+            return self._prioritize_taskboard_final_refs(current_refs), []
 
         missing_required_keys = {
             self._taskboard_task_workspace_path_key(path)
             for path in await self._missing_required_task_workspace_deliverables()
         }
-        if len(required_by_key) != 1:
-            self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
-                DataFormatter.sanitize(
-                    {
-                        "status": "skipped",
-                        "reason": "required_deliverable_ambiguous",
-                        "required_deliverables": list(required_by_key.values()),
-                    }
-                )
+        staged_refs: list[dict[str, Any]] = []
+        promotions: list[dict[str, Any]] = []
+        allow_unique_fallback = len(required_by_key) == 1
+        for target_path_key, target_path in required_by_key.items():
+            target_refs = [
+                ref
+                for ref in current_refs
+                if self._taskboard_task_workspace_path_key(ref.get("path"))
+                == target_path_key
+            ]
+            source_ref = self._taskboard_select_required_final_deliverable_source_ref(
+                target_path_key=target_path_key,
+                current_refs=current_refs,
+                target_refs=target_refs,
+                missing_required=target_path_key in missing_required_keys,
+                allow_unique_fallback=allow_unique_fallback,
             )
-            return self._prioritize_taskboard_final_refs(current_refs)
+            if source_ref is None:
+                if target_refs and target_path_key not in missing_required_keys:
+                    continue
+                trusted_ref_count = len(
+                    [
+                        ref
+                        for ref in current_refs
+                        if self._is_trusted_task_workspace_artifact_ref(ref)
+                        and self._taskboard_task_workspace_path_key(ref.get("path"))
+                        and self._taskboard_task_workspace_path_key(ref.get("path"))
+                        != target_path_key
+                    ]
+                )
+                self.diagnostics.setdefault(
+                    "taskboard_final_deliverable_promotion", []
+                ).append(
+                    DataFormatter.sanitize(
+                        {
+                            "status": "skipped",
+                            "reason": "required_deliverable_source_ref_unavailable",
+                            "required_deliverables": [target_path],
+                            "trusted_ref_count": trusted_ref_count,
+                        }
+                    )
+                )
+                continue
 
-        target_path_key, target_path = next(iter(required_by_key.items()))
-        target_refs = [
-            ref
-            for ref in current_refs
-            if self._taskboard_task_workspace_path_key(ref.get("path")) == target_path_key
-        ]
-        source_ref = self._taskboard_select_required_final_deliverable_source_ref(
-            target_path_key=target_path_key,
-            current_refs=current_refs,
-            target_refs=target_refs,
-            missing_required=target_path_key in missing_required_keys,
+            source_path = str(source_ref.get("path") or "").strip()
+            if self._taskboard_task_workspace_path_key(
+                source_path
+            ) == self._taskboard_task_workspace_path_key(target_path):
+                continue
+            try:
+                staged_ref, promotion = await self._taskboard_stage_final_deliverable_ref(
+                    source_ref,
+                    target_path=target_path,
+                )
+            except Exception as error:
+                self.diagnostics.setdefault(
+                    "taskboard_final_deliverable_promotion", []
+                ).append(
+                    DataFormatter.sanitize(
+                        {
+                            "status": "failed",
+                            "source_path": source_path,
+                            "target_path": target_path,
+                            "error": {
+                                "type": error.__class__.__name__,
+                                "message": _compact_agent_task_error_message(
+                                    error,
+                                    fallback=error.__class__.__name__,
+                                ),
+                            },
+                        }
+                    )
+                )
+                continue
+            staged_refs.append(staged_ref)
+            promotions.append(promotion)
+        return (
+            self._prioritize_taskboard_final_refs(
+                self._dedupe_ref_records([*staged_refs, *current_refs])
+            ),
+            promotions,
         )
-        if source_ref is None:
-            if target_refs and target_path_key not in missing_required_keys:
-                return self._prioritize_taskboard_final_refs(current_refs)
-            trusted_ref_count = len(
-                [
-                    ref
-                    for ref in current_refs
-                    if self._is_trusted_task_workspace_artifact_ref(ref)
-                    and self._taskboard_task_workspace_path_key(ref.get("path"))
-                    and self._taskboard_task_workspace_path_key(ref.get("path")) != target_path_key
-                ]
-            )
-            self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
-                DataFormatter.sanitize(
-                    {
-                        "status": "skipped",
-                        "reason": "required_deliverable_source_ref_unavailable",
-                        "required_deliverables": list(required_by_key.values()),
-                        "trusted_ref_count": trusted_ref_count,
-                    }
-                )
-            )
-            return self._prioritize_taskboard_final_refs(current_refs)
 
+    async def _taskboard_stage_final_deliverable_ref(
+        self,
+        source_ref: Mapping[str, Any],
+        *,
+        target_path: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         source_path = str(source_ref.get("path") or "").strip()
-        if self._taskboard_task_workspace_path_key(source_path) == self._taskboard_task_workspace_path_key(target_path):
-            return self._prioritize_taskboard_final_refs(current_refs)
-
-        try:
-            source_target = self.task_workspace.resolve_file_path(source_path)
-            max_bytes = max(int(source_target.stat().st_size) + 1, _WORKSPACE_ARTIFACT_PREVIEW_BYTES)
-            source_read = await self.task_workspace.read_file(source_path, max_bytes=max_bytes)
-            content = source_read.get("content")
-            if not isinstance(content, str) or bool(source_read.get("truncated")):
-                raise ValueError("TaskWorkspace artifact promotion requires complete text readback.")
-            write_result = await self.task_workspace.write_file(target_path, content, append=False)
-            target_read = await self.task_workspace.read_file(target_path, max_bytes=_WORKSPACE_ARTIFACT_PREVIEW_BYTES)
-        except Exception as error:
-            self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
-                DataFormatter.sanitize(
-                    {
-                        "status": "failed",
-                        "source_path": source_path,
-                        "target_path": target_path,
-                        "error": {
-                            "type": error.__class__.__name__,
-                            "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                        },
-                    }
-                )
+        source_identity = await self.task_workspace._promote_file_identity(
+            source_path,
+            role="task_workspace_artifact",
+        )
+        expected_source_sha256 = str(source_ref.get("sha256") or "").strip()
+        source_sha256 = str(source_identity.get("sha256") or "").strip()
+        if expected_source_sha256 and expected_source_sha256 != source_sha256:
+            raise ValueError(
+                "TaskWorkspace staged candidate changed since its source ref was collected."
             )
-            return self._prioritize_taskboard_final_refs(current_refs)
+        source_bytes = int(
+            source_identity.get("bytes") or source_identity.get("size") or 0
+        )
+        source_read = await self.task_workspace.read_file(
+            source_path,
+            max_bytes=max(source_bytes + 1, _WORKSPACE_ARTIFACT_PREVIEW_BYTES),
+        )
+        if bool(source_read.get("truncated")):
+            raise ValueError(
+                "TaskWorkspace staged candidate requires complete verifier readback."
+            )
+        if str(source_read.get("sha256") or "") != source_sha256:
+            raise ValueError(
+                "TaskWorkspace staged candidate changed during complete readback."
+            )
+        source_content = str(source_read.get("content") or "")
+        preview_truncated = len(source_content) > _WORKSPACE_ARTIFACT_PREVIEW_BYTES
 
-        trusted_refs = [
-            dict(item)
-            for item in write_result.get("file_refs", [])
-            if isinstance(item, Mapping)
-        ]
-        promoted_ref = {
-            **(trusted_refs[0] if trusted_refs else {}),
-            "path": str(target_read.get("path") or write_result.get("path") or target_path),
-            "bytes": int(target_read.get("bytes") or write_result.get("bytes") or 0),
-            "sha256": str(target_read.get("sha256") or write_result.get("sha256") or ""),
-            "media_type": target_read.get("media_type") or write_result.get("media_type") or source_ref.get("media_type"),
-            "content_kind": str(target_read.get("content_kind") or source_ref.get("content_kind") or "text"),
-            "encoding": target_read.get("encoding") or source_ref.get("encoding"),
-            "handler_id": target_read.get("handler_id") or source_ref.get("handler_id"),
+        staged_ref = {
+            **dict(DataFormatter.sanitize(source_ref)),
+            **dict(DataFormatter.sanitize(source_identity)),
+            "path": str(source_read.get("path") or source_path),
+            "bytes": int(source_read.get("bytes") or source_bytes),
+            "size": int(source_read.get("bytes") or source_bytes),
+            "sha256": source_sha256,
+            "media_type": source_read.get("media_type")
+            or source_ref.get("media_type"),
+            "content_kind": str(
+                source_read.get("content_kind")
+                or source_ref.get("content_kind")
+                or "text"
+            ),
+            "encoding": source_read.get("encoding") or source_ref.get("encoding"),
+            "handler_id": source_read.get("handler_id")
+            or source_ref.get("handler_id"),
             "role": "task_workspace_artifact",
-            "source": "agent_task.task_workspace_artifact.taskboard_final_deliverable_promotion",
-            "source_path": source_path,
-            "read_bytes": int(target_read.get("read_bytes") or 0),
-            "truncated": bool(target_read.get("truncated")),
-            "preview": str(target_read.get("content") or ""),
+            "source": "agent_task.task_workspace_artifact.taskboard_final_deliverable_staging",
+            "staged_target_path": target_path,
+            "promotion_state": "staged",
+            "read_bytes": int(source_read.get("read_bytes") or 0),
+            "truncated": preview_truncated,
+            "preview": self._truncate_prompt_text(
+                source_content,
+                _WORKSPACE_ARTIFACT_PREVIEW_BYTES,
+            ),
+            "preview_truncated": preview_truncated,
+            "complete_readback_verified": True,
         }
-        self.diagnostics.setdefault("taskboard_final_deliverable_promotion", []).append(
+        promotion = {
+            "source_path": self._task_workspace_artifact_display_path(
+                staged_ref["path"]
+            ),
+            "target_path": target_path,
+            "source_sha256": source_sha256,
+            "source_content_version_id": str(
+                staged_ref.get("content_version_id") or ""
+            ),
+        }
+        self.diagnostics.setdefault(
+            "taskboard_final_deliverable_promotion", []
+        ).append(
             DataFormatter.sanitize(
                 {
-                    "status": "delivered",
-                    "source_path": source_path,
-                    "target_path": promoted_ref["path"],
-                    "bytes": promoted_ref["bytes"],
-                    "sha256": promoted_ref["sha256"],
+                    "status": "staged",
+                    "source_path": staged_ref["path"],
+                    "target_path": target_path,
+                    "bytes": staged_ref["bytes"],
+                    "sha256": staged_ref["sha256"],
+                    "source_content_version_id": staged_ref.get(
+                        "content_version_id"
+                    ),
                 }
             )
         )
-        return self._prioritize_taskboard_final_refs([promoted_ref, *current_refs])
+        return staged_ref, promotion
+
+    async def _taskboard_promote_staged_deliverables(
+        self,
+        promotions: Sequence[Mapping[str, Any]],
+        terminal_refs: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Promote verifier-accepted staged bytes and completely read back targets."""
+
+        if not promotions:
+            return self._prioritize_taskboard_final_refs(terminal_refs)
+        staged_refs = [
+            dict(DataFormatter.sanitize(ref))
+            for ref in terminal_refs
+            if isinstance(ref, Mapping)
+        ]
+        promoted_refs: list[dict[str, Any]] = []
+        consumed_staged_keys: set[tuple[str, str, str]] = set()
+        promoted_target_keys: set[str] = set()
+        for raw_promotion in promotions:
+            source_path = self._task_workspace_artifact_display_path(
+                raw_promotion.get("source_path")
+            )
+            target_path = self._task_workspace_artifact_display_path(
+                raw_promotion.get("target_path")
+            )
+            source_sha256 = str(
+                raw_promotion.get("source_sha256") or ""
+            ).strip()
+            source_content_version_id = str(
+                raw_promotion.get("source_content_version_id") or ""
+            ).strip()
+            if (
+                not source_path
+                or not target_path
+                or not source_sha256
+                or not source_content_version_id
+            ):
+                raise ValueError(
+                    "TaskBoard staged promotion requires source/target paths, digest, and content version."
+                )
+            matching_refs = [
+                ref
+                for ref in staged_refs
+                if self._task_workspace_artifact_display_path(ref.get("path"))
+                == source_path
+                and self._task_workspace_artifact_display_path(
+                    ref.get("staged_target_path")
+                )
+                == target_path
+                and str(ref.get("sha256") or "") == source_sha256
+                and str(ref.get("content_version_id") or "")
+                == source_content_version_id
+            ]
+            if len(matching_refs) != 1:
+                raise ValueError(
+                    "TaskBoard staged promotion does not resolve to one verifier-visible candidate ref."
+                )
+
+            promoted_identity = await self.task_workspace.atomic_promote_file(
+                source_path,
+                target_path,
+                expected_sha256=source_sha256,
+            )
+            target_bytes = int(
+                promoted_identity.get("bytes")
+                or promoted_identity.get("size")
+                or 0
+            )
+            readback = await self.task_workspace.read_file(
+                target_path,
+                max_bytes=max(1, target_bytes + 1),
+            )
+            if bool(readback.get("truncated")):
+                raise ValueError(
+                    "Promoted TaskWorkspace deliverable did not support complete readback."
+                )
+            if (
+                str(readback.get("sha256") or "") != source_sha256
+                or int(readback.get("bytes") or 0) != target_bytes
+            ):
+                raise ValueError(
+                    "Promoted TaskWorkspace deliverable differs from verifier-accepted staged bytes."
+                )
+            readback_content = str(readback.get("content") or "")
+            preview_truncated = (
+                len(readback_content) > _WORKSPACE_ARTIFACT_PREVIEW_BYTES
+            )
+            promoted_ref = {
+                **dict(DataFormatter.sanitize(promoted_identity)),
+                "path": str(readback.get("path") or target_path),
+                "bytes": int(readback.get("bytes") or 0),
+                "size": int(readback.get("bytes") or 0),
+                "sha256": str(readback.get("sha256") or ""),
+                "media_type": readback.get("media_type"),
+                "content_kind": str(readback.get("content_kind") or "text"),
+                "encoding": readback.get("encoding"),
+                "handler_id": readback.get("handler_id"),
+                "role": "task_workspace_artifact",
+                "source": "agent_task.task_workspace_artifact.taskboard_final_deliverable_promotion",
+                "source_path": source_path,
+                "source_content_version_id": source_content_version_id,
+                "promotion_state": "accepted",
+                "read_bytes": int(readback.get("read_bytes") or 0),
+                "truncated": preview_truncated,
+                "preview": self._truncate_prompt_text(
+                    readback_content,
+                    _WORKSPACE_ARTIFACT_PREVIEW_BYTES,
+                ),
+                "preview_truncated": preview_truncated,
+                "complete_readback_verified": True,
+            }
+            promoted_refs.append(DataFormatter.sanitize(promoted_ref))
+            consumed_staged_keys.add(
+                (source_path, target_path, source_sha256)
+            )
+            promoted_target_keys.add(
+                self._taskboard_task_workspace_path_key(target_path)
+            )
+            self.diagnostics.setdefault(
+                "taskboard_final_deliverable_promotion", []
+            ).append(
+                DataFormatter.sanitize(
+                    {
+                        "status": "promoted",
+                        "source_path": source_path,
+                        "source_content_version_id": source_content_version_id,
+                        "target_path": promoted_ref["path"],
+                        "target_content_version_id": promoted_ref.get(
+                            "content_version_id"
+                        ),
+                        "bytes": promoted_ref["bytes"],
+                        "sha256": promoted_ref["sha256"],
+                        "complete_readback": True,
+                    }
+                )
+            )
+
+        retained_refs: list[dict[str, Any]] = []
+        for ref in staged_refs:
+            ref_path = self._task_workspace_artifact_display_path(ref.get("path"))
+            staged_target = self._task_workspace_artifact_display_path(
+                ref.get("staged_target_path")
+            )
+            staged_key = (ref_path, staged_target, str(ref.get("sha256") or ""))
+            path_key = self._taskboard_task_workspace_path_key(ref_path)
+            if staged_key in consumed_staged_keys or path_key in promoted_target_keys:
+                continue
+            retained_refs.append(ref)
+        return self._prioritize_taskboard_final_refs(
+            self._dedupe_ref_records([*promoted_refs, *retained_refs])
+        )
 
     async def _taskboard_refresh_current_required_final_refs(
         self,
@@ -890,6 +1125,18 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             prepared.get("candidate_final_result")
             or self._taskboard_candidate_final_result(revision)
         )
+        staged_promotions = (
+            [
+                dict(DataFormatter.sanitize(item))
+                for item in prepared["staged_promotions"]
+                if isinstance(item, Mapping)
+            ]
+            if isinstance(prepared.get("staged_promotions"), Sequence)
+            and not isinstance(
+                prepared.get("staged_promotions"), str | bytes | bytearray
+            )
+            else []
+        )
         if isinstance(prepared.get("final_refs"), Sequence) and not isinstance(
             prepared.get("final_refs"),
             str | bytes | bytearray,
@@ -899,8 +1146,8 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             final_refs = self._prioritize_taskboard_final_refs(
                 self._taskboard_final_refs_from_evidence_view(evidence_view)
             )
-            final_refs = await self._taskboard_materialize_required_final_deliverable_refs(
-                final_refs
+            final_refs, staged_promotions = (
+                await self._taskboard_stage_required_final_deliverable_refs(final_refs)
             )
             final_refs = await self._taskboard_refresh_current_required_final_refs(final_refs)
             final_refs = self._taskboard_terminal_candidate_refs(revision, final_refs)
@@ -1065,6 +1312,17 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         final_verification: dict[str, Any] | None = None
         terminal_transition: dict[str, Any] | None = None
         missing_deliverables = await self._missing_taskboard_terminal_task_workspace_deliverables(revision)
+        staged_target_keys = {
+            self._taskboard_task_workspace_path_key(item.get("target_path"))
+            for item in staged_promotions
+            if self._taskboard_task_workspace_path_key(item.get("target_path"))
+        }
+        missing_deliverables = [
+            path
+            for path in missing_deliverables
+            if self._taskboard_task_workspace_path_key(path)
+            not in staged_target_keys
+        ]
         _terminal_deliverables, invalid_internal_terminal_paths = (
             self._taskboard_terminal_task_workspace_deliverables(revision)
         )
@@ -1091,6 +1349,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "missing_criteria": final.get("missing_criteria", []),
                 "file_refs": final_refs,
                 "artifact_refs": final_refs,
+                "staged_promotions": DataFormatter.sanitize(staged_promotions),
                 "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_stream(evidence_view),
                 "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
                 "evidence_ledger": evidence_ledger,
@@ -1134,6 +1393,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     "taskboard_explicit_state_facts": explicit_state_facts,
                     "taskboard_blocking_state_facts": blocking_state_facts,
                     "taskboard_evidence_logs": DataFormatter.sanitize(taskboard_evidence_logs),
+                    "taskboard_staged_promotions": DataFormatter.sanitize(
+                        staged_promotions
+                    ),
                 },
             }
             # The acceptance index is a projection/cache for dirty-item
@@ -1251,6 +1513,138 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 verifier_reason = str(final_verification.get("reason") or "").strip()
                 final["reason"] = verifier_reason or "TaskBoard final verification accepted."
                 final["missing_criteria"] = []
+                if staged_promotions:
+                    try:
+                        promoted_terminal_refs = (
+                            await self._taskboard_promote_staged_deliverables(
+                                staged_promotions,
+                                trusted_terminal_refs,
+                            )
+                        )
+                        promoted_final_refs = self._trusted_terminal_file_refs(
+                            promoted_terminal_refs
+                        )
+                        promoted_inventory = await self._replace_terminal_carriers(
+                            execution_result={
+                                "file_refs": promoted_final_refs,
+                                "artifact_refs": promoted_final_refs,
+                                "final_result": final.get("final_result", ""),
+                            },
+                            execution_evidence_summary={},
+                            source_work_result_id=(
+                                f"taskboard-terminal-promotion:{revision.revision_id}"
+                            ),
+                        )
+                        promoted_carrier_ids = [
+                            carrier.carrier_id
+                            for carrier in promoted_inventory.carriers
+                        ]
+                        decided_inventory = (
+                            self._lifecycle_state.record_terminal_transition(
+                                "accepted",
+                                expected_version=self._lifecycle_state.state_version,
+                                accepted_carrier_ids=promoted_carrier_ids,
+                            )
+                        )
+                    except Exception as error:
+                        message = _compact_agent_task_error_message(
+                            error,
+                            fallback=error.__class__.__name__,
+                        )
+                        accepted = False
+                        final["accepted"] = False
+                        final["reason"] = (
+                            "TaskBoard terminal artifact promotion or complete readback failed: "
+                            + message
+                        )
+                        final["missing_criteria"] = [
+                            "Promote the verifier-accepted staged bytes to every required deliverable and read them back completely."
+                        ]
+                        final_verification = {
+                            **dict(final_verification),
+                            "is_complete": False,
+                            "requires_block": True,
+                            "reason": final["reason"],
+                            "missing_criteria": list(final["missing_criteria"]),
+                            "guard_reasons": self._merge_string_lists(
+                                final_verification.get("guard_reasons"),
+                                ["taskboard_terminal_artifact_promotion_failed"],
+                            ),
+                            "error": {
+                                "type": error.__class__.__name__,
+                                "message": message,
+                            },
+                        }
+                        failed_inventory = (
+                            self._lifecycle_state.record_terminal_transition(
+                                "blocked",
+                                expected_version=self._lifecycle_state.state_version,
+                                issue={
+                                    "gate_kind": "artifact_promotion",
+                                    "issue_code": "taskboard_terminal_artifact_promotion_failed",
+                                    "contract_subject": (
+                                        f"taskboard:{revision.revision_id}:final"
+                                    ),
+                                },
+                            )
+                        )
+                        terminal_transition = {
+                            **dict(terminal_transition),
+                            "transition": "blocked",
+                            "verification": DataFormatter.sanitize(
+                                final_verification
+                            ),
+                            "accepted_carrier_ids": [],
+                            "state_version": failed_inventory.state_version,
+                            "carrier_inventory_version": (
+                                failed_inventory.inventory_version
+                            ),
+                        }
+                    else:
+                        trusted_terminal_refs = promoted_terminal_refs
+                        trusted_final_refs = promoted_final_refs
+                        prior_terminal_result = terminal_transition.get(
+                            "terminal_result"
+                        )
+                        terminal_result = (
+                            dict(prior_terminal_result)
+                            if isinstance(prior_terminal_result, Mapping)
+                            else {}
+                        )
+                        terminal_result.update(
+                            {
+                                "carrier_ids": promoted_carrier_ids,
+                                "required_carrier_ids": [
+                                    carrier.carrier_id
+                                    for carrier in decided_inventory.carriers
+                                    if carrier.required
+                                ],
+                                "task_workspace_paths": [
+                                    carrier.path
+                                    for carrier in decided_inventory.carriers
+                                    if carrier.kind
+                                    == "task_workspace_artifact"
+                                ],
+                                "terminal_refs": DataFormatter.sanitize(
+                                    promoted_terminal_refs
+                                ),
+                                "final_file_refs": DataFormatter.sanitize(
+                                    promoted_final_refs
+                                ),
+                                "final_result": self._compact_terminal_final_result(
+                                    final.get("final_result", ""),
+                                    trusted_file_refs=promoted_final_refs,
+                                    preserve_value=preserve_explicit_final_result,
+                                ),
+                            }
+                        )
+                        terminal_transition = {
+                            **dict(terminal_transition),
+                            "accepted_carrier_ids": promoted_carrier_ids,
+                            "terminal_result": terminal_result,
+                            "state_version": decided_inventory.state_version,
+                            "carrier_inventory_version": decided_inventory.inventory_version,
+                        }
             elif final_verification is not None:
                 if (
                     terminal_transition is not None
@@ -1569,6 +1963,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         has_preview = bool(str(materialized.get("preview") or ""))
         needs_readback = (
             bool(materialized.get("truncated"))
+            or bool(materialized.get("preview_truncated"))
             or not self._task_workspace_artifact_ref_has_trusted_readback(materialized)
             or not has_preview
         )

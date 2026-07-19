@@ -64,6 +64,13 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
                 for ref in cumulative_file_refs
                 if str(ref.get("content_kind") or "text") in {"", "text"}
             ]
+        staged_refs_by_target: dict[str, list[dict[str, Any]]] = {}
+        for ref in text_file_refs:
+            staged_target = self._task_workspace_artifact_display_path(
+                ref.get("staged_target_path")
+            )
+            if staged_target:
+                staged_refs_by_target.setdefault(staged_target, []).append(ref)
         required_deliverables = self._required_task_workspace_deliverables()
         candidate_paths: list[str] = []
         for required_path in required_deliverables:
@@ -85,7 +92,22 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
             for path in required_deliverables
             if self._task_workspace_artifact_display_path(path)
         }
-        for path in candidate_paths:
+        for delivery_path in candidate_paths:
+            staged_refs = staged_refs_by_target.get(delivery_path, [])
+            if len(staged_refs) > 1:
+                diagnostics.append(
+                    {
+                        "code": "agent_task.terminal_carrier.staged_target_ambiguous",
+                        "path": delivery_path,
+                        "message": "Multiple staged candidates target the same required deliverable.",
+                    }
+                )
+                continue
+            path = (
+                self._task_workspace_artifact_display_path(staged_refs[0].get("path"))
+                if staged_refs
+                else delivery_path
+            )
             try:
                 promoted = await self.task_workspace._promote_file_identity(
                     path,
@@ -105,7 +127,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
                 raw_carriers.append(
                     {
                         "kind": "task_workspace_artifact",
-                        "required": path in required_paths or not required_paths,
+                        "required": delivery_path in required_paths or not required_paths,
                         "text": text,
                         "path": path,
                         "content_version_id": content_version_id,
@@ -118,7 +140,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
                 diagnostics.append(
                     {
                         "code": "agent_task.terminal_carrier.readback_failed",
-                        "path": path,
+                        "path": delivery_path,
                         "message": _compact_agent_task_error_message(
                             error,
                             fallback=error.__class__.__name__,
