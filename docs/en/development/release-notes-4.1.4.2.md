@@ -12,9 +12,11 @@ deprecated through aliases.
 
 ## New owner boundaries
 
-- `TaskContext` owns the task information aggregate and source bindings.
-- `ContextReader` owns consumer/phase-bound retrieval and progressive
-  disclosure into `ContextPackage`.
+- `TaskContext` owns the task information aggregate, source bindings, and the
+  lifecycle for its read handles.
+- `ContextReader` is a public consumer/phase-bound handle created or restored
+  only by TaskContext. It performs progressive retrieval into immutable
+  `ContextPackage` values; it is not a second aggregate owner.
 - `TaskWorkspace` owns task files, containment, mutation policy, readback,
   digests, and file refs.
 - `RecordStore` owns records, retrieval indexes, links, checkpoints,
@@ -70,6 +72,9 @@ When recovery is enabled, AgentTask also snapshots TaskContext entries,
 reconstructible built-in sources, ContextReader disclosure state, exact
 ContextPackages, and ContextConsumptions. Skill Context resumes by immutable
 revision reference; unsupported custom ContextSources fail resume explicitly.
+Successful repeated reads of one intent advance private per-source candidate
+windows. Packages expose bounded `source_coverage` and continuation
+availability, while opaque cursors never cross the reader/source boundary.
 
 Required TaskWorkspace delivery paths fail closed when the current physical
 file cannot be read back. TaskWorkspace readback cannot satisfy a required

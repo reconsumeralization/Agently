@@ -34,11 +34,20 @@ source preparation or TaskWorkspace policy. See
 
 ## ContextReader
 
-A consumer-, model-, and phase-bound reader over one `TaskContext`. It performs
-candidate collection, structural filtering, optional structured semantic
-selection, progressive disclosure, budgeting, deduplication, and immutable
-`ContextPackage` construction. It does not mutate sources, install Skills,
+A public consumer-, model-, and phase-bound read handle created and restored by
+one `TaskContext`. It performs candidate-window collection, structural
+filtering, optional structured semantic selection, progressive disclosure,
+budgeting, deduplication, and immutable `ContextPackage` construction. Its
+continuation ledger and source cursors are private; it has no lifecycle
+independent from TaskContext. It does not mutate sources, install Skills,
 execute Actions, or decide task completion.
+
+## ContextPackage
+
+The immutable delivery value produced by a `ContextReader` for one exact
+intent, consumer, phase, and TaskContext snapshot. It contains bounded blocks,
+diagnostics, disclosure facts, and per-binding source coverage, but never a
+source cursor. It is not canonical task state and does not own sources.
 
 ## ensure (third tuple slot)
 
@@ -106,8 +115,10 @@ Execution-local, serializable, snapshot-safe data. The recommended state surface
 The revisioned aggregate of information available to one task. It binds direct
 entries and source adapters such as SkillLibrary, TaskWorkspace, RecordStore,
 memory, evidence, and authorized external sources. `ContextReader` produces
-consumer-specific ContextPackages from it. TaskContext does not own source
-storage, file mutation, execution, or task continuation.
+consumer-specific ContextPackages from it. TaskContext is the sole public
+lifecycle owner for those read handles and packages; source-specific candidate
+windows remain private protocol values. TaskContext does not own source storage,
+file mutation, execution, or task continuation.
 
 ## TaskWorkspace
 

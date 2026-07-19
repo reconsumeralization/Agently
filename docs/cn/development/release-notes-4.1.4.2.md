@@ -11,8 +11,9 @@ ownership 被直接替换，不通过 alias 走废弃兼容。
 
 ## 新所有者边界
 
-- `TaskContext` 负责任务信息 aggregate 与 source bindings。
-- `ContextReader` 负责绑定 consumer/phase 的检索和向 `ContextPackage` 的渐进式披露。
+- `TaskContext` 负责任务信息 aggregate、source bindings 与读取句柄生命周期。
+- `ContextReader` 是只能由 TaskContext 创建或恢复、绑定 consumer/phase 的公开句柄；
+  它负责渐进检索并生成不可变 `ContextPackage`，不是第二个 aggregate owner。
 - `TaskWorkspace` 负责任务文件、路径约束、mutation policy、readback、digest 与 file refs。
 - `RecordStore` 负责 records、检索索引、links、checkpoints、TriggerFlow
   snapshots/events 与 SessionMemory 持久化。本地 store 位于
@@ -61,6 +62,9 @@ readback 仍属于 TaskWorkspace artifact；recovery refs 属于 RecordStore。
 ContextReader 披露状态、精确 ContextPackages 与 ContextConsumptions。Skill
 Context 按不可变 revision reference 恢复；不受支持的自定义 ContextSource 会明确
 终止 resume。
+同一 intent 的成功重复读取会推进私有的逐 source candidate window。package 只暴露
+有界 `source_coverage` 与 continuation availability，opaque cursor 不越过
+reader/source 边界。
 
 required TaskWorkspace delivery path 无法读取当前物理文件时 fail closed。
 TaskWorkspace readback 不能满足 required Action 或 Skill binding。

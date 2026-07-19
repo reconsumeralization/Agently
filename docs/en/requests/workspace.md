@@ -126,6 +126,14 @@ package = await reader.async_read(
 )
 ```
 
+`TaskContext` is the only task-information aggregate and the lifecycle owner.
+It creates readers with `task_context.reader(...)` and restores their exported
+state with `task_context.restore_reader(...)`; constructing or restoring a
+`ContextReader` independently is not supported. The reader is a public,
+consumer/phase-bound handle, comparable to an execution handle owned by its
+aggregate. `ContextPackage` is the immutable value returned across a request,
+AgentTask, Blocks, or persistence boundary; it is not another context owner.
+
 Each reader pins one TaskContext/source revision snapshot. If that snapshot
 is already stale before a read, refresh it explicitly or create a new reader.
 If candidate listing itself advances a source revision while the TaskContext
@@ -136,6 +144,14 @@ cannot be silently dropped. Optional prose relevance uses an Agently
 `ModelRequest` semantic selector when more than one candidate needs judgment;
 selection keys are host-issued and validated before canonical records are
 reconstructed.
+
+Each source lists a bounded `ContextSourceCandidateWindow`. For the same read
+intent, a successful read advances that source's private continuation window;
+selector failure, read failure, or a stale cursor does not advance it. The
+returned package exposes per-binding `source_coverage` with the source scope,
+returned candidate count, exhaustiveness, and whether continuation remains.
+Opaque cursors stay private to the reader/source protocol and never enter model
+input, Blocks projections, or `ContextPackage`.
 
 Required content remains fail-closed when it cannot fit. A caller that has
 explicitly accepted a lossy projection may request

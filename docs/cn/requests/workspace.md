@@ -123,12 +123,26 @@ package = await reader.async_read(
 )
 ```
 
+`TaskContext` 是唯一的任务信息 aggregate 与生命周期 owner。它通过
+`task_context.reader(...)` 创建 reader，并通过
+`task_context.restore_reader(...)` 恢复已导出的 reader state；不支持脱离
+TaskContext 独立构造或恢复 `ContextReader`。reader 是公开的、绑定
+consumer/phase 的句柄，类似由 aggregate 持有的 execution handle；
+`ContextPackage` 是跨 ModelRequest、AgentTask、Blocks 或持久化边界传递的不可变值，
+不是另一个 context owner。
+
 每个 reader 固定一份 TaskContext/source revision 快照；读取开始前已经过期时应显式
 refresh 或创建新 reader。如果列举候选本身推进了 source revision、但 TaskContext 结构
 未变化（例如 source 首次建立惰性读视图），ContextReader 会重新固定新 revision 并重取
 一次；持续或并发变化仍然 fail closed。required 和显式请求的信息块不能被静默丢弃。多个可选 prose
 candidate 需要相关性判断时，使用 Agently `ModelRequest` semantic selector；
 模型只返回宿主发放的 selection key，宿主校验后再重建 canonical record。
+
+每个 source 通过有界 `ContextSourceCandidateWindow` 返回候选。同一个 read intent
+读取成功后，该 source 的私有 continuation window 才会推进；selector 失败、读取失败或
+cursor 过期都不推进。返回的 package 用逐 binding 的 `source_coverage` 暴露 source
+scope、返回候选数、是否 exhaustive、是否仍可 continuation。opaque cursor 只存在于
+reader/source 私有协议中，不进入模型输入、Blocks projection 或 `ContextPackage`。
 
 required 内容超出预算时默认仍然 fail closed。只有 Skill 或调用方显式接受有损投影
 时，才可设置 `metadata={"required_overflow": "lossy_digest"}`。此时 Skill source
