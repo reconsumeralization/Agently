@@ -51,6 +51,11 @@ from .context import (
     TaskContextSnapshot,
 )
 from .task_workspace import (
+    TaskWorkspaceAccessGrant,
+    TaskWorkspaceAccessMode,
+    TaskWorkspaceAccessRequirement,
+    TaskWorkspaceAccessRoot,
+    TaskWorkspaceAccessRootRole,
     TaskWorkspaceDiagnostic,
     TaskWorkspaceExportResult,
     TaskWorkspaceFileInfo,
@@ -58,13 +63,14 @@ from .task_workspace import (
     TaskWorkspaceFileRead,
     TaskWorkspaceFileRef,
     TaskWorkspaceFileWrite,
+    TaskWorkspaceExecutionManifest,
+    TaskWorkspaceExecutionManifestFile,
     TaskWorkspaceReadResult,
     TaskWorkspaceRetentionDiagnostic,
     TaskWorkspaceRetentionResult,
     TaskWorkspaceTerminalStatus,
     TaskWorkspaceWriteResult,
 )
-
 from .serializable import SerializableData, SerializableMapping, SerializableValue
 from .prompt import (
     ChatMessage,
@@ -187,9 +193,26 @@ from .execution_resource import (
     ExecutionResourceHandle,
     ExecutionResourceKind,
     ExecutionResourcePolicy,
+    ExecutionResourceProviderCandidate,
+    ExecutionResourceProviderProbe,
     ExecutionResourceRequirement,
     ExecutionResourceScope,
     ExecutionResourceStatus,
+)
+
+from .code_execution import (
+    CodeExecutionBundle,
+    CodeExecutionFile,
+    CodeExecutionFileRole,
+    CodeExecutionIsolationCapability,
+    CodeExecutionProviderCapability,
+    CodeExecutionRequest,
+    CodeExecutionResult,
+    CodeExecutionStep,
+    CodeExecutionStepRole,
+    CodeExecutionToolchainRequirement,
+    required_code_execution_isolation,
+    resolve_code_execution_workspace_uri,
 )
 
 from .execution_plan import (
@@ -258,6 +281,10 @@ from .skill import (
     SkillMode,
     SkillRuntimeStreamHandler,
     SkillRuntimeStreamItem,
+    SkillSourceRequest,
+    SkillSourceSnapshot,
+    SkillScriptAuthorization,
+    redact_skill_source,
 )
 
 from .record_store import (

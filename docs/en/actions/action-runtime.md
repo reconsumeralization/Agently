@@ -107,7 +107,7 @@ print(calculate("3333+6666=?"))
 | `agent.enable_python(...)` | mount a Docker-backed `run_python` action for deterministic code execution |
 | `agent.enable_shell(...)` | mount a Docker-backed `run_bash` action with workspace roots, command allowlists, timeouts, and bounded output previews |
 | `agent.enable_nodejs(...)` | mount a Docker-backed `run_nodejs` action |
-| `agent.enable_code_runtime(...)` | mount a Docker-backed common-language code runtime action for Python, JavaScript/Node.js, TypeScript, C, C++, Go, Rust, Java, C#/.NET, PHP, Ruby, Perl, R, Lua, or Bash |
+| `agent.enable_code_runtime(...)` | mount a Workspace-backed, provider-neutral code execution Action for Python 3.10+, Node.js 18+, Go 1.25+, or C++20 |
 | `agent.enable_sqlite(...)` | mount a managed `query_sqlite` action |
 | `agent.enable_task_workspace_file_actions(...)` | expose the current TaskWorkspace file area as handler-backed list/search/read/write actions, plus `export_file` when `export=True` and `write=True` |
 | `agent.enable_coding_agent_actions(...)` | expose coding-agent TaskWorkspace actions for file readback, glob/grep search, targeted edit, unified-diff patch, and guarded full-file writes |
@@ -136,13 +136,49 @@ building a custom Action backend.
 
 `agent.enable_python(...)`, `agent.enable_shell(...)`, and
 `agent.enable_nodejs(...)` default to `sandbox="auto"` and
-`provisioning_profile="strict"`, which uses a Docker-backed ExecutionResource
-profile after checking both the local Docker CLI and daemon. Missing images use
+`provisioning_profile="strict"`. Python and Node.js are language facades over
+the Workspace-bound `code_execution` contract; shell remains a broader command
+Action. Their default provider path uses Docker after checking both the local
+Docker CLI and daemon. Missing images use
 `image_pull_policy="never"` by default and fail closed with structured
 diagnostics such as `execution_resource.docker_image_missing`; they do not
 silently fall back to host execution. Use `sandbox="trusted_local"` only for
-trusted compatibility paths that intentionally use the legacy in-process Python
-sandbox, local shell runner, or local Node.js runner.
+explicitly trusted paths that intentionally accept unisolated host Python,
+shell, or Node.js execution.
+
+`agent.enable_code_runtime(...)` exposes the same provider-neutral path for all
+supported languages. Every
+call binds a TaskWorkspace grant, selects an eligible `code_execution`
+provider, materializes an immutable source bundle, executes an adapter-owned
+argv plan, and reads declared outputs back through TaskWorkspace. Configure an
+ordered provider list globally or per Action:
+
+```python
+agent.settings.set(
+    "code_execution.providers",
+    [
+        {"provider_id": "remote-or-platform-provider", "config": {}},
+        "docker",
+    ],
+)
+agent.enable_code_runtime(language="python")
+```
+
+The default isolation requirement fails closed. The unsafe host-process runner
+is never a silent fallback. To use it, opt into both the fallback and a weaker
+isolation requirement explicitly:
+
+```python
+agent.enable_code_runtime(
+    language="python",
+    unsafe_fallback=True,
+    isolation="preferred",
+)
+```
+
+See [Execution Resource](execution-environment.md) for the runtime contract and
+[Code Execution Provider Migration](../development/code-execution-provider-migration.md)
+for contributor guidance.
 
 For Coding Agent, Agently Skills, examples, and framework tests, use
 `provisioning_profile="developer"` or `"ci"`. These profiles default to
@@ -356,6 +392,19 @@ artifact scope; TaskBoard host code binds the current task lineage so sibling
 cards in one task can consume the same retained artifact. Missing scope and
 cross-task or cross-execution access fail closed. Canonical artifact ids and
 Action call ids are not alternate readback selectors.
+
+When `max_bytes` is supplied, a successful readback is one explicitly bounded
+progressive-disclosure page. The next planning round receives that page inline
+together with its typed `owner`, `locator`, `content_version`, and byte range.
+Agently does not externalize the page again or create another selection key for
+it. Action success or the existence of a selection key proves only execution
+or reference availability; content claims require a consumed readback page.
+AgentTask preserves a bounded page body plus the same typed identity as Action
+evidence. If the verifier needs material outside the visible snippet, repair
+must acquire a narrower or subsequent page rather than lower the success
+criterion. Three consecutive reads of the same unchanged typed page terminate
+the open ActionLoop as no information progress and return control to TaskBoard;
+that transition is not task acceptance.
 
 Oversized direct Action and ActionFlow carriers are compacted as complete
 records before they enter a TriggerFlow state or return boundary. This covers

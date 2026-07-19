@@ -1672,7 +1672,9 @@ class MockTaskBoardConsumerDrivenRequester(MockAgentExecutionRequester):
                 "answer": "Dependency evidence is only a ref; request bounded readback before continuing.",
                 "sufficient": False,
                 "next_board_action": "readback",
-                "target_refs": ["sources/source.md"],
+                "target_refs": [
+                    {"owner": "task_workspace", "locator": "sources/source.md"}
+                ],
                 "gaps": ["Need bounded TaskWorkspace readback for sources/source.md."],
                 "evidence": ["collect card produced a ref-only source pointer"],
                 "remaining_work": ["Continue the control card after readback."],
@@ -2731,7 +2733,9 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
         {
             "status": "blocked",
             "next_board_action": "readback",
-            "target_refs": ["task-workspace://final.md"],
+            "target_refs": [
+                {"owner": "task_workspace", "locator": "final.md"}
+            ],
             "gaps": ["Need exact final artifact wording before patching."],
             "remaining_work": ["Read final.md, then apply the attribution correction."],
         },
@@ -2742,7 +2746,9 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
     continued_cards = continued_revision.graph.card_by_id()
     assert "final.continue.readback" in continued_cards
     assert "final.continue.continue" in continued_cards
-    assert continued_cards["final.continue.continue"].metadata["target_refs"] == ["task-workspace://final.md"]
+    assert continued_cards["final.continue.continue"].metadata["target_refs"] == [
+        {"owner": "task_workspace", "locator": "final.md"}
+    ]
 
 
 def test_taskboard_control_auto_readback_scope_includes_upstream_evidence_cards():
@@ -2869,7 +2875,9 @@ def test_taskboard_control_invalid_readback_patch_proposal_becomes_framework_pat
             "status": "blocked",
             "patch_proposal": {
                 "action": "readback",
-                "target_refs": ["https://example.test/source"],
+                "target_refs": [
+                    {"owner": "external", "locator": "https://example.test/source"}
+                ],
                 "reason": "Need scoped source readback.",
             },
             "gaps": ["Need source details."],
@@ -2884,7 +2892,9 @@ def test_taskboard_control_invalid_readback_patch_proposal_becomes_framework_pat
     cards = next_revision.graph.card_by_id()
     assert cards["final.evidence"].allowed_execution_shape == "actions"
     assert cards["final.evidence"].depends_on == ("collect",)
-    assert cards["final.evidence"].metadata["target_refs"] == ["https://example.test/source"]
+    assert cards["final.evidence"].metadata["target_refs"] == [
+        {"owner": "external", "locator": "https://example.test/source"}
+    ]
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
 
 
@@ -2923,8 +2933,8 @@ def test_taskboard_control_direct_target_refs_become_action_evidence_patch():
             "status": "blocked",
             "next_board_action": "readback",
             "target_refs": [
-                "https://example.test/source.pdf",
-                {"url": "https://example.test/examples.html"},
+                {"owner": "external", "locator": "https://example.test/source.pdf"},
+                {"owner": "external", "locator": "https://example.test/examples.html"},
             ],
             "gaps": ["Need full PDF text and example page content."],
             "remaining_work": ["Download or snapshot target refs, then continue final synthesis."],
@@ -2938,8 +2948,8 @@ def test_taskboard_control_direct_target_refs_become_action_evidence_patch():
     cards = next_revision.graph.card_by_id()
     assert cards["final.evidence"].allowed_execution_shape == "actions"
     assert cards["final.evidence"].metadata["target_refs"] == [
-        "https://example.test/source.pdf",
-        "https://example.test/examples.html",
+        {"owner": "external", "locator": "https://example.test/source.pdf"},
+        {"owner": "external", "locator": "https://example.test/examples.html"},
     ]
     assert "https://example.test/source.pdf" in cards["final.evidence"].objective
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
@@ -2979,7 +2989,9 @@ def test_taskboard_control_empty_model_patch_does_not_swallow_readback_intent():
         {
             "status": "blocked",
             "next_board_action": "readback",
-            "target_refs": ["https://example.test/official.html"],
+            "target_refs": [
+                {"owner": "external", "locator": "https://example.test/official.html"}
+            ],
             "patch_proposal": {},
             "gaps": ["Need official source body."],
             "remaining_work": ["Read official source, then continue final synthesis."],
@@ -2992,7 +3004,9 @@ def test_taskboard_control_empty_model_patch_does_not_swallow_readback_intent():
     next_revision = validator.apply_patch(revision, patch)
     cards = next_revision.graph.card_by_id()
     assert cards["final.evidence"].allowed_execution_shape == "actions"
-    assert cards["final.evidence"].metadata["target_refs"] == ["https://example.test/official.html"]
+    assert cards["final.evidence"].metadata["target_refs"] == [
+        {"owner": "external", "locator": "https://example.test/official.html"}
+    ]
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
 
 
@@ -3047,7 +3061,12 @@ def test_taskboard_control_task_workspace_target_refs_become_readback_patch():
         {
             "status": "blocked",
             "next_board_action": "readback",
-            "target_refs": ["retained-notes/rec_abc-operations-note.txt"],
+            "target_refs": [
+                {
+                    "owner": "record_store",
+                    "locator": "retained-notes/rec_abc-operations-note.txt",
+                }
+            ],
             "gaps": ["Need the retained note body before synthesis."],
             "remaining_work": ["Read the retained note, then continue final synthesis."],
         },
@@ -3058,12 +3077,177 @@ def test_taskboard_control_task_workspace_target_refs_become_readback_patch():
     next_revision = validator.apply_patch(revision, patch)
     cards = next_revision.graph.card_by_id()
     assert cards["final.readback"].allowed_execution_shape == "readback"
-    assert cards["final.readback"].metadata["target_refs"] == ["retained-notes/rec_abc-operations-note.txt"]
-    assert cards["final.readback"].metadata["task_workspace_target_refs"] == ["retained-notes/rec_abc-operations-note.txt"]
+    assert cards["final.readback"].metadata["target_refs"] == [
+        {
+            "owner": "record_store",
+            "locator": "retained-notes/rec_abc-operations-note.txt",
+        }
+    ]
+    assert cards["final.readback"].metadata["task_workspace_target_refs"] == [
+        {
+            "owner": "record_store",
+            "locator": "retained-notes/rec_abc-operations-note.txt",
+        }
+    ]
     assert "external_target_refs" not in cards["final.readback"].metadata
     assert cards["final.continue"].depends_on == ("collect", "final.readback")
     assert cards["final.continue"].metadata["readback_card_id"] == "final.readback"
     assert cards["final.continue"].metadata["evidence_card_id"] == ""
+
+
+def test_taskboard_target_refs_require_explicit_owner_and_preserve_read_identity():
+    refs = AgentTask._normalize_taskboard_target_refs(
+        [
+            {
+                "owner": "task_workspace",
+                "locator": "sources/report.md",
+                "content_version": "cv_report_v1",
+                "range": {"offset": 4096, "max_bytes": 2048},
+            },
+            {
+                "owner": "action_artifact",
+                "locator": "sel_search_result",
+                "content_version": "sha256:search-v1",
+                "range": {"offset": 0, "max_bytes": 4096},
+            },
+            {
+                "owner": "external",
+                "locator": "https://example.test/source.pdf",
+            },
+            "selection-key-without-owner",
+            {"locator": "path-without-owner.md"},
+        ]
+    )
+
+    assert refs == [
+        {
+            "owner": "task_workspace",
+            "locator": "sources/report.md",
+            "content_version": "cv_report_v1",
+            "range": {"offset": 4096, "max_bytes": 2048},
+        },
+        {
+            "owner": "action_artifact",
+            "locator": "sel_search_result",
+            "content_version": "sha256:search-v1",
+            "range": {"offset": 0, "max_bytes": 4096},
+        },
+        {
+            "owner": "external",
+            "locator": "https://example.test/source.pdf",
+        },
+    ]
+    local_refs, action_refs = AgentTask._split_taskboard_target_refs(refs)
+    assert [ref["owner"] for ref in local_refs] == ["task_workspace", "action_artifact"]
+    assert [ref["owner"] for ref in action_refs] == ["external"]
+
+
+def test_taskboard_mixed_target_owners_create_separate_action_and_readback_cards():
+    validator = TaskBoardValidator()
+    revision = TaskBoardRevision.create(
+        board_id="mixed-target-owners",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "mixed-target-owners-graph",
+                "cards": [
+                    {
+                        "id": "final",
+                        "objective": "Finish after local and external evidence are both read.",
+                        "allowed_execution_shape": "control",
+                    }
+                ],
+            }
+        ),
+    )
+    patch = AgentTask._taskboard_control_auto_patch(
+        SimpleNamespace(revision=revision, card=revision.graph.card_by_id()["final"]),
+        {
+            "status": "blocked",
+            "next_board_action": "readback",
+            "target_refs": [
+                {"owner": "task_workspace", "locator": "sources/local.md"},
+                {"owner": "external", "locator": "https://example.test/official"},
+            ],
+            "remaining_work": ["Read both targets."],
+        },
+    )
+
+    assert patch is not None
+    updated = validator.apply_patch(revision, patch)
+    cards = updated.graph.card_by_id()
+    assert cards["final.evidence"].allowed_execution_shape == "actions"
+    assert cards["final.evidence"].metadata["external_target_refs"] == [
+        {"owner": "external", "locator": "https://example.test/official"}
+    ]
+    assert cards["final.readback"].allowed_execution_shape == "readback"
+    assert cards["final.readback"].metadata["task_workspace_target_refs"] == [
+        {"owner": "task_workspace", "locator": "sources/local.md"}
+    ]
+    assert cards["final.continue"].depends_on == (
+        "final.evidence",
+        "final.readback",
+    )
+
+
+def test_taskboard_control_continuations_inherit_one_terminal_convergence_subject():
+    validator = TaskBoardValidator()
+    revision = TaskBoardRevision.create(
+        board_id="stable-convergence-subject",
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": "stable-convergence-subject-graph",
+                "cards": [
+                    {
+                        "id": "final",
+                        "objective": "Complete the source-grounded final answer.",
+                        "allowed_execution_shape": "control",
+                        "metadata": {"terminal_convergence_subject": "task:final-grounding"},
+                    }
+                ],
+            }
+        ),
+    )
+    first_patch = AgentTask._taskboard_control_auto_patch(
+        SimpleNamespace(revision=revision, card=revision.graph.card_by_id()["final"]),
+        {
+            "status": "blocked",
+            "next_board_action": "readback",
+            "target_refs": [
+                {"owner": "external", "locator": "https://example.test/source-a"}
+            ],
+            "remaining_work": ["Read source A."],
+        },
+    )
+    assert first_patch is not None
+    first_revision = validator.apply_patch(revision, first_patch)
+    first_cards = first_revision.graph.card_by_id()
+    assert first_cards["final.evidence"].metadata["terminal_convergence_subject"] == (
+        "task:final-grounding"
+    )
+    assert first_cards["final.continue"].metadata["terminal_convergence_subject"] == (
+        "task:final-grounding"
+    )
+
+    second_patch = AgentTask._taskboard_control_auto_patch(
+        SimpleNamespace(revision=first_revision, card=first_cards["final.continue"]),
+        {
+            "status": "blocked",
+            "next_board_action": "readback",
+            "target_refs": [
+                {"owner": "external", "locator": "https://example.test/source-b"}
+            ],
+            "remaining_work": ["Read source B."],
+        },
+    )
+    assert second_patch is not None
+    second_revision = validator.apply_patch(first_revision, second_patch)
+    second_cards = second_revision.graph.card_by_id()
+    assert second_cards["final.continue.evidence"].metadata[
+        "terminal_convergence_subject"
+    ] == "task:final-grounding"
+    assert second_cards["final.continue.continue"].metadata[
+        "terminal_convergence_subject"
+    ] == "task:final-grounding"
 
 
 def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readback():
@@ -3136,7 +3320,9 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
         {
             "status": "blocked",
             "next_board_action": "readback",
-            "target_refs": [discovered_refs[0]["url"]],
+            "target_refs": [
+                {"owner": "external", "locator": discovered_refs[0]["url"]}
+            ],
             "gaps": ["The source ref is discovered-only; scoped source content is still needed."],
             "remaining_work": ["Materialize the ref before final synthesis."],
         },
@@ -3147,7 +3333,9 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
     next_revision = validator.apply_patch(revision, patch)
     cards = next_revision.graph.card_by_id()
     assert cards["final.evidence"].allowed_execution_shape == "actions"
-    assert cards["final.evidence"].metadata["target_refs"] == ["https://example.test/source.pdf"]
+    assert cards["final.evidence"].metadata["target_refs"] == [
+        {"owner": "external", "locator": "https://example.test/source.pdf"}
+    ]
     assert cards["final.continue"].depends_on == ("collect", "final.evidence")
     assert cards["final.continue"].metadata["final_task_workspace_deliverables"] == ["final.md"]
     assert "final.md" in cards["final.continue"].objective
@@ -3463,6 +3651,23 @@ def test_taskboard_available_readback_omits_programmatic_provenance_noise():
     assert '"full_value_available"' not in hot_text
 
 
+def test_taskboard_available_readback_separates_recall_capability_from_prior_refs():
+    available = AgentTask._taskboard_available_readback({})
+
+    readback_shape = available["taskboard_readback_shape"]
+    assert readback_shape["prior_refs_available"] is False
+    assert "available" not in readback_shape
+    action_readback = available["action_artifact_readback"]
+    assert action_readback["capability_available"] is True
+    assert action_readback["prior_refs_available"] is False
+    assert "available" not in action_readback
+    assert action_readback["artifact_refs"] == []
+    file_readback = available["task_workspace_file_readback"]
+    assert file_readback["prior_file_refs_available"] is False
+    assert "available" not in file_readback
+    assert "current ActionLoop records" in available["policy"]
+
+
 @pytest.mark.asyncio
 async def test_taskboard_readback_work_unit_hot_payload_omits_programmatic_provenance_noise(tmp_path):
     agent = _create_agent("execution-taskboard-readback-hot-provenance").use_task_workspace(tmp_path / "task_workspace")
@@ -3669,6 +3874,209 @@ def test_taskboard_action_artifact_readback_preview_omits_ref_provenance_noise()
     assert '"sha256"' not in hot_text
     assert '"bytes"' not in hot_text
     assert '"media_type"' not in hot_text
+
+
+def test_taskboard_readback_evidence_dedupes_by_owner_version_and_range():
+    ref = {
+        "selection_key": "selection-1",
+        "owner": "action_artifact",
+        "locator": "selection-1",
+        "content_version": "sha256:version-1",
+        "role": "output",
+    }
+    readback = {
+        "ok": True,
+        "status": "success",
+        "selection_key": "selection-1",
+        "owner": "action_artifact",
+        "locator": "selection-1",
+        "content_version": "sha256:version-1",
+        "range": {"offset": 0, "end": 128, "read_bytes": 128},
+        "value_preview": "bounded source segment",
+        "value_preview_meta": {"truncated": True},
+        "ref": ref,
+    }
+    first = AgentTask._taskboard_action_artifact_readback_evidence_items(
+        [readback],
+        source="taskboard_dependency_readback",
+        card_id="first-card",
+    )[0]
+    second = AgentTask._taskboard_action_artifact_readback_evidence_items(
+        [readback],
+        source="taskboard_dependency_readback",
+        card_id="second-card",
+    )[0]
+
+    deduped = AgentTask._dedupe_taskboard_readback_evidence_items([first, second])
+
+    assert len(deduped) == 1
+    assert deduped[0]["read_identity"] == {
+        "owner": "action_artifact",
+        "locator": "selection-1",
+        "content_version": "sha256:version-1",
+        "range": {"offset": 0, "end": 128},
+    }
+    assert deduped[0]["id"] == second["id"] == first["id"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_dependency_readback_advances_past_prior_range(tmp_path):
+    agent = _create_agent("execution-taskboard-progressive-action-readback").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-progressive-action-readback",
+        goal="Read the next unseen Action artifact segment.",
+        success_criteria=["Repeated readback advances its byte range."],
+        execution="taskboard",
+    )
+    scope = {"kind": "agent_task", "id": task.id}
+    artifact = agent.action._artifact_manager.register_execution_artifact(
+        action_call_id="progressive-readback-call",
+        artifact_type="action_output",
+        label="Large repository search result",
+        value="0123456789" * 2000,
+        artifact_scope=scope,
+    )
+    output = await task._taskboard_dependency_action_artifact_readbacks(
+        {
+            "artifact_refs": [artifact],
+            "evidence_items": [
+                {
+                    "id": "prior-segment",
+                    "kind": "taskboard_action_artifact.readback",
+                    "status": "ok",
+                    "body_state": "truncated",
+                    "read_identity": {
+                        "owner": "action_artifact",
+                        "locator": artifact["selection_key"],
+                        "content_version": artifact["sha256"],
+                        "range": {"offset": 0, "end": 64},
+                    },
+                }
+            ],
+        },
+        card_id="dependent-card",
+        context_pack={"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert output["readbacks"][0]["range"]["offset"] == 64
+    assert output["readbacks"][0]["range"]["end"] > 64
+
+
+@pytest.mark.asyncio
+async def test_taskboard_dependency_readback_skips_exhausted_artifact(tmp_path):
+    agent = _create_agent("execution-taskboard-exhausted-action-readback").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-exhausted-action-readback",
+        goal="Do not reread an exhausted Action artifact.",
+        success_criteria=["Exhausted refs do not trigger another Action read."],
+        execution="taskboard",
+    )
+    scope = {"kind": "agent_task", "id": task.id}
+    artifact = agent.action._artifact_manager.register_execution_artifact(
+        action_call_id="exhausted-readback-call",
+        artifact_type="action_output",
+        label="Complete repository search result",
+        value="0123456789" * 2000,
+        artifact_scope=scope,
+    )
+    output = await task._taskboard_dependency_action_artifact_readbacks(
+        {
+            "artifact_refs": [artifact],
+            "evidence_items": [
+                {
+                    "id": "complete-segment",
+                    "kind": "taskboard_action_artifact.readback",
+                    "status": "ok",
+                    "body_state": "full",
+                    "total_bytes": artifact["bytes"],
+                    "read_identity": {
+                        "owner": "action_artifact",
+                        "locator": artifact["selection_key"],
+                        "content_version": artifact["sha256"],
+                        "range": {"offset": 0, "end": artifact["bytes"]},
+                    },
+                }
+            ],
+        },
+        card_id="dependent-card",
+        context_pack={"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert output["ref_count"] == 0
+    assert output["exhausted_ref_count"] == 1
+    assert output["readbacks"] == []
+    assert output["diagnostics"][0]["code"] == "taskboard.dependency_readback.no_unread_ranges"
+
+
+def test_taskboard_task_level_read_progress_tracks_versioned_contiguous_ranges(tmp_path):
+    task = AgentTask(
+        _create_agent("execution-taskboard-task-read-progress").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-task-read-progress",
+        goal="Track bounded reads across TaskBoard evidence projections.",
+        success_criteria=["Read progress remains task-owned and version-safe."],
+        execution="taskboard",
+    )
+    evidence_view = {"evidence_items": []}
+    ref = {
+        "owner": "action_artifact",
+        "selection_key": "sel-progress",
+        "locator": "sel-progress",
+        "content_version": "version-a",
+        "bytes": 30_000,
+    }
+
+    for offset, end in ((0, 12_000), (12_000, 24_000)):
+        task._record_taskboard_read_progress(
+            {
+                "ok": True,
+                **ref,
+                "total_bytes": 30_000,
+                "range": {"offset": offset, "end": end},
+            },
+            card_id=f"read-{offset}",
+        )
+
+    assert task._taskboard_requested_read_range(
+        ref,
+        evidence_view,
+        default_max_bytes=12_000,
+    ) == (24_000, 12_000)
+    assert task._taskboard_read_target_exhausted(ref, evidence_view) is False
+    assert "taskboard_read_progress" not in task.diagnostics
+
+    task._record_taskboard_read_progress(
+        {
+            "ok": True,
+            **ref,
+            "total_bytes": 30_000,
+            "range": {"offset": 24_000, "end": 30_000},
+        },
+        card_id="read-final",
+    )
+
+    assert task._taskboard_read_target_exhausted(ref, evidence_view) is True
+    assert task._taskboard_requested_read_range(
+        {**ref, "content_version": "version-b"},
+        evidence_view,
+        default_max_bytes=12_000,
+    ) == (0, 12_000)
+    assert task._taskboard_requested_read_range(
+        {
+            "owner": "task_workspace",
+            "locator": "sources/mutable.md",
+            "path": "sources/mutable.md",
+        },
+        evidence_view,
+        default_max_bytes=12_000,
+    ) == (0, 12_000)
 
 
 def test_taskboard_control_readback_required_patch_type_becomes_readback_patch():
@@ -4219,7 +4627,11 @@ async def test_taskboard_readback_card_reads_task_workspace_target_refs_from_con
                         "depends_on": ["collect"],
                         "allowed_execution_shape": "readback",
                         "required_outputs": ["TaskWorkspace content readback preview."],
-                        "metadata": {"target_refs": [retained_ref["id"]]},
+                        "metadata": {
+                            "target_refs": [
+                                {"owner": "record_store", "locator": retained_ref["id"]}
+                            ]
+                        },
                     },
                 ],
             }
@@ -4260,6 +4672,133 @@ async def test_taskboard_readback_card_reads_task_workspace_target_refs_from_con
     assert '"bytes"' not in hot_text
     assert '"media_type"' not in hot_text
     assert result.metadata["file_ref_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_taskboard_task_workspace_readback_advances_past_prior_range(tmp_path):
+    agent = _create_agent("execution-taskboard-progressive-file-readback").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-progressive-file-readback",
+        goal="Read consecutive unseen segments from one TaskWorkspace file.",
+        success_criteria=["The second read starts after the first bounded range."],
+        execution="taskboard",
+    )
+    write_result = await task.task_workspace.write_file(
+        "sources/large.md",
+        "0123456789" * 3000,
+    )
+    content_version = str(write_result["sha256"])
+    target = {
+        "owner": "task_workspace",
+        "locator": "sources/large.md",
+        "content_version": content_version,
+    }
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {"id": "collect", "objective": "Identify the large source file."},
+                    {
+                        "id": "read-first",
+                        "objective": "Read the first bounded source segment.",
+                        "depends_on": ["collect"],
+                        "allowed_execution_shape": "readback",
+                        "metadata": {"target_refs": [target]},
+                    },
+                    {
+                        "id": "read-second",
+                        "objective": "Read the next unseen bounded source segment.",
+                        "depends_on": ["read-first"],
+                        "allowed_execution_shape": "readback",
+                        "metadata": {"target_refs": [target]},
+                    },
+                    {
+                        "id": "read-third",
+                        "objective": "Read the final unseen source segment.",
+                        "depends_on": ["read-second"],
+                        "allowed_execution_shape": "readback",
+                        "metadata": {"target_refs": [target]},
+                    },
+                    {
+                        "id": "read-fourth",
+                        "objective": "Do not reread an exhausted source.",
+                        "depends_on": ["read-third"],
+                        "allowed_execution_shape": "readback",
+                        "metadata": {"target_refs": [target]},
+                    },
+                ],
+            }
+        ),
+    )
+    validator = TaskBoardValidator()
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [
+                {"op": "record_card_result", "result": {"card_id": "collect", "status": "completed"}}
+            ],
+        },
+    )
+    first = await task._run_taskboard_readback_card(
+        SimpleNamespace(card=revision.graph.card_by_id()["read-first"], revision=revision),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": first.to_dict()}],
+        },
+    )
+    second = await task._run_taskboard_readback_card(
+        SimpleNamespace(card=revision.graph.card_by_id()["read-second"], revision=revision),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": second.to_dict()}],
+        },
+    )
+    third = await task._run_taskboard_readback_card(
+        SimpleNamespace(card=revision.graph.card_by_id()["read-third"], revision=revision),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+    revision = validator.apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": third.to_dict()}],
+        },
+    )
+    fourth = await task._run_taskboard_readback_card(
+        SimpleNamespace(card=revision.graph.card_by_id()["read-fourth"], revision=revision),
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    first_readback = first.preview["file_readbacks"][0]
+    second_readback = second.preview["file_readbacks"][0]
+    assert first_readback["offset"] == 0
+    assert second_readback["offset"] == first_readback["read_bytes"]
+    assert second_readback["content_preview"] != first_readback["content_preview"] or (
+        second_readback["offset"] != first_readback["offset"]
+    )
+    assert third.preview["file_readbacks"][0]["offset"] == (
+        second_readback["offset"] + second_readback["read_bytes"]
+    )
+    assert fourth.status == "completed"
+    assert fourth.preview["file_readbacks"] == []
+    fourth_diagnostic = fourth.preview["diagnostics"][0]
+    assert fourth_diagnostic["code"] == "taskboard.readback.no_unread_ranges"
+    assert fourth_diagnostic["card_id"] == "read-fourth"
+    assert fourth_diagnostic["exhausted_ref_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -4431,11 +4970,19 @@ async def test_taskboard_readback_card_promotes_nested_task_workspace_file_refs_
     file_ref = dict(write_result["file_refs"][0])
     file_ref["role"] = "download"
 
-    async def fake_read_action_artifact(selection_key: str) -> dict[str, Any]:
+    async def fake_read_action_artifact(
+        selection_key: str,
+        offset: int = 0,
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
         return {
             "ok": True,
             "status": "success",
             "selection_key": selection_key,
+            "owner": "action_artifact",
+            "locator": selection_key,
+            "content_version": "nested-file-ref-v1",
+            "range": {"offset": offset, "end": offset + int(max_bytes or 0), "read_bytes": int(max_bytes or 0)},
             "artifact_type": "action_output",
             "value": {
                 "kind": "remote_file",
@@ -6680,21 +7227,118 @@ async def test_agent_task_heartbeat_does_not_reset_progress_clock(tmp_path):
     previous_progress_at = task._last_stream_emit_monotonic - 3.0
     task._last_stream_emit_monotonic = previous_progress_at
 
-    await task._emit(
+    heartbeat_item = await task._emit(
         "agent_task.heartbeat",
         {"stage": "execute", "status": "running"},
         meta={"task_id": task.id, "status": task.status, "stream_kind": "heartbeat"},
     )
 
     assert task._last_stream_emit_monotonic == previous_progress_at
+    execution = agent.create_execution(limits={"max_no_progress_seconds": 1.0})
+    parent_progress_at = execution.execution_context.last_progress_at
+    await execution.bridge_agent_task_stream_item(heartbeat_item)
+    assert execution.execution_context.last_progress_at == parent_progress_at
 
-    await task._emit(
+    progress_item = await task._emit(
         "agent_task.progress",
         {"stage": "execute", "status": "running"},
         meta={"task_id": task.id, "status": task.status, "stream_kind": "progress"},
     )
 
     assert task._last_stream_emit_monotonic > previous_progress_at
+    await execution.bridge_agent_task_stream_item(progress_item)
+    assert execution.execution_context.last_progress_at > parent_progress_at
+    assert execution.execution_context.last_progress_event is not None
+    assert execution.execution_context.last_progress_event["stage"] == "agent_task.progress"
+
+
+@pytest.mark.asyncio
+async def test_routed_agent_task_material_progress_refreshes_parent_idle_clock(tmp_path):
+    agent = _create_agent("execution-routed-task-material-progress").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    idle_timeout_seconds = 0.08
+    execution = (
+        agent.create_execution(limits={"max_no_progress_seconds": idle_timeout_seconds})
+        .goal(
+            "Finish a routed task while reporting material child progress.",
+            success_criteria=["The parent remains live while the child advances."],
+        )
+        .strategy(
+            "flat",
+            max_iterations=1,
+            options={"heartbeat_interval_seconds": 0.01},
+        )
+    )
+
+    async def request_plan(_iteration_index, _context_pack):
+        task = cast(AgentTask, execution.task_record)
+        for sequence in range(5):
+            await asyncio.sleep(0.04)
+            await task._emit(
+                "agent_task.test.material_progress",
+                {"sequence": sequence},
+                meta={
+                    "task_id": task.id,
+                    "status": task.status,
+                    "stream_kind": "progress",
+                },
+            )
+        return {
+            "execution_shape": "direct",
+            "step_instruction": "Finish after reporting bounded progress.",
+            "expected_evidence": "The routed child stayed live.",
+            "rationale": "The child has advanced through five observable units.",
+        }
+
+    async def execute_step(_iteration_index, _plan, _context_pack):
+        return (
+            {
+                "step_result": "bounded child work completed",
+                "evidence": ["five material progress events were emitted"],
+                "remaining_work": [],
+                "ready_for_final_verification": True,
+            },
+            {
+                "execution_id": "routed-task-material-progress-child",
+                "status": "completed",
+                "route": {"selected_route": "model_request"},
+                "logs": {},
+            },
+        )
+
+    async def request_verification(_iteration_index, **_kwargs):
+        return {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The routed child completed after observable progress.",
+            "missing_criteria": [],
+            "replan_instruction": "",
+            "final_result": "Routed task completed after material child progress.",
+        }
+
+    cast(Any, execution)._agent_task_step_overrides = {
+        "_request_plan": request_plan,
+        "_execute_step": execute_step,
+        "_request_verification": request_verification,
+    }
+    assert execution.limits["max_no_progress_seconds"] == idle_timeout_seconds
+
+    started_at = asyncio.get_running_loop().time()
+    result = await execution.async_get_full_data()
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert elapsed > idle_timeout_seconds * 2
+    assert result["status"] == "completed"
+    assert result["accepted"] is True
+    assert execution.status == "success"
+    assert len(
+        [
+            item
+            for item in execution.stream.items
+            if item.path == "agent_task.test.material_progress"
+        ]
+    ) == 5
 
 
 @pytest.mark.asyncio
@@ -7058,6 +7702,79 @@ async def test_taskboard_checkpoint_and_resume_snapshot_include_handoff_projecti
     terminal_state = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     assert terminal_state["revision"]["revision_id"]
     assert task_meta["diagnostics"]["task_workspace_retention"]["status"] in {"applied", "noop"}
+
+
+@pytest.mark.asyncio
+async def test_taskboard_recovery_snapshot_persists_task_level_read_progress(tmp_path):
+    task_id = "taskboard-read-progress-resume"
+    task_workspace_dir = tmp_path / "task_workspace"
+    agent = _create_taskboard_agent(
+        "execution-taskboard-read-progress-resume-seed"
+    ).use_task_workspace(task_workspace_dir)
+    task = AgentTask(
+        agent,
+        task_id=task_id,
+        goal="Resume a board without rereading completed evidence ranges.",
+        success_criteria=["Read progress is restored with the TaskBoard revision."],
+        execution="taskboard",
+        options={"agent_task": {"record_store_recovery": True}},
+    )
+    task._record_taskboard_read_progress(
+        {
+            "ok": True,
+            "owner": "action_artifact",
+            "locator": "sel-resume-progress",
+            "selection_key": "sel-resume-progress",
+            "content_version": "version-resume",
+            "total_bytes": 20_000,
+            "range": {"offset": 0, "end": 12_000},
+        },
+        card_id="read-first",
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task_id,
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": f"{task_id}.graph",
+                "cards": [
+                    {
+                        "id": "continue-read",
+                        "objective": "Read only the remaining evidence range.",
+                    }
+                ],
+            }
+        ),
+    )
+
+    await task._record_taskboard_checkpoint(
+        stage="tick",
+        tick_index=1,
+        revision=revision,
+        runtime_topology={"driver": "test"},
+    )
+
+    snapshot = await agent.record_store.get_snapshot(f"{task_id}::resume")
+    assert snapshot is not None
+    read_progress = snapshot["taskboard_state"]["read_progress"]
+    assert read_progress["schema_version"] == "agent_task_taskboard_read_progress/v1"
+    assert next(iter(read_progress["items"].values()))["next_offset"] == 12_000
+
+    agent2 = _create_taskboard_agent(
+        "execution-taskboard-read-progress-resume-restore"
+    ).use_task_workspace(task_workspace_dir)
+    resumed = await agent2.async_resume(task_id, task_workspace=task_workspace_dir)
+    resumed_task = cast(AgentTask, resumed.task_record)
+    assert resumed_task._taskboard_requested_read_range(
+        {
+            "owner": "action_artifact",
+            "locator": "sel-resume-progress",
+            "selection_key": "sel-resume-progress",
+            "content_version": "version-resume",
+            "bytes": 20_000,
+        },
+        {"evidence_items": []},
+        default_max_bytes=12_000,
+    ) == (12_000, 12_000)
 
 
 @pytest.mark.asyncio
@@ -7600,6 +8317,9 @@ async def test_taskboard_agent_card_prefetches_dependency_action_artifact_refs(t
     assert dependency_carrier["block_graph"]["execution_block_kinds"] == ["action_call"]
     assert MockTaskBoardDependencyReadbackRequester.dependency_readback_seen is True
     assert MockTaskBoardDependencyReadbackRequester.source_refs_seen is True
+    request_text = "\n".join(MockTaskBoardDependencyReadbackRequester.requests)
+    assert "Action success or a selection_key proves only execution/ref availability" in request_text
+    assert "do not read a recall Action's output as a new artifact" in request_text
     assert any(item.path == "agent_task.taskboard.card.synthesize.dependency_readback.started" for item in stream_items)
     assert any(
         item.path == "agent_task.taskboard.card.synthesize.dependency_readback.completed" for item in stream_items

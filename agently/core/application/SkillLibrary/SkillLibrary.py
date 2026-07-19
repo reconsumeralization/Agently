@@ -16,25 +16,170 @@ from __future__ import annotations
 
 import re
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any, cast
+
+from agently.types.data import SkillSourceRequest
+from agently.types.plugins import SkillSourceProvider
+from agently.utils import FunctionShifter
 
 from .Package import SkillPackageRevision, SkillPackRevision, SkillResourceRead
 from .Parser import ParsedSkillPackage, SkillPackageError, parse_skill_package
 from .Store import SkillPackageStore
 
+if TYPE_CHECKING:
+    from agently.core.extension.PluginManager import PluginManager
+
 
 class SkillLibrary:
     """Installed real-world Skill package truth, independent from task execution."""
 
-    def __init__(self, root: str | Path = ".agently/skill-library") -> None:
+    def __init__(
+        self,
+        root: str | Path = ".agently/skill-library",
+        *,
+        plugin_manager: "PluginManager | None" = None,
+    ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.store = SkillPackageStore(self.root)
+        self.plugin_manager = plugin_manager
+        self._source_providers: dict[str, SkillSourceProvider] = {}
+        self._library_owned_source_provider_ids: set[int] = set()
+        from agently.builtins.plugins.SkillSourceProvider import (
+            LocalPathSkillSourceProvider,
+        )
+
+        local_provider = LocalPathSkillSourceProvider(
+            cache_root=self.root / "source-cache"
+        )
+        self.register_source_provider(local_provider)
+        self._library_owned_source_provider_ids.add(id(local_provider))
+        self.install_source = FunctionShifter.syncify(self.async_install_source)
+        self.install_pack_source = FunctionShifter.syncify(
+            self.async_install_pack_source
+        )
 
     def configure(self, *, root: str | Path) -> "SkillLibrary":
         """Rebind the canonical library service without invalidating its holders."""
 
         self.root = Path(root).expanduser().resolve()
         self.store = SkillPackageStore(self.root)
+        from agently.builtins.plugins.SkillSourceProvider import (
+            LocalPathSkillSourceProvider,
+        )
+
+        for provider in tuple(dict.fromkeys(self._source_providers.values())):
+            if (
+                id(provider) not in self._library_owned_source_provider_ids
+                or not isinstance(provider, LocalPathSkillSourceProvider)
+            ):
+                continue
+            replacement = LocalPathSkillSourceProvider(
+                cache_root=self.root / "source-cache",
+                max_files=provider.max_files,
+                max_bytes=provider.max_bytes,
+            )
+            for source_type, registered in tuple(self._source_providers.items()):
+                if registered is provider:
+                    self._source_providers[source_type] = replacement
+            self._library_owned_source_provider_ids.discard(id(provider))
+            self._library_owned_source_provider_ids.add(id(replacement))
         return self
+
+    def register_source_provider(
+        self,
+        provider: SkillSourceProvider,
+        *,
+        replace: bool = True,
+    ) -> "SkillLibrary":
+        provider_id = str(getattr(provider, "provider_id", "")).strip()
+        source_types = tuple(
+            str(item).strip().lower()
+            for item in getattr(provider, "source_types", ())
+            if str(item).strip()
+        )
+        if not provider_id or not source_types:
+            raise TypeError(
+                "SkillSourceProvider requires provider_id and non-empty source_types."
+            )
+        for source_type in source_types:
+            if source_type in self._source_providers and not replace:
+                raise ValueError(
+                    f"Skill source provider is already registered for source_type {source_type!r}."
+                )
+            self._source_providers[source_type] = provider
+        return self
+
+    def _load_source_provider_plugins(self) -> None:
+        if self.plugin_manager is None:
+            return
+        try:
+            names = self.plugin_manager.get_plugin_list("SkillSourceProvider")
+        except Exception:
+            names = []
+        for name in names:
+            plugin_class = cast(
+                Any,
+                self.plugin_manager.get_plugin("SkillSourceProvider", name),
+            )
+            provider = plugin_class()
+            self.register_source_provider(provider)
+
+    @staticmethod
+    def _infer_source_type(request: SkillSourceRequest) -> str:
+        if request.source_type != "auto":
+            return request.source_type
+        if Path(request.source).expanduser().exists():
+            return "local"
+        return "git"
+
+    def _get_source_provider(self, request: SkillSourceRequest) -> SkillSourceProvider:
+        source_type = self._infer_source_type(request)
+        provider = self._source_providers.get(source_type)
+        if provider is None:
+            self._load_source_provider_plugins()
+            provider = self._source_providers.get(source_type)
+        if provider is None:
+            raise ValueError(
+                f"No Skill source provider is registered for source_type {source_type!r}."
+            )
+        return provider
+
+    async def async_install_source(
+        self,
+        request: SkillSourceRequest,
+        *,
+        scope: str = "explicit",
+        trust: str = "untrusted",
+    ) -> SkillPackageRevision:
+        provider = self._get_source_provider(request)
+        snapshot = await provider.async_materialize(request)
+        parsed = parse_skill_package(snapshot.materialized_path)
+        return self.store.save(
+            parsed,
+            scope=str(scope or "explicit"),
+            trust=str(trust or "untrusted"),
+            source=request.to_dict()["source"],
+            source_provenance=snapshot.to_dict(),
+        )
+
+    async def async_install_pack_source(
+        self,
+        request: SkillSourceRequest,
+        *,
+        skill_pack_id: str | None = None,
+        name: str | None = None,
+        trust: str = "untrusted",
+    ) -> SkillPackRevision:
+        provider = self._get_source_provider(request)
+        snapshot = await provider.async_materialize(request)
+        return self.install_pack(
+            snapshot.materialized_path,
+            skill_pack_id=skill_pack_id,
+            name=name,
+            trust=trust,
+            source_label=request.to_dict()["source"],
+            source_provenance=snapshot.to_dict(),
+        )
 
     def install(
         self,
@@ -89,6 +234,8 @@ class SkillLibrary:
         skill_pack_id: str | None = None,
         name: str | None = None,
         trust: str = "untrusted",
+        source_label: str | None = None,
+        source_provenance: dict[str, Any] | None = None,
     ) -> SkillPackRevision:
         root = Path(source).expanduser().resolve()
         resolved_id = self.normalize_pack_id(skill_pack_id or name or root.name)
@@ -97,7 +244,15 @@ class SkillLibrary:
         failed: list[dict[str, str]] = []
         for package_root in self._pack_directories(root):
             try:
-                installed.append(self.install(package_root, scope=resolved_id, trust=trust))
+                installed.append(
+                    self.store.save(
+                        parse_skill_package(package_root),
+                        scope=resolved_id,
+                        trust=trust,
+                        source=str(source_label or package_root),
+                        source_provenance=source_provenance,
+                    )
+                )
             except Exception as error:
                 failed.append(
                     {
@@ -110,11 +265,12 @@ class SkillLibrary:
             SkillPackRevision(
                 skill_pack_id=resolved_id,
                 name=resolved_name,
-                source=str(root),
+                source=str(source_label or root),
                 trust=str(trust or "untrusted"),
                 revision_refs=tuple(item.revision_ref for item in installed),
                 installed_skills=tuple(item.skill_id for item in installed),
                 failed_skills=tuple(failed),
+                source_provenance=dict(source_provenance or {}),
             )
         )
 

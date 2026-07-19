@@ -95,6 +95,92 @@ class TriggerFlowActionFlow:
         data.set_state("consecutive_failed_action_counts", next_counts)
         return any(count >= max_consecutive_failed_rounds_per_action for count in next_counts.values())
 
+    @staticmethod
+    def _typed_evidence_identity(record: dict[str, Any]) -> dict[str, Any] | None:
+        if not TriggerFlowActionFlow._record_has_progress(record):
+            return None
+        candidates: list[Any] = [record]
+        for key in ("result", "data", "model_digest"):
+            candidate = record.get(key)
+            if isinstance(candidate, dict):
+                candidates.append(candidate)
+                preview = candidate.get("result_preview")
+                if isinstance(preview, dict):
+                    candidates.append(preview)
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            owner = str(candidate.get("owner") or "").strip()
+            locator = str(candidate.get("locator") or "").strip()
+            content_version = str(candidate.get("content_version") or "").strip()
+            raw_range = candidate.get("range")
+            if not owner or not locator or not content_version or not isinstance(raw_range, dict):
+                continue
+            bounded_range = {
+                key: raw_range.get(key)
+                for key in ("offset", "end", "read_bytes")
+                if isinstance(raw_range.get(key), int) and not isinstance(raw_range.get(key), bool)
+            }
+            if not bounded_range:
+                continue
+            return {
+                "owner": owner,
+                "locator": locator,
+                "content_version": content_version,
+                "range": bounded_range,
+            }
+        return None
+
+    @classmethod
+    def _update_unchanged_evidence_page_state(
+        cls,
+        data: Any,
+        records: list[dict[str, Any]],
+        *,
+        max_consecutive_unchanged_evidence_rounds: int,
+    ) -> tuple[bool, int, list[dict[str, Any]]]:
+        progress_records = [record for record in records if cls._record_has_progress(record)]
+        typed_identities = [cls._typed_evidence_identity(record) for record in progress_records]
+        if not progress_records or any(identity is None for identity in typed_identities):
+            # Repeating one page is not stagnation when the same round also
+            # produced any other successful information. Reset the counter so
+            # this guard cannot turn mixed evidence progress into a false stop.
+            data.set_state("unchanged_evidence_page_state", {})
+            return False, 0, []
+        identities = {
+            (
+                identity["owner"],
+                identity["locator"],
+                identity["content_version"],
+                tuple(sorted(identity["range"].items())),
+            ): identity
+            for identity in typed_identities
+            if identity is not None
+        }
+        ordered = [identities[key] for key in sorted(identities)]
+        if not ordered:
+            data.set_state("unchanged_evidence_page_state", {})
+            return False, 0, []
+        previous = data.get_state("unchanged_evidence_page_state", {})
+        previous = previous if isinstance(previous, dict) else {}
+        occurrence_count = (
+            int(previous.get("occurrence_count", 0)) + 1
+            if previous.get("evidence_identities") == ordered
+            else 1
+        )
+        data.set_state(
+            "unchanged_evidence_page_state",
+            {
+                "occurrence_count": occurrence_count,
+                "evidence_identities": ordered,
+            },
+        )
+        return (
+            occurrence_count >= max_consecutive_unchanged_evidence_rounds,
+            occurrence_count,
+            ordered,
+        )
+
     async def async_run(
         self,
         *,
@@ -155,6 +241,15 @@ class TriggerFlowActionFlow:
             or max_consecutive_failed_rounds_per_action <= 0
         ):
             max_consecutive_failed_rounds_per_action = 2
+        max_consecutive_unchanged_evidence_rounds = action.action_settings.get(
+            "loop.max_consecutive_unchanged_evidence_rounds",
+            action.tool_settings.get("loop.max_consecutive_unchanged_evidence_rounds", 3),
+        )
+        if (
+            not isinstance(max_consecutive_unchanged_evidence_rounds, int)
+            or max_consecutive_unchanged_evidence_rounds <= 0
+        ):
+            max_consecutive_unchanged_evidence_rounds = 3
 
         action_loop_run = RunContext.create(
             run_kind="action_loop",
@@ -168,10 +263,10 @@ class TriggerFlowActionFlow:
                 "compat_event_family": "tool",
             },
         )
-        parent_artifact_scope = action._artifact_scope_from_agent_execution_context(
-            get_current_agent_execution_context(),
+        artifact_scope = action._resolve_artifact_scope(
+            run_context=action_loop_run,
+            agent_execution_context=get_current_agent_execution_context(),
         )
-        artifact_scope = parent_artifact_scope or action._artifact_scope_from_run_context(action_loop_run)
         owns_artifact_scope = artifact_scope.get("kind") == "action_run"
 
         async def async_call_scoped_action(name: str, kwargs: dict[str, Any]) -> Any:
@@ -241,6 +336,7 @@ class TriggerFlowActionFlow:
             data.set_state("done_plans", [])
             data.set_state("last_round_records", [])
             data.set_state("consecutive_failed_action_counts", {})
+            data.set_state("unchanged_evidence_page_state", {})
             data.set_state("round_index", 0)
             await data.async_emit("PLAN", None)
             return None
@@ -336,6 +432,7 @@ class TriggerFlowActionFlow:
                     },
                 )
             )
+            decision = action._apply_action_decision_round_dispatch_policy(decision, settings)
 
             dispatch_confirmed = action._should_continue(
                 decision,
@@ -658,6 +755,17 @@ class TriggerFlowActionFlow:
                 bounded_records,
                 max_consecutive_failed_rounds_per_action=max_consecutive_failed_rounds_per_action,
             )
+            (
+                should_stop_after_unchanged_evidence,
+                unchanged_evidence_occurrence_count,
+                unchanged_evidence_identities,
+            ) = self._update_unchanged_evidence_page_state(
+                data,
+                bounded_records,
+                max_consecutive_unchanged_evidence_rounds=(
+                    max_consecutive_unchanged_evidence_rounds
+                ),
+            )
 
             for record_index, record in enumerate(bounded_records):
                 action_id = record.get("action_id", record.get("tool_name", "unknown"))
@@ -722,6 +830,23 @@ class TriggerFlowActionFlow:
                         "round_index": round_index,
                         "max_consecutive_failed_rounds_per_action": max_consecutive_failed_rounds_per_action,
                         "records": bounded_records,
+                    },
+                )
+                await data.async_emit("DONE", done_plans)
+                return state_records
+            if should_stop_after_unchanged_evidence:
+                await publish_runtime_observation(
+                    "loop_unchanged_evidence_converged",
+                    level="WARNING",
+                    message="Action loop stopped after repeated unchanged typed evidence pages.",
+                    payload={
+                        "agent_name": agent_name,
+                        "round_index": round_index,
+                        "occurrence_count": unchanged_evidence_occurrence_count,
+                        "max_consecutive_unchanged_evidence_rounds": (
+                            max_consecutive_unchanged_evidence_rounds
+                        ),
+                        "evidence_identities": unchanged_evidence_identities,
                     },
                 )
                 await data.async_emit("DONE", done_plans)

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -84,6 +85,73 @@ class SkillContextSource:
     @staticmethod
     def _resource_summary(resource: SkillResourceDescriptor) -> str:
         return f"{resource.kind} resource {resource.path} ({resource.size} bytes)"
+
+    @classmethod
+    def _markdown_sections(
+        cls,
+        path: str,
+        content: str,
+    ) -> tuple[tuple[str, str, str], ...]:
+        lines = content.splitlines(keepends=True)
+        headings: list[tuple[int, str]] = []
+        for index, line in enumerate(lines):
+            match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+            if match is not None:
+                headings.append((index, match.group(1).strip()))
+        sections: list[tuple[str, str, str]] = []
+        if headings and headings[0][0] > 0:
+            preamble = "".join(lines[: headings[0][0]]).strip()
+            if preamble:
+                sections.append((f"{path}#section-0", "Overview", preamble))
+        for ordinal, (start, title) in enumerate(headings, start=1):
+            end = headings[ordinal][0] if ordinal < len(headings) else len(lines)
+            body = "".join(lines[start:end]).strip()
+            if body:
+                sections.append((f"{path}#section-{ordinal}", title, body))
+        return tuple(sections)
+
+    @classmethod
+    def _instruction_sections(
+        cls,
+        package: SkillPackageRevision,
+    ) -> tuple[tuple[str, str, str], ...]:
+        return cls._markdown_sections("SKILL.md", package.instruction_body)
+
+    @classmethod
+    def _lossy_instruction_digest(
+        cls,
+        package: SkillPackageRevision,
+        *,
+        max_chars: int,
+    ) -> tuple[str, tuple[str, ...], tuple[tuple[str, str, str], ...]]:
+        sections = cls._instruction_sections(package)
+        full_ref = cls._source_ref(package, "SKILL.md")
+        section_refs = tuple(cls._source_ref(package, path) for path, _, _ in sections)
+        lines = [
+            f"# {package.name} — lossy task digest",
+            "",
+            (
+                "This digest is an explicitly authorized lossy projection. "
+                "The immutable full Skill remains authoritative at the original ref."
+            ),
+            "",
+            f"Skill: `{package.skill_id}`",
+            f"Revision: `{package.revision_ref}`",
+            f"Description: {package.description or '(not provided)'}",
+            f"Full instructions ref: `{full_ref}`",
+        ]
+        if sections:
+            lines.extend(["", "## Section refs"])
+            lines.extend(
+                f"- {title}: `{cls._source_ref(package, path)}`"
+                for path, title, _ in sections
+            )
+        content = "\n".join(lines).strip()
+        if len(content) > max_chars:
+            marker = "\n\n[outline truncated; use refs from block metadata]"
+            content = content[: max(1, max_chars - len(marker))].rstrip() + marker
+            content = content[:max_chars]
+        return content, (full_ref, *section_refs), sections
 
     @staticmethod
     def _domain_metadata(
@@ -155,6 +223,20 @@ class SkillContextSource:
                     completeness="complete",
                 )
             )
+            for section_path, section_title, section_body in self._instruction_sections(package):
+                candidates.append(
+                    self._candidate(
+                        binding=binding,
+                        package=package,
+                        path=section_path,
+                        role="instruction",
+                        summary=f"Skill instruction section: {section_title}",
+                        estimated_chars=len(section_body),
+                        required=False,
+                        completeness="complete",
+                        metadata={"section_title": section_title},
+                    )
+                )
             index_items = [
                 {
                     "path": resource.path,
@@ -200,6 +282,49 @@ class SkillContextSource:
                         },
                     )
                 )
+                if resource.kind not in {"reference", "example"} or not resource.path.endswith(
+                    ".md"
+                ):
+                    continue
+                raw_sections = resource.metadata.get("markdown_sections", ())
+                if not isinstance(raw_sections, Sequence) or isinstance(
+                    raw_sections,
+                    str | bytes | bytearray,
+                ):
+                    continue
+                for raw_section in raw_sections:
+                    if not isinstance(raw_section, Mapping):
+                        continue
+                    section_path = str(raw_section.get("section_path") or "")
+                    section_title = str(raw_section.get("title") or "")
+                    estimated_chars = int(raw_section.get("estimated_chars") or 0)
+                    if not section_path or not section_title or estimated_chars <= 0:
+                        continue
+                    candidates.append(
+                        self._candidate(
+                            binding=binding,
+                            package=package,
+                            path=section_path,
+                            role=self._resource_role(resource),
+                            summary=(
+                                f"{resource.kind} section: {section_title} "
+                                f"({resource.path})"
+                            ),
+                            estimated_chars=estimated_chars,
+                            required=False,
+                            completeness="complete",
+                            metadata={
+                                "resource_kind": resource.kind,
+                                "parent_resource_path": resource.path,
+                                "section_title": section_title,
+                                "byte_offset": int(raw_section.get("byte_offset") or 0),
+                                "byte_size": int(raw_section.get("byte_size") or 0),
+                                "sha256": resource.sha256,
+                                "size": resource.size,
+                                "media_type": resource.media_type,
+                            },
+                        )
+                    )
         return tuple(candidates[: max(0, int(limit))])
 
     def _resolve_candidate(
@@ -224,7 +349,6 @@ class SkillContextSource:
         max_chars: int,
         representation: str | None = None,
     ) -> ContextBlock:
-        del representation
         binding, package, path = self._resolve_candidate(candidate)
         common = {
             "block_id": self._block_id(package, path),
@@ -238,6 +362,35 @@ class SkillContextSource:
             "refs": (candidate.source_ref,),
         }
         if path == "SKILL.md":
+            if representation == "lossy_digest":
+                content, refs, sections = self._lossy_instruction_digest(
+                    package,
+                    max_chars=max_chars,
+                )
+                return ContextBlock(
+                    **{key: value for key, value in common.items() if key != "refs"},
+                    content=content,
+                    completeness="lossy",
+                    content_chars=len(content),
+                    refs=refs,
+                    metadata=self._domain_metadata(
+                        binding,
+                        package,
+                        path,
+                        trust=package.trust,
+                        representation="lossy_digest",
+                        original_chars=len(package.instruction_body),
+                        omitted_chars=max(0, len(package.instruction_body) - len(content)),
+                        section_refs=[
+                            {
+                                "title": title,
+                                "source_ref": self._source_ref(package, section_path),
+                                "estimated_chars": len(body),
+                            }
+                            for section_path, title, body in sections
+                        ],
+                    ),
+                )
             return ContextBlock(
                 **common,
                 content=package.instruction_body,
@@ -250,6 +403,33 @@ class SkillContextSource:
                     trust=package.trust,
                 ),
             )
+        if path.startswith("SKILL.md#section-"):
+            section = next(
+                (
+                    (section_title, section_body)
+                    for section_path, section_title, section_body in self._instruction_sections(package)
+                    if section_path == path
+                ),
+                None,
+            )
+            if section is None:
+                raise SkillBindingError("Skill instruction section no longer matches the bound revision.")
+            section_title, section_body = section
+            content = section_body[:max_chars]
+            return ContextBlock(
+                **{key: value for key, value in common.items() if key != "refs"},
+                content=content,
+                completeness="truncated" if len(section_body) > max_chars else "complete",
+                content_chars=len(content),
+                refs=(candidate.source_ref, self._source_ref(package, "SKILL.md")),
+                metadata=self._domain_metadata(
+                    binding,
+                    package,
+                    path,
+                    section_title=section_title,
+                    total_chars=len(section_body),
+                ),
+            )
         if path == "resource-index":
             index = candidate.metadata.get("resource_index", ())
             return ContextBlock(
@@ -258,6 +438,54 @@ class SkillContextSource:
                 completeness="complete",
                 content_chars=len(str(index)),
                 metadata=self._domain_metadata(binding, package, path),
+            )
+        resource_section = re.match(r"^(.+\.md)#section-\d+$", path)
+        if resource_section is not None:
+            parent_path = resource_section.group(1)
+            resource = package.resource(parent_path)
+            raw_sections = resource.metadata.get("markdown_sections", ())
+            section = next(
+                (
+                    raw_section
+                    for raw_section in raw_sections
+                    if isinstance(raw_section, Mapping)
+                    and str(raw_section.get("section_path") or "") == path
+                ),
+                None,
+            )
+            if section is None:
+                raise SkillBindingError(
+                    "Skill resource section no longer matches the bound revision."
+                )
+            section_title = str(section.get("title") or "")
+            byte_offset = int(section.get("byte_offset") or 0)
+            byte_size = int(section.get("byte_size") or 0)
+            readback = self.library.read_resource(
+                package.revision_ref,
+                parent_path,
+                max_bytes=max(1, byte_size),
+                offset=byte_offset,
+            )
+            section_body = readback.text.strip()
+            content = section_body[:max_chars]
+            return ContextBlock(
+                **{key: value for key, value in common.items() if key != "refs"},
+                content=content,
+                completeness="truncated" if len(section_body) > max_chars else "complete",
+                content_chars=len(content),
+                refs=(candidate.source_ref, self._source_ref(package, parent_path)),
+                metadata=self._domain_metadata(
+                    binding,
+                    package,
+                    path,
+                    resource_kind=resource.kind,
+                    parent_resource_path=parent_path,
+                    section_title=section_title,
+                    total_chars=int(section.get("estimated_chars") or len(section_body)),
+                    byte_offset=byte_offset,
+                    byte_size=byte_size,
+                    sha256=resource.sha256,
+                ),
             )
         resource = package.resource(path)
         if resource.kind == "script":

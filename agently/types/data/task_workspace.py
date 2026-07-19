@@ -16,11 +16,104 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any, Literal
 from typing_extensions import NotRequired, TypedDict
 
 
 TaskWorkspaceFileOperation = Literal["read", "write", "export"]
+TaskWorkspaceAccessMode = Literal["snapshot", "read_only", "read_write"]
+TaskWorkspaceAccessRootRole = Literal[
+    "workspace",
+    "source",
+    "build",
+    "output",
+    "logs",
+]
+
+
+def _execution_relative_path(value: str, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} path must be a string")
+    normalized = value.strip()
+    path = PurePosixPath(normalized)
+    if (
+        not normalized
+        or "\\" in normalized
+        or "\x00" in normalized
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ValueError(f"{field_name} path must be normalized and relative")
+    if path.parts[0].casefold() == ".agently":
+        raise ValueError(f"{field_name} path must not address private TaskWorkspace data")
+    return path.as_posix()
+
+
+@dataclass(frozen=True)
+class TaskWorkspaceAccessRequirement:
+    mode: TaskWorkspaceAccessMode = "snapshot"
+    include_workspace_root: bool = False
+    input_paths: tuple[str, ...] = ()
+    output_paths: tuple[str, ...] = ()
+    retain_source: bool = False
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"snapshot", "read_only", "read_write"}:
+            raise ValueError(f"unsupported TaskWorkspace access mode: {self.mode!r}")
+        input_paths = tuple(
+            _execution_relative_path(path, field_name="input") for path in self.input_paths
+        )
+        output_paths = tuple(
+            _execution_relative_path(path, field_name="output") for path in self.output_paths
+        )
+        if len({path.casefold() for path in input_paths}) != len(input_paths):
+            raise ValueError("input path contains a duplicate or case collision")
+        if len({path.casefold() for path in output_paths}) != len(output_paths):
+            raise ValueError("output path contains a duplicate or case collision")
+        object.__setattr__(self, "input_paths", input_paths)
+        object.__setattr__(self, "output_paths", output_paths)
+
+
+@dataclass(frozen=True)
+class TaskWorkspaceAccessRoot:
+    role: TaskWorkspaceAccessRootRole
+    host_path: str
+    access_mode: Literal["read_only", "read_write"]
+
+
+@dataclass(frozen=True)
+class TaskWorkspaceAccessGrant:
+    grant_id: str
+    task_workspace_id: str
+    execution_id: str
+    action_call_id: str
+    mode: TaskWorkspaceAccessMode
+    execution_area: str
+    roots: tuple[TaskWorkspaceAccessRoot, ...]
+    issued_at: str
+
+
+@dataclass(frozen=True)
+class TaskWorkspaceExecutionManifestFile:
+    path: str
+    host_path: str
+    sha256: str
+    bytes: int
+    role: str
+
+
+@dataclass(frozen=True)
+class TaskWorkspaceExecutionManifest:
+    grant_id: str
+    task_workspace_id: str
+    execution_id: str
+    action_call_id: str
+    bundle_id: str
+    bundle_digest: str
+    files: tuple[TaskWorkspaceExecutionManifestFile, ...]
+    entrypoint: str
+    expected_outputs: tuple[str, ...]
 
 
 class TaskWorkspaceDiagnostic(TypedDict):
@@ -256,6 +349,11 @@ class TaskWorkspaceFileWrite(_ResultMapping):
 
 
 __all__ = [
+    "TaskWorkspaceAccessGrant",
+    "TaskWorkspaceAccessMode",
+    "TaskWorkspaceAccessRequirement",
+    "TaskWorkspaceAccessRoot",
+    "TaskWorkspaceAccessRootRole",
     "TaskWorkspaceDiagnostic",
     "TaskWorkspaceExportResult",
     "TaskWorkspaceFileInfo",
@@ -263,6 +361,8 @@ __all__ = [
     "TaskWorkspaceFileRead",
     "TaskWorkspaceFileRef",
     "TaskWorkspaceFileWrite",
+    "TaskWorkspaceExecutionManifest",
+    "TaskWorkspaceExecutionManifestFile",
     "TaskWorkspaceReadResult",
     "TaskWorkspaceRetentionDiagnostic",
     "TaskWorkspaceRetentionResult",

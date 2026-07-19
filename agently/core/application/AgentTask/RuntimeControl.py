@@ -544,6 +544,22 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             return configured
         return _AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS
 
+    def _explicit_task_action_loop_max_rounds(self) -> tuple[bool, int | None]:
+        configured: Any = None
+        supplied = False
+        if "action_loop_max_rounds" in self.options:
+            supplied = True
+            configured = self.options.get("action_loop_max_rounds")
+        agent_task_options = self.options.get("agent_task")
+        if isinstance(agent_task_options, dict) and "action_loop_max_rounds" in agent_task_options:
+            supplied = True
+            configured = agent_task_options.get("action_loop_max_rounds")
+        if not supplied or configured is None:
+            return supplied, None
+        if isinstance(configured, bool) or not isinstance(configured, int) or configured < 0:
+            return True, _AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS
+        return True, configured
+
     def _apply_child_execution_action_loop_guard(
         self,
         execution: Any,
@@ -571,9 +587,60 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             set_setting("tool.loop.enabled", False)
         return execution
 
+    def _apply_taskboard_action_loop_round_dispatch_policy(self, execution: Any) -> Any:
+        """Preserve value dependencies whenever a TaskBoard child enters ActionLoop."""
+
+        request = getattr(execution, "request", None)
+        settings = getattr(request, "settings", None)
+        set_setting = getattr(settings, "set", None)
+        if callable(set_setting):
+            # TaskBoard owns card-level orchestration but cannot prove that calls
+            # using different Action IDs are value-independent. Keep same-Action
+            # fan-out parallel while requiring a fresh planning round before a
+            # different Action capability is dispatched.
+            set_setting("action.loop.round_dispatch_policy", "single_action_id_cohort")
+            set_setting("tool.loop.round_dispatch_policy", "single_action_id_cohort")
+            supplied, max_rounds = self._explicit_task_action_loop_max_rounds()
+            # TaskBoard cards own an adaptive work unit. The generic child-loop
+            # convenience guard must not cut a search -> selected read ->
+            # synthesis value dependency. Task and no-progress deadlines remain
+            # the safety owner unless the caller explicitly supplies a bound.
+            set_setting("action.loop.max_rounds", max_rounds if supplied else None)
+            set_setting("tool.loop.max_rounds", max_rounds if supplied else None)
+        return execution
+
+    def _apply_taskboard_card_action_loop_policy(self, execution: Any, card: Any) -> Any:
+        """Keep exact batches bounded while allowing value-dependent Action backedges."""
+
+        self._apply_taskboard_action_loop_round_dispatch_policy(execution)
+        required_action_ids = self._taskboard_card_required_action_ids(card)
+        if len(required_action_ids) <= 1:
+            return self._apply_child_execution_action_loop_guard(execution, max_rounds=1)
+        supplied, max_rounds = self._explicit_task_action_loop_max_rounds()
+        request = getattr(execution, "request", None)
+        settings = getattr(request, "settings", None)
+        set_setting = getattr(settings, "set", None)
+        if not callable(set_setting):
+            return execution
+        if not supplied:
+            # A dependency-capable card may need search -> selected read ->
+            # validation. Task/no-progress deadlines remain the safety owner;
+            # the generic two-round convenience default must not cut the data
+            # dependency simply because several calls share one card.
+            set_setting("action.loop.max_rounds", None)
+            set_setting("tool.loop.max_rounds", None)
+            return execution
+        set_setting("action.loop.max_rounds", max_rounds)
+        set_setting("tool.loop.max_rounds", max_rounds)
+        return execution
+
     def _child_execution_options(self) -> dict[str, Any]:
         options = dict(self.options)
         options.pop("request_timeout_seconds", None)
+        # Every nested model consumer performs its own intent-bound TaskContext
+        # read. Preserve the AgentTask's declared disclosure budget and
+        # required-overflow policy across that execution boundary.
+        options["context_budget"] = dict(self.context_budget)
         agent_task_options = options.get("agent_task")
         if isinstance(agent_task_options, dict):
             filtered_agent_task_options = dict(agent_task_options)

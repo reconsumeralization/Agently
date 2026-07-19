@@ -11,7 +11,7 @@ from agently.core.application.SkillLibrary import (
     SkillLibrary,
 )
 from agently.core.context import ContextSelection, TaskContext
-from agently.types.data import ContextCandidate, ContextConsumer, ContextReadIntent
+from agently.types.data import ContextBudget, ContextCandidate, ContextConsumer, ContextReadIntent
 
 
 def _write_skill(root: Path, *, body: str = "Always verify the report before delivery.") -> Path:
@@ -57,6 +57,22 @@ class SelectRefs:
 class FailIfSelected:
     async def async_select(self, **_kwargs) -> ContextSelection:
         raise AssertionError("A Skill without optional resources needs no semantic selection.")
+
+
+class SelectSearchSection:
+    async def async_select(
+        self,
+        *,
+        candidates: list[ContextCandidate] | tuple[ContextCandidate, ...],
+        **_kwargs,
+    ) -> ContextSelection:
+        return ContextSelection(
+            selected_keys=tuple(
+                item.block_key
+                for item in candidates
+                if item.metadata.get("section_title") == "Search Action"
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -151,6 +167,126 @@ async def test_skill_core_is_always_delivered_and_reference_body_is_progressive(
     )
     assert reference.content == "Check accuracy, citations, and completeness."
     assert reference.completeness == "complete"
+
+
+@pytest.mark.asyncio
+async def test_oversized_markdown_reference_discloses_selected_section_within_budget(
+    tmp_path: Path,
+) -> None:
+    skill_root = _write_skill(tmp_path / "sectioned-skill")
+    reference = skill_root / "references" / "runtime.md"
+    reference.write_text(
+        "# Runtime Reference\n\n"
+        + ("General background stays cold.\n" * 300)
+        + "\n## Search Action\n\n"
+        + "Use `from agently.builtins.actions import Search` and configure timeout plus retry.\n"
+        + "\n## Other Capability\n\nUnrelated details.\n",
+        encoding="utf-8",
+    )
+    library = SkillLibrary(tmp_path / "library")
+    package = library.install(skill_root, trust="trusted")
+    source = SkillContextSource(
+        library,
+        bindings=(SkillBinding.create(package, task_id="section-task", mode="required"),),
+    )
+    candidates = await source.async_list_candidates(
+        ContextReadIntent(query="Use the exact Search Action API"),
+        limit=100,
+    )
+    whole = next(
+        item
+        for item in candidates
+        if item.metadata.get("resource_path") == "references/runtime.md"
+    )
+    search_section = next(
+        item
+        for item in candidates
+        if item.metadata.get("section_title") == "Search Action"
+    )
+
+    assert whole.estimated_chars > 6000
+    assert search_section.estimated_chars < 1000
+    context = TaskContext("section-task")
+    context.attach(source, required=True)
+    delivered = await context.reader(
+        consumer="planner",
+        budget=ContextBudget(max_chars=2500, max_blocks=8, max_block_chars=1000),
+        semantic_selector=SelectSearchSection(),
+    ).async_read(
+        ContextReadIntent(
+            query="Use the exact Search Action API",
+            metadata={"required_overflow": "lossy_digest"},
+        )
+    )
+
+    selected = next(
+        block for block in delivered.blocks if block.metadata.get("section_title") == "Search Action"
+    )
+    assert "from agently.builtins.actions import Search" in selected.content
+    assert selected.completeness == "complete"
+    assert selected.refs == (search_section.source_ref, whole.source_ref)
+
+
+@pytest.mark.asyncio
+async def test_oversized_skill_can_build_explicit_lossy_outline_with_section_refs(
+    tmp_path: Path,
+) -> None:
+    body = (
+        "This preamble defines the protected operating boundary.\n\n"
+        "## Planning\n\nPlan with exact contracts and trusted keys.\n\n"
+        "## Execution\n\nExecute through ordinary Actions and preserve evidence.\n\n"
+        "## Verification\n\nRead artifacts before judging completion.\n"
+        + ("Additional detail that stays cold.\n" * 400)
+    )
+    library = SkillLibrary(tmp_path / "library")
+    package = library.install(
+        _write_skill(tmp_path / "large-skill", body=body),
+        trust="trusted",
+    )
+    source = SkillContextSource(
+        library,
+        bindings=(SkillBinding.create(package, task_id="large-task", mode="required"),),
+    )
+    candidates = await source.async_list_candidates(
+        ContextReadIntent(query="Execute and verify"),
+        limit=100,
+    )
+    core = next(item for item in candidates if item.metadata["resource_path"] == "SKILL.md")
+    sections = [
+        item for item in candidates if str(item.metadata["resource_path"]).startswith("SKILL.md#section-")
+    ]
+
+    digest = await source.async_read(
+        core,
+        max_chars=900,
+        representation="lossy_digest",
+    )
+
+    assert digest.completeness == "lossy"
+    assert 0 < digest.content_chars <= 900
+    assert digest.metadata["representation"] == "lossy_digest"
+    assert digest.metadata["original_chars"] == len(package.instruction_body)
+    assert {item.metadata["section_title"] for item in sections} >= {
+        "Planning",
+        "Execution",
+        "Verification",
+    }
+    assert set(item.source_ref for item in sections).issubset(set(digest.refs))
+
+    context = TaskContext("large-task")
+    context.attach(source, required=True)
+    delivered = await context.reader(
+        consumer="worker",
+        budget=ContextBudget(max_chars=900, max_blocks=16, max_block_chars=900),
+    ).async_read(
+        ContextReadIntent(
+            query="Execute and verify",
+            roles=("instruction",),
+            metadata={"required_overflow": "lossy_digest"},
+        )
+    )
+    assert delivered.blocks[0].completeness == "lossy"
+    assert not any(item.required for item in delivered.omissions)
 
 
 @pytest.mark.asyncio

@@ -14,14 +14,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agently.types.data import (
     ActionPolicy,
     ExecutionResourcePolicy,
+    ExecutionResourceProviderCandidate,
     ExecutionResourceRequirement,
 )
+from agently.types.data.code_execution import required_code_execution_isolation
 from agently.utils import DataFormatter, LazyImport
 from agently.utils.MCP import normalize_mcp_transport
 
@@ -148,6 +151,46 @@ class ActionResourceRegistrar:
             requirement["approval_required"] = True
         return requirement
 
+    def _normalize_code_execution_providers(
+        self,
+        providers: Sequence[str | Mapping[str, Any]] | None,
+    ) -> list[ExecutionResourceProviderCandidate]:
+        configured = (
+            providers
+            if providers is not None
+            else self._action.settings.get("code_execution.providers", None)
+        )
+        if configured is None:
+            configured = ["docker"]
+        if (
+            not isinstance(configured, Sequence)
+            or isinstance(configured, str | bytes | bytearray)
+            or not configured
+        ):
+            raise ValueError("code_execution providers must be a non-empty ordered sequence.")
+        normalized: list[ExecutionResourceProviderCandidate] = []
+        for index, item in enumerate(configured):
+            if isinstance(item, str):
+                provider_id = item.strip()
+                config: dict[str, Any] = {}
+            elif isinstance(item, Mapping):
+                provider_id = str(item.get("provider_id", "")).strip()
+                raw_config = item.get("config", {})
+                if not isinstance(raw_config, Mapping):
+                    raise TypeError(f"providers[{index}].config must be a mapping.")
+                config = dict(raw_config)
+            else:
+                raise TypeError(f"providers[{index}] must be a provider id or descriptor.")
+            if not provider_id:
+                raise ValueError(f"providers[{index}].provider_id is required.")
+            normalized.append(
+                cast(
+                    ExecutionResourceProviderCandidate,
+                    {"provider_id": provider_id, "config": config},
+                )
+            )
+        return normalized
+
     @staticmethod
     def _format_bash_sandbox_desc(
         desc: str,
@@ -168,6 +211,8 @@ class ActionResourceRegistrar:
             else "no TaskWorkspace root configured"
         )
         policy_desc = (
+            "Pass exactly one command: use a string, an argv token list, or a one-item list "
+            "containing the complete command; Agently parses it to argv and never invokes a shell. "
             f"Allowed command prefixes: {command_text}. "
             f"Allowed working directory roots: {roots_text}. "
             f"Timeout: {timeout} seconds."
@@ -277,63 +322,39 @@ class ActionResourceRegistrar:
         image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
         timeout: int = 60,
     ):
-        action = self._action
         sandbox_mode = self._normalize_code_sandbox(sandbox)
-        if sandbox_mode != "trusted_local" and (
-            preset_objects is not None or base_vars is not None or allowed_return_types is not None
-        ):
+        if preset_objects is not None or base_vars is not None or allowed_return_types is not None:
             raise ValueError(
-                "preset_objects, base_vars, and allowed_return_types require sandbox='trusted_local'."
+                "register_python_sandbox_action() no longer supports in-process preset_objects, "
+                "base_vars, or allowed_return_types. Use the Workspace-bound CodeExecution contract."
             )
-        execution_resources: list[ExecutionResourceRequirement]
+        providers: list[str] | None = None
+        unsafe_fallback = False
+        isolation: Literal["required", "preferred", "none"] = "required"
         if sandbox_mode == "trusted_local":
-            execution_resources = cast(list[ExecutionResourceRequirement], [
-                {
-                    "requirement_id": f"python:{ action_id }",
-                    "kind": "python",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "preset_objects": preset_objects,
-                        "base_vars": base_vars,
-                        "allowed_return_types": allowed_return_types,
-                    },
-                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
-                }
-            ])
-        else:
-            execution_resources = [
-                self._docker_runtime_requirement(
-                    action_id=action_id,
-                    language="python",
-                    image=docker_image,
-                    timeout=timeout,
-                    default_policy=default_policy,
-                    docker_binary=docker_binary,
-                    docker_default_args=docker_default_args,
-                    dependency_policy=dependency_policy,
-                    provisioning_profile=provisioning_profile,
-                    image_pull_policy=image_pull_policy,
-                )
-            ]
-        action.register_action(
+            providers = ["trusted_local"]
+            unsafe_fallback = True
+            isolation = "none"
+        elif sandbox_mode == "docker":
+            providers = ["docker"]
+        return self.register_code_runtime_action(
+            language="python",
             action_id=action_id,
             desc=desc,
-            kwargs={"python_code": (str, "Python code to execute in the sandbox.")},
-            executor=action._create_executor(
-                "PythonSandboxActionExecutor",
-                preset_objects=preset_objects,
-                base_vars=base_vars,
-                allowed_return_types=allowed_return_types,
-            ),
             tags=tags,
             default_policy=default_policy,
-            side_effect_level="exec",
-            sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_resources=execution_resources,
+            providers=providers,
+            unsafe_fallback=unsafe_fallback,
+            isolation=isolation,
+            docker_image=docker_image,
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
+            timeout=timeout,
         )
-        return action
 
     def register_bash_sandbox_action(
         self,
@@ -414,7 +435,10 @@ class ActionResourceRegistrar:
             action_id=action_id,
             desc=model_desc,
             kwargs={
-                "cmd": ("str | list[str]", "Command to run inside the sandbox."),
+                "cmd": (
+                    "str | list[str]",
+                    "Exactly one command: a command string, argv tokens, or a one-item list containing the complete command.",
+                ),
                 "workdir": ("str | None", "Working directory inside allowed roots."),
             },
             executor=action._create_executor(
@@ -456,59 +480,39 @@ class ActionResourceRegistrar:
         provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
         image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
     ):
-        action = self._action
+        if node_binary != "node" or cwd is not None or env is not None:
+            raise ValueError(
+                "register_nodejs_action() no longer accepts provider-owned node_binary, cwd, or env "
+                "settings. Use source files, arguments, TaskWorkspace access, and provider config."
+            )
         sandbox_mode = self._normalize_code_sandbox(sandbox)
+        providers: list[str] | None = None
+        unsafe_fallback = False
+        isolation: Literal["required", "preferred", "none"] = "required"
         if sandbox_mode == "trusted_local":
-            execution_resources = cast(list[ExecutionResourceRequirement], [
-                {
-                    "requirement_id": f"node:{ action_id }",
-                    "kind": "node",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "node_binary": node_binary,
-                        "cwd": cwd,
-                        "timeout": timeout,
-                        "env": env,
-                    },
-                    "policy": cast(ExecutionResourcePolicy, default_policy or {}),
-                }
-            ])
-        else:
-            execution_resources = [
-                self._docker_runtime_requirement(
-                    action_id=action_id,
-                    language="nodejs",
-                    image=docker_image,
-                    timeout=timeout,
-                    default_policy=default_policy,
-                    docker_binary=docker_binary,
-                    docker_default_args=docker_default_args,
-                    dependency_policy=dependency_policy,
-                    provisioning_profile=provisioning_profile,
-                    image_pull_policy=image_pull_policy,
-                    runtime_profile={
-                        "cwd": cwd,
-                        "env": env,
-                    },
-                )
-            ]
-        action.register_action(
+            providers = ["trusted_local"]
+            unsafe_fallback = True
+            isolation = "none"
+        elif sandbox_mode == "docker":
+            providers = ["docker"]
+        return self.register_code_runtime_action(
+            language="nodejs",
             action_id=action_id,
             desc=desc,
-            kwargs={
-                "js_code": (str, "JavaScript code to execute with Node.js."),
-                "args": ("list[str]", "Optional command-line arguments."),
-            },
-            executor=action._create_executor("NodeJSActionExecutor", timeout=timeout),
             tags=tags,
             default_policy=default_policy,
-            side_effect_level="exec",
-            sandbox_required=True,
             expose_to_model=expose_to_model,
-            execution_resources=execution_resources,
+            providers=providers,
+            unsafe_fallback=unsafe_fallback,
+            isolation=isolation,
+            docker_image=docker_image,
+            docker_binary=docker_binary,
+            docker_default_args=docker_default_args,
+            dependency_policy=dependency_policy,
+            provisioning_profile=provisioning_profile,
+            image_pull_policy=image_pull_policy,
+            timeout=timeout,
         )
-        return action
 
     def register_code_runtime_action(
         self,
@@ -519,6 +523,9 @@ class ActionResourceRegistrar:
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
+        providers: Sequence[str | Mapping[str, Any]] | None = None,
+        unsafe_fallback: bool = False,
+        isolation: Literal["required", "preferred", "none"] = "required",
         docker_image: str | None = None,
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -527,34 +534,135 @@ class ActionResourceRegistrar:
         image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
         timeout: int = 60,
     ):
-        from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
-            get_code_runtime_profile,
-        )
+        from agently.builtins.plugins.CodeRuntimeAdapter import get_code_runtime_adapter
 
         action = self._action
-        profile = get_code_runtime_profile(language, image=docker_image)
-        canonical_language = profile["language"]
+        adapter = get_code_runtime_adapter(language)
+        canonical_language = adapter.language_id
         resolved_action_id = action_id or f"run_{ canonical_language }_code"
         resolved_desc = desc or (
-            f"Run { canonical_language } code inside a Docker-backed code runtime sandbox. "
-            "The runtime image and dependency preparation are controlled by host policy; "
-            "do not include package-manager or compiler commands unless the action schema explicitly asks for source files."
+            f"Run { canonical_language } code through a Workspace-bound execution provider. "
+            "Provider selection, dependency preparation and isolation are controlled by host policy; "
+            "the action accepts source files and arguments, never raw package-manager or compiler commands."
         )
+        if isolation not in {"required", "preferred", "none"}:
+            raise ValueError("isolation must be one of: 'required', 'preferred', 'none'.")
+        if unsafe_fallback and isolation == "required":
+            raise ValueError(
+                "unsafe_fallback cannot satisfy isolation='required'; choose isolation='preferred' or 'none' explicitly."
+            )
+        normalized_provisioning_profile = self._normalize_provisioning_profile(provisioning_profile)
+        normalized_dependency_policy = (
+            self._normalize_dependency_policy(dependency_policy)
+            if dependency_policy is not None
+            else {"mode": "install"}
+            if normalized_provisioning_profile in {"developer", "ci"}
+            else {"mode": "deny"}
+        )
+        normalized_image_pull_policy = self._normalize_image_pull_policy(
+            image_pull_policy,
+            provisioning_profile=normalized_provisioning_profile,
+        )
+        runtime_profile: dict[str, Any] = {
+            "language": canonical_language,
+            "provisioning_profile": normalized_provisioning_profile,
+            "image_pull_policy": normalized_image_pull_policy,
+            "network_mode": (
+                "bridge"
+                if normalized_provisioning_profile in {"developer", "ci"}
+                and normalized_dependency_policy.get("mode") == "install"
+                else "disabled"
+            ),
+            "dependency_policy": normalized_dependency_policy,
+        }
+        if docker_image:
+            runtime_profile["image"] = str(docker_image)
+        provider_candidates = self._normalize_code_execution_providers(providers)
+        has_unsafe_candidate = False
+        for candidate in provider_candidates:
+            candidate_config = dict(candidate.get("config", {}))
+            if candidate["provider_id"] == "docker":
+                candidate_runtime_profile = candidate_config.get("runtime_profile", {})
+                if not isinstance(candidate_runtime_profile, dict):
+                    raise TypeError("Docker candidate runtime_profile must be a mapping.")
+                candidate["config"] = {
+                    "docker_binary": docker_binary,
+                    "timeout": timeout,
+                    "default_args": list(docker_default_args or []),
+                    **candidate_config,
+                    "runtime_profile": {
+                        **runtime_profile,
+                        **candidate_runtime_profile,
+                    },
+                }
+            elif candidate["provider_id"] == "trusted_local":
+                has_unsafe_candidate = True
+                if unsafe_fallback:
+                    candidate_config["allow_unsafe_local"] = True
+                candidate["config"] = candidate_config
+        if unsafe_fallback and not has_unsafe_candidate:
+            provider_candidates.append(
+                cast(
+                    ExecutionResourceProviderCandidate,
+                    {
+                        "provider_id": "trusted_local",
+                        "config": {"allow_unsafe_local": True},
+                    },
+                )
+            )
+        required_capabilities: dict[str, Any] = {
+            "language": canonical_language,
+            "toolchains": {
+                item.tool: {
+                    **(
+                        {"minimum_version": item.minimum_version}
+                        if item.minimum_version is not None
+                        else {}
+                    ),
+                    **(
+                        {"exact_version": item.exact_version}
+                        if item.exact_version is not None
+                        else {}
+                    ),
+                    **(
+                        {"required": True}
+                        if item.minimum_version is None and item.exact_version is None
+                        else {}
+                    ),
+                }
+                for item in adapter.toolchain_requirements()
+            },
+            "workspace_access_mode": "snapshot",
+        }
+        preferred_capabilities: dict[str, Any] = {}
+        if isolation == "required":
+            required_capabilities["isolation"] = required_code_execution_isolation()
+        elif isolation == "preferred":
+            preferred_capabilities["isolation"] = required_code_execution_isolation()
         execution_resources = [
-            self._docker_runtime_requirement(
-                action_id=resolved_action_id,
-                language=canonical_language,
-                image=str(profile["image"]),
-                timeout=timeout,
-                default_policy=default_policy,
-                docker_binary=docker_binary,
-                docker_default_args=docker_default_args,
-                dependency_policy=dependency_policy,
-                provisioning_profile=provisioning_profile,
-                image_pull_policy=image_pull_policy,
-                runtime_profile={
-                    "source_file": profile["source_file"],
-                    "entrypoint": profile["entrypoint"],
+            cast(
+                ExecutionResourceRequirement,
+                {
+                    "requirement_id": f"code_execution:{resolved_action_id}",
+                    "kind": "code_execution",
+                    "scope": "action_call",
+                    "resource_key": resolved_action_id,
+                    "provider_candidates": provider_candidates,
+                    "required_capabilities": required_capabilities,
+                    "preferred_capabilities": preferred_capabilities,
+                    "workspace_access": {"mode": "snapshot"},
+                    "config": {
+                        "dependency_policy": normalized_dependency_policy,
+                    },
+                    "policy": self._docker_policy(default_policy, timeout=timeout),
+                    "approval_required": (
+                        normalized_dependency_policy.get("mode") == "request"
+                        or normalized_image_pull_policy == "request"
+                    ),
+                    "meta": {
+                        "isolation_preference": isolation,
+                        "unsafe_fallback_enabled": unsafe_fallback,
+                    },
                 },
             )
         ]
@@ -564,17 +672,25 @@ class ActionResourceRegistrar:
             kwargs={
                 "source_code": (str, "Primary source code to run in the configured language runtime."),
                 "files": ("dict[str, str] | None", "Optional additional source or dependency manifest files."),
+                "entrypoint": (
+                    "str | None",
+                    "Optional relative entrypoint inside the immutable source bundle.",
+                ),
                 "args": ("list[str]", "Optional command-line arguments passed to the program."),
+                "expected_outputs": (
+                    "list[str]",
+                    "Optional bounded relative output paths to read back through TaskWorkspace.",
+                ),
             },
             executor=action._create_executor(
-                "CodeRuntimeActionExecutor",
+                "CodeExecutionActionExecutor",
                 language=canonical_language,
                 timeout=timeout,
             ),
             tags=tags,
             default_policy=default_policy,
             side_effect_level="exec",
-            sandbox_required=True,
+            sandbox_required=isolation == "required",
             expose_to_model=expose_to_model,
             execution_resources=execution_resources,
         )

@@ -87,6 +87,45 @@ def _package_files(root: Path) -> list[Path]:
     return files
 
 
+def _markdown_section_index(path: str, data: bytes) -> list[dict[str, Any]]:
+    lines = data.splitlines(keepends=True)
+    headings: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        text = line.decode("utf-8", errors="replace")
+        match = re.match(r"^#{1,6}\s+(.+?)\s*$", text)
+        if match is not None:
+            headings.append((index, match.group(1).strip()))
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    sections: list[dict[str, Any]] = []
+
+    def append_section(ordinal: int, title: str, start: int, end: int) -> None:
+        section_data = b"".join(lines[start:end])
+        content = section_data.decode("utf-8", errors="replace").strip()
+        if not content:
+            return
+        sections.append(
+            {
+                "section_path": f"{path}#section-{ordinal}",
+                "title": title,
+                "byte_offset": offsets[start],
+                "byte_size": offsets[end] - offsets[start],
+                "estimated_chars": len(content),
+            }
+        )
+
+    next_ordinal = 0
+    if headings and headings[0][0] > 0:
+        append_section(0, "Overview", 0, headings[0][0])
+        next_ordinal = 1
+    for heading_index, (start, title) in enumerate(headings):
+        ordinal = heading_index + 1 if next_ordinal == 0 else heading_index + next_ordinal
+        end = headings[heading_index + 1][0] if heading_index + 1 < len(headings) else len(lines)
+        append_section(ordinal, title, start, end)
+    return sections
+
+
 def parse_skill_package(source: str | Path) -> ParsedSkillPackage:
     root = Path(source).expanduser().resolve()
     skill_file = root / "SKILL.md"
@@ -117,6 +156,9 @@ def parse_skill_package(source: str | Path) -> ParsedSkillPackage:
         package_digest.update(len(data).to_bytes(8, "big"))
         package_digest.update(data)
         kind = _resource_kind(relative)
+        metadata: dict[str, Any] = {}
+        if kind in {"reference", "example"} and relative.endswith(".md"):
+            metadata["markdown_sections"] = _markdown_section_index(relative, data)
         resources.append(
             SkillResourceDescriptor(
                 path=relative,
@@ -125,6 +167,7 @@ def parse_skill_package(source: str | Path) -> ParsedSkillPackage:
                 size=len(data),
                 media_type=mimetypes.guess_type(relative)[0],
                 executable=kind == "script",
+                metadata=metadata,
             )
         )
     return ParsedSkillPackage(

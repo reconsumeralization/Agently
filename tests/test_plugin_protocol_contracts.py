@@ -7,12 +7,10 @@ from pathlib import Path
 from agently.builtins.plugins.ActionExecutor import (
     BashSandboxActionExecutor,
     BrowseActionExecutor,
-    CodeRuntimeActionExecutor,
+    CodeExecutionActionExecutor,
     DockerActionExecutor,
     LocalFunctionActionExecutor,
     MCPActionExecutor,
-    NodeJSActionExecutor,
-    PythonSandboxActionExecutor,
     SearchActionExecutor,
     SQLiteActionExecutor,
 )
@@ -24,9 +22,8 @@ from agently.builtins.plugins.ExecutionResourceProvider import (
     BrowserExecutionResourceProvider,
     DockerExecutionResourceProvider,
     MCPExecutionResourceProvider,
-    NodeExecutionResourceProvider,
-    PythonExecutionResourceProvider,
     SQLiteExecutionResourceProvider,
+    TrustedLocalExecutionResourceProvider,
 )
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import AnthropicCompatible
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
@@ -56,14 +53,14 @@ def test_builtin_execution_resource_providers_match_protocol():
         BrowserExecutionResourceProvider(),
         DockerExecutionResourceProvider(),
         MCPExecutionResourceProvider(),
-        NodeExecutionResourceProvider(),
-        PythonExecutionResourceProvider(),
         SQLiteExecutionResourceProvider(),
+        TrustedLocalExecutionResourceProvider(),
     ]
 
     for provider in providers:
         assert isinstance(provider, ExecutionResourceProvider)
-        assert provider.kind
+        assert provider.provider_id
+        assert provider.supported_kinds
         for method_name in _method_names(ExecutionResourceProvider):
             assert callable(getattr(provider, method_name))
 
@@ -80,12 +77,10 @@ def test_builtin_action_executors_match_protocol():
     executors = [
         LocalFunctionActionExecutor(lambda: None),
         MCPActionExecutor(action_id="protocol_mcp", transport={"type": "direct", "tools": []}),
-        PythonSandboxActionExecutor(),
         BashSandboxActionExecutor(timeout=1),
         SearchActionExecutor(search=FakeSearch(), method_name="search"),
         BrowseActionExecutor(browse=FakeBrowse()),
-        NodeJSActionExecutor(timeout=1),
-        CodeRuntimeActionExecutor(language="python", timeout=1),
+        CodeExecutionActionExecutor(language="python", timeout=1),
         DockerActionExecutor(timeout=1),
         SQLiteActionExecutor(),
     ]

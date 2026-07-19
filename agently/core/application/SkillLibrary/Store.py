@@ -71,6 +71,7 @@ class SkillPackageStore:
         scope: str,
         trust: str,
         source: str,
+        source_provenance: dict[str, Any] | None = None,
     ) -> SkillPackageRevision:
         canonical_ref = f"skill:{parsed.skill_id}"
         revision_root = (
@@ -99,6 +100,7 @@ class SkillPackageStore:
                 "scope": scope,
                 "trust": trust,
                 "source": source,
+                "source_provenance": dict(source_provenance or {}),
                 "installed_path": str(revision_root),
                 "instruction_body": parsed.instruction_body,
                 "frontmatter": parsed.frontmatter,
@@ -204,6 +206,7 @@ class SkillPackageStore:
             failed_skills=tuple(
                 dict(item) for item in failures or () if isinstance(item, dict)
             ),
+            source_provenance=_mapping_or_empty(record.get("source_provenance")),
         )
 
     def list_pack_ids(self) -> list[str]:
@@ -264,6 +267,7 @@ class SkillPackageStore:
             instruction_body=str(value.get("instruction_body") or ""),
             frontmatter=_mapping_or_empty(value.get("frontmatter")),
             resources=resources,
+            source_provenance=_mapping_or_empty(value.get("source_provenance")),
         )
 
 

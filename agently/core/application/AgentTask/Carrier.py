@@ -15,10 +15,94 @@
 
 from __future__ import annotations
 
+from agently.types.data import RunContext
+
 from .TaskShared import *
 
 
 class AgentTaskCarrierMixin(AgentTaskMixinBase):
+    def _bounded_action_result_refs(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Project only trusted cold-reference identities across a work-unit boundary."""
+
+        artifact_refs: list[dict[str, Any]] = []
+        file_refs: list[dict[str, Any]] = []
+        artifact_seen: set[tuple[str, str, str]] = set()
+        file_seen: set[tuple[str, str, str]] = set()
+        for record in records:
+            raw_artifact_refs = record.get("artifact_refs")
+            if isinstance(raw_artifact_refs, Sequence) and not isinstance(
+                raw_artifact_refs, str | bytes | bytearray
+            ):
+                for raw_ref in raw_artifact_refs:
+                    if not isinstance(raw_ref, Mapping):
+                        continue
+                    ref = dict(DataFormatter.sanitize(raw_ref))
+                    selection_key = str(ref.get("selection_key") or "").strip()
+                    if not selection_key:
+                        continue
+                    ref.setdefault("owner", "action_artifact")
+                    ref.setdefault("locator", selection_key)
+                    content_version = str(
+                        ref.get("content_version") or ref.get("sha256") or ""
+                    ).strip()
+                    if not content_version:
+                        manager = getattr(getattr(self.agent, "action", None), "_artifact_manager", None)
+                        get_artifact_id = getattr(manager, "get_artifact_id_for_selection", None)
+                        get_artifact = getattr(manager, "get_artifact", None)
+                        artifact_id = (
+                            get_artifact_id(selection_key)
+                            if callable(get_artifact_id)
+                            else None
+                        )
+                        artifact = get_artifact(artifact_id) if artifact_id and callable(get_artifact) else None
+                        if isinstance(artifact, Mapping):
+                            content_version = str(artifact.get("sha256") or "").strip()
+                    if content_version:
+                        ref["content_version"] = content_version
+                    key = (
+                        str(ref.get("owner") or ""),
+                        str(ref.get("locator") or ""),
+                        content_version,
+                    )
+                    if key in artifact_seen:
+                        continue
+                    artifact_seen.add(key)
+                    artifact_refs.append(ref)
+            raw_file_refs = record.get("file_refs")
+            if isinstance(raw_file_refs, Sequence) and not isinstance(
+                raw_file_refs, str | bytes | bytearray
+            ):
+                for raw_ref in raw_file_refs:
+                    if not isinstance(raw_ref, Mapping):
+                        continue
+                    ref = dict(DataFormatter.sanitize(raw_ref))
+                    path = str(ref.get("path") or "").strip()
+                    if not path:
+                        continue
+                    ref.setdefault("owner", "task_workspace")
+                    ref.setdefault("locator", path)
+                    content_version = str(
+                        ref.get("content_version")
+                        or ref.get("content_version_id")
+                        or ref.get("sha256")
+                        or ""
+                    ).strip()
+                    if content_version:
+                        ref["content_version"] = content_version
+                    key = (
+                        str(ref.get("owner") or ""),
+                        str(ref.get("locator") or ""),
+                        content_version,
+                    )
+                    if key in file_seen:
+                        continue
+                    file_seen.add(key)
+                    file_refs.append(ref)
+        return artifact_refs, file_refs
+
     def _normalize_bounded_action_commands(
         self,
         *,
@@ -214,14 +298,22 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                     posthoc_projection=False,
                 )
 
+        parent_run_context = RunContext.create(
+            run_kind="agent_execution",
+            execution_id=execution_id,
+            agent_name=self.agent.name,
+            meta={"task_id": self.id, "execution_kind": execution_kind},
+        )
+        raw_action_logs = await self.agent.action._async_execute_action_calls(
+            action_calls=commands,
+            settings=self.agent.settings,
+            agent_name=self.agent.name,
+            parent_run_context=parent_run_context,
+            concurrency=concurrency,
+        )
         action_logs = [
             dict(record)
-            for record in await self.agent.action._async_execute_action_calls(
-                action_calls=commands,
-                settings=self.agent.settings,
-                agent_name=self.agent.name,
-                concurrency=concurrency,
-            )
+            for record in raw_action_logs
             if isinstance(record, Mapping)
         ]
         if project_flat_action_batch:
@@ -238,6 +330,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         all_succeeded = len(action_logs) == len(commands) and all(
             self._bounded_action_command_succeeded(record) for record in action_logs
         )
+        artifact_refs, file_refs = self._bounded_action_result_refs(action_logs)
         diagnostic = {
             "execution_kind": execution_kind,
             "command_source": command_source,
@@ -263,6 +356,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 ],
                 "remaining_work": [] if all_succeeded else ["Inspect failed Action diagnostics."],
                 "diagnostics": [] if all_succeeded else [diagnostic],
+                "artifact_refs": DataFormatter.sanitize(artifact_refs),
+                "file_refs": DataFormatter.sanitize(file_refs),
             },
             {
                 "execution_id": execution_id,
@@ -270,6 +365,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "route": {"selected_route": "action_call", "status": status},
                 "logs": {
                     "action_logs": action_logs,
+                    "artifact_refs": DataFormatter.sanitize(artifact_refs),
+                    "file_refs": DataFormatter.sanitize(file_refs),
                     "route_logs": {},
                     "errors": [] if all_succeeded else [diagnostic],
                 },

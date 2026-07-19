@@ -1661,9 +1661,13 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
         original_blocking_count = self._taskboard_evidence_guard_blocking_count(evidence_use_guard)
         if original_blocking_count <= 0:
             return normalized_final, evidence_use_guard
+        binding_reference_ids = set(
+            self._task_reference_catalog.offered_references()
+        )
         repaired_evidence_use = self._deterministic_evidence_binding_repair(
             evidence_use_guard,
             evidence_ledger,
+            offered_reference_ids=binding_reference_ids,
         )
         repair_source = "deterministic"
         if not repaired_evidence_use and self._should_attempt_evidence_binding_repair(evidence_use_guard):
@@ -1678,6 +1682,7 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                         evidence_use_guard,
                         evidence_ledger,
                         language_policy=language_policy,
+                        offered_reference_ids=binding_reference_ids,
                     )
                 except Exception as error:
                     self.diagnostics.setdefault("taskboard_final_evidence_binding_repair", []).append(
@@ -1765,6 +1770,9 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 "evidence_ledger": self._model_evidence_ledger_projection(
                     finalizer_evidence_ledger,
                     max_items=64,
+                    offered_reference_ids=set(
+                        self._task_reference_catalog.offered_references()
+                    ),
                 ),
                 "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
                 "taskboard_focus_payload": DataFormatter.sanitize(focus_payload),

@@ -66,6 +66,7 @@ async def _resolve_required_skill_availability(
     ]
     configured_required_ids = execution.required_skill_ids()
     selected_skill_ids: list[str] = []
+    selected_identity_keys: set[str] = set()
     installations: list[dict[str, Any]] = []
     library = execution.skill_library
     if bindings and library is None:
@@ -91,6 +92,13 @@ async def _resolve_required_skill_availability(
     for binding in bindings:
         package = cast(Any, library).resolve(binding.revision_ref)
         selected_skill_ids.append(package.skill_id)
+        selected_identity_keys.update(
+            {
+                str(package.skill_id),
+                str(package.canonical_ref),
+                str(package.revision_ref),
+            }
+        )
         installations.append(
             {
                 "binding_id": binding.binding_id,
@@ -102,7 +110,9 @@ async def _resolve_required_skill_availability(
             }
         )
     selected_skill_ids = list(dict.fromkeys(selected_skill_ids))
-    missing = [item for item in configured_required_ids if item not in selected_skill_ids]
+    missing = [
+        item for item in configured_required_ids if item not in selected_identity_keys
+    ]
     plan_summary = DataFormatter.sanitize(
         {
             "schema_version": "agently.skill_binding_plan.v2",
@@ -397,7 +407,7 @@ async def _run_agent_task_route_impl(
     )
 
     async for item in task.get_async_generator(type="instant"):
-        await execution.stream.bridge_agent_task_item(item, route="agent_task")
+        await execution.bridge_agent_task_stream_item(item, route="agent_task")
 
     task_meta = await task.async_meta()
     execution._terminal_task_handoff_refs = [

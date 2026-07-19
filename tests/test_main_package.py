@@ -125,7 +125,7 @@ def test_action_executor_plugins_registered():
     plugin_list = Agently.plugin_manager.get_plugin_list("ActionExecutor")
     assert "LocalFunctionActionExecutor" in plugin_list
     assert "MCPActionExecutor" in plugin_list
-    assert "PythonSandboxActionExecutor" in plugin_list
+    assert "CodeExecutionActionExecutor" in plugin_list
     assert "BashSandboxActionExecutor" in plugin_list
 
 
@@ -252,6 +252,13 @@ def test_skills_executor_is_a_thin_application_facade_not_a_plugin():
     assert not hasattr(Agently.skills_executor, "resolve_strategy")
     assert hasattr(Agently.skills_executor, "install_skills")
     assert hasattr(Agently.skills_executor, "build_context_pack")
+
+
+def test_skills_facade_and_agents_share_the_canonical_skill_library():
+    agent = Agently.create_agent("canonical-skill-library-agent")
+
+    assert Agently.skills_executor.library is Agently.skill_library
+    assert agent.skill_library is Agently.skill_library
 
 
 def test_agent_can_create_dynamic_task():

@@ -486,6 +486,9 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                             "acceptance_index": dict(acceptance_index or {}),
                             "handoff_projection": dict(handoff_projection or {}),
                             "runtime_topology": dict(runtime_topology),
+                            "read_progress": DataFormatter.sanitize(
+                                self._taskboard_read_progress
+                            ),
                             "record_refs": DataFormatter.sanitize(self.record_refs),
                             "final_result": dict(final_result),
                         },
@@ -624,6 +627,16 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         taskboard_state = state.get("taskboard_state")
         if isinstance(taskboard_state, dict):
             task_any._resumed_taskboard_state = DataFormatter.sanitize(taskboard_state)
+            read_progress = taskboard_state.get("read_progress")
+            if (
+                isinstance(read_progress, Mapping)
+                and read_progress.get("schema_version")
+                == "agent_task_taskboard_read_progress/v1"
+                and isinstance(read_progress.get("items"), Mapping)
+            ):
+                task_any._taskboard_read_progress = DataFormatter.sanitize(
+                    read_progress
+                )
             try:
                 task_any._resumed_from_iteration = int(
                     taskboard_state.get("tick_index") or task_any._resumed_from_iteration or 0

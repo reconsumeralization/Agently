@@ -25,6 +25,13 @@ from pathlib import Path
 from typing import Any
 
 from agently.types.data import TaskWorkspaceFileRead, TaskWorkspaceFileWrite
+from agently.types.data import (
+    CodeExecutionBundle,
+    TaskWorkspaceAccessGrant,
+    TaskWorkspaceAccessRequirement,
+    TaskWorkspaceExecutionManifest,
+    TaskWorkspaceExecutionManifestFile,
+)
 
 from .Errors import TaskWorkspacePolicyError
 from .Identity import TaskWorkspaceIdentityCatalog
@@ -59,6 +66,9 @@ class TaskWorkspace:
             self.root / ".agently",
             task_workspace_id=self.task_workspace_id,
         )
+        from .ExecutionAccess import TaskWorkspaceExecutionAccess
+
+        self._execution_access = TaskWorkspaceExecutionAccess(self)
 
     @property
     def task_workspace_id(self) -> str:
@@ -67,6 +77,34 @@ class TaskWorkspace:
     @property
     def fallback_root(self) -> Path:
         return self.root / ".agently" / "files" / self.execution_id
+
+    def issue_execution_access(
+        self,
+        *,
+        action_call_id: str,
+        requirement: TaskWorkspaceAccessRequirement,
+    ) -> TaskWorkspaceAccessGrant:
+        return self._execution_access.issue(
+            action_call_id=action_call_id,
+            requirement=requirement,
+        )
+
+    async def materialize_execution_bundle(
+        self,
+        grant: TaskWorkspaceAccessGrant,
+        bundle: CodeExecutionBundle,
+    ) -> TaskWorkspaceExecutionManifest:
+        return await self._execution_access.materialize(grant, bundle)
+
+    async def collect_execution_outputs(
+        self,
+        grant: TaskWorkspaceAccessGrant,
+        paths: list[str] | tuple[str, ...],
+    ) -> tuple[TaskWorkspaceExecutionManifestFile, ...]:
+        return await self._execution_access.collect_outputs(grant, paths)
+
+    def close_execution_access(self, grant_id: str) -> None:
+        self._execution_access.close(grant_id)
 
     def resolve_path(self, path: str | os.PathLike[str]) -> Path:
         raw = Path(path).expanduser()

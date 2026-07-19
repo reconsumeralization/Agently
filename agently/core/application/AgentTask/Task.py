@@ -238,6 +238,14 @@ class AgentTask(
         self._resumed_iteration_summaries: list[dict[str, Any]] = []
         self._resumed_taskboard_state: dict[str, Any] | None = None
         self._latest_taskboard_acceptance_index: dict[str, Any] | None = None
+        # TaskBoard read progress is operational task state, not diagnostics.
+        # It is keyed by the stable owner/locator/content-version identity so
+        # narrower evidence projections and durable resume do not reread a
+        # completed byte range or reuse progress for changed content.
+        self._taskboard_read_progress: dict[str, Any] = {
+            "schema_version": "agent_task_taskboard_read_progress/v1",
+            "items": {},
+        }
         self._taskboard_planned_task_workspace_deliverables: list[str] = []
         self._resumed_prior_result: Any = None
         self._terminal_deliverable_refs: list[RecordRef] = []

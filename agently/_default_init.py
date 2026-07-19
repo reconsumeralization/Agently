@@ -27,12 +27,10 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     from agently.builtins.plugins.ActionExecutor import (
         BashSandboxActionExecutor,
         BrowseActionExecutor,
-        CodeRuntimeActionExecutor,
+        CodeExecutionActionExecutor,
         DockerActionExecutor,
         LocalFunctionActionExecutor,
         MCPActionExecutor,
-        NodeJSActionExecutor,
-        PythonSandboxActionExecutor,
         SQLiteActionExecutor,
         SearchActionExecutor,
     )
@@ -42,9 +40,8 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
         BrowserExecutionResourceProvider,
         DockerExecutionResourceProvider,
         MCPExecutionResourceProvider,
-        NodeExecutionResourceProvider,
-        PythonExecutionResourceProvider,
         SQLiteExecutionResourceProvider,
+        TrustedLocalExecutionResourceProvider,
     )
 
     plugin_manager.register("ActionRuntime", AgentlyActionRuntime)
@@ -52,22 +49,39 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     plugin_manager.register("ActionFlow", DAGActionFlow, activate=False)
     plugin_manager.register("ActionExecutor", LocalFunctionActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", MCPActionExecutor, activate=False)
-    plugin_manager.register("ActionExecutor", PythonSandboxActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", BashSandboxActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", SearchActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", BrowseActionExecutor, activate=False)
-    plugin_manager.register("ActionExecutor", NodeJSActionExecutor, activate=False)
-    plugin_manager.register("ActionExecutor", CodeRuntimeActionExecutor, activate=False)
+    plugin_manager.register("ActionExecutor", CodeExecutionActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", DockerActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", SQLiteActionExecutor, activate=False)
     plugin_manager.register("ExecutionResourceProvider", ACPExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", MCPExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", BashExecutionResourceProvider, activate=False)
-    plugin_manager.register("ExecutionResourceProvider", PythonExecutionResourceProvider, activate=False)
-    plugin_manager.register("ExecutionResourceProvider", NodeExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", DockerExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", BrowserExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", SQLiteExecutionResourceProvider, activate=False)
+    plugin_manager.register("ExecutionResourceProvider", TrustedLocalExecutionResourceProvider, activate=False)
+
+    from agently.builtins.plugins.SkillSourceProvider import (
+        GitSkillSourceProvider,
+        LocalPathSkillSourceProvider,
+    )
+
+    plugin_manager.register("SkillSourceProvider", LocalPathSkillSourceProvider, activate=False)
+    plugin_manager.register("SkillSourceProvider", GitSkillSourceProvider, activate=False)
+
+    from agently.builtins.plugins.CodeRuntimeAdapter import (
+        CppCodeRuntimeAdapter,
+        GoCodeRuntimeAdapter,
+        NodeCodeRuntimeAdapter,
+        PythonCodeRuntimeAdapter,
+    )
+
+    plugin_manager.register("CodeRuntimeAdapter", PythonCodeRuntimeAdapter, activate=False)
+    plugin_manager.register("CodeRuntimeAdapter", NodeCodeRuntimeAdapter, activate=False)
+    plugin_manager.register("CodeRuntimeAdapter", GoCodeRuntimeAdapter, activate=False)
+    plugin_manager.register("CodeRuntimeAdapter", CppCodeRuntimeAdapter, activate=False)
 
     from agently.builtins.plugins.PromptGenerator.AgentlyPromptGenerator import (
         AgentlyPromptGenerator,

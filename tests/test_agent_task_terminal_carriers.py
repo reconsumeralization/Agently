@@ -149,6 +149,7 @@ async def test_verifier_claim_projection_contains_only_current_inventory_content
             "claim_key": "claim_1",
             "text": "new",
             "delivery_kind": "task_workspace_artifact",
+            "syntax_role": "prose",
             "path": "final.md",
         }
     ]

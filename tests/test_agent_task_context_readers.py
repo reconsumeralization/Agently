@@ -9,6 +9,7 @@ from agently import Agently
 from agently.core import AgentTask, SkillLibrary
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
 from agently.core.context import TaskContext
+from agently.types.data import ContextReadIntent
 
 
 def _write_skill(root: Path) -> Path:
@@ -22,6 +23,24 @@ def _write_skill(root: Path) -> Path:
         encoding="utf-8",
     )
     return root
+
+
+class _FailingRequiredContextSource:
+    source_id = "source:failing-required"
+    source_revision = "rev:1"
+
+    async def async_list_candidates(
+        self,
+        _intent: ContextReadIntent,
+        *,
+        limit: int,
+        filters=None,
+    ):
+        del limit, filters
+        raise RuntimeError("required source unavailable")
+
+    async def async_read(self, *_args, **_kwargs):
+        raise AssertionError("candidate reads must not start after list failure")
 
 
 @pytest.mark.asyncio
@@ -65,6 +84,125 @@ async def test_agent_task_phase_readers_share_context_but_not_disclosure_history
         block.content for block in verification.blocks if block.role == "instruction"
     ] == ["Apply this instruction in every governed model phase."]
     assert planning.source_revisions == verification.source_revisions
+
+
+@pytest.mark.asyncio
+async def test_agent_task_fails_closed_when_required_source_cannot_list_candidates(
+    tmp_path: Path,
+) -> None:
+    task_context = TaskContext("required-source-task")
+    task_context.attach(
+        _FailingRequiredContextSource(),
+        binding_id="binding:failing-required",
+        required=True,
+    )
+    agent = Agently.create_agent("required-source-task").use_task_workspace(
+        tmp_path / "work"
+    )
+    task = AgentTask(
+        agent,
+        task_id="required-source-task",
+        goal="Use required context",
+        success_criteria=["Required context is used."],
+        task_context=task_context,
+        task_workspace=agent.task_workspace,
+    )
+
+    with pytest.raises(RuntimeError, match="Required TaskContext content"):
+        await task._read_task_context_package(
+            phase="planning",
+            consumer_id="agent_task:required-source-task:planner",
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_task_context_budget_can_explicitly_allow_lossy_required_digest(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "large-skill"
+    skill_root.mkdir()
+    (skill_root / "SKILL.md").write_text(
+        "---\n"
+        "name: Large Governed Work\n"
+        "description: Large protected procedure.\n"
+        "---\n\n"
+        + ("Preserve this protected instruction.\n" * 500),
+        encoding="utf-8",
+    )
+    library = SkillLibrary(tmp_path / "library")
+    installed = library.install(skill_root, trust="trusted")
+    binding = SkillBinding.create(installed, task_id="large-task", mode="required")
+    task_context = TaskContext("large-task")
+    task_context.attach(SkillContextSource(library, bindings=(binding,)), required=True)
+    agent = Agently.create_agent("large-task-reader").use_task_workspace(tmp_path / "work")
+    task = AgentTask(
+        agent,
+        task_id="large-task",
+        goal="Apply the large procedure",
+        success_criteria=["The procedure remains traceable."],
+        task_context=task_context,
+        task_workspace=agent.task_workspace,
+        context_budget={"chars": 800, "required_overflow": "lossy_digest"},
+    )
+
+    package = await task._read_task_context_package(
+        phase="planning",
+        consumer_id="agent_task:large-task:planner",
+    )
+
+    assert len(package.blocks) == 1
+    assert package.blocks[0].completeness == "lossy"
+    assert package.blocks[0].metadata["original_chars"] == len(installed.instruction_body)
+    assert not any(item.required for item in package.omissions)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_child_model_read_inherits_required_overflow_policy(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "large-child-skill"
+    skill_root.mkdir()
+    (skill_root / "SKILL.md").write_text(
+        "---\n"
+        "name: Large Child Work\n"
+        "description: Large child execution procedure.\n"
+        "---\n\n"
+        + ("Preserve this child instruction.\n" * 500),
+        encoding="utf-8",
+    )
+    library = SkillLibrary(tmp_path / "library")
+    installed = library.install(skill_root, trust="trusted")
+    agent = Agently.create_agent("large-child-reader").use_task_workspace(
+        tmp_path / "work"
+    )
+    agent.skill_library = library
+    agent.require_skills(installed.revision_ref, always=True)
+    task = AgentTask(
+        agent,
+        goal="Apply the large child procedure",
+        success_criteria=["The child read remains traceable."],
+        context_budget={"chars": 800, "required_overflow": "lossy_digest"},
+    )
+
+    child = task._create_bounded_child_execution(
+        lineage={
+            "task_id": task.id,
+            "iteration_id": "iteration-1",
+            "step_id": "child-read",
+        }
+    )
+    package = await child.async_read_task_context(
+        consumer_id=f"model_request:{child.id}",
+        phase="direct",
+    )
+
+    assert child.options["context_budget"] == {
+        "chars": 800,
+        "required_overflow": "lossy_digest",
+    }
+    assert len(package.blocks) == 1
+    assert package.blocks[0].completeness == "lossy"
+    assert not any(item.required for item in package.omissions)
 
 
 @pytest.mark.asyncio

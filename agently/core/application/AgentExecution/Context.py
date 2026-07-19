@@ -162,6 +162,7 @@ class AgentExecutionContext:
         task_execution_strategy: str | None = None,
         effective_task_execution_strategy: str | None = None,
         strategy_context_source: str | None = None,
+        task_workspace: Any | None = None,
     ):
         self.execution_id = execution_id
         self.lineage = cast(AgentExecutionLineage, dict(lineage))
@@ -186,6 +187,7 @@ class AgentExecutionContext:
         self.task_execution_strategy = _optional_str(task_execution_strategy)
         self.effective_task_execution_strategy = _optional_str(effective_task_execution_strategy)
         self.strategy_context_source = _optional_str(strategy_context_source)
+        self.task_workspace = task_workspace
 
     def raise_if_nesting_exceeded(self):
         if self.nesting_budget is None:

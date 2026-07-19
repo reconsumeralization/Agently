@@ -13,5 +13,6 @@
 # limitations under the License.
 
 from .SkillsExtension import SkillsExtension
+from .SkillActionBinder import BoundSkillAction, SkillActionBinder
 
-__all__ = ["SkillsExtension"]
+__all__ = ["BoundSkillAction", "SkillActionBinder", "SkillsExtension"]

@@ -28,7 +28,6 @@ from agently.types.data import (
     ContextOmission,
     ContextPackage,
     ContextReadIntent,
-    ContextSourceBindingSnapshot,
     TaskContextEntrySnapshot,
     TaskContextSnapshot,
 )
@@ -97,6 +96,35 @@ class ContextReader:
         """
 
         self._snapshot = self.task_context.snapshot()
+
+    def ensure_required_delivery(self, package: ContextPackage) -> ContextPackage:
+        """Fail closed when a required binding or block was not delivered."""
+
+        if (
+            package.task_context_id != self._snapshot.context_id
+            or package.consumer_id != self.consumer.consumer_id
+            or package.phase != self.phase
+        ):
+            raise ValueError("ContextPackage does not belong to this ContextReader.")
+        required_omissions = [item for item in package.omissions if item.required]
+        failed_binding_ids = {
+            str(item.details.get("binding_id") or "")
+            for item in package.diagnostics
+            if item.code == "context.source_candidates_failed"
+        }
+        required_binding_ids = {
+            binding.binding_id
+            for binding in self._snapshot.bindings
+            if binding.required
+        }
+        if required_omissions or failed_binding_ids.intersection(
+            required_binding_ids
+        ):
+            raise RuntimeError(
+                "Required TaskContext content could not be delivered completely to "
+                f"consumer {self.consumer.consumer_id!r}."
+            )
+        return package
 
     def _export_state(self) -> dict[str, Any]:
         """Serialize consumer-local progressive disclosure state for durable resume."""
@@ -282,14 +310,21 @@ class ContextReader:
         self,
         intent: ContextReadIntent,
         candidates: list[_CollectedCandidate],
-    ) -> tuple[set[str], list[ContextDiagnostic], str | None]:
+        *,
+        available_chars: int,
+        available_blocks: int,
+    ) -> tuple[tuple[str, ...], list[ContextDiagnostic], str | None]:
         if not candidates:
-            return set(), [], None
+            return (), [], None
+        if str(intent.metadata.get("optional_selection") or "").strip() == "none":
+            return (), [], "explicitly_skipped"
+        if available_chars <= 0 or available_blocks <= 0:
+            return (), [], "selection_budget_exhausted"
         if len(candidates) == 1 and self.semantic_selector is None:
-            return {candidates[0].offered.block_key}, [], None
+            return (candidates[0].offered.block_key,), [], None
         if self.semantic_selector is None:
             return (
-                set(),
+                (),
                 [
                     ContextDiagnostic(
                         code="context.semantic_selector_unavailable",
@@ -303,16 +338,30 @@ class ContextReader:
                 "semantic_selector_unavailable",
             )
         offered = tuple(item.offered for item in candidates)
+        selection_intent = ContextReadIntent(
+            query=intent.query,
+            explicit_refs=intent.explicit_refs,
+            roles=intent.roles,
+            filters=intent.filters,
+            metadata={
+                **dict(intent.metadata),
+                "selection_budget": {
+                    "available_chars": available_chars,
+                    "available_blocks": available_blocks,
+                    "max_block_chars": self.budget.max_block_chars,
+                },
+            },
+        )
         try:
             result = await self.semantic_selector.async_select(
-                intent=intent,
+                intent=selection_intent,
                 candidates=offered,
                 consumer=self.consumer,
                 phase=self.phase,
             )
         except Exception as error:
             return (
-                set(),
+                (),
                 [
                     ContextDiagnostic(
                         code="context.selection_failed",
@@ -331,7 +380,7 @@ class ContextReader:
             )
         if not isinstance(result, ContextSelection):
             return (
-                set(),
+                (),
                 [
                     ContextDiagnostic(
                         code="context.selection_invalid",
@@ -347,7 +396,7 @@ class ContextReader:
         duplicate = len(keys) != len(set(keys))
         if unknown or duplicate:
             return (
-                set(),
+                (),
                 [
                     ContextDiagnostic(
                         code="context.selection_invalid",
@@ -357,13 +406,14 @@ class ContextReader:
                 ],
                 "selection_invalid",
             )
-        return set(keys), [], None
+        return keys, [], None
 
     async def _read_block(
         self,
         item: _CollectedCandidate,
         *,
         max_chars: int,
+        representation: str | None = None,
     ) -> ContextBlock:
         candidate = item.offered
         if item.direct_entry is not None:
@@ -389,7 +439,7 @@ class ContextReader:
         raw = await source.async_read(
             item.source_candidate,
             max_chars=max_chars,
-            representation=None,
+            representation=representation,
         )
         self._assert_current()
         return ContextBlock(
@@ -408,64 +458,27 @@ class ContextReader:
             metadata=raw.metadata,
         )
 
-    async def async_read(self, intent: str | ContextReadIntent) -> ContextPackage:
-        self._assert_current()
-        resolved_intent = self._coerce_intent(intent)
-        collected, diagnostics = await self._collect(resolved_intent)
-        self._assert_current()
+    async def _materialize_candidates(
+        self,
+        items: Sequence[_CollectedCandidate],
+        *,
+        intent: ContextReadIntent,
+        blocks: list[ContextBlock],
+        omissions: list[ContextOmission],
+        diagnostics: list[ContextDiagnostic],
+        remaining_chars: int,
+    ) -> int:
+        required_overflow = str(
+            intent.metadata.get("required_overflow") or "fail"
+        ).strip()
+        allow_lossy_required = required_overflow == "lossy_digest"
+        required_remaining = sum(1 for item in items if item.offered.required)
 
-        explicit_refs = set(resolved_intent.explicit_refs)
-        selected: list[_CollectedCandidate] = []
-        optional: list[_CollectedCandidate] = []
-        omissions: list[ContextOmission] = []
-
-        for item in collected:
+        for item in items:
             candidate = item.offered
-            is_explicit = candidate.source_ref in explicit_refs
-            if not candidate.required and not is_explicit and self._identity(candidate) in self._disclosed:
-                omissions.append(
-                    ContextOmission(
-                        block_key=candidate.block_key,
-                        source_ref=candidate.source_ref,
-                        reason="already_disclosed",
-                    )
-                )
-                continue
-            if candidate.required or is_explicit:
-                selected.append(item)
-            else:
-                optional.append(item)
-
-        optional_keys, selection_diagnostics, selection_failure = await self._select_optional(
-            resolved_intent,
-            optional,
-        )
-        diagnostics.extend(selection_diagnostics)
-        for item in optional:
-            if item.offered.block_key in optional_keys:
-                selected.append(item)
-            else:
-                omissions.append(
-                    ContextOmission(
-                        block_key=item.offered.block_key,
-                        source_ref=item.offered.source_ref,
-                        reason=selection_failure or "not_selected",
-                    )
-                )
-
-        selected.sort(
-            key=lambda item: (
-                not item.offered.required,
-                item.offered.source_ref not in explicit_refs,
-                -item.offered.priority,
-                item.offered.block_key,
-            )
-        )
-        blocks: list[ContextBlock] = []
-        remaining_chars = self.budget.max_chars
-
-        for item in selected:
-            candidate = item.offered
+            required_divisor = max(1, required_remaining)
+            if candidate.required:
+                required_remaining -= 1
             if len(blocks) >= self.budget.max_blocks:
                 omissions.append(
                     ContextOmission(
@@ -477,7 +490,64 @@ class ContextReader:
                 )
                 continue
             read_limit = min(self.budget.max_block_chars, remaining_chars)
+            if candidate.required and allow_lossy_required and read_limit > 0:
+                read_limit = min(
+                    read_limit,
+                    max(1, remaining_chars // required_divisor),
+                )
+            use_lossy_digest = bool(
+                candidate.required
+                and allow_lossy_required
+                and candidate.estimated_chars > read_limit
+                and read_limit > 0
+            )
             if read_limit <= 0 or candidate.estimated_chars > read_limit:
+                if use_lossy_digest:
+                    try:
+                        block = await self._read_block(
+                            item,
+                            max_chars=read_limit,
+                            representation="lossy_digest",
+                        )
+                    except ContextStaleError:
+                        raise
+                    except Exception as error:
+                        diagnostics.append(
+                            ContextDiagnostic(
+                                code="context.required_content_lossy_failed",
+                                message="Required Context lossy digest could not be built.",
+                                details={
+                                    "source_ref": candidate.source_ref,
+                                    "error_type": error.__class__.__name__,
+                                    "error": str(error),
+                                },
+                            )
+                        )
+                    else:
+                        if (
+                            block.completeness == "lossy"
+                            and 0 < block.content_chars <= read_limit
+                            and block.content_chars <= remaining_chars
+                        ):
+                            blocks.append(block)
+                            remaining_chars -= block.content_chars
+                            self._disclosed.add(self._identity(candidate))
+                            diagnostics.append(
+                                ContextDiagnostic(
+                                    code="context.required_content_lossy",
+                                    message=(
+                                        "Required Context content was explicitly delivered as an "
+                                        "auditable lossy digest with original refs."
+                                    ),
+                                    details={
+                                        "source_ref": candidate.source_ref,
+                                        "estimated_chars": candidate.estimated_chars,
+                                        "delivered_chars": block.content_chars,
+                                        "refs": list(block.refs),
+                                    },
+                                )
+                            )
+                            continue
                 reason = (
                     "required_content_incompatible"
                     if candidate.required
@@ -540,10 +610,9 @@ class ContextReader:
                     )
                 )
                 continue
-            if block.content_chars > read_limit:
-                completeness = "truncated"
-            else:
-                completeness = block.completeness
+            completeness = (
+                "truncated" if block.content_chars > read_limit else block.completeness
+            )
             if candidate.required and completeness != "complete":
                 omissions.append(
                     ContextOmission(
@@ -578,6 +647,99 @@ class ContextReader:
             blocks.append(block)
             remaining_chars -= block.content_chars
             self._disclosed.add(self._identity(candidate))
+        return remaining_chars
+
+    async def async_read(self, intent: str | ContextReadIntent) -> ContextPackage:
+        self._assert_current()
+        resolved_intent = self._coerce_intent(intent)
+        for attempt in range(2):
+            collected, diagnostics = await self._collect(resolved_intent)
+            try:
+                self._assert_current()
+            except ContextStaleError:
+                current = self.task_context.snapshot()
+                if current.revision != self._snapshot.revision or attempt > 0:
+                    raise
+                # A source may establish a lazy index or durable read view while
+                # listing candidates. Rebase once and recollect so the package
+                # is pinned to the resulting source revisions. Pre-existing
+                # staleness and repeated concurrent mutation still fail closed.
+                self.refresh()
+                continue
+            break
+
+        explicit_refs = set(resolved_intent.explicit_refs)
+        required_or_explicit: list[_CollectedCandidate] = []
+        optional: list[_CollectedCandidate] = []
+        omissions: list[ContextOmission] = []
+
+        for item in collected:
+            candidate = item.offered
+            is_explicit = candidate.source_ref in explicit_refs
+            if (
+                not candidate.required
+                and not is_explicit
+                and self._identity(candidate) in self._disclosed
+            ):
+                omissions.append(
+                    ContextOmission(
+                        block_key=candidate.block_key,
+                        source_ref=candidate.source_ref,
+                        reason="already_disclosed",
+                    )
+                )
+                continue
+            if candidate.required or is_explicit:
+                required_or_explicit.append(item)
+            else:
+                optional.append(item)
+
+        required_or_explicit.sort(
+            key=lambda item: (
+                not item.offered.required,
+                item.offered.source_ref not in explicit_refs,
+                -item.offered.priority,
+                item.offered.block_key,
+            )
+        )
+        blocks: list[ContextBlock] = []
+        remaining_chars = await self._materialize_candidates(
+            required_or_explicit,
+            intent=resolved_intent,
+            blocks=blocks,
+            omissions=omissions,
+            diagnostics=diagnostics,
+            remaining_chars=self.budget.max_chars,
+        )
+
+        optional_keys, selection_diagnostics, selection_failure = await self._select_optional(
+            resolved_intent,
+            optional,
+            available_chars=remaining_chars,
+            available_blocks=self.budget.max_blocks - len(blocks),
+        )
+        diagnostics.extend(selection_diagnostics)
+        optional_by_key = {item.offered.block_key: item for item in optional}
+        selected_optional = [optional_by_key[key] for key in optional_keys]
+        selected_optional_keys = set(optional_keys)
+        for item in optional:
+            if item.offered.block_key in selected_optional_keys:
+                continue
+            omissions.append(
+                ContextOmission(
+                    block_key=item.offered.block_key,
+                    source_ref=item.offered.source_ref,
+                    reason=selection_failure or "not_selected",
+                )
+            )
+        remaining_chars = await self._materialize_candidates(
+            selected_optional,
+            intent=resolved_intent,
+            blocks=blocks,
+            omissions=omissions,
+            diagnostics=diagnostics,
+            remaining_chars=remaining_chars,
+        )
 
         package = ContextPackage(
             package_id=f"context_package:{uuid.uuid4().hex}",

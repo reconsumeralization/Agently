@@ -165,6 +165,43 @@ async def test_resolve_skills_plan_is_binding_and_route_preview(tmp_path: Path) 
     assert plan["route_preview"]["selected_route"] != "skills"
 
 
+@pytest.mark.asyncio
+async def test_required_skill_availability_joins_revision_selector_to_canonical_id(
+    tmp_path: Path,
+) -> None:
+    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.task_strategy import (
+        _resolve_required_skill_availability,
+    )
+
+    library = SkillLibrary(tmp_path / "library")
+    package = library.install(
+        _write_skill(
+            tmp_path / "skill",
+            name="Revision Identity",
+            description="Exercise required Skill identity joins.",
+        ),
+        trust="trusted",
+    )
+    agent = Agently.create_agent("skill-required-revision-identity").use_task_workspace(
+        tmp_path / "work"
+    )
+    agent.skill_library = library
+    execution = agent.input("Use the exact installed revision").use_skills(
+        package.revision_ref,
+        mode="required",
+    )
+    await execution.async_prepare_task_context()
+
+    assert execution.required_skill_ids() == [package.revision_ref]
+    selected, failure = await _resolve_required_skill_availability(
+        execution,
+        goal="Use the exact installed revision",
+    )
+
+    assert selected == [package.skill_id]
+    assert failure is None
+
+
 class _OrdinaryExecution:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []

@@ -19,6 +19,8 @@ from urllib.parse import urljoin, urlparse
 
 from agently.utils import LazyImport
 
+from ._base import BuiltinExecutionResourceProvider
+
 if TYPE_CHECKING:
     from agently.types.data import (
         ExecutionResourceHandle,
@@ -192,7 +194,7 @@ class BrowserExecutionResource:
             await self._playwright.stop()
 
 
-class BrowserExecutionResourceProvider:
+class BrowserExecutionResourceProvider(BuiltinExecutionResourceProvider):
     name = "BrowserExecutionResourceProvider"
     DEFAULT_SETTINGS = {}
     kind = "browser"

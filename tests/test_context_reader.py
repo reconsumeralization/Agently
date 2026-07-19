@@ -6,7 +6,6 @@ from typing import Any
 import pytest
 
 from agently.core.context import (
-    ContextReader,
     ContextSelection,
     ContextStaleError,
     TaskContext,
@@ -55,6 +54,24 @@ class MemoryContextSource:
     ) -> ContextBlock:
         self.read_refs.append(candidate.source_ref)
         return self._blocks[candidate.source_ref]
+
+
+class SelfRevisingListSource(MemoryContextSource):
+    async def async_list_candidates(
+        self,
+        intent: ContextReadIntent,
+        *,
+        limit: int,
+        filters: Mapping[str, Any] | None = None,
+    ) -> Sequence[ContextCandidate]:
+        candidates = await super().async_list_candidates(
+            intent,
+            limit=limit,
+            filters=filters,
+        )
+        if self.list_calls == 1:
+            self.source_revision = "rev:2"
+        return candidates
 
 
 class RecordingSelector:
@@ -159,6 +176,63 @@ async def test_required_and_explicit_blocks_bypass_semantic_dropping() -> None:
 
 
 @pytest.mark.asyncio
+async def test_optional_blocks_follow_selector_priority_with_actual_remaining_budget() -> None:
+    candidates = [
+        _candidate("skill/core", role="instruction", required=True, estimated_chars=4),
+        _candidate("docs/general", estimated_chars=6),
+        _candidate("docs/exact-api", estimated_chars=6),
+    ]
+    source = MemoryContextSource(
+        candidates,
+        {
+            "skill/core": _source_block(
+                "skill/core",
+                role="instruction",
+                content="core",
+                required=True,
+            ),
+            "docs/general": _source_block("docs/general", content="aaaaaa"),
+            "docs/exact-api": _source_block("docs/exact-api", content="bbbbbb"),
+        },
+    )
+    selector = RecordingSelector()
+    context = TaskContext("task-priority")
+    context.attach(source, binding_id="binding:memory")
+    probe_reader = context.reader(
+        consumer="probe",
+        budget=ContextBudget(max_chars=20, max_blocks=3, max_block_chars=6),
+        semantic_selector=RecordingSelector("all"),
+    )
+    probe = await probe_reader.async_read("probe")
+    optional_keys = {
+        block.source_ref: block.block_key for block in probe.blocks if not block.required
+    }
+    selector.selected = (
+        optional_keys["docs/exact-api"],
+        optional_keys["docs/general"],
+    )
+    reader = context.reader(
+        consumer="planner",
+        phase="planning",
+        budget=ContextBudget(max_chars=10, max_blocks=2, max_block_chars=6),
+        semantic_selector=selector,
+    )
+
+    package = await reader.async_read("Use the exact API integration contract")
+
+    assert [block.source_ref for block in package.blocks] == [
+        "skill/core",
+        "docs/exact-api",
+    ]
+    selection_intent = selector.calls[0][0]
+    assert dict(selection_intent.metadata["selection_budget"]) == {
+        "available_chars": 6,
+        "available_blocks": 1,
+        "max_block_chars": 6,
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_kind", ["unknown", "duplicate"])
 async def test_invalid_selector_keys_fail_closed_without_losing_required_blocks(
     invalid_kind: str,
@@ -212,6 +286,30 @@ async def test_optional_prose_relevance_never_falls_back_to_keyword_matching() -
     assert package.blocks == ()
     assert source.read_refs == []
     assert any(item.code == "context.semantic_selector_unavailable" for item in package.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_explicit_optional_none_skips_semantic_selector() -> None:
+    candidate = _candidate("docs/optional")
+    source = MemoryContextSource(
+        [candidate],
+        {candidate.source_ref: _source_block(candidate.source_ref)},
+    )
+    selector = RecordingSelector("all")
+    context = TaskContext("task-1")
+    context.attach(source, binding_id="binding:memory")
+    reader = context.reader(consumer="planner", semantic_selector=selector)
+
+    package = await reader.async_read(
+        ContextReadIntent(
+            query="Use required core only",
+            metadata={"optional_selection": "none"},
+        )
+    )
+
+    assert package.blocks == ()
+    assert selector.calls == []
+    assert package.omissions[0].reason == "explicitly_skipped"
 
 
 @pytest.mark.asyncio
@@ -304,6 +402,84 @@ async def test_required_incomplete_block_is_reported_as_incompatible_not_deliver
 
 
 @pytest.mark.asyncio
+async def test_explicit_lossy_required_overflow_returns_auditable_digest() -> None:
+    candidate = _candidate(
+        "skill/oversized-core",
+        role="instruction",
+        required=True,
+        estimated_chars=10000,
+    )
+
+    class LossySource(MemoryContextSource):
+        async def async_read(
+            self,
+            candidate: ContextCandidate,
+            *,
+            max_chars: int,
+            representation: str | None = None,
+        ) -> ContextBlock:
+            if representation != "lossy_digest":
+                return await super().async_read(
+                    candidate,
+                    max_chars=max_chars,
+                    representation=representation,
+                )
+            content = "Lossy core digest with scoped refs"[:max_chars]
+            return ContextBlock(
+                block_id="lossy-core-block",
+                block_key=candidate.block_key,
+                source_id=self.source_id,
+                source_revision=self.source_revision,
+                source_ref=candidate.source_ref,
+                binding_id=candidate.binding_id,
+                role="instruction",
+                content=content,
+                completeness="lossy",
+                content_chars=len(content),
+                required=True,
+                refs=(candidate.source_ref, "skill/oversized-core#section-1"),
+                metadata={
+                    "original_chars": candidate.estimated_chars,
+                    "representation": "lossy_digest",
+                },
+            )
+
+    source = LossySource(
+        [candidate],
+        {
+            candidate.source_ref: _source_block(
+                candidate.source_ref,
+                role="instruction",
+                content="full protected core",
+                required=True,
+            )
+        },
+    )
+    context = TaskContext("task-1")
+    context.attach(source, binding_id="binding:skill", required=True)
+    reader = context.reader(
+        consumer="worker",
+        budget=ContextBudget(max_chars=100, max_block_chars=100),
+    )
+
+    package = await reader.async_read(
+        ContextReadIntent(
+            query="Apply the Skill",
+            metadata={"required_overflow": "lossy_digest"},
+        )
+    )
+
+    assert len(package.blocks) == 1
+    assert package.blocks[0].completeness == "lossy"
+    assert package.blocks[0].refs == (
+        "skill/oversized-core",
+        "skill/oversized-core#section-1",
+    )
+    assert not any(item.required for item in package.omissions)
+    assert any(item.code == "context.required_content_lossy" for item in package.diagnostics)
+
+
+@pytest.mark.asyncio
 async def test_reader_rejects_stale_source_revision() -> None:
     candidate = _candidate("docs/one")
     source = MemoryContextSource([candidate], {"docs/one": _source_block("docs/one")})
@@ -315,6 +491,63 @@ async def test_reader_rejects_stale_source_revision() -> None:
 
     with pytest.raises(ContextStaleError, match="source revision"):
         await reader.async_read("Read the source")
+
+
+@pytest.mark.asyncio
+async def test_reader_rebases_once_when_source_revision_changes_during_listing() -> None:
+    candidate = _candidate("docs/one")
+    source = SelfRevisingListSource(
+        [candidate],
+        {"docs/one": _source_block("docs/one")},
+    )
+    context = TaskContext("task-1")
+    context.attach(source, binding_id="binding:memory")
+    reader = context.reader(consumer="worker")
+
+    package = await reader.async_read("Read the source")
+
+    assert source.list_calls == 2
+    assert package.source_revisions == {"binding:memory": "rev:2"}
+    assert [block.source_ref for block in package.blocks] == ["docs/one"]
+
+
+@pytest.mark.asyncio
+async def test_reader_does_not_rebase_structural_task_context_mutation_during_listing() -> None:
+    candidate = _candidate("docs/one")
+    context = TaskContext("task-1")
+
+    class StructurallyMutatingListSource(MemoryContextSource):
+        async def async_list_candidates(
+            self,
+            intent: ContextReadIntent,
+            *,
+            limit: int,
+            filters: Mapping[str, Any] | None = None,
+        ) -> Sequence[ContextCandidate]:
+            candidates = await super().async_list_candidates(
+                intent,
+                limit=limit,
+                filters=filters,
+            )
+            if self.list_calls == 1:
+                context.put(
+                    role="information",
+                    content="concurrent structural entry",
+                    entry_id="entry:concurrent",
+                )
+            return candidates
+
+    source = StructurallyMutatingListSource(
+        [candidate],
+        {"docs/one": _source_block("docs/one")},
+    )
+    context.attach(source, binding_id="binding:memory")
+    reader = context.reader(consumer="worker")
+
+    with pytest.raises(ContextStaleError, match="TaskContext revision"):
+        await reader.async_read("Read the source")
+
+    assert source.list_calls == 1
 
 
 @pytest.mark.asyncio
@@ -334,5 +567,5 @@ async def test_reader_explicit_refresh_rebases_source_revision_and_preserves_his
 
     assert [block.source_ref for block in first.blocks] == ["docs/one"]
     assert [block.source_ref for block in second.blocks] == ["docs/one"]
-    assert reader.snapshot.source_revisions["source:memory"] == "rev:2"
+    assert reader.snapshot.source_revisions["binding:memory"] == "rev:2"
     assert len(reader.packages) == 2

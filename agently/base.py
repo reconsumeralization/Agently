@@ -95,7 +95,8 @@ action_dispatcher: Any = action.action_dispatcher
 action_runtime: Any = action.action_runtime
 action_flow: Any = action.action_flow
 skill_library: SkillLibrary = SkillLibrary(
-    str(settings.get("skills.library.root", ".agently/skill-library"))
+    str(settings.get("skills.library.root", ".agently/skill-library")),
+    plugin_manager=plugin_manager,
 )
 skills_executor: SkillsExecutor = SkillsExecutor(
     plugin_manager,

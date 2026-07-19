@@ -26,6 +26,13 @@ binds the exact revision, not a mutable directory alias. Skill descriptions may
 be offered to a semantic model selector; local code must not route free-form
 task text with keyword tables or regular expressions.
 
+`Agently.skills_executor`, `Agently.skill_library`, and agents created by the
+same `Agently` application share one canonical `SkillLibrary` instance. The
+compatibility facade reconfigures that instance in place; it does not install
+packs into a separate global registry. Resolve pack members through
+`Agently.skill_library` when the installation call starts from the facade, then
+bind the returned exact revision through the agent execution.
+
 ## Recommended Agent API
 
 ```python
@@ -67,15 +74,20 @@ The facade is retained for released application calls that manage or project
 Skills:
 
 - configure the SkillLibrary root and accepted trust labels;
-- install, list, inspect, and read local Skill packages;
-- install/list/inspect local Skill packs;
+- install, list, inspect, and read Skill packages;
+- install/list/inspect local Skill packs and authorized Git/local source snapshots;
 - build a compatibility context-pack projection;
 - expose the TaskDAG `skill` resolver helper.
 
 It does not own route selection, effort strategies, stages, React loops,
 runtime chains, Blocks lowering, script execution, capability inference,
-Action mounting, network fetching, or approvals. Remote sources must be
-materialized by authorized host code before local installation.
+automatic Action mounting, or approvals. A registered `SkillSourceProvider`
+may materialize an authorized remote source to an immutable local snapshot;
+SkillLibrary installs only that snapshot and records the exact provenance.
+Remote compatibility installs default to `untrusted`; callers must explicitly
+promote a reviewed immutable revision. Local installs retain their local trust
+default. A selected Git/local `subpath` is resolved without following symlink
+components outside the materialized source root.
 
 ```python
 pack = await Agently.skills_executor.async_build_context_pack(
@@ -87,8 +99,48 @@ pack = await Agently.skills_executor.async_build_context_pack(
 
 This method creates a temporary TaskContext and uses the same ContextReader
 contracts as ordinary execution. `actionize_scripts=True` is ignored with a
-diagnostic; Skill scripts remain descriptors until an owning Action or runtime
-explicitly authorizes and executes them.
+diagnostic; it cannot grant execution implicitly. Host code may explicitly bind
+a trusted exact-revision script as an ordinary Workspace-backed
+`code_execution` Action, with ActionRuntime and ExecutionResource retaining
+execution ownership.
+
+```python
+from agently.types.data import SkillScriptAuthorization
+
+await execution.async_prepare_task_context()
+binding = next(
+    item
+    for item in execution.skill_bindings
+    if item.revision_ref == contract["revision_ref"]
+)
+bound = agent.bind_skill_script_action(
+    execution,
+    binding_id=binding.binding_id,
+    resource_path="scripts/check.py",
+    authorization=SkillScriptAuthorization(
+        auto_allow=True,
+        expected_outputs=("output/report.json",),
+    ),
+)
+action_result = await agent.action.async_execute_action(
+    bound.action_id,
+    {"args": []},
+)
+artifact = next(
+    item
+    for item in action_result["artifacts"]
+    if item["path"].endswith("output/report.json")
+)
+readback = await execution.task_workspace.read_file(artifact["path"])
+```
+
+The binder registers its own narrow provider requirement from the ordered
+`code_execution.providers` setting. Do not call `enable_code_runtime(...)`
+only for this script; that would expose an additional general-purpose code
+Action. Trust is package provenance policy, not script permission. Only the
+successful Action record plus TaskWorkspace readback proves the side effect and
+collected bytes. Published artifact paths are TaskWorkspace-relative private
+paths under `.agently/files/.../code_execution/.../output/`.
 
 ## Released execution convenience adapter
 

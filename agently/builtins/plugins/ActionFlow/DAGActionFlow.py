@@ -116,10 +116,10 @@ class DAGActionFlow:
                 "compat_event_family": "tool",
             },
         )
-        parent_artifact_scope = action._artifact_scope_from_agent_execution_context(
-            get_current_agent_execution_context(),
+        artifact_scope = action._resolve_artifact_scope(
+            run_context=action_loop_run,
+            agent_execution_context=get_current_agent_execution_context(),
         )
-        artifact_scope = parent_artifact_scope or action._artifact_scope_from_run_context(action_loop_run)
         owns_artifact_scope = artifact_scope.get("kind") == "action_run"
 
         async def publish_runtime_observation(
@@ -222,6 +222,7 @@ class DAGActionFlow:
                     },
                 )
             )
+            decision = action._apply_action_decision_round_dispatch_policy(decision, settings)
 
             dispatch_confirmed = action._should_continue(
                 decision,
@@ -337,10 +338,13 @@ class DAGActionFlow:
 
             # Extract per-task results and collect them
             task_results: list[dict[str, Any]] = []
+            task_result_map = result.get("task_results", {}) if isinstance(result, dict) else {}
+            if not isinstance(task_result_map, dict):
+                task_result_map = {}
             for command_index, command in enumerate(action_calls):
                 action_id = str(command.get("action_id", command.get("tool_name", "")))
                 task_id = f"action_{round_index}_{command_index}_{action_id}"
-                task_result = result.get(task_id, {})
+                task_result = task_result_map.get(task_id, {})
                 if isinstance(task_result, dict):
                     task_results.append(task_result)
                 else:

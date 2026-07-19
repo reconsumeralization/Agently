@@ -31,6 +31,7 @@ from agently.core.application.AgentTask.BlockCarrier import (
     select_carrier_output_policy,
 )
 from agently.core.application.AgentTask import AgentTask
+from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
 from agently.core.application.AgentExecution.Stream import (
     AgentExecutionTextDeltaProjector,
@@ -185,7 +186,15 @@ async def test_taskboard_final_prompt_omits_duplicate_revision_card_results(tmp_
                 "status": "ok",
                 "body_state": "bounded",
                 "body": "Collected evidence body.",
-            }
+            },
+            {
+                "id": "artifact-final-readback",
+                "kind": "task_workspace_artifact.targeted_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "path": "final.md",
+                "body": "Collected evidence body.",
+            },
         ]
     }
     revision = TaskBoardRevision.create(
@@ -260,13 +269,78 @@ async def test_taskboard_final_prompt_omits_duplicate_revision_card_results(tmp_
     assert "card_results" not in prompt_revision
     assert prompt_revision["card_result_statuses"] == {"collect": "completed"}
     assert payload["taskboard_evidence_view"]["cards"][0]["preview"]
+    assert len(payload["evidence_ledger"]["items"]) == 1
     prompt_evidence = payload["evidence_ledger"]["items"][0]
     assert prompt_evidence["body_preview"] == "Collected evidence body."
+    assert prompt_evidence["kind"] == "note"
     assert prompt_evidence["reference_id"].startswith("ref_")
     assert "id" not in prompt_evidence
     assert "evidence_id" not in prompt_evidence
     assert "cite_as" not in prompt_evidence
     assert "aliases" not in prompt_evidence
+
+
+def test_evidence_binding_repair_excludes_final_artifact_transport_from_source_candidates():
+    task = AgentTask(
+        _create_agent("agent-evidence-binding-source-role"),
+        task_id="evidence-binding-source-role",
+        goal="Ground a repository claim in independent source evidence.",
+        success_criteria=["The claim uses source evidence rather than its own final artifact."],
+    )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "repository-source",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "repo_read_file",
+            "action_call_id": "call-source",
+            "body": "class UltraEfficientRouter(nn.Module):",
+        }
+    )
+    transport = task._task_reference_catalog.add_evidence(
+        {
+            "id": "final-artifact-readback",
+            "kind": "task_workspace_artifact.targeted_readback",
+            "status": "ok",
+            "body_state": "bounded",
+            "path": "final.md",
+            "body": "The repository defines UltraEfficientRouter.",
+        }
+    )
+    ledger = {"items": [source, transport]}
+
+    offered_reference_ids = set(task._task_reference_catalog.offered_references())
+    candidates = task._evidence_binding_repair_candidate_refs(
+        ledger,
+        offered_reference_ids=offered_reference_ids,
+    )
+
+    assert [item["reference_id"] for item in candidates] == [
+        source["reference_id"]
+    ]
+    assert transport["reference_id"] not in {
+        item["reference_id"] for item in candidates
+    }
+
+    transport_only_ledger = {"items": [transport]}
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The repository defines UltraEfficientRouter.",
+                "evidence_ids": ["missing-source-ref"],
+                "support_type": "content",
+            }
+        ],
+        transport_only_ledger,
+    )
+
+    assert guard["blocking_count"] == 1
+    assert task._deterministic_evidence_binding_repair(
+        guard,
+        transport_only_ledger,
+        offered_reference_ids=offered_reference_ids,
+    ) == []
 
 
 def test_taskboard_dependency_prompt_projection_omits_recursive_result_state():
@@ -342,6 +416,83 @@ def test_taskboard_card_binding_ledger_prioritizes_current_execution_evidence_be
     assert candidates[0]["reference_id"] == current_reference_id
     assert any(item["reference_id"] == current_reference_id for item in candidates)
     assert len(candidates) == 80
+
+
+def test_taskboard_live_readback_ref_survives_ref_only_flood_into_binding_guard():
+    task = AgentTask(
+        _create_agent("taskboard-live-readback-identity"),
+        task_id="taskboard-live-readback-identity",
+        goal="Keep one dependency readback identity stable through validation.",
+        success_criteria=["The body-bearing dependency evidence remains bindable."],
+        execution="taskboard",
+    )
+    ref_only_flood = [
+        {
+            "id": f"pointer:{index}",
+            "kind": "action_artifact.pointer",
+            "status": "ok",
+            "body_state": "ref_only",
+            "selection_key": f"selection:{index}",
+        }
+        for index in range(90)
+    ]
+    dependency_readbacks = {
+        "evidence_items": [
+            {
+                "id": "dependency-readback:router-source",
+                "kind": "taskboard_dependency_artifact_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "The router source performs top-k expert selection.",
+                "owner": "action_artifact",
+                "locator": "router-source.py",
+                "content_version": "sha256:router-source",
+            }
+        ]
+    }
+
+    live_ledger = task._taskboard_live_evidence_ledger(
+        {"evidence_items": ref_only_flood},
+        dependency_readbacks,
+        max_items=120,
+        body_chars=1800,
+    )
+    prompt_ledger = task._model_evidence_ledger_projection(
+        live_ledger,
+        max_items=64,
+    )
+    body_item = next(
+        item
+        for item in prompt_ledger["items"]
+        if item.get("body_preview")
+        == "The router source performs top-k expert selection."
+    )
+    prompt_reference_id = body_item["reference_id"]
+    empty_execution_ledger = task._stable_evidence_ledger_view(
+        {"evidence_items": []},
+        max_items=16,
+        body_chars=1800,
+    )
+    binding_ledger = task._taskboard_card_binding_evidence_ledger(
+        live_ledger,
+        empty_execution_ledger,
+    )
+    guard = validate_evidence_use(
+        [
+            {
+                "claim": "The router source was inspected.",
+                "evidence_ids": [prompt_reference_id],
+                "support_type": "content",
+            }
+        ],
+        binding_ledger,
+    )
+
+    assert guard["blocking_count"] == 0
+    assert any(
+        item.get("reference_id") == prompt_reference_id
+        for item in binding_ledger["items"]
+    )
 
 
 def test_taskboard_revision_prompt_projection_omits_recursive_diagnostics_and_acceptance_metadata():
@@ -2033,7 +2184,7 @@ def test_terminal_convergence_stops_third_same_issue_without_a_fourth_repair():
     )
     third = state.record_detection(
         issue,
-        "b" * 64,
+        "a" * 64,
         repair_contract={"claim_keys": ["claim:1"]},
     )
 
@@ -2063,6 +2214,27 @@ def test_terminal_convergence_stops_third_same_issue_without_a_fourth_repair():
     assert restored.snapshot() == snapshot
 
 
+def test_terminal_convergence_resets_unchanged_count_when_relevant_state_changes():
+    from agently.core.application.AgentTask.TerminalConvergence import (
+        TerminalConvergenceState,
+        TerminalIssue,
+    )
+
+    state = TerminalConvergenceState("agent_task_convergence_progress")
+    issue = TerminalIssue("criterion", "criterion_unsatisfied", "criterion:2")
+
+    first = state.record_detection(issue, "a" * 64, repair_contract={})
+    unchanged = state.record_detection(issue, "a" * 64, repair_contract={})
+    progressed = state.record_detection(issue, "b" * 64, repair_contract={})
+
+    assert first["occurrence"] == 1
+    assert unchanged["occurrence"] == 2
+    assert progressed["state_changed"] is True
+    assert progressed["occurrence"] == 1
+    assert progressed["repair_count"] == 1
+    assert progressed["terminal"] is False
+
+
 def test_terminal_convergence_does_not_merge_different_issue_codes_for_the_same_gate_subject():
     from agently.core.application.AgentTask.TerminalConvergence import (
         TerminalConvergenceState,
@@ -2082,7 +2254,7 @@ def test_terminal_convergence_does_not_merge_different_issue_codes_for_the_same_
     )
 
     first = state.record_detection(unsupported, "a" * 64, repair_contract={"claim_keys": ["claim:1"]})
-    second = state.record_detection(unsupported, "b" * 64, repair_contract={"claim_keys": ["claim:2"]})
+    second = state.record_detection(unsupported, "a" * 64, repair_contract={"claim_keys": ["claim:2"]})
     independent = state.record_detection(contradicted, "c" * 64, repair_contract={"claim_keys": ["claim:3"]})
 
     assert first["occurrence"] == 1
@@ -2114,7 +2286,7 @@ def test_terminal_convergence_keeps_resolved_and_independent_issue_counts():
         unrecoverable=True,
     )
 
-    assert reappeared["occurrence"] == 2
+    assert reappeared["occurrence"] == 1
     assert immediate["occurrence"] == 1
     assert immediate["terminal"] is True
     assert immediate["should_repair"] is False
@@ -2231,6 +2403,39 @@ def test_taskboard_required_card_setback_stops_on_third_cross_tick_occurrence(tm
     assert task.status == "blocked"
     assert task.result == third
     assert task.diagnostics["terminal_convergence"]["records"]
+
+
+def test_taskboard_tick_executed_card_ids_falls_back_when_failed_tick_collected_nothing():
+    tick_result = SimpleNamespace(
+        triggerflow_snapshot={
+            "status": "failed",
+            "collected_card_results_json": "{}",
+            "expected_card_ids_json": '["synthesize_report"]',
+        },
+        schedule=SimpleNamespace(runnable_card_ids=("synthesize_report",)),
+    )
+
+    assert AgentTask._taskboard_tick_executed_card_ids(tick_result) == (
+        "synthesize_report",
+    )
+
+
+def test_taskboard_tick_executed_card_ids_includes_collected_and_interrupted_cards():
+    tick_result = SimpleNamespace(
+        triggerflow_snapshot={
+            "status": "failed",
+            "collected_card_results_json": '{"collect": {"status": "completed"}}',
+            "expected_card_ids_json": '["collect", "synthesize_report"]',
+        },
+        schedule=SimpleNamespace(
+            runnable_card_ids=("collect", "synthesize_report"),
+        ),
+    )
+
+    assert AgentTask._taskboard_tick_executed_card_ids(tick_result) == (
+        "collect",
+        "synthesize_report",
+    )
 
 
 def test_taskboard_required_repair_converges_across_non_satisfying_statuses(tmp_path):
@@ -4562,9 +4767,11 @@ async def test_carrier_control_policy_reaches_child_execution_output_format():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("allowed_execution_shape", ["actions", "auto"])
 async def test_taskboard_action_card_separates_work_unit_input_from_task_orientation(
     tmp_path,
     monkeypatch,
+    allowed_execution_shape,
 ):
     requirement = {
         "capability_id": "required_probe_action",
@@ -4612,7 +4819,7 @@ async def test_taskboard_action_card_separates_work_unit_input_from_task_orienta
             "depends_on": ["source-context"],
             "input_refs": ["skills/portfolio-analysis/SKILL.md"],
             "required_outputs": ["Mandate constraints are available as evidence"],
-            "allowed_execution_shape": "actions",
+            "allowed_execution_shape": allowed_execution_shape,
             "evidence_contract": {
                 "done_when": "Mandate constraints are available as evidence",
                 "requires_skill_refs": ["skills/portfolio-analysis/SKILL.md"],
@@ -4785,6 +4992,13 @@ async def test_taskboard_action_card_separates_work_unit_input_from_task_orienta
     assert "execution_prompt" in captured["info_payload"]
     assert captured["input_payload"]["dependency_results"]
     assert captured["input_payload"]["evidence_ledger"]
+    assert captured["input_payload"]["available_readback"]["action_artifact_readback"] == {
+        "capability_available": True,
+        "prior_refs_available": False,
+        "action_id": "read_action_artifact",
+        "artifact_refs": [],
+    }
+    assert "current ActionLoop records may expose new" in captured["instruction"]
     assert captured["input_payload"]["evidence_ledger"]["items"]
     for evidence_item in captured["input_payload"]["evidence_ledger"]["items"]:
         assert evidence_item["reference_id"].startswith("ref_")
@@ -4824,8 +5038,18 @@ async def test_taskboard_action_card_separates_work_unit_input_from_task_orienta
     assert carrier_plan["required_action_ids"] == ["required_probe_action"]
     assert child_execution.used_action_ids == ["required_probe_action"]
     assert child_execution.required_action_ids == ["required_probe_action"]
-    assert child_execution.request.settings.get("action.loop.max_rounds") == 1
-    assert child_execution.request.settings.get("tool.loop.max_rounds") == 1
+    assert child_execution.request.settings.get("action.loop.round_dispatch_policy") == (
+        "single_action_id_cohort"
+    )
+    assert child_execution.request.settings.get("tool.loop.round_dispatch_policy") == (
+        "single_action_id_cohort"
+    )
+    if allowed_execution_shape == "actions":
+        assert child_execution.request.settings.get("action.loop.max_rounds") == 1
+        assert child_execution.request.settings.get("tool.loop.max_rounds") == 1
+    else:
+        assert child_execution.request.settings.get("action.loop.max_rounds") is None
+        assert child_execution.request.settings.get("tool.loop.max_rounds") is None
     assert child_execution.route_policies[-1]["allowed_routes"] == ["model_request"]
 
 
@@ -5053,6 +5277,109 @@ async def test_taskboard_initial_plan_receives_capability_contract_and_normalize
     assert final_card.metadata["final_task_workspace_deliverables"] == ["final.md"]
 
 
+@pytest.mark.asyncio
+async def test_taskboard_replan_receives_prior_verifier_contract_and_cumulative_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-replan-cumulative-evidence").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-replan-cumulative-evidence",
+        goal="Repair the source-grounded final.md report.",
+        success_criteria=["final.md is grounded in the previously read source."],
+        execution="taskboard",
+    )
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "plan": {"execution_shape": "actions"},
+            "execution_meta": {
+                "status": "completed",
+                "logs": {
+                    "action_logs": [
+                        {
+                            "action_id": "repo_read_file",
+                            "status": "success",
+                            "action_call_id": "call-moe-config",
+                            "model_digest": {
+                                "result_preview": {
+                                    "path": "ultralytics/cfg/default.yaml",
+                                    "start_line": 234,
+                                    "end_line": 277,
+                                    "text": "# MoE settings\nmoe_num_experts: 4",
+                                },
+                                "result_preview_meta": {"truncated": False},
+                            },
+                        }
+                    ],
+                    "route_logs": {},
+                },
+            },
+            "verification": {
+                "is_complete": False,
+                "reason": "The report ignored the already-read MoE configuration.",
+                "missing_criteria": ["Ground architecture claims in the MoE configuration."],
+                "replan_instruction": "Reuse prior evidence and add only missing reads.",
+            },
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        id = "taskboard-replan-request-1"
+
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            return self
+
+        def get_result(self):
+            return self
+
+        async def async_get_data(self):
+            return {
+                "board_goal": task.goal,
+                "cards": [
+                    {
+                        "id": "repair-report",
+                        "objective": "Repair final.md from cumulative evidence.",
+                        "depends_on": [],
+                        "done_when": "The report uses the MoE configuration evidence.",
+                        "allowed_execution_shape": "control",
+                        "final_task_workspace_deliverables": ["final.md"],
+                    }
+                ],
+                "completion_gate": "final.md is grounded.",
+                "why_this_effort_shape": "One repair card can reuse prior evidence.",
+            }
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: FakeRequest())
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_apply_language_policy_to_request",
+        lambda *_args, **_kwargs: None,
+    )
+
+    await task._request_taskboard_plan(cast(Any, {}))
+
+    repair_context = captured["input"]["repair_context"]
+    assert repair_context["replan_instruction"] == "Reuse prior evidence and add only missing reads."
+    previews = repair_context["available_evidence_anchors"]["action_result_previews"]
+    assert previews[0]["id"] == "repo_read_file"
+    assert previews[0]["result_preview"]["path"] == "ultralytics/cfg/default.yaml"
+    assert "reuse prior evidence" in captured["instruct"].lower()
+
+
 def test_taskboard_initial_plan_splits_action_commands_from_final_delivery(tmp_path):
     agent = _create_agent("agent-taskboard-split-initial-final").use_task_workspace(
         tmp_path / "task_workspace",
@@ -5165,6 +5492,57 @@ def test_taskboard_initial_plan_rejects_undeclared_action_input_keys(tmp_path):
         "taskboard.initial_plan.action_commands_rejected"
     )
     assert normalized["diagnostics"][-1]["validation_code"] == "invalid_input_keys"
+
+
+def test_taskboard_rejected_action_commands_preserve_known_action_identity(tmp_path):
+    task_workspace_root = tmp_path / "task_workspace"
+    agent = _create_agent("agent-taskboard-preserve-rejected-action").use_task_workspace(
+        task_workspace_root,
+        mode="read_write",
+    )
+    agent.enable_task_workspace_file_actions(
+        root=task_workspace_root,
+        read=True,
+        write=False,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-preserve-rejected-action",
+        goal="Read back final.md.",
+        success_criteria=["The read_file Action succeeds."],
+        execution="taskboard",
+    )
+    raw_plan = {
+        "board_goal": task.goal,
+        "cards": [
+            {
+                "id": "read_back_plan",
+                "objective": "Read back final.md.",
+                "allowed_execution_shape": "actions",
+                "action_commands": [
+                    {
+                        "purpose": "Read back the final plan.",
+                        "action_id": "read_file",
+                        "action_input": {"filepath": "final.md"},
+                    }
+                ],
+            }
+        ],
+        "completion_gate": "The file is read back.",
+        "why_this_effort_shape": "One bounded Action is sufficient.",
+    }
+
+    normalized = task._normalize_taskboard_initial_plan(raw_plan)
+
+    card = normalized["cards"][0]
+    assert card["requires_capability_ids"] == ["read_file"]
+    assert "action_commands" not in card
+    assert normalized["diagnostics"][-1]["fallback"] == (
+        "taskboard_action_command_request"
+    )
 
 
 @pytest.mark.asyncio
@@ -5422,6 +5800,123 @@ async def test_taskboard_control_delivery_preserves_task_workspace_action_eviden
     assert missing == []
 
 
+@pytest.mark.asyncio
+async def test_taskboard_control_uses_one_authoritative_ledger_for_dependency_readback(
+    tmp_path,
+    monkeypatch,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-control-unified-readback-ledger").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-control-unified-readback-ledger",
+        goal="Ground the final report in dependency readback evidence.",
+        success_criteria=["The dependency source is available through a stable evidence id."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "synthesis",
+            "objective": "Synthesize the grounded report.",
+            "allowed_execution_shape": "control",
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    dependency_readbacks = {
+        "schema_version": "agent_task_taskboard_dependency_readbacks/v1",
+        "card_id": card.id,
+        "evidence_items": [
+            {
+                "id": "dependency-readback:router-source",
+                "kind": "taskboard_dependency_artifact_readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "The router source performs top-k expert selection.",
+                "owner": "action_artifact",
+                "locator": "router-source.py",
+                "content_version": "sha256:router-source",
+            }
+        ],
+    }
+
+    async def fake_dependency_readbacks(*_args, **_kwargs):
+        return dependency_readbacks
+
+    captured_reference_id = ""
+    captured_prompt_ledger: dict[str, Any] = {}
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any):
+        nonlocal captured_reference_id, captured_prompt_ledger
+        prompt_ledger = kwargs["work_unit"].input_payload["evidence_ledger"]
+        captured_prompt_ledger = prompt_ledger
+        matching = [
+            item
+            for item in prompt_ledger["items"]
+            if item.get("body_preview")
+            == "The router source performs top-k expert selection."
+        ]
+        assert len(matching) == 1
+        captured_reference_id = matching[0]["reference_id"]
+        return (
+            {
+                "status": "setback",
+                "sufficient": False,
+                "next_board_action": "readback",
+                "remaining_work": ["Continue after bounded source inspection."],
+                "evidence_use": [
+                    {
+                        "claim": "The router source was inspected.",
+                        "evidence_ids": [captured_reference_id],
+                        "support_type": "content",
+                    }
+                ],
+            },
+            {
+                "execution_id": f"{task.id}:taskboard:synthesis:control",
+                "status": "setback",
+                "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+            },
+            WorkUnitResult(
+                id=str(kwargs["work_unit"].id),
+                status="completed",
+            ),
+        )
+
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_taskboard_dependency_action_artifact_readbacks",
+        fake_dependency_readbacks,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_run_work_unit_through_blocks",
+        fake_run_work_unit_through_blocks,
+    )
+
+    result = await task._run_taskboard_control_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert captured_reference_id, captured_prompt_ledger
+    assert result.metadata["evidence_use_guard"]["blocking_count"] == 0
+    assert any(
+        item.get("reference_id") == captured_reference_id
+        for item in result.metadata["evidence_ledger"]["items"]
+    )
+
+
 def test_taskboard_planned_task_workspace_deliverables_reject_escape_paths(tmp_path):
     task = AgentTask(
         _create_agent("agent-taskboard-invalid-final-path").use_task_workspace(
@@ -5557,6 +6052,215 @@ async def test_taskboard_preplanned_action_commands_dispatch_without_actionloop(
 
     assert result.status == "completed"
     assert calls == ["NVDA", "AVGO"]
+
+
+@pytest.mark.asyncio
+async def test_bounded_action_commands_project_cold_refs_across_taskboard_card_boundary(
+    tmp_path,
+    monkeypatch,
+):
+    from agently.core.runtime import bind_runtime_context
+
+    agent = _create_agent("agent-taskboard-action-ref-projection").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
+    )
+
+    @agent.action_func
+    def repository_search(query: str) -> dict[str, Any]:
+        return {
+            "query": query,
+            "matches": [f"src/module_{index}.py" for index in range(300)],
+        }
+
+    read_paths: list[str] = []
+
+    @agent.action_func
+    def repository_read(path: str) -> dict[str, Any]:
+        read_paths.append(path)
+        return {"path": path, "content": "bounded source"}
+
+    task = AgentTask(
+        agent,
+        task_id="taskboard-action-ref-projection",
+        goal="Search the repository and preserve the exact result for a dependent card.",
+        success_criteria=["The dependent card receives a readable Action artifact ref."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "search",
+            "objective": "Search the repository.",
+            "allowed_execution_shape": "actions",
+            "evidence_contract": {"requires_capability_ids": ["repository_search"]},
+            "metadata": {
+                "action_commands": [
+                    {
+                        "purpose": "Locate implementation files.",
+                        "action_id": "repository_search",
+                        "action_input": {"query": "execution owner"},
+                    }
+                ]
+            },
+        }
+    )
+    read_card = TaskBoardCard.from_value(
+        {
+            "id": "read",
+            "objective": "Read one exact path returned by the repository search.",
+            "depends_on": [card.id],
+            "allowed_execution_shape": "actions",
+            "evidence_contract": {"requires_capability_ids": ["repository_read"]},
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {
+                "graph_id": f"{task.id}.graph",
+                "cards": [card.to_dict(), read_card.to_dict()],
+            }
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+
+    # A standalone AgentTask can itself run under an outer AgentExecution.  Its
+    # explicit task RunContext remains the artifact owner across card boundaries.
+    with bind_runtime_context(
+        agent_execution_context=SimpleNamespace(
+            execution_id="outer-agent-execution",
+            lineage={},
+        )
+    ):
+        result = await task._run_taskboard_agent_card(
+            context,
+            {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+        )
+
+    assert result.status == "completed"
+    assert result.artifact_refs
+    output_refs = [
+        ref
+        for ref in result.artifact_refs
+        if isinstance(ref, Mapping) and ref.get("role") == "output"
+    ]
+    assert output_refs
+    assert output_refs[0]["owner"] == "action_artifact"
+    assert output_refs[0]["locator"] == output_refs[0]["selection_key"]
+    assert len(output_refs[0]["content_version"]) == 64
+    with agent.action._artifact_manager.bind_artifact_scope(
+        {"kind": "agent_task", "id": task.id}
+    ):
+        readback = await agent.action.async_read_action_artifact(
+            selection_key=output_refs[0]["selection_key"],
+            offset=0,
+            max_bytes=128,
+        )
+    assert readback["ok"] is True
+    assert readback["content_version"] == output_refs[0]["content_version"]
+
+    updated = TaskBoardValidator().apply_patch(
+        revision,
+        {
+            "base_revision": revision.revision_id,
+            "operations": [{"op": "record_card_result", "result": result.to_dict()}],
+        },
+    )
+    evidence_view = build_task_board_evidence_view(updated).to_dict()
+    assert evidence_view["artifact_refs"][0]["selection_key"]
+
+    class FakeNarrowReadRequest:
+        id = "taskboard-cross-card-read-request"
+
+        def __init__(self) -> None:
+            self.prompts: dict[str, Any] = {}
+
+        def input(self, value):
+            self.prompts["input"] = value
+            return self
+
+        def info(self, value):
+            self.prompts["info"] = value
+            return self
+
+        def instruct(self, value):
+            self.prompts["instruct"] = value
+            return self
+
+        def output(self, value, *, format=None):
+            self.prompts["output"] = value
+            self.prompts["output_format"] = format
+            return self
+
+        def get_result(self):
+            return self
+
+        async def async_get_data(self):
+            visible_readbacks = json.dumps(
+                self.prompts["input"]["dependency_readbacks"],
+                ensure_ascii=False,
+            )
+            assert "src/module_0.py" in visible_readbacks
+            return {
+                "action_commands": [
+                    {
+                        "purpose": "Read an observed repository search match.",
+                        "action_id": "repository_read",
+                        "action_input": {"path": "src/module_0.py"},
+                    }
+                ]
+            }
+
+    narrow_request = FakeNarrowReadRequest()
+    monkeypatch.setattr(agent, "create_temp_request", lambda: narrow_request)
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_apply_language_policy_to_request",
+        lambda *_args, **_kwargs: None,
+    )
+    dependent_context = SimpleNamespace(
+        card=read_card,
+        revision=updated,
+        dependency_results={card.id: result},
+        planning_policy=None,
+    )
+    dependent_result = await task._run_taskboard_agent_card(
+        dependent_context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert dependent_result.status == "completed"
+    assert read_paths == ["src/module_0.py"]
+    assert "dependency_readbacks" in narrow_request.prompts["instruct"]
+
+    repeated_artifact_reads: list[Any] = []
+
+    async def capture_repeated_artifact_read(event):
+        if event.event_type == "action.artifact_read":
+            repeated_artifact_reads.append(event)
+
+    hook_name = "test.taskboard.cross-card-read-progress"
+    Agently.event_center.register_hook(capture_repeated_artifact_read, hook_name=hook_name)
+    try:
+        repeated_readback = await task._taskboard_dependency_action_artifact_readbacks(
+            evidence_view,
+            card_id="repair-with-narrow-evidence-view",
+            context_pack=cast(Any, {"goal": task.goal}),
+        )
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+    assert repeated_artifact_reads == []
+    assert repeated_readback["ref_count"] == 0
+    assert repeated_readback["exhausted_ref_count"] >= 1
+    assert repeated_readback["diagnostics"][0]["code"] == (
+        "taskboard.dependency_readback.no_unread_ranges"
+    )
 
 
 @pytest.mark.asyncio
@@ -5699,6 +6403,65 @@ async def test_taskboard_known_action_unknown_args_uses_one_narrow_command_reque
 
     monkeypatch.setattr(agent, "create_temp_request", create_fake_request)
     monkeypatch.setattr(cast(Any, task), "_apply_language_policy_to_request", lambda *_args, **_kwargs: None)
+    context_reads: list[dict[str, Any]] = []
+    context_consumption: list[tuple[Any, str]] = []
+    bound_context: list[tuple[Any, str, str]] = []
+    selected_context_pack = {
+        "profile": "task_context",
+        "skill_projection": {
+            "skills": [
+                {
+                    "skill_id": "market-data",
+                    "selected_resources": [
+                        {"ref": "skill:market-data/reference.md#api", "content": "Exact API contract."}
+                    ],
+                }
+            ]
+        },
+    }
+    context_package = object()
+    dependency_readbacks = {
+        "schema_version": "agent_task_taskboard_dependency_readbacks/v1",
+        "card_id": "market-data",
+        "readbacks": [
+            {
+                "selection_key": "sel_market_upstream",
+                "ok": True,
+                "value_preview": {"selected_ticker": "AVGO"},
+            }
+        ],
+    }
+
+    async def read_task_context_view(**kwargs):
+        context_reads.append(kwargs)
+        return selected_context_pack, context_package
+
+    def record_task_context_consumption(package, *, request_id):
+        context_consumption.append((package, request_id))
+
+    async def emit_required_skill_context_bound(pack, *, request_id, phase):
+        bound_context.append((pack, request_id, phase))
+
+    monkeypatch.setattr(cast(Any, task), "_read_task_context_view", read_task_context_view)
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_record_task_context_consumption",
+        record_task_context_consumption,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_emit_required_skill_context_bound",
+        emit_required_skill_context_bound,
+    )
+
+    async def read_dependency_action_artifacts(*_args, **_kwargs):
+        return dependency_readbacks
+
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_taskboard_dependency_action_artifact_readbacks",
+        read_dependency_action_artifacts,
+    )
 
     async def fail_if_child_agent_runs(*_args, **_kwargs):
         raise AssertionError("known TaskBoard Actions must not start a child AgentExecution")
@@ -5714,7 +6477,20 @@ async def test_taskboard_known_action_unknown_args_uses_one_narrow_command_reque
     assert len(requests) == 1
     assert requests[0].prompts["info"]["required_action_ids"] == ["market_snapshot"]
     assert requests[0].prompts["info"]["available_actions"][0]["kwargs"]["ticker"]
+    assert requests[0].prompts["info"]["context_pack"] == selected_context_pack
+    assert requests[0].prompts["input"]["dependency_readbacks"] == dependency_readbacks
+    assert "dependency_readbacks" in requests[0].prompts["instruct"]
     assert requests[0].prompts["output_format"] == "json"
+    assert context_reads[0]["phase"] == "card"
+    assert "taskboard-action-commands:market-data" in context_reads[0]["consumer_id"]
+    assert context_consumption == [(context_package, "taskboard-narrow-action-request-1")]
+    assert bound_context == [
+        (
+            selected_context_pack,
+            "taskboard-narrow-action-request-1",
+            "work.execute.taskboard.action_commands",
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -5996,6 +6772,136 @@ async def test_flat_known_action_unknown_args_uses_one_narrow_command_request(
             "truncated": False,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_multi_action_dependency_uses_actionloop_instead_of_frozen_command_batch(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-dependent-actions").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
+    )
+
+    @agent.action_func
+    def repository_search(query: str) -> dict[str, Any]:
+        return {"matches": [f"src/{query}.py"]}
+
+    @agent.action_func
+    def repository_read(path: str) -> dict[str, Any]:
+        return {"path": path, "content": "bounded source"}
+
+    task = AgentTask(
+        agent,
+        task_id="taskboard-dependent-actions",
+        goal="Search first, then read the selected repository file.",
+        success_criteria=["The read Action consumes a path returned by Search."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "search-then-read",
+            "objective": "Search first and read one selected match.",
+            "allowed_execution_shape": "actions",
+            "evidence_contract": {
+                "requires_capability_ids": ["repository_search", "repository_read"]
+            },
+        }
+    )
+
+    monkeypatch.setattr(
+        agent,
+        "create_temp_request",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("dependent multi-Action cards must not freeze all arguments in one request")
+        ),
+    )
+    direct = await task._try_taskboard_narrow_action_command_request(
+        SimpleNamespace(card=card),
+        card_input_payload={"dependency_results": {}},
+    )
+
+    assert direct is None
+    frozen_card = TaskBoardCard.from_value(
+        {
+            **card.to_dict(),
+            "metadata": {
+                "action_commands": [
+                    {
+                        "purpose": "Search for a matching implementation.",
+                        "action_id": "repository_search",
+                        "action_input": {"query": "task context"},
+                    },
+                    {
+                        "purpose": "Read the selected search match.",
+                        "action_id": "repository_read",
+                        "action_input": {"path": "guessed/path.py"},
+                    },
+                ]
+            },
+        }
+    )
+    frozen_direct = await task._try_taskboard_preplanned_action_calls(
+        SimpleNamespace(card=frozen_card)
+    )
+    assert frozen_direct is None
+    normalized_plan = task._normalize_taskboard_initial_plan(
+        {
+            "board_goal": task.goal,
+            "cards": [
+                {
+                    **frozen_card.to_dict(),
+                    "action_commands": list(frozen_card.metadata["action_commands"]),
+                    "requires_capability_ids": [
+                        "repository_search",
+                        "repository_read",
+                    ],
+                }
+            ],
+            "completion_gate": "The selected repository file was read.",
+            "why_this_effort_shape": "Search supplies the path consumed by read.",
+        }
+    )
+    normalized_card = normalized_plan["cards"][0]
+    assert "action_commands" not in normalized_card
+    assert normalized_card["requires_capability_ids"] == [
+        "repository_search",
+        "repository_read",
+    ]
+    assert normalized_plan["diagnostics"][-1]["code"] == (
+        "taskboard.initial_plan.action_commands_require_adaptive_loop"
+    )
+    assert normalized_plan["diagnostics"][-1]["fallback"] == "action_loop"
+    execution = SimpleNamespace(request=SimpleNamespace(settings=Settings()))
+    task._apply_taskboard_card_action_loop_policy(execution, card)
+    assert execution.request.settings.get("action.loop.max_rounds") is None
+    assert execution.request.settings.get("tool.loop.max_rounds") is None
+    assert execution.request.settings.get("action.loop.round_dispatch_policy") == (
+        "single_action_id_cohort"
+    )
+    assert execution.request.settings.get("tool.loop.round_dispatch_policy") == (
+        "single_action_id_cohort"
+    )
+
+    explicitly_bounded = AgentTask(
+        agent,
+        task_id="taskboard-dependent-actions-explicit-guard",
+        goal=task.goal,
+        success_criteria=task.success_criteria,
+        execution="taskboard",
+        options={"agent_task": {"action_loop_max_rounds": 4}},
+    )
+    bounded_execution = SimpleNamespace(request=SimpleNamespace(settings=Settings()))
+    explicitly_bounded._apply_taskboard_card_action_loop_policy(bounded_execution, card)
+    assert bounded_execution.request.settings.get("action.loop.max_rounds") == 4
+    assert bounded_execution.request.settings.get("tool.loop.max_rounds") == 4
+    assert bounded_execution.request.settings.get("action.loop.round_dispatch_policy") == (
+        "single_action_id_cohort"
+    )
+    assert bounded_execution.request.settings.get("tool.loop.round_dispatch_policy") == (
+        "single_action_id_cohort"
+    )
 
 
 @pytest.mark.asyncio
@@ -9165,6 +10071,28 @@ def test_agent_task_child_execution_sets_task_local_action_loop_guard(tmp_path):
     assert execution.request.settings.get("tool.loop.max_rounds") == 2
 
 
+def test_taskboard_auto_card_does_not_use_convenience_round_cap_as_strategy_owner(tmp_path):
+    agent = _create_agent("agent-taskboard-auto-action-loop").use_task_workspace(
+        tmp_path / "task-workspace"
+    )
+    task = AgentTask(
+        agent,
+        goal="Search, read the selected source, and synthesize grounded evidence.",
+        success_criteria=["The selected source content is read before synthesis."],
+        execution="taskboard",
+    )
+    execution = task._create_bounded_child_execution(
+        lineage={"task_id": task.id, "iteration_id": "card-1", "step_id": "taskboard_card"}
+    )
+
+    assert execution.request.settings.get("action.loop.max_rounds") == 2
+
+    task._apply_taskboard_action_loop_round_dispatch_policy(execution)
+
+    assert execution.request.settings.get("action.loop.max_rounds") is None
+    assert execution.request.settings.get("tool.loop.max_rounds") is None
+
+
 def test_agent_task_child_execution_respects_explicit_action_loop_guard(tmp_path):
     agent = _create_agent("agent-task-action-loop-explicit").use_task_workspace(tmp_path / "task-workspace")
     task = AgentTask(
@@ -9966,6 +10894,96 @@ async def test_taskboard_grounding_task_workspace_patch_is_claim_scoped_and_reje
 
 
 @pytest.mark.asyncio
+async def test_taskboard_grounding_delete_only_policy_rejects_rewording_and_accepts_exact_deletion(
+    tmp_path,
+):
+    agent = _create_agent("agent-taskboard-grounding-delete-only").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-grounding-delete-only",
+        goal="Remove an unverifiable material claim.",
+        success_criteria=["No replacement fact is invented."],
+        execution="taskboard",
+    )
+    quote = "No public model YAML exists in the repository."
+    original = f"# Report\n\n{quote}\n\nSupported paragraph.\n"
+    await task.task_workspace.write_file("final.md", original)
+    promoted = await task.task_workspace._promote_file_identity(
+        "final.md", role="grounding_candidate"
+    )
+    requirement = {
+        "claim_key": "claim_1",
+        "artifact_quote": quote,
+        "carrier_id": promoted.get("content_version_id"),
+        "content_version_id": promoted.get("content_version_id"),
+        "state": "unverifiable",
+        "repair_policy": "delete_only",
+    }
+    context = SimpleNamespace(
+        card=SimpleNamespace(
+            id="final-verification-repair",
+            evidence_contract={
+                "material_claim_repair_contract": {"requirements": [requirement]},
+                "material_claim_patch_paths": ["final.md"],
+            },
+        )
+    )
+
+    rejected = await task._materialize_taskboard_task_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "patch",
+            "patch_proposal": {
+                "path": "final.md",
+                "operations": [
+                    {
+                        "claim_key": "claim_1",
+                        "op": "replace",
+                        "old_string": quote,
+                        "new_string": "The model YAML was not read during this run.",
+                    }
+                ],
+            },
+        },
+    )
+    unchanged = await task.task_workspace.read_file("final.md")
+
+    assert rejected["status"] == "blocked"
+    assert rejected["task_workspace_patch_delivery"]["status"] == "failed"
+    assert "delete_only" in rejected["task_workspace_patch_delivery"]["reason"]
+    assert unchanged["content"] == original
+
+    deleted = await task._materialize_taskboard_task_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "sufficient": True,
+            "next_board_action": "patch",
+            "patch_proposal": {
+                "path": "final.md",
+                "operations": [
+                    {
+                        "claim_key": "claim_1",
+                        "op": "replace",
+                        "old_string": quote,
+                        "new_string": "",
+                    }
+                ],
+            },
+        },
+    )
+    readback = await task.task_workspace.read_file("final.md")
+
+    assert deleted["status"] == "completed"
+    assert deleted["task_workspace_patch_delivery"]["status"] == "completed"
+    assert readback["content"] == "# Report\n\n\n\nSupported paragraph.\n"
+
+
+@pytest.mark.asyncio
 async def test_taskboard_grounding_task_workspace_patch_scope_ignores_markdown_emphasis(tmp_path):
     agent = _create_agent("agent-taskboard-grounding-markdown-patch").use_task_workspace(tmp_path / "task_workspace")
     task = AgentTask(
@@ -10523,6 +11541,35 @@ def test_taskboard_control_continue_preserves_current_card_status():
     assert setback == "setback"
 
 
+def test_taskboard_control_finalize_cannot_override_explicit_insufficiency():
+    task = AgentTask(
+        _create_agent("agent-taskboard-control-contradictory-finalize"),
+        task_id="taskboard-control-contradictory-finalize",
+        goal="Produce a complete final report.",
+        success_criteria=["The report body is complete and grounded."],
+        execution="taskboard",
+    )
+
+    status = task._taskboard_control_card_status(
+        {
+            "status": "completed",
+            "sufficient": False,
+            "next_board_action": "finalize",
+            "candidate_final_result": "",
+            "final_result": "",
+            "artifact_markdown": "",
+            "artifact_manifest": {
+                "path": "final.md",
+                "sections": [{"id": "outline", "title": "Outline"}],
+            },
+            "gaps": [],
+            "remaining_work": [],
+        }
+    )
+
+    assert status == "setback"
+
+
 def test_taskboard_control_stop_preserves_completed_card_status():
     agent = _create_agent("agent-taskboard-control-stop-status")
     task = AgentTask(
@@ -10630,7 +11677,13 @@ async def test_taskboard_action_card_repairs_binding_without_repeating_business_
             {},
         )
 
-    async def fake_request_evidence_binding_repair(grounding_guard, evidence_ledger, *, language_policy):
+    async def fake_request_evidence_binding_repair(
+        grounding_guard,
+        evidence_ledger,
+        *,
+        language_policy,
+        offered_reference_ids=None,
+    ):
         candidates = task._evidence_binding_repair_candidate_refs(evidence_ledger)
         binding_requests.append(candidates)
         nvda = next(item for item in candidates if item.get("input_preview", {}).get("ticker") == "NVDA")
@@ -10737,10 +11790,19 @@ async def test_taskboard_finalizer_repairs_binding_before_terminal_verifier(tmp_
     guard = validate_evidence_use(collect_evidence_use(final), ledger)
     model_calls = 0
 
-    async def fake_request_evidence_binding_repair(grounding_guard, evidence_ledger, *, language_policy):
+    async def fake_request_evidence_binding_repair(
+        grounding_guard,
+        evidence_ledger,
+        *,
+        language_policy,
+        offered_reference_ids=None,
+    ):
         nonlocal model_calls
         model_calls += 1
-        candidates = task._evidence_binding_repair_candidate_refs(evidence_ledger)
+        candidates = task._evidence_binding_repair_candidate_refs(
+            evidence_ledger,
+            offered_reference_ids=offered_reference_ids,
+        )
         nvda = next(item for item in candidates if item.get("input_preview", {}).get("ticker") == "NVDA")
         current = grounding_guard["normalized_evidence_use"][0]
         return [
@@ -10867,6 +11929,271 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
     schedule = TaskBoard(repaired, handler=lambda _context: None).schedule()
     assert schedule.runnable_card_ids == (repair.id,)
     assert task.diagnostics["taskboard_final_repair_patches"][0]["repair_card_id"] == repair.id
+
+
+def test_taskboard_final_repair_stops_after_three_unchanged_acceptance_evidence_states(
+    tmp_path,
+):
+    from agently.core.orchestration.TaskBoard import apply_task_board_patch
+
+    agent = _create_agent("agent-taskboard-final-repair-convergence").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-repair-convergence",
+        goal="Produce a source-grounded architecture report.",
+        success_criteria=["Direct code evidence supports the architecture conclusion."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+    verification = {
+        "is_complete": False,
+        "requires_block": False,
+        "reason": "The same search excerpt does not prove the implementation claim.",
+        "missing_criteria": ["Read the implementation module and tests."],
+        "criterion_checks": [
+            {
+                "criterion_id": "criterion:1",
+                "satisfied": False,
+                "evidence_ids": ["ref_search_excerpt"],
+            }
+        ],
+        "replan_signal": {
+            "status": "replan_segment",
+            "reason": "Acquire direct implementation evidence.",
+            "evidence_refs": ["ref_search_excerpt"],
+        },
+    }
+
+    def complete_latest_repair(current: TaskBoardRevision) -> TaskBoardRevision:
+        repair = next(
+            card
+            for card in reversed(current.graph.cards)
+            if card.metadata.get("generated_by")
+            == "agent_task.taskboard.final_verification_repair"
+        )
+        return apply_task_board_patch(
+            current,
+            {
+                "base_revision": current.revision_id,
+                "source": "test.complete_repair",
+                "operations": [
+                    {
+                        "op": "record_card_result",
+                        "result": TaskBoardCardResult(
+                            card_id=repair.id,
+                            status="completed",
+                            output_digest=f"carrier-rewrite-{repair.id}",
+                        ).to_dict(),
+                    },
+                    {"op": "set_board_status", "status": "completed"},
+                ],
+            },
+        )
+
+    first = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification=verification,
+    )
+    assert first is not None
+    first_repair = next(card for card in first.graph.cards if card.id.startswith("final-verification-repair"))
+    assert first_repair.metadata["acceptance_evidence_convergence"]["occurrence"] == 1
+
+    second = task._taskboard_final_verification_repair_revision(
+        complete_latest_repair(first),
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification=verification,
+    )
+    assert second is not None
+    second_repair = second.graph.cards[-1]
+    assert second_repair.metadata["acceptance_evidence_convergence"]["occurrence"] == 2
+
+    third = task._taskboard_final_verification_repair_revision(
+        complete_latest_repair(second),
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification=verification,
+    )
+
+    assert third is None
+    stopped = task.diagnostics["taskboard_final_repair_convergence"][-1]
+    assert stopped["terminal"] is True
+    assert stopped["occurrence"] == 3
+    assert stopped["state_changed"] is False
+    assert stopped["evidence_refs"] == ["ref_search_excerpt"]
+
+
+def test_taskboard_final_repair_new_verifier_used_evidence_resets_convergence(tmp_path):
+    agent = _create_agent("agent-taskboard-final-repair-evidence-progress").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-repair-evidence-progress",
+        goal="Produce a grounded architecture report.",
+        success_criteria=["Direct code evidence supports the conclusion."],
+        execution="taskboard",
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+
+    def verification(evidence_id: str) -> dict[str, Any]:
+        return {
+            "is_complete": False,
+            "requires_block": False,
+            "missing_criteria": ["Read direct implementation evidence."],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": False,
+                    "evidence_ids": [evidence_id],
+                }
+            ],
+            "replan_signal": {
+                "status": "replan_segment",
+                "reason": "Acquire direct implementation evidence.",
+                "evidence_refs": [evidence_id],
+            },
+        }
+
+    first = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification=verification("ref_search_excerpt"),
+    )
+    assert first is not None
+    progressed = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification=verification("ref_direct_module_read"),
+    )
+
+    assert progressed is not None
+    repair = progressed.graph.cards[-1]
+    assert repair.metadata["acceptance_evidence_convergence"]["occurrence"] == 1
+    assert repair.metadata["acceptance_evidence_convergence"]["state_changed"] is True
+
+
+@pytest.mark.asyncio
+async def test_taskboard_final_repair_cannot_complete_without_task_workspace_content_change(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-final-repair-write-proof").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-repair-write-proof",
+        goal="Repair final.md.",
+        success_criteria=["The repaired artifact is delivered."],
+        execution="taskboard",
+    )
+    await task.task_workspace.write_file("final.md", "# Original\n\nUnsupported claim.\n")
+    card = TaskBoardCard.from_value(
+        {
+            "id": "final-verification-repair",
+            "objective": "Repair final.md.",
+            "required_outputs": ["Corrected final.md"],
+            "metadata": {
+                "generated_by": "agent_task.taskboard.final_verification_repair",
+                "final_task_workspace_deliverables": ["final.md"],
+            },
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph={"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]},
+    )
+    context = SimpleNamespace(card=card, revision=revision, dependency_results={})
+
+    async def fake_agent_card(*_args, **_kwargs):
+        return TaskBoardCardResult(
+            card_id=card.id,
+            status="completed",
+            preview={
+                "status": "completed",
+                "artifact_manifest": {"path": "final.md"},
+                "self_check": "The file was repaired.",
+            },
+        )
+
+    monkeypatch.setattr(cast(Any, task), "_run_taskboard_agent_card", fake_agent_card)
+
+    result = await task._run_taskboard_card(
+        context,
+        cast(Any, {"goal": task.goal, "items": []}),
+    )
+
+    assert result.status == "setback"
+    assert result.metadata["task_workspace_write_proof"]["changed"] is False
+    assert result.metadata["task_workspace_write_proof"]["unchanged_paths"] == ["final.md"]
+    assert any(
+        item.get("code") == "taskboard.final_repair.task_workspace_content_unchanged"
+        for item in result.diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_final_repair_completion_records_task_workspace_content_change(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-final-repair-write-proof-success").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-final-repair-write-proof-success",
+        goal="Repair final.md.",
+        success_criteria=["The repaired artifact is delivered."],
+        execution="taskboard",
+    )
+    await task.task_workspace.write_file("final.md", "# Original\n\nUnsupported claim.\n")
+    card = TaskBoardCard.from_value(
+        {
+            "id": "final-verification-repair",
+            "objective": "Repair final.md.",
+            "required_outputs": ["Corrected final.md"],
+            "metadata": {
+                "generated_by": "agent_task.taskboard.final_verification_repair",
+                "final_task_workspace_deliverables": ["final.md"],
+            },
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph={"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]},
+    )
+    context = SimpleNamespace(card=card, revision=revision, dependency_results={})
+
+    async def fake_agent_card(*_args, **_kwargs):
+        write = await task.task_workspace.write_file(
+            "final.md",
+            "# Corrected\n\nThe unsupported claim was removed.\n",
+        )
+        return TaskBoardCardResult(
+            card_id=card.id,
+            status="completed",
+            preview={"status": "completed", "artifact_manifest": {"path": "final.md"}},
+            file_refs=tuple(write["file_refs"]),
+        )
+
+    monkeypatch.setattr(cast(Any, task), "_run_taskboard_agent_card", fake_agent_card)
+
+    result = await task._run_taskboard_card(
+        context,
+        cast(Any, {"goal": task.goal, "items": []}),
+    )
+
+    assert result.status == "completed"
+    proof = result.metadata["task_workspace_write_proof"]
+    assert proof["changed"] is True
+    assert proof["changed_paths"] == ["final.md"]
+    assert proof["before"]["final.md"]["content_version_id"] != proof["after"]["final.md"][
+        "content_version_id"
+    ]
 
 
 def _completed_taskboard_revision_for_final_repair(board_id: str) -> TaskBoardRevision:
@@ -11034,6 +12361,570 @@ def test_taskboard_material_claim_repair_uses_structured_claim_contract(tmp_path
     assert "Do not return or rewrite the complete artifact body" in repair.objective
     assert "Produce a complete corrected deliverable" not in repair.objective
     assert repair.allowed_execution_shape == "control"
+
+
+def test_taskboard_material_claim_evidence_gap_replans_segment_before_carrier_patch(tmp_path):
+    agent = _create_agent("agent-taskboard-grounding-evidence-replan").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-grounding-evidence-replan",
+        goal="Produce a source-grounded architecture report.",
+        success_criteria=["Architecture claims use direct code, config, and test evidence."],
+        execution="taskboard",
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+    repair_contract = {
+        "gate_kind": "factual_integrity",
+        "issue_code": "unsupported_material_claim",
+        "contract_subject": "carrier:car_grounded_candidate",
+        "requirements": [
+            {
+                "claim_key": "claim:1",
+                "path": "final.md",
+                "artifact_quote": "The repository has no dedicated MoE package.",
+                "state": "unsupported",
+            }
+        ],
+    }
+    replan_signal = {
+        "status": "replan_segment",
+        "reason": "Direct module, configuration, and test evidence has not been read.",
+        "evidence_refs": ["ref_search_results"],
+    }
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification={
+            "is_complete": False,
+            "requires_block": False,
+            "missing_criteria": ["Direct non-README architecture evidence is incomplete."],
+            "material_claim_repair_contract": repair_contract,
+            "replan_signal": replan_signal,
+        },
+    )
+
+    assert repaired is not None
+    evidence_card = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by")
+        == "agent_task.taskboard.final_verification_evidence_reacquisition"
+    )
+    repair = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by")
+        == "agent_task.taskboard.final_verification_repair"
+    )
+    assert evidence_card.allowed_execution_shape == "auto"
+    assert evidence_card.depends_on == ("draft",)
+    assert evidence_card.evidence_contract["kind"] == (
+        "taskboard_final_verification_evidence_reacquisition"
+    )
+    assert evidence_card.evidence_contract["done_when"]
+    assert evidence_card.evidence_contract["minimum_new_content_identity_count"] == 1
+    assert evidence_card.evidence_contract["excluded_artifact_paths"] == []
+    assert evidence_card.metadata["repair_source"] == (
+        "verification_evidence_reacquisition"
+    )
+    assert repair.allowed_execution_shape == "auto"
+    assert repair.metadata["repair_source"] == "verification_evidence_reacquisition"
+    assert repair.evidence_contract["replan_signal"] == replan_signal
+    assert repair.evidence_contract["prior_material_claim_repair_contract"] == repair_contract
+    assert repair.evidence_contract["evidence_reacquisition_card_id"] == evidence_card.id
+    assert repair.depends_on == (evidence_card.id,)
+    assert "material_claim_repair_contract" not in repair.evidence_contract
+    assert "material_claim_patch_paths" not in repair.evidence_contract
+    assert "Acquire additional verifier-visible evidence" in evidence_card.objective
+    assert "Do not lower, relax, or replace the original success criteria" in evidence_card.objective
+    assert "rewriting or qualifying the deliverable is not evidence acquisition" in evidence_card.objective
+    assert "return setback or blocked" in evidence_card.objective
+    assert "complete corrected deliverable" in repair.objective
+    assert "remove, qualify, or replace unsupported facts" not in repair.objective
+    assert "TaskWorkspace replace patch" not in repair.objective
+    schedule = TaskBoard(repaired, handler=lambda _context: None).schedule()
+    assert schedule.runnable_card_ids == (evidence_card.id,)
+
+
+def test_taskboard_card_done_when_uses_evidence_contract_then_required_outputs(tmp_path):
+    task = AgentTask(
+        _create_agent("agent-taskboard-card-done-when").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-card-done-when",
+        goal="Acquire evidence before repairing final.md.",
+        success_criteria=["New source evidence is visible."],
+        execution="taskboard",
+    )
+    explicit = TaskBoardCard.from_value(
+        {
+            "id": "evidence",
+            "objective": "Acquire source evidence.",
+            "required_outputs": ["A bounded source body."],
+            "evidence_contract": {
+                "done_when": "A new body-bearing source reference is visible."
+            },
+        }
+    )
+    fallback = TaskBoardCard.from_value(
+        {
+            "id": "fallback",
+            "objective": "Acquire fallback evidence.",
+            "required_outputs": ["A bounded fallback source body."],
+        }
+    )
+
+    assert task._taskboard_card_done_when(explicit) == [
+        "A new body-bearing source reference is visible."
+    ]
+    assert task._taskboard_card_done_when(fallback) == [
+        "A bounded fallback source body."
+    ]
+
+
+def test_taskboard_evidence_reacquisition_requires_new_source_content_not_final_artifact(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-evidence-delta").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-evidence-delta",
+        goal="Acquire direct repository evidence before repairing final.md.",
+        success_criteria=["Direct code evidence supports the report."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "final-verification-evidence",
+            "objective": "Acquire new verifier-visible source evidence.",
+            "required_outputs": ["New bounded source evidence."],
+            "evidence_contract": {
+                "kind": "taskboard_final_verification_evidence_reacquisition",
+                "done_when": "At least one new body-bearing source reference exists.",
+                "baseline_content_identities": [],
+                "minimum_new_content_identity_count": 1,
+                "eligible_source_roles": [
+                    "action",
+                    "source",
+                    "task_workspace_readback",
+                ],
+                "excluded_artifact_paths": ["final.md"],
+            },
+            "metadata": {
+                "generated_by": (
+                    "agent_task.taskboard.final_verification_evidence_reacquisition"
+                )
+            },
+        }
+    )
+    context = SimpleNamespace(card=card)
+    completed = TaskBoardCardResult(
+        card_id=card.id,
+        status="completed",
+        preview={"status": "completed", "remaining_work": []},
+    )
+
+    no_evidence = task._enforce_taskboard_evidence_reacquisition_proof(
+        context,
+        completed,
+    )
+    assert no_evidence.status == "setback"
+    assert no_evidence.metadata["evidence_reacquisition_proof"]["new_content_identity_count"] == 0
+
+    task._task_reference_catalog.add_evidence(
+        {
+            "id": "final-readback-action",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "read_file",
+            "action_call_id": "call-final-readback",
+            "path": "final.md",
+            "input_preview": {"path": "final.md", "max_bytes": 50000},
+            "body": "# Existing final report\n\nUnsupported repository claim.",
+        }
+    )
+    carrier_only = task._enforce_taskboard_evidence_reacquisition_proof(
+        context,
+        completed,
+    )
+    assert carrier_only.status == "setback"
+    assert carrier_only.metadata["evidence_reacquisition_proof"]["new_content_identity_count"] == 0
+
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "repository-source-read",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "repo_read_file",
+            "action_call_id": "call-repository-source",
+            "path": "ultralytics/nn/modules/moe/routers.py",
+            "input_preview": {
+                "path": "ultralytics/nn/modules/moe/routers.py",
+                "start_line": 97,
+                "end_line": 184,
+            },
+            "body": "class UltraEfficientRouter(nn.Module):\n    def forward(self, x): ...",
+        }
+    )
+    with_source = task._enforce_taskboard_evidence_reacquisition_proof(
+        context,
+        completed,
+    )
+
+    assert with_source.status == "completed"
+    proof = with_source.metadata["evidence_reacquisition_proof"]
+    assert proof["new_content_identity_count"] == 1
+    assert proof["new_reference_ids"] == [source["reference_id"]]
+
+    baseline = task._taskboard_grounding_evidence_snapshot(
+        excluded_artifact_paths=["final.md"],
+    )
+    repeated_card = TaskBoardCard.from_value(
+        {
+            **card.to_dict(),
+            "id": "final-verification-evidence-repeat",
+            "evidence_contract": {
+                **dict(card.evidence_contract),
+                "baseline_content_identities": baseline["content_identities"],
+            },
+        }
+    )
+    repeated_context = SimpleNamespace(card=repeated_card)
+    task._task_reference_catalog.add_evidence(
+        {
+            "id": "repository-source-read-repeat",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "action_id": "repo_read_file",
+            "action_call_id": "call-repository-source-repeat",
+            "path": "ultralytics/nn/modules/moe/routers.py",
+            "input_preview": {
+                "path": "ultralytics/nn/modules/moe/routers.py",
+                "start_line": 97,
+                "end_line": 184,
+            },
+            "body": "class UltraEfficientRouter(nn.Module):\n    def forward(self, x): ...",
+        }
+    )
+    repeated = task._enforce_taskboard_evidence_reacquisition_proof(
+        repeated_context,
+        TaskBoardCardResult(
+            card_id=repeated_card.id,
+            status="completed",
+            preview={"status": "completed", "remaining_work": []},
+        ),
+    )
+
+    assert repeated.status == "setback"
+    assert repeated.metadata["evidence_reacquisition_proof"]["new_content_identity_count"] == 0
+
+
+def _revision_with_completed_evidence_reacquisition(
+    board_id: str,
+    *,
+    new_reference_ids: list[str],
+) -> TaskBoardRevision:
+    cards = [
+        TaskBoardCard.from_value(
+            {
+                "id": "draft",
+                "objective": "Draft the final report.",
+                "required_outputs": ["final.md"],
+                "status": "completed",
+            }
+        ),
+        TaskBoardCard.from_value(
+            {
+                "id": "evidence",
+                "objective": "Acquire evidence for the architecture criterion.",
+                "depends_on": ["draft"],
+                "required_outputs": ["Bounded source evidence"],
+                "status": "completed",
+                "evidence_contract": {
+                    "kind": "taskboard_final_verification_evidence_reacquisition",
+                    "criterion_subjects": ["criterion:architecture"],
+                },
+                "metadata": {
+                    "generated_by": (
+                        "agent_task.taskboard.final_verification_evidence_reacquisition"
+                    )
+                },
+            }
+        ),
+        TaskBoardCard.from_value(
+            {
+                "id": "repair",
+                "objective": "Repair final.md using the acquired evidence.",
+                "depends_on": ["evidence"],
+                "required_outputs": ["Corrected final.md"],
+                "status": "completed",
+            }
+        ),
+    ]
+    return TaskBoardRevision.from_value(
+        {
+            "board_id": board_id,
+            "revision_id": "rev-after-evidence-repair",
+            "graph": {
+                "graph_id": f"{board_id}-graph",
+                "cards": [card.to_dict() for card in cards],
+            },
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                ).to_dict(),
+                "evidence": TaskBoardCardResult(
+                    card_id="evidence",
+                    status="completed",
+                    metadata={
+                        "evidence_reacquisition_proof": {
+                            "satisfied": True,
+                            "new_reference_ids": new_reference_ids,
+                        }
+                    },
+                ).to_dict(),
+                "repair": TaskBoardCardResult(
+                    card_id="repair",
+                    status="completed",
+                ).to_dict(),
+            },
+        }
+    )
+
+
+def test_taskboard_replan_rejects_new_evidence_not_used_by_its_target_check(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-irrelevant-evidence").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-irrelevant-evidence",
+        goal="Produce a source-grounded architecture report.",
+        success_criteria=["Architecture claims use direct code evidence."],
+        execution="taskboard",
+    )
+    revision = _revision_with_completed_evidence_reacquisition(
+        task.id,
+        new_reference_ids=["ref_new_router_source"],
+    )
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification={
+            "is_complete": False,
+            "missing_criteria": ["Architecture evidence remains incomplete."],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:architecture",
+                    "satisfied": False,
+                    "evidence_ids": ["ref_unrelated"],
+                }
+            ],
+            "replan_signal": {
+                "status": "replan_segment",
+                "evidence_refs": ["ref_unrelated"],
+            },
+        },
+    )
+
+    assert repaired is None
+    diagnostic = task.diagnostics["taskboard_evidence_relevance"][-1]
+    assert diagnostic["verified_new_reference_ids"] == []
+    assert diagnostic["target_subjects"] == ["criterion:architecture"]
+    assert diagnostic["status"] == "not_used_by_target_check"
+
+
+def test_taskboard_replan_accepts_new_evidence_used_by_its_target_check(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-relevant-evidence").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-relevant-evidence",
+        goal="Produce a source-grounded architecture report.",
+        success_criteria=["Architecture claims use direct code evidence."],
+        execution="taskboard",
+    )
+    revision = _revision_with_completed_evidence_reacquisition(
+        task.id,
+        new_reference_ids=["ref_new_router_source"],
+    )
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification={
+            "is_complete": False,
+            "missing_criteria": ["More code evidence is still required."],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:architecture",
+                    "satisfied": False,
+                    "evidence_ids": ["ref_new_router_source"],
+                }
+            ],
+            "replan_signal": {
+                "status": "replan_segment",
+                "evidence_refs": ["ref_new_router_source"],
+            },
+        },
+    )
+
+    assert repaired is not None
+    diagnostic = task.diagnostics["taskboard_evidence_relevance"][-1]
+    assert diagnostic["verified_new_reference_ids"] == [
+        "ref_new_router_source"
+    ]
+    assert diagnostic["status"] == "used_by_target_check"
+
+
+def test_taskboard_material_claim_relevance_uses_stable_exact_subject_not_position():
+    _issue, repair_contract, _digest, _refs = (
+        AgentTask._taskboard_final_repair_acceptance_evidence_state(
+            {
+                "material_claim_checks": [
+                    {
+                        "claim_key": "claim_2",
+                        "carrier_id": "car_report",
+                        "path": "final.md",
+                        "content_version_id": "cv_before",
+                        "artifact_quote": "The router uses top-k expert selection.",
+                        "state": "unsupported",
+                        "evidence_ids": [],
+                    }
+                ],
+                "replan_signal": {"status": "replan_segment"},
+            },
+            output_subjects=["final.md"],
+        )
+    )
+
+    target_subjects = repair_contract["criterion_subjects"]
+    assert target_subjects
+    assert "claim_2" not in target_subjects
+
+    refs_after_reorder = AgentTask._taskboard_verifier_check_evidence_refs(
+        {
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_1",
+                    "carrier_id": "car_report",
+                    "path": "final.md",
+                    "content_version_id": "cv_after",
+                    "artifact_quote": "The router uses top-k expert selection.",
+                    "state": "unsupported",
+                    "evidence_ids": ["ref_new_router_source"],
+                }
+            ]
+        },
+        target_subjects=target_subjects,
+    )
+    refs_for_different_claim_at_same_position = (
+        AgentTask._taskboard_verifier_check_evidence_refs(
+            {
+                "material_claim_checks": [
+                    {
+                        "claim_key": "claim_2",
+                        "carrier_id": "car_report",
+                        "path": "final.md",
+                        "content_version_id": "cv_after",
+                        "artifact_quote": "A different claim now occupies this position.",
+                        "state": "unsupported",
+                        "evidence_ids": ["ref_unrelated"],
+                    }
+                ]
+            },
+            target_subjects=target_subjects,
+        )
+    )
+
+    assert refs_after_reorder == ["ref_new_router_source"]
+    assert refs_for_different_claim_at_same_position == []
+
+
+def test_taskboard_inline_material_claim_repair_does_not_open_task_workspace_patch_mode(
+    tmp_path,
+):
+    agent = _create_agent("agent-taskboard-inline-grounding-repair").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-inline-grounding-repair",
+        goal="Write a grounded deliverable to final.md.",
+        success_criteria=["final.md exists and every material claim is grounded."],
+        execution="taskboard",
+        options={"required_deliverables": ["final.md"]},
+    )
+    inline_version = "inline:" + "1" * 64
+    task._lifecycle_state.replace_carriers(
+        [
+            {
+                "carrier_id": "car_inline_candidate",
+                "kind": "inline_final_result",
+                "required": True,
+                "path": "",
+                "content_version_id": inline_version,
+                "content_digest": hashlib.sha256(
+                    b"Workspace final.md path was not verified."
+                ).hexdigest(),
+                "source_work_result_id": "work:inline-taskboard-repair",
+                "status": "materialized",
+            }
+        ],
+        expected_version=task._lifecycle_state.state_version,
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+    repair_contract = {
+        "gate_kind": "factual_integrity",
+        "issue_code": "unsupported_material_claim",
+        "contract_subject": "carrier:car_inline_candidate",
+        "requirements": [
+            {
+                "claim_key": "claim:1",
+                "carrier_id": "car_inline_candidate",
+                "path": "",
+                "content_version_id": inline_version,
+                "artifact_quote": "Workspace final.md path was not verified.",
+                "state": "unsupported",
+                "repair_policy": "delete_only",
+            }
+        ],
+    }
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "Workspace final.md path was not verified."},
+        final_verification={
+            "is_complete": False,
+            "requires_block": False,
+            "reason": "The inline pointer is not a delivered artifact.",
+            "material_claim_repair_contract": repair_contract,
+        },
+    )
+
+    assert repaired is not None
+    repair = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by") == "agent_task.taskboard.final_verification_repair"
+    )
+    assert repair.allowed_execution_shape == "auto"
+    assert "material_claim_patch_paths" not in repair.evidence_contract
+    assert repair.metadata["final_task_workspace_deliverables"] == ["final.md"]
+    assert "Produce a complete corrected deliverable" in repair.objective
+    assert "TaskWorkspace replace patch" not in repair.objective
 
 
 @pytest.mark.parametrize(
@@ -12821,10 +14712,86 @@ def test_terminal_verifier_validates_the_exact_model_visible_reference_snapshot(
 
     assert accepted["is_complete"] is True
     assert rejected["criterion_audit"]["valid"] is False
-    assert {
-        error["code"]
-        for error in rejected["criterion_audit"]["structural_errors"]
-    } == {"criterion_evidence_unknown"}
+    assert rejected["criterion_audit"]["structural_errors"] == []
+    assert rejected["criterion_audit"]["repair_contract"]["issue_code"] == (
+        "criterion_unsatisfied"
+    )
+    failed_join = rejected["criterion_audit"]["failed_checks"][0]
+    assert failed_join["satisfied"] is False
+    assert failed_join["evidence_ids"] == []
+    assert failed_join["discarded_evidence_ids"] == [
+        carrier_readback["reference_id"]
+    ]
+
+
+def test_terminal_verifier_discards_unknown_criterion_binding_as_targetable_failure(tmp_path):
+    agent = _create_agent("agent-verifier-criterion-unknown-binding").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-criterion-unknown-binding",
+        goal="Return one grounded fact in final.md.",
+        success_criteria=["The grounded fact is delivered in final.md."],
+    )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "source:fact",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "The bounded source fact.",
+        }
+    )
+    carrier_id = "inline:" + "8" * 64
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": "The bounded source fact.",
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "carrier_id": carrier_id,
+                "kind": "inline_final_result",
+                "text": "The bounded source fact.",
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Complete.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "The artifact location projection proves delivery.",
+                    "evidence_ids": [
+                        source["reference_id"],
+                        "trusted_task_workspace_artifacts",
+                    ],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [],
+        },
+        execution_evidence_summary={},
+        terminal_candidate=candidate,
+        offered_reference_ids={source["reference_id"]},
+    )
+
+    assert verification["is_complete"] is False
+    audit = verification["criterion_audit"]
+    assert audit["structural_errors"] == []
+    assert audit["repair_contract"]["issue_code"] == "criterion_unsatisfied"
+    failed = audit["failed_checks"][0]
+    assert failed["satisfied"] is False
+    assert failed["evidence_ids"] == [source["reference_id"]]
+    assert failed["discarded_evidence_ids"] == ["trusted_task_workspace_artifacts"]
+    assert "outside the offered set" in failed["gaps"][-1]
 
 
 def test_terminal_verifier_material_claim_keys_reconstruct_host_owned_identity(tmp_path):
@@ -12861,13 +14828,16 @@ def test_terminal_verifier_material_claim_keys_reconstruct_host_owned_identity(t
     assert [item["claim_key"] for item in offered_candidates] == [
         "claim_1",
         "claim_2",
-        "claim_3",
+    ]
+    assert [item["syntax_role"] for item in offered_candidates] == [
+        "prose",
+        "prose",
     ]
     assert all(
         not {"carrier_id", "content_version_id", "artifact_quote"}.intersection(item)
         for item in offered_candidates
     )
-    selected = offered_candidates[1]
+    selected = offered_candidates[0]
     verification = task._normalize_verification(
         {
             "is_complete": True,
@@ -12914,6 +14884,108 @@ def test_terminal_verifier_material_claim_keys_reconstruct_host_owned_identity(t
     ]
 
 
+def test_terminal_verifier_actual_case_simulation_separates_markdown_structure_from_material_claims(
+    tmp_path,
+):
+    agent = _create_agent("agent-verifier-actual-case-simulation").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-actual-case-simulation",
+        goal="Review a repository capability and propose a bounded adoption step.",
+        success_criteria=["Repository facts are grounded and the recommendation stays bounded."],
+    )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "repo:moe-config",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "The repository exposes MoE expert-count and router-loss settings.",
+        }
+    )
+    carrier_id = "car_actual_case"
+    candidate: dict[str, Any] = {
+        "carrier_id": carrier_id,
+        "kind": "task_workspace_artifact",
+        "path": "final.md",
+        "text": (
+            "# Adoption review\n\n"
+            "| Surface | Observed state |\n"
+            "| --- | --- |\n"
+            "| Configuration | MoE expert-count and router-loss settings exist. |\n\n"
+            "The repository exposes MoE expert-count and router-loss settings.\n\n"
+            "Recommendation: validate a minimal inference and routing-diagnostics path before adoption."
+        ),
+        "content_version_id": "cv_actual_case",
+    }
+    candidate["carriers"] = [dict(candidate)]
+    candidates = task._material_claim_candidates_for_verifier(candidate)
+    by_text = {item["text"]: item for item in candidates}
+
+    assert "# Adoption review" not in by_text
+    assert "| --- | --- |" not in by_text
+    assert by_text["| Surface | Observed state |"]["syntax_role"] == "markdown_table_row"
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The factual claims are grounded and the recommendation is bounded.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "The report separates observed repository facts from the adoption step.",
+                    "evidence_ids": [source["reference_id"]],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": by_text[
+                        "| Configuration | MoE expert-count and router-loss settings exist. |"
+                    ]["claim_key"],
+                    "claim_kind": "external_fact",
+                    "state": "supported",
+                    "evidence_ids": [source["reference_id"]],
+                    "reason": "The bounded repository read supports the table row.",
+                },
+                {
+                    "claim_key": by_text[
+                        "The repository exposes MoE expert-count and router-loss settings."
+                    ]["claim_key"],
+                    "claim_kind": "external_fact",
+                    "state": "supported",
+                    "evidence_ids": [source["reference_id"]],
+                    "reason": "The bounded repository read supports the prose fact.",
+                },
+                {
+                    "claim_key": by_text[
+                        "Recommendation: validate a minimal inference and routing-diagnostics path before adoption."
+                    ]["claim_key"],
+                    "claim_kind": "recommendation",
+                    "state": "reasonable_derived",
+                    "evidence_ids": [source["reference_id"]],
+                    "reason": "The recommendation is a bounded validation step derived from the observed surface.",
+                },
+            ],
+        },
+        execution_evidence_summary={},
+        terminal_candidate=candidate,
+        offered_reference_ids={source["reference_id"]},
+    )
+
+    assert verification["is_complete"] is True
+    assert verification["material_claim_audit"]["valid"] is True
+    assert len(verification["material_claim_checks"]) == 3
+    assert "# Adoption review" not in {
+        item["artifact_quote"] for item in verification["material_claim_checks"]
+    }
+
+
 def test_terminal_verifier_claim_candidates_keep_adjacent_markdown_lines_separate(
     tmp_path,
 ):
@@ -12942,9 +15014,8 @@ def test_terminal_verifier_claim_candidates_keep_adjacent_markdown_lines_separat
     offered = task._material_claim_candidates_for_verifier(candidate)
 
     assert [(item["claim_key"], item["text"]) for item in offered] == [
-        ("claim_1", "## Market facts"),
-        ("claim_2", "- NVDA closed at 170.2."),
-        ("claim_3", "- AVGO closed at 238.4."),
+        ("claim_1", "- NVDA closed at 170.2."),
+        ("claim_2", "- AVGO closed at 238.4."),
     ]
 
 
@@ -13063,7 +15134,7 @@ def test_terminal_verifier_rejects_duplicate_material_claim_key(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_terminal_verifier_join_errors_share_one_protocol_owner_and_stop_on_third(
+async def test_terminal_verifier_unknown_criterion_join_is_targetable_and_separate_from_protocol_error(
     tmp_path,
 ):
     agent = _create_agent("agent-verifier-protocol-convergence").use_task_workspace(
@@ -13146,34 +15217,36 @@ async def test_terminal_verifier_join_errors_share_one_protocol_owner_and_stop_o
         for item in normalized
     ]
 
-    assert {
+    assert [
         tuple(
             decision["terminal_convergence"]["issue"][field]
             for field in ("gate_kind", "issue_code", "contract_subject")
         )
         for decision in decisions
-    } == {
+    ] == [
+        ("criterion", "criterion_unsatisfied", "criterion:1"),
         (
             "output_contract",
             "terminal_verifier_output_invalid",
             "verification:response",
-        )
-    }
+        ),
+        ("criterion", "criterion_unsatisfied", "criterion:1"),
+    ]
     assert [
         decision["terminal_convergence"]["occurrence"] for decision in decisions
-    ] == [1, 2, 3]
-    assert decisions[-1]["requires_block"] is True
+    ] == [1, 1, 2]
+    assert decisions[-1]["requires_block"] is False
     assert (
         AgentTask._taskboard_final_verification_allows_repair(
             decisions[0],
             blocking_state_facts=[],
         )
-        is False
+        is True
     )
 
 
 @pytest.mark.asyncio
-async def test_terminal_verifier_merges_all_response_contract_failures_into_retry_contract(
+async def test_terminal_verifier_keeps_targetable_criterion_failure_out_of_protocol_retry_contract(
     tmp_path,
 ):
     agent = _create_agent("agent-verifier-merged-protocol-repair").use_task_workspace(
@@ -13237,19 +15310,22 @@ async def test_terminal_verifier_merges_all_response_contract_failures_into_retr
     )
     repair_contract = decision["terminal_convergence"]["repair_contract"]
 
-    assert repair_contract["protocol_sections"] == [
-        "criterion_checks",
-        "material_claim_checks",
-    ]
+    assert repair_contract["protocol_sections"] == ["material_claim_checks"]
     assert {
         requirement["protocol_section"]
         for requirement in repair_contract["requirements"]
-    } == {"criterion_checks", "material_claim_checks"}
+    } == {"material_claim_checks"}
     assert {
         invalid_id
         for requirement in repair_contract["requirements"]
         for invalid_id in requirement.get("invalid_reference_ids", [])
-    } == {"ref_stale_criterion", "ref_stale_material"}
+    } == {"ref_stale_material"}
+    assert normalized["criterion_audit"]["repair_contract"]["issue_code"] == (
+        "criterion_unsatisfied"
+    )
+    assert normalized["criterion_audit"]["failed_checks"][0][
+        "discarded_evidence_ids"
+    ] == ["ref_stale_criterion"]
 
 
 def test_verification_material_claim_audit_blocks_unsupported_external_fact(tmp_path):
@@ -13322,6 +15398,166 @@ def test_verification_material_claim_audit_blocks_unsupported_external_fact(tmp_
     assert verification["material_claim_repair_contract"]["issue_code"] == (
         "unsupported_material_claim"
     )
+    assert verification["material_claim_repair_contract"]["requirements"][0][
+        "repair_policy"
+    ] == "delete_only"
+
+
+@pytest.mark.parametrize("claim_kind", ["external_fact", "absence_claim"])
+def test_verification_material_claim_audit_converts_invalid_reasonable_derived_fact_to_targeted_deletion(
+    tmp_path,
+    claim_kind,
+):
+    agent = _create_agent("agent-material-claim-invalid-derived-fact").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="material-claim-invalid-derived-fact",
+        goal="Produce a source-grounded repository report.",
+        success_criteria=["Material repository facts are supported."],
+    )
+    source = task._task_reference_catalog.add_evidence(
+        {
+            "id": "repository:partial-listing",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "scripts/train.py\ntests/test_train.py",
+        }
+    )
+    carrier_id = "inline:" + "d" * 64
+    text = "No public model YAML exists in the repository."
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": text,
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "kind": "inline_final_result",
+                "carrier_id": carrier_id,
+                "text": text,
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Complete.",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": text,
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "Repository facts were audited.",
+                    "evidence_ids": [source["reference_id"]],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_1",
+                    "claim_kind": claim_kind,
+                    "state": "reasonable_derived",
+                    "evidence_ids": [source["reference_id"]],
+                    "reason": "This conclusion was inferred from a partial directory listing.",
+                }
+            ],
+        },
+        execution_evidence_summary={},
+        candidate_final_result=text,
+        terminal_candidate=candidate,
+    )
+
+    audit = verification["material_claim_audit"]
+    requirement = verification["material_claim_repair_contract"]["requirements"][0]
+    assert audit["structural_errors"] == []
+    assert audit["failed_checks"][0]["state"] == "unverifiable"
+    assert audit["failed_checks"][0]["reported_state"] == "reasonable_derived"
+    assert verification["material_claim_repair_contract"]["gate_kind"] == "factual_integrity"
+    assert requirement["claim_key"] == "claim_1"
+    assert requirement["carrier_id"] == carrier_id
+    assert requirement["content_version_id"] == carrier_id
+    assert requirement["artifact_quote"] == text
+    assert requirement["repair_policy"] == "delete_only"
+
+
+def test_verification_material_claim_audit_converts_supported_fact_without_evidence_to_targeted_deletion(
+    tmp_path,
+):
+    agent = _create_agent("agent-material-claim-supported-without-evidence").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="material-claim-supported-without-evidence",
+        goal="Produce a source-grounded repository report.",
+        success_criteria=["Material repository facts are supported."],
+    )
+    carrier_id = "inline:" + "f" * 64
+    text = "The repository uses the AGPL-3.0 license."
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": text,
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "kind": "inline_final_result",
+                "carrier_id": carrier_id,
+                "text": text,
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Complete.",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": text,
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "Repository facts were audited.",
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_1",
+                    "claim_kind": "external_fact",
+                    "state": "supported",
+                    "evidence_ids": [],
+                    "reason": "The claim was treated as supported without binding evidence.",
+                }
+            ],
+        },
+        execution_evidence_summary={},
+        candidate_final_result=text,
+        terminal_candidate=candidate,
+    )
+
+    audit = verification["material_claim_audit"]
+    requirement = verification["material_claim_repair_contract"]["requirements"][0]
+    assert audit["structural_errors"] == []
+    assert audit["failed_checks"][0]["state"] == "unsupported"
+    assert audit["failed_checks"][0]["reported_state"] == "supported"
+    assert verification["material_claim_repair_contract"]["gate_kind"] == "factual_integrity"
+    assert requirement["claim_key"] == "claim_1"
+    assert requirement["carrier_id"] == carrier_id
+    assert requirement["content_version_id"] == carrier_id
+    assert requirement["artifact_quote"] == text
+    assert requirement["repair_policy"] == "delete_only"
 
 
 def test_verification_material_claim_audit_allows_reasonable_derived_analysis(tmp_path):
@@ -13611,11 +15847,74 @@ async def test_terminal_verification_uses_one_semantic_request_without_grounding
     assert verification["is_complete"] is True
     assert calls == {"requests": 1}
     assert "material_claim_checks" in captured["output"]
+    assert "replan_signal" in captured["output"]
     assert "material_claim_candidates" in captured["input"]
     material_check_schema = captured["output"]["material_claim_checks"][0][0]
+    criterion_check_schema = captured["output"]["criterion_checks"][0][0]
+    replan_signal_schema = captured["output"]["replan_signal"][0]
+    assert criterion_check_schema["criterion_id"][0].__args__ == ("criterion:1",)
+    assert replan_signal_schema["status"][0].__args__ == (
+        "continue",
+        "repair",
+        "replan_segment",
+        "replan_goal",
+        "blocked",
+        "clarify",
+    )
     assert "claim_key" in material_check_schema
+    assert material_check_schema["claim_key"][0].__args__ == ("claim_1",)
     assert "carrier_id" not in material_check_schema
     assert "artifact_quote" not in material_check_schema
+    assert "absence_claim" in material_check_schema["claim_kind"][1]
+    assert "absence_claim" in captured["instruct"]
+    assert "exact carrier text is already host-validated" in captured["instruct"]
+    assert "does not need to appear in evidence_ledger" in captured["instruct"]
+    assert "Pure Markdown headings" in captured["instruct"]
+    assert "excluded from material_claim_candidates" in captured["instruct"]
+    assert "status='repair'" in captured["instruct"]
+    assert "status='replan_segment'" in captured["instruct"]
+
+
+def test_verification_normalizes_structured_replan_signal_and_offered_evidence_refs(tmp_path):
+    agent = _create_agent("agent-verifier-replan-signal").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-replan-signal",
+        goal="Produce a source-grounded report.",
+        success_criteria=["Direct source evidence supports the report."],
+        execution="taskboard",
+    )
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": False,
+            "requires_block": False,
+            "reason": "Direct source evidence has not been read.",
+            "missing_criteria": ["Read direct source evidence."],
+            "replan_signal": {
+                "status": "replan_segment",
+                "reason": "The current board segment contains search refs but no bounded source body.",
+                "evidence_refs": ["ref_search", "ref_not_offered"],
+            },
+        },
+        execution_evidence_summary={},
+        offered_reference_ids={"ref_search"},
+    )
+
+    assert verification["replan_signal"] == {
+        "status": "replan_segment",
+        "reason": "The current board segment contains search refs but no bounded source body.",
+        "affected_plan_block_ids": [],
+        "affected_execution_block_ids": [],
+        "reusable_output_refs": [],
+        "invalidated_output_refs": [],
+        "missing_capabilities": [],
+        "evidence_refs": ["ref_search"],
+        "budget_impact": {},
+        "schema_version": "execution_plan/v1",
+    }
 
 
 def test_verification_keeps_liveness_failure_blocking_without_criterion_checks(tmp_path):
@@ -17202,7 +19501,9 @@ async def test_verifier_input_has_one_bounded_body_ledger_and_body_light_indexes
         for item in verifier_input["acceptance_locator_view"]["items"]
     )
     assert all(
-        set(item).intersection({"claim_key", "text", "delivery_kind", "path"})
+        set(item).intersection(
+            {"claim_key", "text", "delivery_kind", "path", "syntax_role"}
+        )
         == set(item)
         and item["claim_key"].startswith("claim_")
         for item in verifier_input["material_claim_candidates"]
@@ -17222,6 +19523,17 @@ async def test_verifier_input_has_one_bounded_body_ledger_and_body_light_indexes
     assert {requirement["capability_id"] for requirement in verifier_input["capability_evidence_requirements"]} == {
         "deep_research"
     }
+    offered_reference_ids = {
+        item["reference_id"] for item in verifier_input["evidence_ledger"]["items"]
+    }
+    criterion_evidence_type = captured["output"]["criterion_checks"][0][0][
+        "evidence_ids"
+    ][0][0]
+    material_evidence_type = captured["output"]["material_claim_checks"][0][0][
+        "evidence_ids"
+    ][0][0]
+    assert set(criterion_evidence_type.__args__) == offered_reference_ids
+    assert set(material_evidence_type.__args__) == offered_reference_ids
     serialized_input_characters = len(json.dumps(verifier_input, ensure_ascii=False))
     assert serialized_input_characters <= 160_000
     assert task.diagnostics["verifier_prompt_projection"][-1] == {

@@ -123,10 +123,34 @@ package = await reader.async_read(
 )
 ```
 
-每个 reader 固定一份 TaskContext/source revision 快照；快照过期后应显式
-refresh 或创建新 reader。required 和显式请求的信息块不能被静默丢弃。多个可选 prose
+每个 reader 固定一份 TaskContext/source revision 快照；读取开始前已经过期时应显式
+refresh 或创建新 reader。如果列举候选本身推进了 source revision、但 TaskContext 结构
+未变化（例如 source 首次建立惰性读视图），ContextReader 会重新固定新 revision 并重取
+一次；持续或并发变化仍然 fail closed。required 和显式请求的信息块不能被静默丢弃。多个可选 prose
 candidate 需要相关性判断时，使用 Agently `ModelRequest` semantic selector；
 模型只返回宿主发放的 selection key，宿主校验后再重建 canonical record。
+
+required 内容超出预算时默认仍然 fail closed。只有 Skill 或调用方显式接受有损投影
+时，才可设置 `metadata={"required_overflow": "lossy_digest"}`。此时 Skill source
+返回有界、`completeness="lossy"` 的结构化纲要，并保留不可变全文 ref、有序 section
+refs、原始长度与省略事实；不会把静默截断伪装成完整权威指令。可选 section 仍由语义
+selector 选择。只需要 required core、明确不做可选选择的 host preflight 还可以设置
+`optional_selection="none"`。
+
+AgentTask 通过同一份 context budget 传递该策略：
+
+```python
+execution = agent.goal(goal, success_criteria=criteria).strategy(
+    "taskboard",
+    context_budget={
+        "chars": 12_000,
+        "required_overflow": "lossy_digest",
+    },
+)
+```
+
+只有明确接受有损披露时才使用该设置；否则应换用更大/更聚焦的 consumer，或让
+required Skill 在业务执行前失败。
 
 `source_kinds` 是结构性来源过滤，不是语义路由。内置值包括
 `task_workspace` 与 `record_store`；Skill source 已由安装 revision 和

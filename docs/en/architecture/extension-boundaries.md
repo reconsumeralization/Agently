@@ -65,8 +65,9 @@ Plugins implement replaceable backend behavior behind core contracts.
 
 Examples:
 
-- `ExecutionResourceProvider` for Python, Bash, Node.js, Docker-backed common
-  language profiles, MCP, SQLite, vector stores, browsers, or remote runners.
+- `ExecutionResourceProvider` for Bash, provider-neutral code execution, MCP,
+  SQLite, vector stores, browsers, or remote runners; Python and Node.js are
+  `CodeRuntimeAdapter` concerns rather than separate providers.
 - `ActionExecutor` for one atomic action call.
 - `ActionRuntime` for action planning and loop behavior.
 - `ActionFlow` for execution strategy.
@@ -88,9 +89,8 @@ model-callable operations as Actions and may depend on ExecutionResource.
 Good built-in candidates:
 
 - run Bash commands inside a policy-bound workspace
-- run Python code through a Docker-backed runtime profile
-- run Node.js code through a Docker-backed runtime profile
-- run common-language code through Docker-backed runtime profiles
+- run Python, Node.js, Go, or C++ through one Workspace-bound CodeExecution
+  Action family and ordered execution providers
 - search, read, and write files
 - search the web and browse pages
 - read and write SQLite data
@@ -190,7 +190,8 @@ workflow templates. The Skills layer should resolve those declarations into a
 plan, then apply them to existing Agently layers:
 
 - guidance -> prompt/context
-- scripts -> built-in actions such as run Python, run Bash, or run Node.js
+- authorized scripts -> ordinary code-execution Actions bound to an exact Skill
+  revision and TaskWorkspace grant
 - MCP assets -> MCP actions plus execution environment requirements
 - hooks -> approved actions or sandbox-backed executors
 - workflow templates -> TriggerFlow templates

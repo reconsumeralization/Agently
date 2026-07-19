@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -269,6 +270,202 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
 
     def _stable_evidence_ledger_view(self, value: Any, **kwargs: Any) -> dict[str, Any]:
         return evidence_ledger_view(value, task_references=self._task_references(), **kwargs)
+
+    @staticmethod
+    def _taskboard_normalized_evidence_path(value: Any) -> str:
+        path = str(value or "").strip().replace("\\", "/")
+        while path.startswith("./"):
+            path = path[2:]
+        return path.strip("/")
+
+    @classmethod
+    def _taskboard_grounding_evidence_identity(
+        cls,
+        resolved: Mapping[str, Any],
+        *,
+        excluded_paths: set[str],
+    ) -> dict[str, Any] | None:
+        target = resolved.get("target")
+        if not isinstance(target, Mapping):
+            return None
+        status = str(resolved.get("status") or target.get("status") or "").strip().lower()
+        body_state = str(
+            resolved.get("body_state") or target.get("body_state") or ""
+        ).strip().lower()
+        if status != "ok" or body_state not in {"full", "bounded", "truncated"}:
+            return None
+
+        body: Any = None
+        for field in ("body", "content", "text", "snippet", "preview"):
+            candidate = target.get(field)
+            if candidate not in (None, "", [], {}):
+                body = candidate
+                break
+        if body in (None, "", [], {}):
+            return None
+        body_value = DataFormatter.sanitize(body)
+        body_text = (
+            body_value
+            if isinstance(body_value, str)
+            else json.dumps(
+                body_value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        )
+        if not str(body_text).strip():
+            return None
+
+        provenance = target.get("provenance")
+        provenance_map = provenance if isinstance(provenance, Mapping) else {}
+        input_preview = target.get("input_preview")
+        input_map = input_preview if isinstance(input_preview, Mapping) else {}
+
+        path = ""
+        for source in (target, input_map, provenance_map):
+            for field in ("path", "file_path", "output_path"):
+                path = cls._taskboard_normalized_evidence_path(source.get(field))
+                if path:
+                    break
+            if path:
+                break
+        if path and path in excluded_paths:
+            return None
+
+        owner = str(
+            target.get("owner")
+            or provenance_map.get("owner")
+            or resolved.get("source_role")
+            or "source"
+        ).strip()
+        locator = str(target.get("locator") or provenance_map.get("locator") or path).strip()
+        if not locator:
+            for source in (target, input_map, provenance_map):
+                for field in (
+                    "source_url",
+                    "canonical_url",
+                    "url",
+                    "record_id",
+                    "selection_key",
+                    "query",
+                ):
+                    locator = str(source.get(field) or "").strip()
+                    if locator:
+                        break
+                if locator:
+                    break
+        if not locator:
+            locator = str(target.get("action_id") or target.get("kind") or "source").strip()
+
+        content_version = str(
+            target.get("content_version")
+            or target.get("content_version_id")
+            or target.get("sha256")
+            or provenance_map.get("content_version")
+            or provenance_map.get("content_version_id")
+            or provenance_map.get("sha256")
+            or hashlib.sha256(str(body_text).encode("utf-8")).hexdigest()
+        ).strip()
+        read_range: dict[str, Any] = {}
+        raw_range = target.get("range")
+        if isinstance(raw_range, Mapping):
+            read_range.update(
+                {
+                    str(key): DataFormatter.sanitize(value)
+                    for key, value in raw_range.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+        for field in ("offset", "max_bytes", "start_line", "end_line"):
+            if field not in read_range and input_map.get(field) not in (None, "", [], {}):
+                read_range[field] = DataFormatter.sanitize(input_map.get(field))
+
+        identity_payload = {
+            "owner": owner,
+            "locator": locator,
+            "content_version": content_version,
+            "range": read_range,
+        }
+        identity = hashlib.sha256(
+            json.dumps(
+                identity_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "identity": f"evidence:{identity}",
+            "reference_id": str(resolved.get("reference_id") or ""),
+            "source_role": str(resolved.get("source_role") or ""),
+            "owner": owner,
+            "locator": locator,
+            "content_version": content_version,
+            "range": read_range,
+            "path": path,
+        }
+
+    def _taskboard_grounding_evidence_snapshot(
+        self,
+        *,
+        eligible_source_roles: Sequence[str] = (
+            "action",
+            "source",
+            "task_workspace_readback",
+        ),
+        excluded_artifact_paths: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        roles = tuple(
+            str(role).strip()
+            for role in eligible_source_roles
+            if str(role or "").strip()
+        )
+        excluded_paths = {
+            path
+            for path in (
+                self._taskboard_normalized_evidence_path(value)
+                for value in excluded_artifact_paths
+            )
+            if path
+        }
+        offered = self._task_references().offered_references(
+            eligible_roles=roles,
+        )
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for reference_id in offered:
+            try:
+                resolved = self._task_references().resolve(reference_id)
+            except ValueError:
+                continue
+            item = self._taskboard_grounding_evidence_identity(
+                resolved,
+                excluded_paths=excluded_paths,
+            )
+            if item is None:
+                continue
+            identity = str(item.get("identity") or "")
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            items.append(item)
+        items.sort(key=lambda item: str(item.get("identity") or ""))
+        return DataFormatter.sanitize(
+            {
+                "content_identities": [
+                    str(item.get("identity") or "") for item in items
+                ],
+                "reference_ids": [
+                    str(item.get("reference_id") or "") for item in items
+                ],
+                "items": items,
+                "eligible_source_roles": list(roles),
+                "excluded_artifact_paths": sorted(excluded_paths),
+            }
+        )
 
     @classmethod
     def _process_summary_from_value(

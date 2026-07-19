@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._base import BuiltinExecutionResourceProvider
+
 if TYPE_CHECKING:
     from agently.types.data import (
         ExecutionResourceHandle,
@@ -76,7 +78,7 @@ class SQLiteExecutionResource:
         self.connection.close()
 
 
-class SQLiteExecutionResourceProvider:
+class SQLiteExecutionResourceProvider(BuiltinExecutionResourceProvider):
     name = "SQLiteExecutionResourceProvider"
     DEFAULT_SETTINGS = {}
     kind = "sqlite"

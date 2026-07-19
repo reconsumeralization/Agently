@@ -102,6 +102,7 @@ class SkillPackageRevision:
     instruction_body: str
     frontmatter: Mapping[str, Any]
     resources: tuple[SkillResourceDescriptor, ...]
+    source_provenance: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in (
@@ -121,6 +122,11 @@ class SkillPackageRevision:
         object.__setattr__(self, "instruction_body", str(self.instruction_body or ""))
         object.__setattr__(self, "frontmatter", _freeze(dict(self.frontmatter)))
         object.__setattr__(self, "resources", tuple(self.resources))
+        object.__setattr__(
+            self,
+            "source_provenance",
+            _freeze(dict(self.source_provenance)),
+        )
 
     def resource(self, path: str) -> SkillResourceDescriptor:
         normalized = str(path)
@@ -145,6 +151,7 @@ class SkillPackageRevision:
             "instruction_body": self.instruction_body,
             "frontmatter": _thaw(self.frontmatter),
             "resources": [item.to_dict() for item in self.resources],
+            "source_provenance": _thaw(self.source_provenance),
         }
 
 
@@ -159,6 +166,7 @@ class SkillPackRevision:
     revision_refs: tuple[str, ...]
     installed_skills: tuple[str, ...]
     failed_skills: tuple[Mapping[str, Any], ...] = ()
+    source_provenance: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("skill_pack_id", "name", "source", "trust"):
@@ -169,6 +177,11 @@ class SkillPackRevision:
             self,
             "failed_skills",
             tuple(_freeze(dict(item)) for item in self.failed_skills),
+        )
+        object.__setattr__(
+            self,
+            "source_provenance",
+            _freeze(dict(self.source_provenance)),
         )
 
     @property
@@ -185,7 +198,8 @@ class SkillPackRevision:
             "skills_pack_id": self.skill_pack_id,
             "name": self.name,
             "source": self.source,
-            "source_type": "local",
+            "source_type": str(self.source_provenance.get("source_type") or "local"),
+            "source_provenance": _thaw(self.source_provenance),
             "trust_level": self.trust,
             "revision_refs": list(self.revision_refs),
             "installed_skills": list(self.installed_skills),

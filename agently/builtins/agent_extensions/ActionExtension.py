@@ -322,6 +322,13 @@ class ActionExtension(BaseAgent):
             raise ValueError("desc_mode must be one of: 'append', 'override', 'default'.")
         return f"{ default_desc }\n\nAdditional guidance: { extra }"
 
+    @staticmethod
+    def _normalize_code_sandbox_mode(value: CodeSandboxMode) -> CodeSandboxMode:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        if normalized not in {"auto", "docker", "trusted_local"}:
+            raise ValueError("sandbox must be one of: 'auto', 'docker', 'trusted_local'.")
+        return cast(CodeSandboxMode, normalized)
+
     async def async_use_mcp(
         self,
         transport: "MCPConfigs | str | Any",
@@ -382,27 +389,36 @@ class ActionExtension(BaseAgent):
         image_pull_policy: ImagePullPolicyMode | None = None,
         timeout: int = 60,
     ) -> Self:
-        if sandbox == "trusted_local":
-            default_desc = (
-                "Run Python code through an explicitly trusted local in-process execution resource for "
-                "deterministic calculation or small data shaping. Assign the final value to `result`."
+        if preset_objects is not None or base_vars is not None or allowed_return_types is not None:
+            raise ValueError(
+                "enable_python() no longer supports in-process preset_objects, base_vars, or "
+                "allowed_return_types. Materialize explicit files and use the Workspace-bound "
+                "CodeExecution input/output contract."
             )
-        else:
-            default_desc = (
-                "Run Python code in a Docker-backed sandbox when a local Docker service is available. "
-                "Use this for deterministic calculation or small data shaping and assign the final value "
-                "to `result`. Dependency installation is controlled by the host resource policy, not by "
-                "model-visible action inputs; if Docker is unavailable this action fails closed."
-            )
-        self.action.register_python_sandbox_action(
+        sandbox_mode = self._normalize_code_sandbox_mode(sandbox)
+        providers: list[str] | None = None
+        unsafe_fallback = False
+        isolation: Literal["required", "preferred", "none"] = "required"
+        if sandbox_mode == "docker":
+            providers = ["docker"]
+        elif sandbox_mode == "trusted_local":
+            providers = ["trusted_local"]
+            unsafe_fallback = True
+            isolation = "none"
+        default_desc = (
+            "Run Python code through the canonical Workspace-bound CodeExecution chain. "
+            "The host prepares an immutable bundle, selects one eligible provider, and reads "
+            "declared outputs back through TaskWorkspace."
+        )
+        return self.enable_code_runtime(
+            language="python",
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
-            tags=[f"agent-{ self.name }"],
+            desc_mode="override",
             expose_to_model=expose_to_model,
-            preset_objects=preset_objects,
-            base_vars=base_vars,
-            allowed_return_types=allowed_return_types,
-            sandbox=sandbox,
+            providers=providers,
+            unsafe_fallback=unsafe_fallback,
+            isolation=isolation,
             docker_image=docker_image,
             docker_binary=docker_binary,
             docker_default_args=docker_default_args,
@@ -411,7 +427,6 @@ class ActionExtension(BaseAgent):
             image_pull_policy=image_pull_policy,
             timeout=timeout,
         )
-        return self
 
     def enable_shell(
         self,
@@ -529,35 +544,43 @@ class ActionExtension(BaseAgent):
         provisioning_profile: ProvisioningProfileMode = "strict",
         image_pull_policy: ImagePullPolicyMode | None = None,
     ) -> Self:
-        task_workspace = getattr(self, "task_workspace", None)
-        if cwd is None and task_workspace is not None:
-            cwd = str(getattr(task_workspace, "root"))
-        if sandbox == "trusted_local":
-            default_desc = "Run JavaScript with Node.js inside an explicitly trusted local execution resource."
-        else:
-            default_desc = (
-                "Run JavaScript with Node.js inside a Docker-backed execution resource when a local Docker "
-                "service is available. Dependency installation is controlled by the host resource policy, "
-                "not by model-visible action inputs; if Docker is unavailable this action fails closed."
+        if node_binary != "node" or cwd is not None or env is not None:
+            raise ValueError(
+                "enable_nodejs() no longer accepts provider-owned node_binary, cwd, or env settings. "
+                "Use source files, arguments, TaskWorkspace access, and provider candidate config."
             )
-        self.action.register_nodejs_action(
+        sandbox_mode = self._normalize_code_sandbox_mode(sandbox)
+        providers: list[str] | None = None
+        unsafe_fallback = False
+        isolation: Literal["required", "preferred", "none"] = "required"
+        if sandbox_mode == "docker":
+            providers = ["docker"]
+        elif sandbox_mode == "trusted_local":
+            providers = ["trusted_local"]
+            unsafe_fallback = True
+            isolation = "none"
+        default_desc = (
+            "Run JavaScript with Node.js through the canonical Workspace-bound CodeExecution chain. "
+            "The host prepares an immutable bundle, selects one eligible provider, and reads "
+            "declared outputs back through TaskWorkspace."
+        )
+        return self.enable_code_runtime(
+            language="nodejs",
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
-            tags=[f"agent-{ self.name }"],
+            desc_mode="override",
             expose_to_model=expose_to_model,
-            node_binary=node_binary,
-            cwd=cwd,
-            timeout=timeout,
-            env=env,
-            sandbox=sandbox,
+            providers=providers,
+            unsafe_fallback=unsafe_fallback,
+            isolation=isolation,
             docker_image=docker_image,
             docker_binary=docker_binary,
             docker_default_args=docker_default_args,
             dependency_policy=dependency_policy,
             provisioning_profile=provisioning_profile,
             image_pull_policy=image_pull_policy,
+            timeout=timeout,
         )
-        return self
 
     def enable_code_runtime(
         self,
@@ -567,6 +590,9 @@ class ActionExtension(BaseAgent):
         desc: str | None = None,
         desc_mode: CapabilityDescMode = "append",
         expose_to_model: bool = True,
+        providers: Sequence[str | Mapping[str, Any]] | None = None,
+        unsafe_fallback: bool = False,
+        isolation: Literal["required", "preferred", "none"] = "required",
         docker_image: str | None = None,
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -575,31 +601,29 @@ class ActionExtension(BaseAgent):
         image_pull_policy: ImagePullPolicyMode | None = None,
         timeout: int = 60,
     ) -> Self:
-        from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
-            get_code_runtime_profile,
-        )
+        from agently.builtins.plugins.CodeRuntimeAdapter import get_code_runtime_adapter
 
-        profile = get_code_runtime_profile(language, image=docker_image)
+        adapter = get_code_runtime_adapter(language)
         display_names = {
             "nodejs": "JavaScript/Node.js",
-            "typescript": "TypeScript",
             "cpp": "C++",
-            "csharp": "C#/.NET",
-            "r": "R",
         }
-        language_name = display_names.get(profile["language"], str(profile["language"]).capitalize())
+        language_name = display_names.get(adapter.language_id, adapter.language_id.capitalize())
         default_desc = (
-            f"Run { language_name } code inside a Docker-backed code runtime sandbox. "
-            "The host-selected runtime profile owns image pull and dependency preparation; "
-            "the model can provide source files and arguments but not arbitrary compiler or package-manager commands."
+            f"Run { language_name } code through a Workspace-bound execution provider. "
+            "The host-selected provider and runtime policy own isolation and dependency preparation; "
+            "the model can provide source files and arguments but not raw compiler or package-manager commands."
         )
         self.action.register_code_runtime_action(
-            language=profile["language"],
+            language=adapter.language_id,
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
             tags=[f"agent-{ self.name }"],
             expose_to_model=expose_to_model,
-            docker_image=str(profile["image"]),
+            providers=providers,
+            unsafe_fallback=unsafe_fallback,
+            isolation=isolation,
+            docker_image=docker_image,
             docker_binary=docker_binary,
             docker_default_args=docker_default_args,
             dependency_policy=dependency_policy,

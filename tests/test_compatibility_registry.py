@@ -75,7 +75,8 @@ def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
     assert "TaskContext" in contract["disclosure_owner"]
     assert "Agently.skills_executor" in contract["compatibility_facade"]
     assert "No Skills route" in contract["execution_policy"]
-    assert "host code materializes remote sources" in contract["remote_source_policy"]
+    assert "SkillSourceProvider" in contract["remote_source_policy"]
+    assert "immutable local snapshots" in contract["remote_source_policy"]
 
     request_contract = manifest["request_input"]["skills"]
     assert "AgentExecution.use_skills" in request_contract["surface"]
@@ -94,6 +95,23 @@ def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:
     assert "TaskWorkspace is never an event store" in (
         devtools["runtime_control"]["record_store_contract"]
     )
+
+
+def test_in_development_code_execution_and_evidence_replan_contracts() -> None:
+    manifest = _development_manifest()
+    action_runtime = manifest["companions"]["action_runtime"]
+    task_loop = manifest["request_input"]["agent_execution_task_loop"]
+
+    assert action_runtime["code_execution_languages"] == [
+        "python>=3.10",
+        "nodejs>=18",
+        "go>=1.25",
+        "cpp20",
+    ]
+    assert "toolchain-version" in action_runtime["provider_selection_contract"]
+    assert "Action result metadata" in action_runtime["provider_selection_contract"]
+    assert "evidence-reacquisition card" in task_loop["evidence_replan_contract"]
+    assert "final-artifact self-readback" in task_loop["evidence_replan_contract"]
 
 
 def test_public_typing_contract_remains_explicit() -> None:

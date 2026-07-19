@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from agently.core.orchestration import TaskBoardValidator
 from agently.types.data import TaskBoardPatch
 
@@ -725,91 +728,133 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         }
 
     @classmethod
-    def _taskboard_patch_proposal_target_refs(cls, patch_proposal: Mapping[str, Any]) -> list[str]:
+    def _taskboard_patch_proposal_target_refs(cls, patch_proposal: Mapping[str, Any]) -> list[dict[str, Any]]:
         raw_refs = patch_proposal.get("target_refs") or patch_proposal.get("refs") or patch_proposal.get("urls")
         return cls._normalize_taskboard_target_refs(raw_refs)
 
     @classmethod
-    def _taskboard_control_output_target_refs(cls, card_output: Mapping[str, Any]) -> list[str]:
+    def _taskboard_control_output_target_refs(cls, card_output: Mapping[str, Any]) -> list[dict[str, Any]]:
         return cls._normalize_taskboard_target_refs(card_output.get("target_refs"))
 
-    @staticmethod
-    def _normalize_taskboard_target_refs(raw_refs: Any) -> list[str]:
+    @classmethod
+    def _normalize_taskboard_target_refs(cls, raw_refs: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_refs, Sequence) or isinstance(raw_refs, str | bytes | bytearray):
             return []
-        refs: list[str] = []
-        seen: set[str] = set()
+        refs: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, int, int | None]] = set()
         for item in raw_refs:
-            text = ""
-            if isinstance(item, Mapping):
-                for key in ("target_ref", "url", "href", "uri", "path", "ref"):
-                    value = str(item.get(key) or "").strip()
-                    if value:
-                        text = value
-                        break
-            else:
-                text = str(item or "").strip()
-            if not text or text in seen:
+            if not isinstance(item, Mapping):
                 continue
-            seen.add(text)
-            refs.append(text)
+            owner = str(item.get("owner") or "").strip().lower()
+            locator = str(item.get("locator") or "").strip()
+            if owner not in {"task_workspace", "record_store", "action_artifact", "external"}:
+                continue
+            if not locator:
+                continue
+            content_version = str(item.get("content_version") or "").strip()
+            read_range: dict[str, int] = {}
+            raw_range = item.get("range")
+            if isinstance(raw_range, Mapping):
+                offset = cls._coerce_non_negative_int(raw_range.get("offset"))
+                max_bytes = cls._coerce_positive_int(raw_range.get("max_bytes"))
+                if offset is not None:
+                    read_range["offset"] = offset
+                if max_bytes is not None:
+                    read_range["max_bytes"] = max_bytes
+            offset_key = int(read_range.get("offset", 0))
+            max_bytes_key = read_range.get("max_bytes")
+            key = (owner, locator, content_version, offset_key, max_bytes_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            ref: dict[str, Any] = {"owner": owner, "locator": locator}
+            if content_version:
+                ref["content_version"] = content_version
+            if read_range:
+                ref["range"] = read_range
+            refs.append(ref)
         return refs[:8]
 
     @staticmethod
-    def _taskboard_target_ref_requires_action(ref: str) -> bool:
-        text = str(ref or "").strip().lower()
-        if not text:
-            return False
-        if text.startswith(("http://", "https://")):
-            return True
-        if "://" not in text:
-            return False
-        scheme = text.split("://", 1)[0].strip()
-        return scheme not in {"task-workspace", "content"}
+    def _taskboard_target_ref_requires_action(ref: Mapping[str, Any]) -> bool:
+        return str(ref.get("owner") or "").strip().lower() == "external"
 
     @classmethod
-    def _split_taskboard_target_refs(cls, refs: Sequence[str]) -> tuple[list[str], list[str]]:
-        task_workspace_refs: list[str] = []
-        action_refs: list[str] = []
+    def _split_taskboard_target_refs(
+        cls,
+        refs: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        local_refs: list[dict[str, Any]] = []
+        action_refs: list[dict[str, Any]] = []
         for ref in refs:
-            text = str(ref or "").strip()
-            if not text:
+            if not isinstance(ref, Mapping):
                 continue
-            if cls._taskboard_target_ref_requires_action(text):
-                action_refs.append(text)
+            item = dict(DataFormatter.sanitize(ref))
+            if cls._taskboard_target_ref_requires_action(item):
+                action_refs.append(item)
             else:
-                task_workspace_refs.append(text)
-        return task_workspace_refs, action_refs
+                local_refs.append(item)
+        return local_refs, action_refs
 
     @staticmethod
-    def _taskboard_task_workspace_target_ref_path(ref: str) -> str:
-        text = str(ref or "").strip()
-        lowered = text.lower()
-        for prefix in ("task-workspace://", "content://"):
-            if lowered.startswith(prefix):
-                return text[len(prefix) :].lstrip("/")
-        return text
+    def _taskboard_target_ref_label(ref: Mapping[str, Any]) -> str:
+        return str(ref.get("locator") or "").strip()
 
     @classmethod
-    def _taskboard_task_workspace_target_ref_file_refs(cls, refs: Sequence[str]) -> list[dict[str, Any]]:
+    def _taskboard_task_workspace_target_ref_file_refs(
+        cls,
+        refs: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
         file_refs: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, str, str]] = set()
         for ref in refs:
-            if cls._taskboard_target_ref_requires_action(str(ref or "")):
+            if not isinstance(ref, Mapping):
                 continue
-            path = cls._taskboard_task_workspace_target_ref_path(str(ref or ""))
-            if not path or path in seen:
+            owner = str(ref.get("owner") or "").strip().lower()
+            if owner not in {"task_workspace", "record_store"}:
                 continue
-            seen.add(path)
-            file_refs.append(
-                {
-                    "path": path,
-                    "source": "taskboard_target_ref",
-                    "content_state": "ref_only",
-                    "readback_mode": "task_workspace_content",
-                }
-            )
+            locator = str(ref.get("locator") or "").strip()
+            content_version = str(ref.get("content_version") or "").strip()
+            key = (owner, locator, content_version)
+            if not locator or key in seen:
+                continue
+            seen.add(key)
+            item: dict[str, Any] = {
+                "owner": owner,
+                "locator": locator,
+                "path": locator,
+                "source": "taskboard_target_ref",
+                "content_state": "ref_only",
+                "readback_mode": (
+                    "task_workspace_file" if owner == "task_workspace" else "record_store_content"
+                ),
+            }
+            if content_version:
+                item["content_version"] = content_version
+            if isinstance(ref.get("range"), Mapping):
+                item["range"] = DataFormatter.sanitize(ref["range"])
+            file_refs.append(item)
         return file_refs
+
+    @classmethod
+    def _taskboard_action_target_ref_artifact_refs(
+        cls,
+        refs: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        for ref in refs:
+            if not isinstance(ref, Mapping) or str(ref.get("owner") or "") != "action_artifact":
+                continue
+            locator = str(ref.get("locator") or "").strip()
+            if not locator:
+                continue
+            item = dict(DataFormatter.sanitize(ref))
+            item["selection_key"] = locator
+            item.setdefault("role", "output")
+            item.setdefault("available", True)
+            item.setdefault("full_value_available", True)
+            output.append(item)
+        return output
 
     def _taskboard_scoped_retrieval_continuation_patch(
         self,
@@ -923,7 +968,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         context: Any,
         card_output: Mapping[str, Any],
         *,
-        target_refs: Sequence[str] | None = None,
+        target_refs: Sequence[Mapping[str, Any]] | None = None,
         scoped_retrieval: Mapping[str, Any] | None = None,
         source: str | None = None,
         diagnostic_code: str = "taskboard.control.auto_readback_patch",
@@ -933,10 +978,10 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         scoped_retrieval_plan = cls._normalize_scoped_retrieval_plan(scoped_retrieval)
         if next_action not in {"readback", "needs_readback"} and not scoped_retrieval_plan:
             return None
-        raw_target_refs: Sequence[str] | None = target_refs
+        raw_target_refs: Sequence[Mapping[str, Any]] | None = target_refs
         if raw_target_refs is None:
             raw_target_refs = cls._taskboard_control_output_target_refs(card_output)
-        target_ref_list = [str(ref).strip() for ref in list(raw_target_refs or ()) if str(ref).strip()]
+        target_ref_list = cls._normalize_taskboard_target_refs(raw_target_refs)
         revision = getattr(context, "revision", None)
         card = getattr(context, "card", None)
         if revision is None or card is None:
@@ -971,6 +1016,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         if not current_card:
             return None
         current_metadata = dict(current_card.get("metadata") or {})
+        convergence_subject = cls._taskboard_card_convergence_subject(card)
+        current_metadata["terminal_convergence_subject"] = convergence_subject
         if (
             str(current_metadata.get("generated_by") or "")
             in {
@@ -983,23 +1030,40 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 or str(current_metadata.get("evidence_card_id") or "").strip()
             )
         ):
-            previous_target_refs = set(
-                cls._normalize_taskboard_target_refs(
-                    current_metadata.get("target_refs") or current_metadata.get("readback_target_refs")
-                )
+            previous_target_refs = cls._normalize_taskboard_target_refs(
+                current_metadata.get("target_refs") or current_metadata.get("readback_target_refs")
             )
-            if not target_ref_list or (previous_target_refs and set(target_ref_list).issubset(previous_target_refs)):
+            previous_keys = {
+                json.dumps(ref, ensure_ascii=False, sort_keys=True)
+                for ref in previous_target_refs
+            }
+            target_keys = {
+                json.dumps(ref, ensure_ascii=False, sort_keys=True)
+                for ref in target_ref_list
+            }
+            if not target_ref_list or (previous_keys and target_keys.issubset(previous_keys)):
                 return None
         patch_source = source or (
             "agent_task.taskboard.control_auto_target_refs"
             if target_ref_list
             else "agent_task.taskboard.control_auto_readback"
         )
-        evidence_card_id = (
+        action_evidence_card_id = (
             unique_id(f"{current_id}.evidence")
             if support_card_requires_action
-            else unique_id(f"{current_id}.readback")
+            else ""
         )
+        local_readback_card_id = (
+            unique_id(f"{current_id}.readback")
+            if task_workspace_target_refs or not support_card_requires_action
+            else ""
+        )
+        support_card_ids = [
+            card_id
+            for card_id in (action_evidence_card_id, local_readback_card_id)
+            if card_id
+        ]
+        primary_evidence_card_id = support_card_ids[0]
         current_metadata.update(
             {
                 "superseded_by": continuation_id,
@@ -1018,25 +1082,33 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         gaps = cls._normalize_string_list(card_output.get("gaps"))
         remaining_work = cls._normalize_string_list(card_output.get("remaining_work"))
         if scoped_retrieval_plan:
-            readback_objective = "Run expanded bounded scoped retrieval before continuing the setback card."
-            if target_ref_list:
-                readback_objective = (
-                    f"{readback_objective} Also collect explicit target refs: {'; '.join(target_ref_list)}"
+            action_objective = "Run expanded bounded scoped retrieval before continuing the setback card."
+            if action_target_refs:
+                action_objective = (
+                    f"{action_objective} Also collect explicit external target refs: "
+                    f"{'; '.join(cls._taskboard_target_ref_label(ref) for ref in action_target_refs)}"
                 )
-        elif action_target_refs:
-            readback_objective = (
+        else:
+            action_objective = (
                 "Collect scoped evidence from the explicit external target refs required before continuing the "
-                f"setback control card. Target refs: {'; '.join(action_target_refs)}"
+                "setback control card. Target refs: "
+                f"{'; '.join(cls._taskboard_target_ref_label(ref) for ref in action_target_refs)}"
             )
-        elif task_workspace_target_refs:
-            readback_objective = (
+        if task_workspace_target_refs:
+            local_readback_objective = (
                 "Read bounded TaskWorkspace target refs required before continuing the setback control card. "
-                f"Target refs: {'; '.join(task_workspace_target_refs)}"
+                "Target refs: "
+                f"{'; '.join(cls._taskboard_target_ref_label(ref) for ref in task_workspace_target_refs)}"
             )
         else:
-            readback_objective = "Read scoped cold evidence required before continuing the setback control card."
+            local_readback_objective = (
+                "Read scoped cold evidence required before continuing the setback control card."
+            )
         if gaps:
-            readback_objective = f"{readback_objective} Gaps: {'; '.join(gaps[:3])}"
+            action_objective = f"{action_objective} Gaps: {'; '.join(gaps[:3])}"
+            local_readback_objective = (
+                f"{local_readback_objective} Gaps: {'; '.join(gaps[:3])}"
+            )
         continuation_objective = str(getattr(card, "objective", "") or "Continue the setback TaskBoard card.").strip()
         if remaining_work:
             continuation_objective = f"{continuation_objective} Remaining work: {'; '.join(remaining_work[:3])}"
@@ -1048,64 +1120,79 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 f"{continuation_objective} Materialize required TaskWorkspace final deliverable path(s): "
                 f"{'; '.join(final_task_workspace_deliverables)}"
             )
-        evidence_metadata = {
+        shared_evidence_metadata = {
             "evidence_scope": readback_dependencies,
             "generated_by": patch_source,
             "source_card_id": current_id,
+            "terminal_convergence_subject": convergence_subject,
         }
-        if target_ref_list:
-            evidence_metadata["target_refs"] = target_ref_list
-        if task_workspace_target_refs:
-            evidence_metadata["task_workspace_target_refs"] = task_workspace_target_refs
+        action_evidence_metadata = dict(shared_evidence_metadata)
         if action_target_refs:
-            evidence_metadata["external_target_refs"] = action_target_refs
+            action_evidence_metadata["target_refs"] = action_target_refs
+            action_evidence_metadata["external_target_refs"] = action_target_refs
         if scoped_retrieval_plan:
-            evidence_metadata["scoped_retrieval"] = DataFormatter.sanitize(scoped_retrieval_plan)
-            evidence_metadata["retrieval_policy"] = scoped_retrieval_policy()
+            action_evidence_metadata["scoped_retrieval"] = DataFormatter.sanitize(scoped_retrieval_plan)
+            action_evidence_metadata["retrieval_policy"] = scoped_retrieval_policy()
+        local_readback_metadata = dict(shared_evidence_metadata)
+        if task_workspace_target_refs:
+            local_readback_metadata["target_refs"] = task_workspace_target_refs
+            local_readback_metadata["task_workspace_target_refs"] = task_workspace_target_refs
         continuation_metadata: dict[str, Any] = {
             "generated_by": patch_source,
             "continues_card_id": current_id,
-            "readback_card_id": evidence_card_id,
-            "evidence_card_id": evidence_card_id if support_card_requires_action else "",
+            "readback_card_id": local_readback_card_id or primary_evidence_card_id,
+            "evidence_card_id": action_evidence_card_id,
+            "terminal_convergence_subject": convergence_subject,
         }
         if target_ref_list:
             continuation_metadata["target_refs"] = target_ref_list
         if final_task_workspace_deliverables:
             continuation_metadata["final_task_workspace_deliverables"] = final_task_workspace_deliverables
-        evidence_card = {
-            "id": evidence_card_id,
-            "objective": readback_objective,
-            "depends_on": readback_dependencies,
-            "required_outputs": (
-                ["Expanded bounded scoped retrieval evidence or diagnostics explaining why it remains insufficient."]
-                if scoped_retrieval_plan
-                else
-                ["Evidence gathered from external target refs or diagnostics explaining inaccessible refs."]
-                if action_target_refs
-                else
-                ["Bounded TaskWorkspace target-ref readback previews or diagnostics explaining inaccessible refs."]
-                if task_workspace_target_refs
-                else ["Bounded readback previews for verifier-visible cold evidence."]
-            ),
-            "allowed_execution_shape": "actions" if support_card_requires_action else "readback",
-            "failure_policy": "required",
-            "metadata": evidence_metadata,
-        }
+        evidence_cards: list[dict[str, Any]] = []
+        if action_evidence_card_id:
+            evidence_cards.append(
+                {
+                    "id": action_evidence_card_id,
+                    "objective": action_objective,
+                    "depends_on": readback_dependencies,
+                    "required_outputs": (
+                        ["Expanded bounded scoped retrieval evidence or diagnostics explaining why it remains insufficient."]
+                        if scoped_retrieval_plan
+                        else ["Evidence gathered from external target refs or diagnostics explaining inaccessible refs."]
+                    ),
+                    "allowed_execution_shape": "actions",
+                    "failure_policy": "required",
+                    "metadata": action_evidence_metadata,
+                }
+            )
+        if local_readback_card_id:
+            evidence_cards.append(
+                {
+                    "id": local_readback_card_id,
+                    "objective": local_readback_objective,
+                    "depends_on": readback_dependencies,
+                    "required_outputs": (
+                        ["Bounded TaskWorkspace target-ref readback previews or diagnostics explaining inaccessible refs."]
+                        if task_workspace_target_refs
+                        else ["Bounded readback previews for verifier-visible cold evidence."]
+                    ),
+                    "allowed_execution_shape": "readback",
+                    "failure_policy": "required",
+                    "metadata": local_readback_metadata,
+                }
+            )
         patch = {
             "base_revision": str(getattr(revision, "revision_id", "") or ""),
             "source": patch_source,
             "operations": [
                 {"op": "update_card", "card": current_card},
-                {
-                    "op": "add_card",
-                    "card": evidence_card,
-                },
+                *({"op": "add_card", "card": evidence_card} for evidence_card in evidence_cards),
                 {
                     "op": "add_card",
                     "card": {
                         "id": continuation_id,
                         "objective": continuation_objective,
-                        "depends_on": [*dependencies, evidence_card_id],
+                        "depends_on": [*dependencies, *support_card_ids],
                         "required_outputs": list(getattr(card, "required_outputs", ()) or ()),
                         "allowed_execution_shape": str(getattr(card, "allowed_execution_shape", "") or "control"),
                         "failure_policy": str(getattr(card, "failure_policy", "") or "required"),
@@ -1118,7 +1205,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                         "code": "taskboard.control.auto_readback_patch",
                         "source_code": diagnostic_code,
                         "card_id": current_id,
-                        "readback_card_id": evidence_card_id,
+                        "readback_card_id": local_readback_card_id or primary_evidence_card_id,
+                        "evidence_card_id": action_evidence_card_id,
                         "continuation_card_id": continuation_id,
                         "target_ref_count": len(target_ref_list),
                         "task_workspace_target_ref_count": len(task_workspace_target_refs),
@@ -1132,7 +1220,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 {
                     "code": diagnostic_code,
                     "card_id": current_id,
-                    "readback_card_id": evidence_card_id,
+                    "readback_card_id": local_readback_card_id or primary_evidence_card_id,
+                    "evidence_card_id": action_evidence_card_id,
                     "continuation_card_id": continuation_id,
                     "target_ref_count": len(target_ref_list),
                     "task_workspace_target_ref_count": len(task_workspace_target_refs),
@@ -1171,6 +1260,214 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             visit(str(dependency_id))
         return ordered
 
+    @classmethod
+    def _taskboard_final_repair_acceptance_evidence_state(
+        cls,
+        final_verification: Mapping[str, Any],
+        *,
+        output_subjects: Sequence[str],
+    ) -> tuple[TerminalIssue, dict[str, Any], str, list[str]]:
+        """Describe verifier-observed progress without counting carrier rewrites.
+
+        A new TaskWorkspace content version proves that a carrier changed, not
+        that the acceptance gap gained evidence. This repair-specific state is
+        therefore limited to failed structured criterion subjects, verifier-used
+        evidence refs, missing capability facts, and the structured replan kind.
+        """
+
+        criterion_subjects: list[str] = []
+        evidence_refs: list[str] = []
+
+        def add_unique(target: list[str], value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in target:
+                target.append(text)
+
+        raw_criterion_checks = final_verification.get("criterion_checks")
+        if isinstance(raw_criterion_checks, Sequence) and not isinstance(
+            raw_criterion_checks,
+            str | bytes | bytearray,
+        ):
+            for check in raw_criterion_checks:
+                if not isinstance(check, Mapping) or check.get("satisfied") is True:
+                    continue
+                add_unique(criterion_subjects, check.get("criterion_id"))
+                for evidence_id in cls._normalize_string_list(check.get("evidence_ids")):
+                    add_unique(evidence_refs, evidence_id)
+
+        raw_material_checks = final_verification.get("material_claim_checks")
+        if isinstance(raw_material_checks, Sequence) and not isinstance(
+            raw_material_checks,
+            str | bytes | bytearray,
+        ):
+            for check in raw_material_checks:
+                if not isinstance(check, Mapping):
+                    continue
+                state = str(check.get("state") or "").strip()
+                if state in {"supported", "reasonable_derived", "not_material"}:
+                    continue
+                add_unique(
+                    criterion_subjects,
+                    cls._taskboard_material_claim_subject(check),
+                )
+                for evidence_id in cls._normalize_string_list(check.get("evidence_ids")):
+                    add_unique(evidence_refs, evidence_id)
+
+        replan_signal = final_verification.get("replan_signal")
+        replan_status = "repair"
+        if isinstance(replan_signal, Mapping):
+            replan_status = str(replan_signal.get("status") or "repair").strip() or "repair"
+            for evidence_id in cls._normalize_string_list(replan_signal.get("evidence_refs")):
+                add_unique(evidence_refs, evidence_id)
+
+        missing_capability_ids = cls._normalize_string_list(
+            final_verification.get("missing_capability_evidence")
+        )
+        contract_subject = "|".join(sorted(criterion_subjects)) or "taskboard_final_verification"
+        issue = TerminalIssue(
+            "taskboard_final_repair",
+            "unchanged_acceptance_evidence",
+            contract_subject,
+        )
+        repair_contract = {
+            "criterion_subjects": sorted(criterion_subjects),
+            "evidence_refs": sorted(evidence_refs),
+            "missing_capability_ids": sorted(missing_capability_ids),
+            "replan_status": replan_status,
+        }
+        state_digest = relevant_state_digest(
+            {
+                "source_reference_targets": sorted(evidence_refs),
+                "capability_facts": {
+                    capability_id: "missing"
+                    for capability_id in sorted(missing_capability_ids)
+                },
+                "criterion_subjects": sorted(criterion_subjects),
+                "output_subjects": sorted(
+                    str(item).strip() for item in output_subjects if str(item).strip()
+                ),
+                "repair_contract": {
+                    "replan_status": replan_status,
+                },
+            }
+        )
+        return issue, repair_contract, state_digest, sorted(evidence_refs)
+
+    @staticmethod
+    def _taskboard_material_claim_subject(check: Mapping[str, Any]) -> str:
+        """Return a revision-stable identity for one exact material claim.
+
+        ``claim_key`` is only a model-selection key within one verifier
+        response.  Persisting it across TaskBoard rounds can silently bind a
+        newly acquired source to a different line after artifact reordering.
+        The task host therefore owns a separate target identity based on the
+        exact claim text and its stable delivery anchor.  A semantic rewrite is
+        intentionally a new subject; semantic equivalence remains model-owned
+        and must not be guessed with local text heuristics.
+        """
+
+        artifact_quote = str(check.get("artifact_quote") or "").strip()
+        if not artifact_quote:
+            return ""
+        path = str(check.get("path") or "").strip()
+        carrier_id = str(check.get("carrier_id") or "").strip()
+        anchor = f"path:{path}" if path else f"carrier:{carrier_id}"
+        if not path and not carrier_id:
+            return ""
+        payload = json.dumps(
+            {
+                "anchor": anchor,
+                "artifact_quote": artifact_quote,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"material_claim:{hashlib.sha256(payload).hexdigest()}"
+
+    @classmethod
+    def _taskboard_latest_completed_evidence_reacquisition(
+        cls,
+        revision: Any,
+    ) -> dict[str, Any] | None:
+        cards = list(getattr(getattr(revision, "graph", None), "cards", ()) or ())
+        results = getattr(revision, "card_results", {})
+        if not isinstance(results, Mapping):
+            return None
+        for card in reversed(cards):
+            contract = getattr(card, "evidence_contract", None)
+            if not isinstance(contract, Mapping) or str(
+                contract.get("kind") or ""
+            ).strip() != "taskboard_final_verification_evidence_reacquisition":
+                continue
+            card_id = str(getattr(card, "id", "") or "")
+            result = results.get(card_id)
+            if result is None or str(getattr(result, "status", "")).strip().lower() != "completed":
+                continue
+            metadata = getattr(result, "metadata", None)
+            proof = (
+                metadata.get("evidence_reacquisition_proof")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if not isinstance(proof, Mapping) or proof.get("satisfied") is not True:
+                continue
+            return {
+                "card_id": card_id,
+                "target_subjects": cls._normalize_string_list(
+                    contract.get("criterion_subjects")
+                ),
+                "new_reference_ids": cls._normalize_string_list(
+                    proof.get("new_reference_ids")
+                ),
+            }
+        return None
+
+    @classmethod
+    def _taskboard_verifier_check_evidence_refs(
+        cls,
+        final_verification: Mapping[str, Any],
+        *,
+        target_subjects: Sequence[str],
+    ) -> list[str]:
+        targets = {
+            str(subject).strip()
+            for subject in target_subjects
+            if str(subject or "").strip()
+        }
+        if not targets:
+            return []
+        evidence_refs: list[str] = []
+
+        def collect(raw_checks: Any, *, material_claims: bool = False) -> None:
+            if not isinstance(raw_checks, Sequence) or isinstance(
+                raw_checks,
+                str | bytes | bytearray,
+            ):
+                return
+            for check in raw_checks:
+                if not isinstance(check, Mapping):
+                    continue
+                subject = (
+                    cls._taskboard_material_claim_subject(check)
+                    if material_claims
+                    else str(check.get("criterion_id") or "").strip()
+                )
+                if subject not in targets:
+                    continue
+                for evidence_id in cls._normalize_string_list(
+                    check.get("evidence_ids")
+                ):
+                    if evidence_id not in evidence_refs:
+                        evidence_refs.append(evidence_id)
+
+        collect(final_verification.get("criterion_checks"))
+        collect(
+            final_verification.get("material_claim_checks"),
+            material_claims=True,
+        )
+        return evidence_refs
+
     def _taskboard_final_verification_repair_revision(
         self,
         revision: Any,
@@ -1189,10 +1486,69 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         ]
         if not completed_dependencies:
             return None
+        raw_replan_signal = final_verification.get("replan_signal")
+        replan_signal = (
+            dict(DataFormatter.sanitize(raw_replan_signal))
+            if isinstance(raw_replan_signal, Mapping)
+            else None
+        )
+        evidence_reacquisition = bool(
+            replan_signal is not None
+            and str(replan_signal.get("status") or "").strip() == "replan_segment"
+        )
+        if evidence_reacquisition:
+            prior_reacquisition = (
+                self._taskboard_latest_completed_evidence_reacquisition(
+                    effective_revision
+                )
+            )
+            if prior_reacquisition is not None:
+                target_subjects = self._normalize_string_list(
+                    prior_reacquisition.get("target_subjects")
+                )
+                acquired_reference_ids = self._normalize_string_list(
+                    prior_reacquisition.get("new_reference_ids")
+                )
+                verifier_check_refs = self._taskboard_verifier_check_evidence_refs(
+                    final_verification,
+                    target_subjects=target_subjects,
+                )
+                verified_new_reference_ids = [
+                    reference_id
+                    for reference_id in acquired_reference_ids
+                    if reference_id in verifier_check_refs
+                ]
+                relevance_diagnostic = {
+                    "card_id": str(prior_reacquisition.get("card_id") or ""),
+                    "target_subjects": target_subjects,
+                    "acquired_reference_ids": acquired_reference_ids,
+                    "verifier_check_evidence_refs": verifier_check_refs,
+                    "verified_new_reference_ids": verified_new_reference_ids,
+                    "status": (
+                        "used_by_target_check"
+                        if verified_new_reference_ids
+                        else "not_used_by_target_check"
+                    ),
+                    "revision_id": effective_revision.revision_id,
+                }
+                self.diagnostics.setdefault(
+                    "taskboard_evidence_relevance",
+                    [],
+                ).append(relevance_diagnostic)
+                if not verified_new_reference_ids:
+                    return None
         grounding_repair_contract: dict[str, Any] | None = None
         raw_repair_contract = final_verification.get("material_claim_repair_contract")
         if isinstance(raw_repair_contract, Mapping):
             grounding_repair_contract = dict(DataFormatter.sanitize(raw_repair_contract))
+        prior_grounding_repair_contract = grounding_repair_contract
+        if evidence_reacquisition:
+            # The verifier determined that the current evidence segment is
+            # insufficient. A claim-only carrier patch would erase unsupported
+            # text without resolving the missing source boundary, so keep the
+            # claim contract as context and reopen the ordinary Action-capable
+            # card path.
+            grounding_repair_contract = None
         if grounding_repair_contract is not None:
             raw_requirements = grounding_repair_contract.get("requirements")
             requirements = (
@@ -1313,6 +1669,11 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             existing_ids.add(candidate)
             return candidate
 
+        evidence_reacquisition_id = (
+            unique_id("final-verification-evidence")
+            if evidence_reacquisition
+            else ""
+        )
         repair_id = unique_id("final-verification-repair")
         gap_text = "; ".join(gaps[:6])
         required_outputs = [
@@ -1322,9 +1683,45 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         grounding_patch_mode = bool(
             grounding_repair_contract is not None
             and grounding_patch_paths
+            and repair_carrier is not None
+            and repair_carrier.kind == "task_workspace_artifact"
+            and self._task_workspace_artifact_display_path(repair_carrier.path)
+            in grounding_patch_paths
             and not action_requirements
         )
         repair_deliverables = grounding_patch_paths if grounding_patch_mode else required_deliverables
+        (
+            acceptance_evidence_issue,
+            acceptance_evidence_contract,
+            acceptance_evidence_digest,
+            verifier_used_evidence_refs,
+        ) = self._taskboard_final_repair_acceptance_evidence_state(
+            final_verification,
+            output_subjects=repair_deliverables,
+        )
+        acceptance_evidence_convergence = self._terminal_convergence_state.record_detection(
+            acceptance_evidence_issue,
+            acceptance_evidence_digest,
+            repair_contract=acceptance_evidence_contract,
+            verifier_called=True,
+        )
+        convergence_diagnostic = {
+            **dict(DataFormatter.sanitize(acceptance_evidence_convergence)),
+            "issue": {
+                "gate_kind": acceptance_evidence_issue.gate_kind,
+                "issue_code": acceptance_evidence_issue.issue_code,
+                "contract_subject": acceptance_evidence_issue.contract_subject,
+            },
+            "relevant_state_digest": acceptance_evidence_digest,
+            "evidence_refs": verifier_used_evidence_refs,
+            "revision_id": effective_revision.revision_id,
+        }
+        self.diagnostics.setdefault("taskboard_final_repair_convergence", []).append(
+            convergence_diagnostic
+        )
+        self.diagnostics["terminal_convergence"] = self._terminal_convergence_state.snapshot()
+        if acceptance_evidence_convergence.get("terminal") is True:
+            return None
         if grounding_repair_contract is not None:
             if grounding_patch_mode:
                 required_outputs[0] = (
@@ -1351,18 +1748,25 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 "Trusted TaskWorkspace final deliverable path(s): " + ", ".join(repair_deliverables)
             )
         repair_instruction = "Repair"
-        if required_action_ids:
+        if required_action_ids and not evidence_reacquisition:
             repair_instruction = (
                 "First produce the listed structured Action evidence with the mounted capabilities "
                 f"({', '.join(required_action_ids)}), then repair"
             )
-        repair_completion_instruction = (
-            " Preserve verifier-visible source refs; remove, qualify, or replace unsupported facts instead of "
-            "inventing evidence."
-            if grounding_patch_mode
-            else " Produce a complete corrected deliverable; preserve verifier-visible source refs; remove, "
-            "qualify, or replace unsupported facts instead of inventing evidence."
-        )
+        if evidence_reacquisition:
+            repair_completion_instruction = (
+                f" Use the new verifier-visible evidence produced by dependency card {evidence_reacquisition_id}. "
+                "Do not lower, relax, or replace the original success criteria. Produce a complete corrected "
+                "deliverable grounded in that dependency evidence."
+            )
+        else:
+            repair_completion_instruction = (
+                " Preserve verifier-visible source refs; remove, qualify, or replace unsupported facts instead of "
+                "inventing evidence."
+                if grounding_patch_mode
+                else " Produce a complete corrected deliverable; preserve verifier-visible source refs; remove, "
+                "qualify, or replace unsupported facts instead of inventing evidence."
+            )
         evidence_contract = {
             "kind": "taskboard_final_verification_repair",
             "missing_criteria": self._normalize_string_list(final_verification.get("missing_criteria")),
@@ -1389,7 +1793,27 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "previous_revision_id": effective_revision.revision_id,
             "final_task_workspace_deliverables": repair_deliverables,
             "terminal_convergence_subject": "taskboard_final_verification",
+            "acceptance_evidence_convergence": {
+                **dict(DataFormatter.sanitize(acceptance_evidence_convergence)),
+                "relevant_state_digest": acceptance_evidence_digest,
+                "evidence_refs": verifier_used_evidence_refs,
+            },
         }
+        if evidence_reacquisition and replan_signal is not None:
+            evidence_contract["replan_signal"] = replan_signal
+            evidence_contract["evidence_reacquisition_card_id"] = (
+                evidence_reacquisition_id
+            )
+            if prior_grounding_repair_contract is not None:
+                evidence_contract["prior_material_claim_repair_contract"] = (
+                    prior_grounding_repair_contract
+                )
+                contract_subject = str(
+                    prior_grounding_repair_contract.get("contract_subject") or ""
+                ).strip()
+                if contract_subject:
+                    metadata["terminal_convergence_subject"] = contract_subject
+            metadata["repair_source"] = "verification_evidence_reacquisition"
         if grounding_repair_contract is not None:
             evidence_contract["material_claim_repair_contract"] = grounding_repair_contract
             if grounding_patch_mode:
@@ -1398,10 +1822,91 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             contract_subject = str(grounding_repair_contract.get("contract_subject") or "").strip()
             if contract_subject:
                 metadata["terminal_convergence_subject"] = contract_subject
-        if action_requirements:
+        if action_requirements and not evidence_reacquisition:
             evidence_contract["capability_evidence_requirements"] = action_requirements
             evidence_contract["requires_capability_ids"] = required_action_ids
             metadata["requires_capability_ids"] = required_action_ids
+        evidence_card: dict[str, Any] | None = None
+        if evidence_reacquisition:
+            eligible_source_roles = [
+                "action",
+                "source",
+                "task_workspace_readback",
+            ]
+            baseline_snapshot = self._taskboard_grounding_evidence_snapshot(
+                eligible_source_roles=eligible_source_roles,
+                excluded_artifact_paths=repair_deliverables,
+            )
+            evidence_done_when = (
+                "At least one new eligible body-bearing source content identity, distinct from the replan "
+                "baseline and excluding final-deliverable transport, is verifier-visible for the failed criteria."
+            )
+            evidence_card_contract: dict[str, Any] = {
+                "kind": "taskboard_final_verification_evidence_reacquisition",
+                "done_when": evidence_done_when,
+                "missing_criteria": self._normalize_string_list(
+                    final_verification.get("missing_criteria")
+                ),
+                "next_step_requirements": self._normalize_string_list(
+                    final_verification.get("next_step_requirements")
+                ),
+                "acceptance_delta": self._normalize_string_list(
+                    final_verification.get("acceptance_delta")
+                ),
+                "reason": str(final_verification.get("reason") or ""),
+                "replan_signal": replan_signal,
+                "baseline_content_identities": self._normalize_string_list(
+                    baseline_snapshot.get("content_identities")
+                ),
+                "minimum_new_content_identity_count": 1,
+                "eligible_source_roles": eligible_source_roles,
+                "excluded_artifact_paths": repair_deliverables,
+                "criterion_subjects": self._normalize_string_list(
+                    acceptance_evidence_contract.get("criterion_subjects")
+                ),
+            }
+            if prior_grounding_repair_contract is not None:
+                evidence_card_contract["prior_material_claim_repair_contract"] = (
+                    prior_grounding_repair_contract
+                )
+            evidence_card_metadata: dict[str, Any] = {
+                "generated_by": (
+                    "agent_task.taskboard.final_verification_evidence_reacquisition"
+                ),
+                "repair_source": "verification_evidence_reacquisition",
+                "previous_revision_id": effective_revision.revision_id,
+                "terminal_convergence_subject": metadata[
+                    "terminal_convergence_subject"
+                ],
+                "acceptance_evidence_convergence": metadata[
+                    "acceptance_evidence_convergence"
+                ],
+            }
+            if action_requirements:
+                evidence_card_contract["capability_evidence_requirements"] = (
+                    action_requirements
+                )
+                evidence_card_contract["requires_capability_ids"] = required_action_ids
+                evidence_card_metadata["requires_capability_ids"] = required_action_ids
+            evidence_card = {
+                "id": evidence_reacquisition_id,
+                "objective": (
+                    "Acquire additional verifier-visible evidence for the final verification gaps: "
+                    f"{gap_text}. Do not lower, relax, or replace the original success criteria. Merely "
+                    "rewriting or qualifying the deliverable is not evidence acquisition and must not count "
+                    "as progress. Use mounted readback or source capabilities to obtain new bounded evidence. "
+                    "Do not write or rewrite the final deliverable in this card. If the required evidence is "
+                    "unavailable, return setback or blocked with the missing source boundary."
+                ),
+                "depends_on": completed_dependencies,
+                "required_outputs": [evidence_done_when],
+                "allowed_execution_shape": (
+                    "actions" if action_requirements else "auto"
+                ),
+                "failure_policy": "required",
+                "evidence_contract": evidence_card_contract,
+                "metadata": evidence_card_metadata,
+            }
         repair_card = {
             "id": repair_id,
             "objective": (
@@ -1410,7 +1915,11 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 f"verification feedback. Address these gaps: {gap_text}.{grounding_scope_instruction}"
                 + repair_completion_instruction
             ),
-            "depends_on": completed_dependencies,
+            "depends_on": (
+                [evidence_reacquisition_id]
+                if evidence_reacquisition
+                else completed_dependencies
+            ),
             "required_outputs": required_outputs,
             # Exact action_succeeded gaps remain narrowed deterministically by
             # action_requirements. A file-backed grounding-only repair uses the
@@ -1428,18 +1937,25 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         diagnostic = {
             "code": "taskboard.final_verification.repair_patch",
             "repair_card_id": repair_id,
-            "depends_on": completed_dependencies,
+            "evidence_reacquisition_card_id": evidence_reacquisition_id,
+            "depends_on": repair_card["depends_on"],
             "missing_criteria": self._normalize_string_list(final_verification.get("missing_criteria")),
             "reason": str(final_verification.get("reason") or ""),
         }
-        patch = {
-            "base_revision": effective_revision.revision_id,
-            "source": "agent_task.taskboard.final_verification_repair",
-            "operations": [
+        operations: list[dict[str, Any]] = []
+        if evidence_card is not None:
+            operations.append({"op": "add_card", "card": evidence_card})
+        operations.extend(
+            [
                 {"op": "add_card", "card": repair_card},
                 {"op": "append_diagnostic", "diagnostic": diagnostic},
                 {"op": "set_board_status", "status": "running"},
-            ],
+            ]
+        )
+        patch = {
+            "base_revision": effective_revision.revision_id,
+            "source": "agent_task.taskboard.final_verification_repair",
+            "operations": operations,
             "diagnostics": [diagnostic],
         }
         try:
@@ -1457,6 +1973,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         self.diagnostics.setdefault("taskboard_final_repair_patches", []).append(
             {
                 "repair_card_id": repair_id,
+                "evidence_reacquisition_card_id": evidence_reacquisition_id,
                 "previous_revision_id": effective_revision.revision_id,
                 "revision_id": repaired_revision.revision_id,
                 "missing_criteria": diagnostic["missing_criteria"],

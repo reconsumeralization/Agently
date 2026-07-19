@@ -66,7 +66,7 @@ Agently.execution_resource
 ```
 
 Most application code does not call the manager directly. Built-in MCP, Bash,
-Python, Node.js, Docker, Browser, and SQLite actions can declare their
+code-execution, Docker, Browser, and SQLite actions can declare their
 requirements and the Action dispatcher ensures them before executor calls.
 
 For the broader ownership model, see
@@ -80,9 +80,8 @@ The built-in providers are:
 |---|---|---|
 | `mcp` | `agent.use_mcp(...)` / MCP actions | MCP transport resource |
 | `bash` | `sandbox="trusted_local"` shell actions | configured local command runner |
-| `python` | `sandbox="trusted_local"` Python actions | configured in-process Python sandbox |
-| `node` | `sandbox="trusted_local"` Node.js actions | configured local Node.js runner |
-| `docker` | default `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and Docker executor actions | Docker CLI runner, image provisioning, and language runtime profiles |
+| `docker` | isolated shell actions, direct Docker Actions, and one `code_execution` provider candidate | Docker CLI runner and image provisioning |
+| `code_execution` | `agent.enable_python(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and authorized Skill script Actions | provider-neutral Workspace-bound execution; built-ins include Docker and the explicit unsafe `trusted_local` fallback |
 | `browser` | Browse actions that opt into managed browser resources | managed browser/page/session wrapper |
 | `sqlite` | `agent.enable_sqlite(...)` / SQLite executor actions | SQLite connection |
 
@@ -93,28 +92,71 @@ package/executor configuration rather than ExecutionResource.
 These providers are low-level environment implementations. User-facing
 capabilities should normally be exposed as Actions, and scenario shortcuts
 should be exposed through Agent Components or future `agent.enable_*` helpers.
-The Python, shell, Node.js, and common-language code runtime helpers default to
-Docker-backed runtime profiles and fail closed when Docker CLI or daemon
-preflight fails. Strict profiles report missing images instead of pulling them
-implicitly; developer and CI profiles may pull missing images and prepare
-standard dependencies as host-selected provisioning work. Explicit
-`sandbox="trusted_local"` keeps the legacy local provider path for trusted
-compatibility.
+Python and Node.js helpers are language-specific facades over the same
+`kind="code_execution"` contract used by `enable_code_runtime(...)`; they are
+not separate providers. Python, Node.js, Go, and C++ differ through language
+adapters, while provider probes select the first installed and eligible
+configured execution mechanism. Hard isolation and Workspace capability checks
+still fail closed, and `trusted_local` remains explicitly unsafe.
 
 Action execution flow:
 
 ```text
 ActionCall
   -> resolve ActionSpec
-  -> ensure ActionSpec.execution_resources
+  -> issue TaskWorkspace access grant when required
+  -> probe/select and ensure ActionSpec.execution_resources
   -> inject execution_resource_resources into action_call
+  -> materialize immutable code bundle into TaskWorkspace
   -> ActionExecutor.execute(...)
+  -> collect declared outputs
   -> release action_call-scoped handles
+  -> close Workspace grant
 ```
 
 Custom `ActionExecutor.execute(...)` signatures do not change. Managed handles
 are passed through `action_call["execution_resource_handles"]` and live
 resources through `action_call["execution_resource_resources"]`.
+
+### Ordered code-execution providers
+
+Configure provider priority with strings or candidate descriptors. Descriptor
+configuration is merged only for that candidate:
+
+```python
+agent.settings.set(
+    "code_execution.providers",
+    [
+        {"provider_id": "preferred-provider", "config": {"profile": "strict"}},
+        "docker",
+    ],
+)
+agent.enable_code_runtime(language="go")
+```
+
+`trusted_local` executes host toolchains without isolation and accepts only a
+snapshot grant. It requires explicit host authorization and cannot satisfy
+`isolation="required"`. `unsafe_fallback=True` must therefore be paired with an
+explicit `isolation="preferred"` or `"none"`; it is never selected implicitly.
+
+The public `isolation=` option is selection policy, not a provider capability
+label. A `code_execution` provider must report concrete boolean isolation axes:
+process containment, host-filesystem restriction, privilege-escalation
+blocking, and syscall restriction. Required isolation matches all requested
+axes. Preferred isolation first searches the ordered candidate set for a full
+match and only then uses an eligible fallback, recording that fallback in the
+handle metadata. A provider name or a string such as `"required"` is not safety
+evidence.
+
+Code requests declare at most 128 expected outputs. Each path is bounded,
+normalized, and must be under `output/`; missing declared outputs make the
+Action fail. Stdout/stderr retention is bounded, cancellation terminates the
+owned process group or container, and resource-release failure changes an
+otherwise successful Action into an error instead of reporting false success.
+
+External isolation implementations register through the same
+`ExecutionResourceProvider` seam. See
+[Code Execution Provider Migration](../development/code-execution-provider-migration.md).
 
 ## TriggerFlow
 
@@ -128,17 +170,21 @@ You can pass managed requirements at execution creation or start:
 execution = flow.create_execution(
     execution_resources=[
         {
-            "kind": "python",
+            "kind": "custom_runtime",
+            "provider_id": "my-runtime-provider",
             "scope": "execution",
-            "resource_key": "sandbox",
+            "resource_key": "runtime",
         }
     ],
 )
 ```
 
-The manager ensures the resource, injects it into the execution-local resources,
-and releases it when the execution closes. Manual `runtime_resources={...}` are
-still unmanaged and are not health-checked or auto-released by the manager.
+After the host registers the named provider, the manager ensures the resource,
+injects it into the execution-local resources, and releases it when the
+execution closes. Code execution itself should still be invoked through a
+Workspace-bound CodeExecution Action so bundle materialization and output
+readback remain in the Action Runtime chain. Manual `runtime_resources={...}`
+are unmanaged and are not health-checked or auto-released by the manager.
 
 ## Direct manager API
 

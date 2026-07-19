@@ -184,6 +184,16 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     )
                 ]
                 operation_claim_keys.append(claim_key)
+                if str(requirement.get("repair_policy") or "").strip() == "delete_only":
+                    new = self._grounding_patch_first_string(
+                        operation,
+                        _GROUNDING_WORKSPACE_REPLACE_NEW_KEYS,
+                    )
+                    if new != "":
+                        return (
+                            False,
+                            "Grounding patch repair_policy=delete_only requires an exactly empty new_string.",
+                        )
             elif require_exact_claim_coverage:
                 return False, "Every grounding patch operation must reference its host-issued claim_key."
             if len(normalized_old) < 8 or not any(

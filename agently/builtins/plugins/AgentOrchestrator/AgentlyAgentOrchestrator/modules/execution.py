@@ -50,6 +50,7 @@ from agently.types.data import (
 from agently.utils import DataFormatter, FunctionShifter
 
 from .bridges import (
+    bridge_agent_task_stream_item as bridge_agent_task_stream_item_entry,
     bridge_model_stream_item as bridge_model_stream_item_entry,
     bridge_task_dag_stream_item as bridge_task_dag_stream_item_entry,
     record_action_log as record_action_log_entry,
@@ -225,6 +226,7 @@ class AgentExecution:
             task_execution_strategy=self.inherited_task_execution_strategy,
             effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
             strategy_context_source=self.inherited_strategy_context_source,
+            task_workspace=self.task_workspace,
         )
         self.parent_run_context = parent_run_context
         self.agent_execution_run_context: "RunContext | None" = None
@@ -418,6 +420,7 @@ class AgentExecution:
             task_execution_strategy=self.inherited_task_execution_strategy,
             effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
             strategy_context_source=self.inherited_strategy_context_source,
+            task_workspace=self.task_workspace,
         )
         self.stream = AgentExecutionStream(
             execution_id=self.id,
@@ -1162,6 +1165,25 @@ class AgentExecution:
     ) -> Any:
         if not self._task_context_prepared:
             await self.async_prepare_task_context()
+        raw_context_budget = self.options.get("context_budget")
+        context_budget = (
+            raw_context_budget
+            if isinstance(raw_context_budget, Mapping)
+            else {}
+        )
+
+        def positive_int(*keys: str, default: int) -> int:
+            for key in keys:
+                value = context_budget.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    return value
+            return default
+
+        resolved_budget = budget or ContextBudget(
+            max_chars=positive_int("max_chars", "chars", default=12000),
+            max_blocks=positive_int("max_blocks", default=64),
+            max_block_chars=positive_int("max_block_chars", default=6000),
+        )
         key = (str(consumer_id), str(phase))
         reader = self.context_readers.get(key)
         if reader is None:
@@ -1174,33 +1196,39 @@ class AgentExecution:
             reader = self.task_context.reader(
                 consumer=consumer_id,
                 phase=phase,
-                budget=budget or ContextBudget(),
+                budget=resolved_budget,
                 semantic_selector=semantic_selector,
             )
             self.context_readers[key] = reader
+        policy_metadata: dict[str, Any] = {}
+        if str(context_budget.get("required_overflow") or "").strip() == "lossy_digest":
+            policy_metadata["required_overflow"] = "lossy_digest"
+        if str(context_budget.get("optional_selection") or "").strip() == "none":
+            policy_metadata["optional_selection"] = "none"
         resolved_intent = intent
         if resolved_intent is None:
             resolved_intent = ContextReadIntent(
                 query=self.task_target(),
-                metadata={"exclude_already_in_prompt": True},
+                metadata={
+                    "exclude_already_in_prompt": True,
+                    **policy_metadata,
+                },
+            )
+        elif isinstance(resolved_intent, ContextReadIntent) and policy_metadata:
+            resolved_intent = ContextReadIntent(
+                query=resolved_intent.query,
+                explicit_refs=resolved_intent.explicit_refs,
+                roles=resolved_intent.roles,
+                filters=resolved_intent.filters,
+                metadata={**policy_metadata, **dict(resolved_intent.metadata)},
+            )
+        elif isinstance(resolved_intent, str) and policy_metadata:
+            resolved_intent = ContextReadIntent(
+                query=resolved_intent,
+                metadata=policy_metadata,
             )
         package = await reader.async_read(resolved_intent)
-        required_omissions = [item for item in package.omissions if item.required]
-        failed_required_bindings = {
-            str(item.details.get("binding_id") or "")
-            for item in package.diagnostics
-            if item.code == "context.source_candidates_failed"
-        }
-        required_binding_ids = {
-            binding.binding_id
-            for binding in reader.snapshot.bindings
-            if binding.required
-        }
-        if required_omissions or failed_required_bindings.intersection(required_binding_ids):
-            raise RuntimeError(
-                "Required TaskContext content could not be delivered completely to "
-                f"consumer {consumer_id!r}."
-            )
+        reader.ensure_required_delivery(package)
         self.context_packages.append(package)
         self.logs.setdefault("context_packages", []).append(package.to_dict())
         return package
@@ -1525,6 +1553,14 @@ class AgentExecution:
 
     async def bridge_task_dag_stream_item(self, item: Any, *, route: str) -> None:
         await bridge_task_dag_stream_item_entry(self, item, route=route)
+
+    async def bridge_agent_task_stream_item(
+        self,
+        item: Any,
+        *,
+        route: str = "agent_task",
+    ) -> None:
+        await bridge_agent_task_stream_item_entry(self, item, route=route)
 
     async def bridge_model_stream_item(
         self,

@@ -92,16 +92,24 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         reader = self._task_context_reader(phase=phase, consumer_id=consumer_id)
         if not reader.is_current:
             reader.refresh()
+        intent_metadata: dict[str, Any] = {"exclude_already_in_prompt": True}
+        required_overflow = str(
+            self.context_budget.get("required_overflow") or "fail"
+        ).strip()
+        if required_overflow == "lossy_digest":
+            intent_metadata["required_overflow"] = required_overflow
+        optional_selection = str(
+            self.context_budget.get("optional_selection") or ""
+        ).strip()
+        if optional_selection == "none":
+            intent_metadata["optional_selection"] = optional_selection
         package = await reader.async_read(
             ContextReadIntent(
                 query=str(intent or self.goal),
-                metadata={"exclude_already_in_prompt": True},
+                metadata=intent_metadata,
             )
         )
-        if any(omission.required for omission in package.omissions):
-            raise RuntimeError(
-                f"Required TaskContext content is incompatible with {consumer_id!r}."
-            )
+        reader.ensure_required_delivery(package)
         self.context_packages.append(package)
         return package
 

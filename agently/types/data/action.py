@@ -55,6 +55,9 @@ class ActionApproval(TypedDict, total=False):
 
 
 class ActionArtifact(TypedDict, total=False):
+    owner: Literal["action_artifact"]
+    locator: str
+    content_version: str
     selection_key: str
     artifact_id: str
     action_call_id: str
@@ -109,6 +112,7 @@ class ActionSpec(TypedDict, total=False):
 
 
 class ActionCall(TypedDict, total=False):
+    action_call_id: str
     purpose: str
     action_id: str
     action_input: dict[str, Any]
@@ -120,6 +124,8 @@ class ActionCall(TypedDict, total=False):
     tool_kwargs: dict[str, Any]
     execution_resource_handles: dict[str, Any]
     execution_resource_resources: dict[str, Any]
+    task_workspace: Any
+    task_workspace_access_grants: dict[str, Any]
     diagnostics: list[ActionDiagnostic]
 
 

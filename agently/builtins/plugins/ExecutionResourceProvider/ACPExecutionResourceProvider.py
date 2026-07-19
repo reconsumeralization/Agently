@@ -19,8 +19,10 @@ from typing import Any, cast
 
 from agently.types.data import ExecutionResourceHandle, ExecutionResourceRequirement
 
+from ._base import BuiltinExecutionResourceProvider
 
-class ACPExecutionResourceProvider:
+
+class ACPExecutionResourceProvider(BuiltinExecutionResourceProvider):
     name = "ACPExecutionResourceProvider"
     DEFAULT_SETTINGS: dict[str, Any] = {}
     kind = "acp"

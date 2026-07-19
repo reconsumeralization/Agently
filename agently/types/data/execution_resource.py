@@ -14,10 +14,18 @@
 
 from typing import Any, Literal, TypeAlias
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
-ExecutionResourceKind: TypeAlias = Literal["mcp", "bash", "python"] | str
+ExecutionResourceKind: TypeAlias = Literal[
+    "mcp",
+    "bash",
+    "code_execution",
+    "docker",
+    "browser",
+    "sqlite",
+    "acp",
+] | str
 ExecutionResourceScope: TypeAlias = Literal[
     "global",
     "agent",
@@ -56,12 +64,24 @@ class ExecutionResourcePolicy(TypedDict, total=False):
     auto_release: bool
 
 
+class ExecutionResourceProviderCandidate(TypedDict):
+    provider_id: str
+    config: NotRequired[dict[str, Any]]
+
+
 class ExecutionResourceRequirement(TypedDict, total=False):
     requirement_id: str
+    action_call_id: str
     kind: ExecutionResourceKind
     scope: ExecutionResourceScope
     owner_id: str
     resource_key: str
+    provider_id: str
+    provider_candidates: list[str | ExecutionResourceProviderCandidate]
+    required_capabilities: dict[str, Any]
+    preferred_capabilities: dict[str, Any]
+    task_workspace_access_grant: Any
+    workspace_access: dict[str, Any]
     config: dict[str, Any]
     policy: ExecutionResourcePolicy
     reuse_key: str
@@ -72,11 +92,13 @@ class ExecutionResourceRequirement(TypedDict, total=False):
 
 class ExecutionResourceHandle(TypedDict, total=False):
     handle_id: str
+    action_call_id: str
     requirement_id: str
     kind: ExecutionResourceKind
     scope: ExecutionResourceScope
     owner_id: str
     resource_key: str
+    provider_id: str
     status: ExecutionResourceStatus
     resource: Any
     policy: ExecutionResourcePolicy
@@ -88,4 +110,14 @@ class ExecutionResourceDecision(TypedDict, total=False):
     approved: bool
     reason: str
     policy_override: ExecutionResourcePolicy
+    meta: dict[str, Any]
+
+
+class ExecutionResourceProviderProbe(TypedDict, total=False):
+    provider_id: str
+    available: bool
+    supported_kinds: list[str]
+    capabilities: dict[str, Any]
+    reason: str
+    diagnostics: list[dict[str, Any]]
     meta: dict[str, Any]

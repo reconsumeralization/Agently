@@ -127,11 +127,39 @@ package = await reader.async_read(
 ```
 
 Each reader pins one TaskContext/source revision snapshot. If that snapshot
-becomes stale, refresh it explicitly or create a new reader. Required and explicitly requested blocks
+is already stale before a read, refresh it explicitly or create a new reader.
+If candidate listing itself advances a source revision while the TaskContext
+structure remains unchanged (for example, a source establishes a lazy read
+view), ContextReader optimistically re-pins and recollects once. Repeated or
+concurrent mutation still fails closed. Required and explicitly requested blocks
 cannot be silently dropped. Optional prose relevance uses an Agently
 `ModelRequest` semantic selector when more than one candidate needs judgment;
 selection keys are host-issued and validated before canonical records are
 reconstructed.
+
+Required content remains fail-closed when it cannot fit. A caller that has
+explicitly accepted a lossy projection may request
+`metadata={"required_overflow": "lossy_digest"}`. Skill sources then return a
+bounded `completeness="lossy"` outline with the immutable full ref, ordered
+section refs, original size, and omission facts; they do not silently truncate
+the authority-bearing instructions. Optional section candidates still use the
+semantic selector. A host-only preflight that intentionally wants no optional
+selection may additionally set `optional_selection="none"`.
+
+AgentTask carries the same policy in its context budget:
+
+```python
+execution = agent.goal(goal, success_criteria=criteria).strategy(
+    "taskboard",
+    context_budget={
+        "chars": 12_000,
+        "required_overflow": "lossy_digest",
+    },
+)
+```
+
+Use this only when the Skill or caller accepts lossy disclosure. Otherwise use
+a larger/focused consumer or let the required Skill fail before business work.
 
 `source_kinds` is structural source filtering, not semantic routing. Supported
 built-in values are `task_workspace` and `record_store`; Skill bindings are

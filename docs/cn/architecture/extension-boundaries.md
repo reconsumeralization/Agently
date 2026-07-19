@@ -59,7 +59,7 @@ Plugin 在 core contract 背后提供可替换的 backend 行为。
 
 示例：
 
-- 用于 Python、Bash、Node.js、Docker-backed 常用语言 profiles、MCP、SQLite、vector store、browser 或 remote runner 的 `ExecutionResourceProvider`。
+- 用于 Bash、provider-neutral 代码执行、MCP、SQLite、vector store、browser 或 remote runner 的 `ExecutionResourceProvider`；Python 与 Node.js 属于 `CodeRuntimeAdapter`，不是独立 provider。
 - 用于一次原子 action call 的 `ActionExecutor`。
 - 用于 action planning 和 loop 行为的 `ActionRuntime`。
 - 用于执行策略的 `ActionFlow`。
@@ -77,9 +77,8 @@ Built-in 是 Agently 随框架提供的默认能力目录。它们以 Action 的
 适合作为 built-in 的能力：
 
 - 在受 policy 约束的 workspace 内执行 Bash 命令
-- 通过 Docker-backed runtime profile 运行 Python 代码
-- 通过 Docker-backed runtime profile 运行 Node.js 代码
-- 通过 Docker-backed runtime profiles 运行常用语言代码
+- 通过同一组 Workspace-bound CodeExecution Actions 与有序 execution providers
+  运行 Python、Node.js、Go 或 C++
 - 文件搜索、读取、写入
 - web 搜索与页面 browse
 - SQLite 读写
@@ -110,7 +109,7 @@ agent.enable_vector_store(...)
 agent.enable_coding_workspace(...)
 ```
 
-这些 API 应该描述开发者意图，不应该要求应用开发者理解 `ExecutionResourceHandle`、provider lifecycle 或 executor 内部机制。Python、shell、Node.js 和常用语言 code runtime 这类代码执行 helper 默认应使用 Docker-backed runtime profile；只有可信兼容路径才显式选择本地执行。
+这些 API 应该描述开发者意图，不应该要求应用开发者理解 `ExecutionResourceHandle`、provider lifecycle 或 executor 内部机制。Python 与 Node.js helper 和通用 code runtime 使用同一条 Workspace-bound、有序 provider 主链；只有显式授权的可信路径才允许无防护本地执行。shell 仍是独立的宽命令 Action。
 
 ### Typing 与 IDE 辅助
 
@@ -162,7 +161,7 @@ Skills 不应该成为平行执行器。
 Skill package 可以声明 guidance、scripts、MCP assets、hooks、resources 或 workflow templates。Skills 层应该把这些声明解析成 plan，再应用到已有 Agently 层：
 
 - guidance -> prompt/context
-- scripts -> run Python、run Bash、run Node.js 等 built-in actions
+- 已授权 scripts -> 绑定精确 Skill revision 与 TaskWorkspace grant 的普通 code-execution Actions
 - MCP assets -> MCP actions 与 execution environment requirements
 - hooks -> 经过审批的 actions 或 sandbox-backed executors
 - workflow templates -> TriggerFlow templates

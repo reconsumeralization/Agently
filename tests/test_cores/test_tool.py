@@ -387,17 +387,29 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     assert recalled["value"]["stdout"] == stdout
     assert recalled["value"]["stderr"] == stderr
 
+    artifact_count_before_recall = len(action._artifact_manager._artifacts)
     dispatched_recall = action.execute_action(
         "read_action_artifact",
         {
             "selection_key": str(output_ref.get("selection_key", "")),
+            "max_bytes": 4096,
         },
         source_protocol="structured_plan",
         artifact_scope=artifact_scope,
     )
     assert dispatched_recall.get("status") == "success"
-    assert dispatched_recall.get("data", {}).get("carrier_compacted") is True
     assert len(json.dumps(dispatched_recall, ensure_ascii=False, default=str).encode("utf-8")) <= 16000
+    recall_digest = dispatched_recall.get("result")
+    assert isinstance(recall_digest, dict)
+    recall_preview = recall_digest.get("result_preview")
+    assert isinstance(recall_preview, dict)
+    assert recall_preview["owner"] == "action_artifact"
+    assert recall_preview["locator"] == output_ref["selection_key"]
+    assert recall_preview["content_version"] == output_ref["sha256"]
+    assert recall_preview["range"] == {"offset": 0, "end": 4096, "read_bytes": 4096}
+    assert "y" * 128 in recall_preview["value"]
+    assert dispatched_recall.get("artifact_refs") == []
+    assert len(action._artifact_manager._artifacts) == artifact_count_before_recall
     action._release_artifact_scope(artifact_scope)
 
 
@@ -589,10 +601,10 @@ def test_action_sandbox_executors(tmp_path):
     bash_action_id = f"bash_sandbox_{ uuid.uuid4().hex[:8] }"
 
     action.register_python_sandbox_action(action_id=python_action_id)
-    python_result = action.execute_action(python_action_id, {"python_code": "result = 1 + 2"})
+    python_result = action.execute_action(python_action_id, {"source_code": "print(1 + 2)"})
     assert python_result.get("status") == "success"
     python_data = cast(dict[str, Any], python_result.get("data"))
-    assert python_data["result"] == 3
+    assert python_data["stdout"] == "3\n"
 
     action.register_bash_sandbox_action(
         action_id=bash_action_id,

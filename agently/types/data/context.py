@@ -383,7 +383,10 @@ class TaskContextSnapshot:
     @property
     def source_revisions(self) -> Mapping[str, str]:
         return MappingProxyType(
-            {binding.source_id: binding.source_revision for binding in self.bindings}
+            {
+                binding.binding_id: binding.source_revision
+                for binding in self.bindings
+            }
         )
 
     def to_dict(self) -> dict[str, Any]:

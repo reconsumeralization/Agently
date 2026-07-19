@@ -139,9 +139,27 @@ def test_task_context_detects_context_and_source_revision_staleness() -> None:
     assert context.is_snapshot_current(snapshot) is False
 
     fresh = context.snapshot()
-    assert fresh.source_revisions["source:docs"] == "rev:2"
+    assert fresh.source_revisions["binding:docs"] == "rev:2"
     context.put(role="state", content="new", entry_id="entry:new")
     assert context.is_snapshot_current(fresh) is False
+
+
+def test_task_context_tracks_revisions_per_binding_when_sources_share_an_id() -> None:
+    first = RecordingSource(source_id="source:shared", revision="rev:first")
+    second = RecordingSource(source_id="source:shared", revision="rev:second")
+    context = TaskContext(task_id="task-1", context_id="context:task-1")
+    context.attach(first, binding_id="binding:first")
+    context.attach(second, binding_id="binding:second")
+    snapshot = context.snapshot()
+
+    assert snapshot.source_revisions == {
+        "binding:first": "rev:first",
+        "binding:second": "rev:second",
+    }
+
+    first.source_revision = "rev:first-updated"
+
+    assert context.is_snapshot_current(snapshot) is False
 
 
 def test_binding_and_snapshot_do_not_trigger_source_or_model_work() -> None:

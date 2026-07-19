@@ -680,6 +680,14 @@ def _compact_ledger_item(
     for field in ("locator_id", "content_version_id", "snapshot_id", "sha256"):
         if str(item.get(field) or "").strip():
             compact[field] = str(item.get(field))
+    for field in ("owner", "locator", "content_version"):
+        if str(item.get(field) or "").strip():
+            compact[field] = str(item.get(field))
+    if item.get("total_bytes") is not None:
+        compact["total_bytes"] = item.get("total_bytes")
+    for field in ("range", "read_identity"):
+        if isinstance(item.get(field), Mapping):
+            compact[field] = DataFormatter.sanitize(item.get(field))
     # The rendered view owns cite_as: a freshly assigned, position-based handle is
     # authoritative so a single view never exposes duplicate handles. Inherited
     # cite_as from a sub-render is only a fallback when the view does not assign one

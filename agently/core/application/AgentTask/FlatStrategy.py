@@ -2322,7 +2322,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                                 ),
                                 "new_string": (
                                     str,
-                                    "Bounded supported replacement; empty removes the unsupported claim",
+                                    "Bounded supported replacement, or exactly empty when repair_policy is delete_only",
                                     True,
                                 ),
                             }
@@ -2466,8 +2466,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         request.instruct(
             "Propose the smallest deterministic repair for the structured grounding requirements. "
             "Return exactly one replace operation for every offered claim_key and copy old_string exactly from that "
-            "requirement's artifact_quote. Use only the authorized TaskWorkspace target path. new_string may narrow the "
-            "claim to what the offered evidence supports or remove it when no supported replacement is available. "
+            "requirement's artifact_quote. Use only the authorized TaskWorkspace target path. This request cannot acquire "
+            "or validate new evidence, so never invent a new fact, readback state, path assertion, or evidence citation. "
+            "When repair_policy='delete_only', new_string must be the exactly empty string; a qualifying rewording is not "
+            "a deletion. Otherwise new_string may narrow the claim only to what the already offered evidence supports. "
             "Do not call Actions, do not return candidate_final_result, final_result, artifact_markdown, a full-file "
             "body, a full-file rewrite, append/insert/write operations, replace_all, or edits outside the implicated "
             "artifact quotes. The host validates identity, scope, current content version, exact-match cardinality, "

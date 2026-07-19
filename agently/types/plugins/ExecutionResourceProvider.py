@@ -18,16 +18,41 @@ from .base import AgentlyPlugin
 
 if TYPE_CHECKING:
     from agently.types.data import (
+        CodeExecutionBundle,
+        CodeExecutionResult,
         ExecutionResourceHandle,
         ExecutionResourcePolicy,
+        ExecutionResourceProviderProbe,
         ExecutionResourceRequirement,
         ExecutionResourceStatus,
+        TaskWorkspaceAccessGrant,
+        TaskWorkspaceExecutionManifest,
     )
 
 
 @runtime_checkable
+class CodeExecutionResource(Protocol):
+    async def async_execute_code(
+        self,
+        *,
+        bundle: "CodeExecutionBundle",
+        manifest: "TaskWorkspaceExecutionManifest",
+        grant: "TaskWorkspaceAccessGrant",
+        timeout: int,
+    ) -> "CodeExecutionResult": ...
+
+
+@runtime_checkable
 class ExecutionResourceProvider(AgentlyPlugin, Protocol):
-    kind: str
+    provider_id: str
+    supported_kinds: tuple[str, ...]
+
+    async def async_probe(
+        self,
+        *,
+        requirement: "ExecutionResourceRequirement",
+        policy: "ExecutionResourcePolicy",
+    ) -> "ExecutionResourceProviderProbe": ...
 
     async def async_ensure(
         self,

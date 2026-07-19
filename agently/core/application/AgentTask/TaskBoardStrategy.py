@@ -174,7 +174,15 @@ class AgentTaskTaskBoardStrategyMixin(
                     "source_reference_targets": self._taskboard_card_reference_targets(result),
                     "capability_facts": {capability_id: "required" for capability_id in requires_capability_ids},
                     "output_subjects": [contract_subject],
-                    "repair_contract": repair_contract,
+                    # setback/failed/blocked and regenerated repair-card ids are
+                    # equivalent observations of the same unresolved contract.
+                    # They must not masquerade as relevant-state progress.
+                    "repair_contract": {
+                        "allowed_execution_shape": str(
+                            getattr(card, "allowed_execution_shape", "") or "auto"
+                        ),
+                        "requires_capability_ids": requires_capability_ids,
+                    },
                 }
             )
             decision = self._terminal_convergence_state.record_detection(
@@ -231,27 +239,47 @@ class AgentTaskTaskBoardStrategyMixin(
 
     @staticmethod
     def _taskboard_tick_executed_card_ids(tick_result: Any) -> tuple[str, ...]:
+        executed: list[str] = []
+
+        def add_card_ids(value: Any) -> None:
+            if isinstance(value, Mapping):
+                candidates = value.keys()
+            elif isinstance(value, Sequence) and not isinstance(
+                value,
+                str | bytes | bytearray,
+            ):
+                candidates = value
+            else:
+                return
+            for card_id in candidates:
+                normalized = str(card_id)
+                if normalized and normalized not in executed:
+                    executed.append(normalized)
+
         snapshot = getattr(tick_result, "triggerflow_snapshot", None)
         if isinstance(snapshot, Mapping):
-            collected = snapshot.get("collected_card_results")
-            if isinstance(collected, Mapping):
-                return tuple(str(card_id) for card_id in collected if str(card_id))
+            add_card_ids(snapshot.get("collected_card_results"))
             collected_json = snapshot.get("collected_card_results_json")
             if isinstance(collected_json, str) and collected_json.strip():
                 try:
                     parsed = json.loads(collected_json)
                 except json.JSONDecodeError:
                     parsed = None
-                if isinstance(parsed, Mapping):
-                    return tuple(str(card_id) for card_id in parsed if str(card_id))
+                add_card_ids(parsed)
+            add_card_ids(snapshot.get("expected_card_ids"))
+            expected_json = snapshot.get("expected_card_ids_json")
+            if isinstance(expected_json, str) and expected_json.strip():
+                try:
+                    parsed = json.loads(expected_json)
+                except json.JSONDecodeError:
+                    parsed = None
+                add_card_ids(parsed)
+            if executed:
+                return tuple(executed)
         schedule = getattr(tick_result, "schedule", None)
         runnable_card_ids = getattr(schedule, "runnable_card_ids", ())
-        if isinstance(runnable_card_ids, Sequence) and not isinstance(
-            runnable_card_ids,
-            str | bytes | bytearray,
-        ):
-            return tuple(str(card_id) for card_id in runnable_card_ids if str(card_id))
-        return ()
+        add_card_ids(runnable_card_ids)
+        return tuple(executed)
 
     async def _run_taskboard(self) -> dict[str, Any]:
         """Compatibility entry point for the TaskBoard work-producer subflow."""
@@ -921,6 +949,8 @@ class AgentTaskTaskBoardStrategyMixin(
         language_policy = self._language_policy()
         request = self.agent.create_temp_request()
         self._apply_language_policy_to_request(request, language_policy)
+        previous_iterations = self._iteration_prompt_summaries()
+        repair_context = self._planner_repair_context(previous_iterations)
         request.input(
             {
                 "task_id": self.id,
@@ -952,6 +982,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 },
                 "planner_capabilities": self._planner_capabilities(),
                 "capability_evidence_requirements": self._capability_evidence_requirements(),
+                "repair_context": repair_context,
                 "language_policy": language_policy,
             }
         )
@@ -968,6 +999,8 @@ class AgentTaskTaskBoardStrategyMixin(
             "TaskContext-disclosed Skill procedure. Apply it directly; do not treat it as business evidence or create readback "
             "cards or scoped_retrieval query groups for skills/... citations, and do not treat Skill citations "
             "as TaskWorkspace file paths or local registry paths. "
+            "When repair_context is present, reuse prior evidence anchors and exact source/readback refs before planning new reads. "
+            "Add only evidence required by the recorded acceptance delta; do not rediscover a repository or discard stronger prior facts. "
             "Plan card objectives and done_when conditions around user-visible outcomes, not around one "
             "specific provider, endpoint, file format, or auxiliary guidance source unless the user explicitly "
             "requires that exact source or artifact. Mark replaceable evidence attempts, optional guidance, "
@@ -980,6 +1013,10 @@ class AgentTaskTaskBoardStrategyMixin(
             "For an actions card, include action_commands only when the exact offered Action ids and every required "
             "argument are already known now. Omit action_commands when any argument depends on a future card result; "
             "do not invent placeholders, copy opaque ids, or guess arguments. "
+            "When a later Action needs a locator, selection, path, or value returned by an earlier Action, represent "
+            "that value dependency with separate dependent cards when their outputs are useful board evidence. If the "
+            "dependency is a tightly coupled bounded operation inside one card, omit action_commands so the card keeps "
+            "its ActionLoop result-to-next-request backedge; never freeze search and selected-read calls as one parallel batch. "
             "Treat action_commands as the exhaustive command batch for that card: completion follows after that exact "
             "batch finishes. Never combine evidence-gathering action_commands with later synthesis or final TaskWorkspace "
             "delivery in the same card. Put synthesis and final_task_workspace_deliverables on a dependent control card so "
@@ -1067,28 +1104,55 @@ class AgentTaskTaskBoardStrategyMixin(
                 required_action_ids = self._normalize_string_list(
                     card.get("requires_capability_ids")
                 )
-                _normalized_commands, validation_error = (
-                    self._normalize_bounded_action_commands(
-                        raw_commands=commands_value,
-                        required_action_ids=([] if final_paths else required_action_ids),
-                        unit_label="TaskBoard",
-                    )
+                attempted_action_ids = self._merge_string_lists(
+                    [command.get("action_id") for command in commands]
                 )
-                if validation_error is not None:
-                    validation_code, message = validation_error
+                if not final_paths and len(attempted_action_ids) > 1:
                     card.pop("action_commands", None)
                     commands = []
+                    if attempted_action_ids:
+                        card["requires_capability_ids"] = self._merge_string_lists(
+                            [*required_action_ids, *attempted_action_ids]
+                        )
                     normalization_diagnostics.append(
                         {
-                            "code": "taskboard.initial_plan.action_commands_rejected",
+                            "code": "taskboard.initial_plan.action_commands_require_adaptive_loop",
                             "card_id": str(
                                 card.get("id") or card.get("card_id") or f"card-{index + 1}"
                             ),
-                            "validation_code": validation_code,
-                            "message": message,
-                            "fallback": "taskboard_action_command_request",
+                            "message": (
+                                "A multi-capability Action batch cannot preserve result-to-next-call value dependencies."
+                            ),
+                            "fallback": "action_loop",
                         }
                     )
+                else:
+                    _normalized_commands, validation_error = (
+                        self._normalize_bounded_action_commands(
+                            raw_commands=commands_value,
+                            required_action_ids=([] if final_paths else required_action_ids),
+                            unit_label="TaskBoard",
+                        )
+                    )
+                    if validation_error is not None:
+                        validation_code, message = validation_error
+                        card.pop("action_commands", None)
+                        commands = []
+                        if attempted_action_ids:
+                            card["requires_capability_ids"] = self._merge_string_lists(
+                                [*required_action_ids, *attempted_action_ids]
+                            )
+                        normalization_diagnostics.append(
+                            {
+                                "code": "taskboard.initial_plan.action_commands_rejected",
+                                "card_id": str(
+                                    card.get("id") or card.get("card_id") or f"card-{index + 1}"
+                                ),
+                                "validation_code": validation_code,
+                                "message": message,
+                                "fallback": "taskboard_action_command_request",
+                            }
+                        )
 
             if not final_paths:
                 prepared.append(card)

@@ -14,6 +14,7 @@
 
 from .ContextSource import TaskWorkspaceContextSource
 from .Errors import TaskWorkspaceError, TaskWorkspacePolicyError
+from .ExecutionAccess import TaskWorkspaceExecutionAccess
 from .Manager import TaskWorkspaceManager
 from .TaskWorkspace import TaskWorkspace
 
@@ -21,6 +22,7 @@ __all__ = [
     "TaskWorkspace",
     "TaskWorkspaceContextSource",
     "TaskWorkspaceError",
+    "TaskWorkspaceExecutionAccess",
     "TaskWorkspaceManager",
     "TaskWorkspacePolicyError",
 ]

@@ -36,9 +36,18 @@ Removed public/development concepts include `Workspace`, `ContextBuilder`,
 ordinary AgentExecution. There is no `skills` route.
 
 `Agently.skills_executor` remains a thin compatibility/management facade for
-local install, configure, list, inspect, read, context-pack projection, and the
-TaskDAG helper. It does not fetch remote sources, infer or grant capabilities,
-actionize scripts, select routes, or execute Skill-local strategies.
+install, configure, list, inspect, read, context-pack projection, and the
+TaskDAG helper. Authorized Git or local source snapshots are materialized by a
+`SkillSourceProvider` before immutable SkillLibrary installation. It does not
+infer capabilities, select routes, or execute Skill-local strategies.
+Remote compatibility installation defaults to `untrusted`, and selected
+Git/local subpaths reject symlink components that escape the materialized
+source root.
+
+An explicitly authorized script from a trusted exact Skill revision may be
+bound as an ordinary `code_execution` Action. The Skill layer supplies only
+revision/path/digest identity; ActionRuntime, TaskWorkspace, language adapters,
+and ExecutionResource retain execution ownership.
 
 `agent.run_skills_task(...)` is a result-shaped adapter over ordinary
 AgentExecution.
@@ -65,6 +74,48 @@ revision reference; unsupported custom ContextSources fail resume explicitly.
 Required TaskWorkspace delivery paths fail closed when the current physical
 file cannot be read back. TaskWorkspace readback cannot satisfy a required
 Action or Skill binding.
+
+When strict verification reports missing material evidence,
+`replan_segment` now creates an evidence-reacquisition card followed by a
+dependent artifact-repair card. The host requires a new stable
+`(owner, locator, content_version, range)` source identity before the repair is
+scheduled. Re-reading the final artifact or the same unchanged source under a
+fresh call id is a setback, not evidence progress.
+After reacquisition, another repair is allowed only when a newly acquired
+reference is actually cited by the original failed criterion or material-claim
+check; unrelated new material cannot keep a replan loop alive.
+Dependency readback evidence is canonicalized before a TaskBoard card prompt is
+built. Prompt projection, host binding validation, acceptance indexing and
+result persistence now share that one live ledger identity domain, so a legal
+model-selected reference cannot change merely because the host later rebuilds
+an ordered evidence view. Material-claim targets use a host-owned stable exact
+claim identity rather than response-local `claim_N` positions.
+
+A control card that explicitly returns `sufficient=false` cannot become
+completed through `next_board_action=finalize`. It normalizes to a setback, so
+an outline-only manifest cannot create a completed-without-deliverable dead
+state.
+
+## Workspace-backed code execution
+
+`agent.enable_code_runtime(...)` supports Python 3.10+, Node.js 18+, Go 1.25+,
+and C++20 through provider-neutral adapters. Every run follows
+TaskWorkspace grant -> provider binding -> immutable bundle materialization ->
+argv execution -> output readback -> release/close. Docker is one provider;
+`trusted_local` is an explicit unsafe fallback and never satisfies a hard
+isolation requirement. Provider probes report observed toolchain versions and
+safety/isolation facts; minimum or exact adapter constraints participate in
+ordered selection, and the selected facts are preserved in Action result
+metadata.
+Isolation probes use concrete boolean capability axes rather than provider
+self-labels. Expected outputs are bounded normalized paths under `output/`;
+missing outputs, cleanup failure, timeout, and cancellation fail visibly, with
+owned processes or containers terminated.
+
+External isolation providers use ordered candidate descriptors. Concrete
+gVisor and Seatbelt implementations remain contributor-owned in PR #325 and
+#327; this development branch provides their migration contract without
+copying either implementation.
 
 ## TriggerFlow and Blocks
 

@@ -143,6 +143,62 @@ async def bridge_task_dag_stream_item(owner: "AgentExecution", item: Any, *, rou
     await owner.stream.bridge_task_dag_item(item, route=route)
 
 
+async def bridge_agent_task_stream_item(
+    owner: "AgentExecution",
+    item: Any,
+    *,
+    route: str = "agent_task",
+) -> None:
+    """Bridge one child-task event and project material progress to its parent.
+
+    AgentTask owns its internal liveness clock, while the routed parent
+    AgentExecution owns the outer idle deadline.  A typed non-heartbeat task
+    event is the value edge between those two owners.  Project it onto the
+    parent before publishing the stream item so long-running cards, Actions,
+    and model streams remain observable without treating observational
+    heartbeats as work.
+    """
+
+    raw_path = str(getattr(item, "path", "") or "agent_task.stream")
+    item_meta = getattr(item, "meta", None)
+    item_meta = dict(item_meta) if isinstance(item_meta, dict) else {}
+    stream_kind = str(item_meta.get("stream_kind") or "").strip()
+    if stream_kind != "heartbeat":
+        raw_event_type = getattr(item, "event_type", "done")
+        completed = bool(getattr(item, "is_complete", raw_event_type != "delta"))
+        progress_meta: dict[str, Any] = {
+            "route": route,
+            "source": str(getattr(item, "source", "") or "agent_task"),
+            "stream_kind": stream_kind or None,
+            "task_id": getattr(item, "task_id", None) or item_meta.get("task_id"),
+        }
+        progress_meta.update(item_meta)
+        child_meta = item_meta.get("child_meta")
+        child_meta = child_meta if isinstance(child_meta, dict) else {}
+        record_progress = getattr(owner.execution_context, "record_progress", None)
+        if callable(record_progress):
+            record_progress(
+                stage=raw_path,
+                status="completed" if completed else "progress",
+                event_type=raw_path,
+                run_id=str(
+                    child_meta.get("model_run_id")
+                    or child_meta.get("request_run_id")
+                    or item_meta.get("model_run_id")
+                    or item_meta.get("request_run_id")
+                    or ""
+                )
+                or None,
+                response_id=str(
+                    child_meta.get("response_id") or item_meta.get("response_id") or ""
+                )
+                or None,
+                meta=progress_meta,
+                notify=False,
+            )
+    await owner.stream.bridge_agent_task_item(item, route=route)
+
+
 async def bridge_model_stream_item(
     owner: "AgentExecution",
     item: Any,

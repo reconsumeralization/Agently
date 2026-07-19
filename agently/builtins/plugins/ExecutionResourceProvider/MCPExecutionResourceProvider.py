@@ -15,6 +15,8 @@
 import uuid
 from typing import TYPE_CHECKING
 
+from ._base import BuiltinExecutionResourceProvider
+
 if TYPE_CHECKING:
     from agently.types.data import (
         ExecutionResourceHandle,
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
     )
 
 
-class MCPExecutionResourceProvider:
+class MCPExecutionResourceProvider(BuiltinExecutionResourceProvider):
     name = "MCPExecutionResourceProvider"
     DEFAULT_SETTINGS = {}
     kind = "mcp"
