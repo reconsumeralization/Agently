@@ -21,6 +21,7 @@ keywords: Agently, context, info, session, KB, retrieval, instruct
 | Session chat history | user/assistant 消息 | 跨请求累积 |
 | Session memo | system 消息 | 持久，由自定义 resize handler 写入 |
 | 知识库检索 | 检索代码注入 | 单次按需 |
+| `TaskContext` sources | 有界 `ContextPackage` 信息块 | 按 task、consumer 与 phase |
 | 工具 / MCP 结果 | tool 消息 | 单次工具循环内累积 |
 
 按职责选槽：
@@ -46,6 +47,25 @@ keywords: Agently, context, info, session, KB, retrieval, instruct
 | 上几轮对话 | session chat history |
 | 100k tokens 公司文档 | KB + 检索，**不**放进 prompt |
 | 当前轮检索到的相关事实 | 仅本次请求的 `info` |
+
+## 用 TaskContext 做任务级渐进式披露
+
+prompt slot 负责模型可见材料，不拥有任务 source catalog。当一个任务可能需要
+Skills、files、records、SessionMemory recall、evidence 或固定仓库时，把这些 source
+绑定到 `TaskContext`，再由 `ContextReader` 按 consumer/phase 读取一份
+`ContextPackage`。
+
+TaskContext 拥有内部 `ContextIndex`。source 提供结构 descriptor 与有界精确读取；
+内部 index 构建可复用、带 revision 的 structural、lexical 或可选 hybrid partition。
+ContextReader 查询 index，完成由 ModelRequest 负责的可选相关性选择，读取 canonical
+source 内容并执行披露预算。模型只收到最终 blocks、refs、omissions、coverage 与
+diagnostics，不接收完整 source tree 或内部 vector。
+
+Embedding usage 与模型 prompt usage 是两类独立事实。cache hit 或更小的
+ContextPackage 可以解释效率变化，但只有可比请求的完整 provider-observed prompt
+token 才能证明模型输入 token 下降；不得把字符数换算成计费 token。
+
+source contract 与 owner 边界见[任务上下文、文件与记录](workspace.md)。
 
 ## 让 info 可 diff
 
@@ -77,7 +97,8 @@ agent.info({
 上下文窗口快满时：
 
 - 默认 session 只按 `session.max_length` 做窗口裁剪；需要摘要时，注册自定义 resize handler，把摘要写入 session `memo`。详见 [会话记忆](session-memory.md)。
-- 一次性长输入，先摘要再请求，不要中间截断。
+- 任务 source 优先使用有界 TaskContext read 与可复用 ref。真正一次性的长输入，
+  先摘要再请求，不要中间截断。
 
 ## 单次 info 而不污染 agent
 

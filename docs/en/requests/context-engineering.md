@@ -21,6 +21,7 @@ The model only knows what fits in its context window. Context engineering is the
 | Session chat history | user/assistant messages | accumulates across requests |
 | Session memo | system message | persists, written by custom resize handlers |
 | Knowledge base retrieval | injected by retrieval code | per-request, on demand |
+| `TaskContext` sources | bounded `ContextPackage` blocks | per task, consumer, and phase |
 | Tool / MCP results | tool messages | accumulates within one tool loop |
 
 Use the right slot for the right job:
@@ -46,6 +47,29 @@ Don't put everything in `input`. Don't put per-request payload in `info`.
 | The previous turns of a conversation | session chat history |
 | 100k tokens of company docs | KB with retrieval, not the prompt |
 | Recently retrieved facts that are relevant *this turn* | `info` for this request only |
+
+## Use TaskContext for task-scoped progressive disclosure
+
+Prompt slots own model-facing material; they do not own a task's source
+catalog. When one task may need Skills, files, records, SessionMemory recall,
+evidence, or a pinned repository, bind those sources to `TaskContext` and read
+one consumer/phase-specific `ContextPackage` through `ContextReader`.
+
+TaskContext owns an internal `ContextIndex`. Sources contribute structural
+descriptors and bounded exact reads; the internal index builds reusable
+revisioned structural, lexical, or optional hybrid partitions. ContextReader
+queries that index, performs any ModelRequest-owned optional relevance
+selection, reads canonical source content, and applies disclosure budgets. The
+model receives only the resulting blocks, refs, omissions, coverage, and
+diagnostics—not an entire source tree or internal vectors.
+
+Embedding usage and model prompt usage are separate facts. A cache hit or
+smaller ContextPackage can explain an efficiency change, but only complete
+provider-observed prompt-token usage from comparable requests proves a model
+input-token reduction. Never convert character counts into billed tokens.
+
+See [Task context, files, and records](workspace.md) for the source contract and
+ownership boundaries.
 
 ## Keep info diffable
 
@@ -77,7 +101,9 @@ If you're using actions / tools, the framework already injects the tool catalog 
 When the context window starts to fill up:
 
 - The default Session only trims the window by `session.max_length`; when you need summaries, register a custom resize handler and write the summary into session `memo`. See [Session Memory](session-memory.md).
-- For one-off long inputs, summarize before the request rather than truncating mid-sentence.
+- For task sources, prefer bounded TaskContext reads and reusable refs. For a
+  truly one-off long input, summarize before the request rather than truncating
+  mid-sentence.
 
 ## Per-request info without polluting the agent
 

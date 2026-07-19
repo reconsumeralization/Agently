@@ -3,7 +3,7 @@
   "framework": "agently",
   "target_version": "4.1.4.2",
   "release_train": "2026-07-4.1.4.2-dev",
-  "notes": "4.1.4.2 breaking development line: TaskContext and ContextReader own progressive disclosure; TaskWorkspace owns task files and code-execution grants; RecordStore owns records and durability; SkillLibrary owns immutable installed Skill revisions and authorized remote-source snapshots; AgentExecution owns task-scoped Skill binding. Workspace-backed code execution selects provider-neutral ExecutionResource providers after immutable bundle materialization. AgentTask process state stays in memory/logs by default and record_store_recovery is opt-in. The former combined Workspace, ContextBuilder, SkillsManager, Skills execution route/strategies, skill_activation, and workspace_operation are removed without shims.",
+  "notes": "4.1.4.2 breaking development line: TaskContext owns progressive disclosure and one internal derived ContextIndex lifecycle; ContextReader owns consumer-bound exact readback and ContextPackage construction. TaskWorkspace owns task files and code-execution grants, including verifier-gated atomic terminal promotion; RecordStore owns records and durability; SkillLibrary owns immutable installed Skill revisions and authorized remote-source snapshots; SessionMemory recall enters through a TaskContext source; AgentExecution owns task-scoped Skill binding. Workspace-backed code execution selects provider-neutral ExecutionResource providers after immutable bundle materialization. AgentTask process state stays in memory/logs by default and record_store_recovery is opt-in. The former combined Workspace, ContextBuilder, SkillsManager, Skills execution route/strategies, skill_activation, and workspace_operation are removed without shims.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",
@@ -130,12 +130,16 @@
       "owner": "TaskContext",
       "reader": "ContextReader",
       "package": "ContextPackage",
+      "derived_index_owner": "TaskContext internal ContextIndex",
+      "source_protocol": "ContextSource async_enumerate_descriptors plus async_read_exact; sources own canonical truth while TaskContext owns disposable derived partitions",
+      "source_kinds": "open adapter vocabulary",
       "source_adapters": [
         "SkillContextSource",
         "TaskWorkspaceContextSource",
-        "RecordStoreContextSource"
+        "RecordStoreContextSource",
+        "AgentlyMemoryContextSource"
       ],
-      "selection_contract": "Required and explicit blocks cannot be dropped; optional prose relevance uses ModelRequest structured output and host-issued keys; a source revision advanced by candidate listing is optimistically re-pinned and recollected once, while pre-existing or repeated staleness fails closed."
+      "selection_contract": "ContextIndex owns structural, lexical, and optional hybrid candidate retrieval; ContextReader owns consumer-local offsets, exact readback, budgets, and optional ModelRequest structured selection with host-issued keys. Required and explicit blocks cannot be silently dropped; unknown source kinds fail before enumeration."
     },
     "task_workspace": {
       "surface": [
@@ -145,7 +149,8 @@
         "Agent.enable_task_workspace_file_actions"
       ],
       "default_root": "<entry-directory>/.agently/task_workspaces/<agent-id>",
-      "ownership": "Task files, path policy, physical readback, digest, file refs, scoped execution grants, immutable bundle materialization, and declared-output collection"
+      "ownership": "Task files, path policy, physical readback, digest, file refs, scoped execution grants, immutable bundle materialization, and declared-output collection",
+      "terminal_artifact_contract": "Required AgentTask deliverables remain digest-pinned staged candidates through verifier acceptance, then use atomic target promotion and complete post-promotion readback; failure blocks delivery without overwriting the prior accepted target"
     },
     "record_store": {
       "surface": [
@@ -160,6 +165,7 @@
     "session_memory": {
       "storage_owner": "RecordStore",
       "strategy_owner": "SessionMemory plugin",
+      "recall_owner": "TaskContext via AgentlyMemoryContextSource",
       "task_file_dependency": false
     }
   },

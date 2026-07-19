@@ -12,8 +12,8 @@ deprecated through aliases.
 
 ## New owner boundaries
 
-- `TaskContext` owns the task information aggregate, source bindings, and the
-  lifecycle for its read handles.
+- `TaskContext` owns the task information aggregate, source bindings, one
+  internal derived ContextIndex lifecycle, and its read handles.
 - `ContextReader` is a public consumer/phase-bound handle created or restored
   only by TaskContext. It performs progressive retrieval into immutable
   `ContextPackage` values; it is not a second aggregate owner.
@@ -22,6 +22,9 @@ deprecated through aliases.
 - `RecordStore` owns records, retrieval indexes, links, checkpoints,
   TriggerFlow snapshots/events, and SessionMemory persistence. The local store
   materializes under `<root>/.agently/records/records.db`.
+- `SessionMemory` owns memory extraction/compression and accepted RecordStore
+  writes; active recall joins task information through a `session_memory`
+  ContextSource instead of a parallel prompt-injection pipeline.
 - `SkillLibrary` owns immutable installed Skill and Skill-pack revisions.
 - `AgentExecution` owns task-scoped Skill selection/binding and shares its
   TaskContext with AgentTask.
@@ -72,13 +75,19 @@ When recovery is enabled, AgentTask also snapshots TaskContext entries,
 reconstructible built-in sources, ContextReader disclosure state, exact
 ContextPackages, and ContextConsumptions. Skill Context resumes by immutable
 revision reference; unsupported custom ContextSources fail resume explicitly.
-Successful repeated reads of one intent advance private per-source candidate
-windows. Packages expose bounded `source_coverage` and continuation
-availability, while opaque cursors never cross the reader/source boundary.
+ContextSources now expose structural descriptor enumeration and bounded exact
+readback. TaskContext's internal ContextIndex builds revision/profile/provider-
+keyed structural, lexical, or optional hybrid partitions; ContextReader owns
+consumer-local query offsets, exact source reads, semantic selection and
+ContextPackage construction. `source_kinds` is the open vocabulary of sources
+actually attached to the TaskContext, not a hard-coded framework list.
 
-Required TaskWorkspace delivery paths fail closed when the current physical
-file cannot be read back. TaskWorkspace readback cannot satisfy a required
-Action or Skill binding.
+Required TaskWorkspace delivery paths are represented by digest-pinned staged
+candidates during terminal verification. Verifier rejection leaves the prior
+target unchanged. Acceptance triggers atomic target promotion and complete
+post-promotion readback; any promotion, digest, or readback failure changes the
+task to blocked. TaskWorkspace readback cannot satisfy a required Action or
+Skill binding.
 
 When strict verification reports missing material evidence,
 `replan_segment` now creates an evidence-reacquisition card followed by a

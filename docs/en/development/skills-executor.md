@@ -165,14 +165,20 @@ TaskContext diagnostics, retries, or lifecycle control.
 ## Context limits and progressive disclosure
 
 Installing a Skill does not copy all of its resources into every prompt.
-Required `SKILL.md` guidance is delivered first; resource indexes and explicit
-references allow later bounded reads. When available context is too large, the
+`SkillContextSource` contributes revision-pinned resource descriptors and exact
+reads to the TaskContext-owned internal ContextIndex. Required `SKILL.md`
+guidance is delivered first; resource indexes and explicit references allow
+later bounded reads. Structural, lexical, or optional hybrid indexing may
+narrow reusable candidates, but TaskContext remains the aggregate and
+SkillLibrary remains source truth. When available context is too large, the
 reader returns omissions and diagnostics plus refs for later reads. It never
 pretends that a synthetic summary is the full source.
 
 Use one or more bounded information blocks selected for the consumer and
 phase. Keep full files and raw evidence in SkillLibrary, TaskWorkspace, or
 RecordStore; put only the task-relevant package on the hot model path.
+Embedding/cache accounting is separate from model prompt-token accounting;
+cache reuse alone is not evidence that the final prompt used fewer tokens.
 
 ## Side effects
 

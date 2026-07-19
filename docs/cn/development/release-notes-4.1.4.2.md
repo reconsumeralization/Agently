@@ -11,13 +11,17 @@ ownership 被直接替换，不通过 alias 走废弃兼容。
 
 ## 新所有者边界
 
-- `TaskContext` 负责任务信息 aggregate、source bindings 与读取句柄生命周期。
+- `TaskContext` 负责任务信息 aggregate、source bindings、一套内部派生
+  ContextIndex 生命周期与读取句柄。
 - `ContextReader` 是只能由 TaskContext 创建或恢复、绑定 consumer/phase 的公开句柄；
   它负责渐进检索并生成不可变 `ContextPackage`，不是第二个 aggregate owner。
 - `TaskWorkspace` 负责任务文件、路径约束、mutation policy、readback、digest 与 file refs。
 - `RecordStore` 负责 records、检索索引、links、checkpoints、TriggerFlow
   snapshots/events 与 SessionMemory 持久化。本地 store 位于
   `<root>/.agently/records/records.db`。
+- `SessionMemory` 负责 memory extraction/compression 与 accepted RecordStore
+  写入；active recall 通过 `session_memory` ContextSource 并入任务信息，不再运行
+  平行 prompt-injection pipeline。
 - `SkillLibrary` 负责不可变的 Skill 与 Skill-pack 安装 revision。
 - `AgentExecution` 负责任务级 Skill selection/binding，并与 AgentTask 共享同一个
   TaskContext。
@@ -62,11 +66,15 @@ readback 仍属于 TaskWorkspace artifact；recovery refs 属于 RecordStore。
 ContextReader 披露状态、精确 ContextPackages 与 ContextConsumptions。Skill
 Context 按不可变 revision reference 恢复；不受支持的自定义 ContextSource 会明确
 终止 resume。
-同一 intent 的成功重复读取会推进私有的逐 source candidate window。package 只暴露
-有界 `source_coverage` 与 continuation availability，opaque cursor 不越过
-reader/source 边界。
+ContextSource 现在提供结构 descriptor 枚举与有界 exact readback。TaskContext 的内部
+ContextIndex 构造以 revision/profile/provider 为 key 的 structural、lexical 或可选
+hybrid partition；ContextReader 负责 consumer-local query offset、精确 source read、
+语义选择与 ContextPackage 构造。`source_kinds` 是当前 TaskContext 实际挂载 source 的
+开放 vocabulary，不是框架硬编码列表。
 
-required TaskWorkspace delivery path 无法读取当前物理文件时 fail closed。
+required TaskWorkspace delivery path 在 terminal verification 期间表示为 digest-pinned
+暂存候选。verifier 拒绝时旧目标保持不变；验收通过后才原子提升目标并进行完整的
+提升后 readback。提升、digest 或 readback 任一失败都会把任务转为 blocked。
 TaskWorkspace readback 不能满足 required Action 或 Skill binding。
 
 strict verification 判断缺少事实材料时，`replan_segment` 会先创建证据补采 card，

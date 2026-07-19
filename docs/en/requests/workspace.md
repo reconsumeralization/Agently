@@ -11,14 +11,18 @@ one ambiguous Workspace concept.
 
 | Owner | Responsibility | Does not own |
 |---|---|---|
-| `TaskContext` | Task-scoped information aggregate, direct entries, source bindings, immutable read snapshots | Files, persistence, semantic execution routing |
+| `TaskContext` | Task-scoped information aggregate, direct entries, source bindings, and one internal derived index lifecycle | Files, persistence, semantic execution routing |
 | `ContextReader` | Consumer/phase-bound retrieval and progressive disclosure; returns `ContextPackage` | Source storage, writes, side effects |
 | `TaskWorkspace` | One explicit task file boundary: containment, mutation policy, format-aware readback, digest and file refs | Records, memory, snapshots, Skill selection |
 | `RecordStore` | Durable records, retrieval indexes, links, checkpoints, TriggerFlow snapshots/events, memory persistence | Task files, prompt assembly, semantic relevance judgment |
 
 `ContextSource` adapters make source-specific information readable without
-moving ownership into `TaskContext`. Built-in adapters cover SkillLibrary,
-TaskWorkspace, and RecordStore. Applications may attach their own source.
+moving source truth into `TaskContext`. A source exposes structural descriptors
+through `async_enumerate_descriptors(...)` and bounded canonical content through
+`async_read_exact(...)`; it does not choose cross-source relevance. Built-in
+adapters cover SkillLibrary, TaskWorkspace, RecordStore, and SessionMemory
+recall. Applications may attach their own source kind, such as an authorized
+pinned-repository adapter.
 
 ## File boundary: TaskWorkspace
 
@@ -57,6 +61,14 @@ TaskWorkspace produces stable locator and content-version facts for host-side
 readback. A short application citation alias such as `[[ref:ref_1]]` is a
 request-local display alias, not durable identity. Host code validates it and
 maps it back to the canonical reference identity.
+
+For a required AgentTask deliverable, the candidate bytes are first written as
+a staged candidate and completely read back for terminal verification. Only
+after verifier acceptance does TaskWorkspace perform digest-pinned atomic
+promotion to the declared target and completely read the promoted bytes again.
+Verification rejection leaves the previous target untouched; promotion or
+post-promotion readback failure changes the task to a blocked result rather
+than claiming delivery.
 
 ## Persistence boundary: RecordStore
 
@@ -126,9 +138,12 @@ package = await reader.async_read(
 )
 ```
 
-`TaskContext` is the only task-information aggregate and the lifecycle owner.
-It creates readers with `task_context.reader(...)` and restores their exported
-state with `task_context.restore_reader(...)`; constructing or restoring a
+`TaskContext` is the only task-information aggregate. TaskContext owns source
+bindings and one internal `ContextIndex` that builds, synchronizes, invalidates,
+and reuses derived source partitions. ContextIndex is not a public manager and
+never becomes canonical source truth. TaskContext creates readers with
+`task_context.reader(...)` and restores their exported state with
+`task_context.restore_reader(...)`; constructing or restoring a
 `ContextReader` independently is not supported. The reader is a public,
 consumer/phase-bound handle, comparable to an execution handle owned by its
 aggregate. `ContextPackage` is the immutable value returned across a request,
@@ -145,13 +160,15 @@ cannot be silently dropped. Optional prose relevance uses an Agently
 selection keys are host-issued and validated before canonical records are
 reconstructed.
 
-Each source lists a bounded `ContextSourceCandidateWindow`. For the same read
-intent, a successful read advances that source's private continuation window;
-selector failure, read failure, or a stale cursor does not advance it. The
-returned package exposes per-binding `source_coverage` with the source scope,
-returned candidate count, exhaustiveness, and whether continuation remains.
-Opaque cursors stay private to the reader/source protocol and never enter model
-input, Blocks projections, or `ContextPackage`.
+ContextIndex enumerates source descriptors into revision/profile/provider-keyed
+partitions. It may use `structural`, `lexical`, or host-configured `hybrid`
+candidate retrieval, but exact bytes still come from the source's
+`async_read_exact(...)` port. Reusable partitions may avoid rebuilding
+unchanged embeddings; vector failure degrades only when policy allows it and is
+reported in package diagnostics. ContextReader owns consumer-local offsets,
+deduplication, optional ModelRequest selection, exact readback, and package
+budgets. The returned package exposes per-binding `source_coverage` and index
+diagnostics, never internal cache keys or provider vectors.
 
 Required content remains fail-closed when it cannot fit. A caller that has
 explicitly accepted a lossy projection may request
@@ -177,9 +194,11 @@ execution = agent.goal(goal, success_criteria=criteria).strategy(
 Use this only when the Skill or caller accepts lossy disclosure. Otherwise use
 a larger/focused consumer or let the required Skill fail before business work.
 
-`source_kinds` is structural source filtering, not semantic routing. Supported
-built-in values are `task_workspace` and `record_store`; Skill bindings are
-already scoped by the installed revision and execution binding.
+`source_kinds` is structural source filtering, not semantic routing and not a
+closed enumeration. Valid values come from the source kinds actually attached
+to that TaskContext, including built-in adapters such as `task_workspace`,
+`record_store`, `skill_library`, `session_memory`, or `pinned_repository` when present. Unknown
+kinds fail before source enumeration.
 
 AgentTask creates an independent reader/package for each concrete planner,
 worker, control-card, and verifier request. A successful response records a

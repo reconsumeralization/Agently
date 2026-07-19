@@ -153,13 +153,18 @@ AgentExecution API。
 ## 上下文限制与渐进式披露
 
 安装 Skill 不会把全部资源复制进每次 prompt。required `SKILL.md` guidance
-优先交付；resource index 与显式 refs 支持后续 bounded read。上下文过大时，
-reader 返回 omissions、diagnostics 和可继续读取的 refs，不会把合成 summary
-伪装成完整 source。
+优先交付。`SkillContextSource` 向 TaskContext 拥有的内部 ContextIndex 提供固定
+revision 的 resource descriptor 与 exact read；resource index 与显式 refs 支持
+后续 bounded read。structural、lexical 或可选 hybrid index 可以缩小可复用
+candidate，但 TaskContext 仍是 aggregate，SkillLibrary 仍是 source truth。上下文
+过大时，reader 返回 omissions、diagnostics 和可继续读取的 refs，不会把合成
+summary 伪装成完整 source。
 
 按 consumer 和 phase 返回一份或多份有界信息块。完整文件和原始 evidence
 留在 SkillLibrary、TaskWorkspace 或 RecordStore；hot model path 只携带当前任务
 相关的 package。
+Embedding/cache 计量与模型 prompt token 计量彼此独立；cache 复用本身不能证明
+最终 prompt token 更少。
 
 ## 副作用
 

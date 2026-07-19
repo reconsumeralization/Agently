@@ -56,9 +56,20 @@ def test_in_development_manifest_declares_breaking_owner_split() -> None:
 
     companions = manifest["companions"]
     assert companions["task_context"]["reader"] == "ContextReader"
+    assert companions["task_context"]["derived_index_owner"] == (
+        "TaskContext internal ContextIndex"
+    )
+    assert "async_enumerate_descriptors" in companions["task_context"][
+        "source_protocol"
+    ]
+    assert "async_read_exact" in companions["task_context"]["source_protocol"]
+    assert companions["task_context"]["source_kinds"] == "open adapter vocabulary"
     assert companions["task_workspace"]["default_root"].endswith(
         ".agently/task_workspaces/<agent-id>"
     )
+    assert "verifier acceptance" in companions["task_workspace"][
+        "terminal_artifact_contract"
+    ]
     assert companions["record_store"]["local_state"].endswith(
         ".agently/records/records.db"
     )

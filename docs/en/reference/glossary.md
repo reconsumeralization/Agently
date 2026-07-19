@@ -36,11 +36,12 @@ source preparation or TaskWorkspace policy. See
 
 A public consumer-, model-, and phase-bound read handle created and restored by
 one `TaskContext`. It performs candidate-window collection, structural
-filtering, optional structured semantic selection, progressive disclosure,
+filtering through the TaskContext-owned internal ContextIndex, optional
+structured semantic selection, exact source readback, progressive disclosure,
 budgeting, deduplication, and immutable `ContextPackage` construction. Its
-continuation ledger and source cursors are private; it has no lifecycle
-independent from TaskContext. It does not mutate sources, install Skills,
-execute Actions, or decide task completion.
+consumer-local offsets are private; it has no lifecycle independent from
+TaskContext. It does not mutate sources, install Skills, execute Actions, or
+decide task completion.
 
 ## ContextPackage
 
@@ -48,6 +49,15 @@ The immutable delivery value produced by a `ContextReader` for one exact
 intent, consumer, phase, and TaskContext snapshot. It contains bounded blocks,
 diagnostics, disclosure facts, and per-binding source coverage, but never a
 source cursor. It is not canonical task state and does not own sources.
+
+## ContextIndex
+
+The internal derived-index subordinate owned by `TaskContext`. It builds and
+reuses revision/profile/embedding-provider-keyed descriptor partitions and
+supports structural, lexical, or optional hybrid candidate retrieval. It is
+not independently constructed, exported as a public manager, or treated as
+source truth; canonical content still comes from each ContextSource exact-read
+port.
 
 ## ensure (third tuple slot)
 
@@ -116,16 +126,18 @@ The revisioned aggregate of information available to one task. It binds direct
 entries and source adapters such as SkillLibrary, TaskWorkspace, RecordStore,
 memory, evidence, and authorized external sources. `ContextReader` produces
 consumer-specific ContextPackages from it. TaskContext is the sole public
-lifecycle owner for those read handles and packages; source-specific candidate
-windows remain private protocol values. TaskContext does not own source storage,
-file mutation, execution, or task continuation.
+lifecycle owner for those read handles and packages and owns one internal
+ContextIndex lifecycle over its bound sources. TaskContext does not own source
+storage, file mutation, execution, or task continuation.
 
 ## TaskWorkspace
 
 The task's ordinary file boundary. It owns contained file operations, mutable
 working copies, artifacts, source-local search, physical readback, stable file
 identity, and scoped execution grants. It is distinct from TaskContext
-information management and RecordStore durability. See
+information management and RecordStore durability. Required AgentTask terminal
+artifacts are verified from staged bytes, atomically promoted only after
+acceptance, and completely read back again. See
 [TaskWorkspace and RecordStore](../requests/workspace.md).
 
 ## TriggerFlow

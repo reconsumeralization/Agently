@@ -35,16 +35,23 @@ provider 不拥有源码准备或 TaskWorkspace policy。详见
 ## ContextReader
 
 由一个 `TaskContext` 创建和恢复、绑定 consumer、model 与 phase 的公开读取句柄。
-它负责候选 window 收集、结构过滤、可选的结构化语义选择、渐进披露、预算、去重与
-不可变 `ContextPackage` 构造；continuation ledger 和 source cursor 都是私有状态，
-没有脱离 TaskContext 的独立生命周期。它不修改 source、不安装 Skill、不执行
-Action，也不决定任务完成。
+它通过 TaskContext 拥有的内部 ContextIndex 完成候选查询与结构过滤，并负责可选的
+结构化语义选择、精确 source readback、渐进披露、预算、去重与不可变
+`ContextPackage` 构造；consumer-local offset 是私有状态，没有脱离 TaskContext 的
+独立生命周期。它不修改 source、不安装 Skill、不执行 Action，也不决定任务完成。
 
 ## ContextPackage
 
 `ContextReader` 针对精确 intent、consumer、phase 和 TaskContext snapshot 生成的
 不可变交付值。它包含有界 blocks、diagnostics、披露事实与逐 binding source
 coverage，但不包含 source cursor。它不是 canonical task state，也不拥有 source。
+
+## ContextIndex
+
+`TaskContext` 拥有的内部派生索引下级组件。它构造并复用以
+revision/profile/embedding-provider 为 key 的 descriptor partition，支持
+structural、lexical 或可选 hybrid candidate retrieval。它不能独立构造，也不是公开
+manager 或 source truth；canonical 内容仍来自各 ContextSource 的 exact-read port。
 
 ## ensure（第三槽） {#ensure-third-tuple-slot}
 
@@ -110,14 +117,16 @@ Execution-local、可序列化、可快照的数据面。推荐入口：`data.as
 一个任务可用信息的 revisioned aggregate。它绑定直接条目，以及 SkillLibrary、
 TaskWorkspace、RecordStore、memory、evidence 和已授权 external source 等 adapter；
 `ContextReader` 从中生成面向具体 consumer 的 ContextPackage。TaskContext 是这些读取
-句柄与 package 的唯一公开生命周期 owner；source-specific candidate window 仍是私有
-协议值。TaskContext 不拥有 source 存储、文件修改、执行或任务 continuation。
+句柄与 package 的唯一公开生命周期 owner，并负责绑定 sources 上的一套内部
+ContextIndex 生命周期。TaskContext 不拥有 source 存储、文件修改、执行或任务
+continuation。
 
 ## TaskWorkspace
 
 任务的普通文件边界，负责 contained file operation、mutable working copy、artifact、
 source-local search、物理 readback、稳定 file identity 与 scoped execution grant。它与
-TaskContext 信息管理、RecordStore durability 是不同职责。详见
+TaskContext 信息管理、RecordStore durability 是不同职责。AgentTask 的 required
+terminal artifact 先从暂存 bytes 验证，只在通过后原子提升，并再次完整读回。详见
 [TaskWorkspace 与 RecordStore](../requests/workspace.md)。
 
 ## TriggerFlow

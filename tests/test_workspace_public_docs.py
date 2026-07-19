@@ -38,6 +38,53 @@ def test_context_file_and_record_docs_define_non_overlapping_owners() -> None:
         assert "source_kinds" in document
 
 
+def test_context_docs_keep_index_internal_and_use_descriptor_source_ports() -> None:
+    english = _read("docs/en/requests/workspace.md")
+    chinese = _read("docs/cn/requests/workspace.md")
+    english_flat = " ".join(english.split())
+    chinese_flat = " ".join(chinese.split())
+
+    assert "internal `ContextIndex`" in english_flat
+    assert "TaskContext owns" in english_flat
+    assert "async_enumerate_descriptors" in english_flat
+    assert "async_read_exact" in english_flat
+    assert "not a closed enumeration" in english_flat
+    assert "内部 `ContextIndex`" in chinese_flat
+    assert "TaskContext 负责" in chinese_flat
+    assert "async_enumerate_descriptors" in chinese_flat
+    assert "async_read_exact" in chinese_flat
+    assert "不是封闭枚举" in chinese_flat
+    for stale_surface in ("ContextSourceCandidateWindow", "async_list_candidates"):
+        assert stale_surface not in english
+        assert stale_surface not in chinese
+
+
+def test_session_memory_docs_route_task_recall_through_task_context_source() -> None:
+    english = _read("docs/en/requests/session-memory.md")
+    chinese = _read("docs/cn/requests/session-memory.md")
+
+    assert "SessionMemory remains" in english
+    assert "TaskContext source" in english
+    assert "ContextReader" in english
+    assert "SessionMemory 仍负责" in chinese
+    assert "TaskContext source" in chinese
+    assert "ContextReader" in chinese
+
+
+def test_task_workspace_docs_stage_then_promote_terminal_artifacts() -> None:
+    english = _read("docs/en/requests/workspace.md")
+    chinese = _read("docs/cn/requests/workspace.md")
+    english_flat = " ".join(english.split())
+    chinese_flat = " ".join(chinese.split())
+
+    assert "staged candidate" in english_flat
+    assert "verifier acceptance" in english_flat
+    assert "atomic promotion" in english_flat
+    assert "暂存候选" in chinese_flat
+    assert "verifier 验收" in chinese_flat
+    assert "原子提升" in chinese_flat
+
+
 def test_session_memory_docs_bind_record_store_without_task_workspace_dependency() -> None:
     for path in ("docs/en/requests/session-memory.md", "docs/cn/requests/session-memory.md"):
         document = _read(path)
