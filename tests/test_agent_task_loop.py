@@ -3971,7 +3971,11 @@ def test_block_carrier_normalizes_singleton_record_filters(tmp_path):
 
 @pytest.mark.asyncio
 async def test_block_carrier_executes_scoped_retrieval_and_injects_results(tmp_path):
-    agent = _create_agent("agent-task-scoped-retrieval-block-exec").use_task_workspace(tmp_path / "task_workspace")
+    agent = (
+        _create_agent("agent-task-scoped-retrieval-block-exec")
+        .use_task_workspace(tmp_path / "task_workspace")
+        .use_record_store(tmp_path / "records", mode="read_write")
+    )
     task = AgentTask(
         agent,
         task_id="scoped-retrieval-block-exec",

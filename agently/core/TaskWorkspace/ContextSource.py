@@ -37,11 +37,20 @@ class TaskWorkspaceContextSource:
         root_digest = hashlib.sha256(str(task_workspace.root).encode("utf-8")).hexdigest()[:16]
         self.source_id = f"task-workspace:{root_digest}:{task_workspace.execution_id}"
 
+    def _logical_paths(self) -> tuple[str, ...]:
+        logical: set[str] = set()
+        for relative in self.task_workspace.list_files():
+            target = self.task_workspace.root / relative
+            parts = self.task_workspace._logical_file_parts(target)
+            if parts:
+                logical.add("/".join(parts))
+        return tuple(sorted(logical))
+
     @property
     def source_revision(self) -> str:
         digest = hashlib.sha256()
-        for relative in self.task_workspace.list_files():
-            path = self.task_workspace.resolve_path(relative)
+        for relative in self._logical_paths():
+            path = self.task_workspace.resolve_file_path(relative)
             digest.update(relative.encode("utf-8"))
             digest.update(b"\0")
             with path.open("rb") as file:
@@ -69,7 +78,7 @@ class TaskWorkspaceContextSource:
         if projection_max_chars <= 0:
             raise ValueError("projection_max_chars must be positive.")
         revision = self.source_revision
-        paths = tuple(sorted(self.task_workspace.list_files()))
+        paths = self._logical_paths()
         page_paths = paths[offset : offset + page_size]
         descriptors: list[ContextSourceDescriptor] = []
         for relative in page_paths:

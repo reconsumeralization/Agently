@@ -57,6 +57,30 @@ async def test_read_only_task_workspace_creates_task_artifact_in_private_fallbac
 
 
 @pytest.mark.asyncio
+async def test_context_source_exposes_execution_fallback_as_logical_file(
+    tmp_path: Path,
+) -> None:
+    workspace = TaskWorkspace(tmp_path, mode="read_only", execution_id="task-context")
+    created = await workspace.write_file(
+        "notes/alpha.md",
+        "release deadline is 2026-07-01\n",
+    )
+    source = TaskWorkspaceContextSource(workspace)
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=20,
+    )
+
+    assert created.path == ".agently/files/task-context/notes/alpha.md"
+    assert [item.source_ref for item in page.descriptors] == ["notes/alpha.md"]
+    assert page.descriptors[0].metadata["path"] == "notes/alpha.md"
+    readback = await source.async_read_exact("notes/alpha.md", max_chars=200)
+    assert readback.content == "release deadline is 2026-07-01\n"
+
+
+@pytest.mark.asyncio
 async def test_read_only_task_workspace_can_continue_only_its_own_fallback_carrier(
     tmp_path: Path,
 ) -> None:
