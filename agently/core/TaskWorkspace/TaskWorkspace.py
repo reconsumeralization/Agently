@@ -376,12 +376,16 @@ class TaskWorkspace:
         *,
         path: str | os.PathLike[str] = ".",
         pattern: str = "**/*",
+        offset: int = 0,
         max_results: int = 20,
         max_file_bytes: int = 20000,
         include_hidden: bool = False,
         **_: object,
     ) -> list[dict[str, object]]:
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError("offset must be a non-negative integer.")
         results: list[dict[str, object]] = []
+        matched_files = 0
         query_text = str(query or "").casefold()
         pattern = "**/*" if str(pattern or "").strip() in {"", "**"} else str(pattern)
         candidates: set[Path] = set()
@@ -401,6 +405,9 @@ class TaskWorkspace:
             for line_no, line in enumerate(readback.content.splitlines(), start=1):
                 if query_text and query_text not in line.casefold():
                     continue
+                if matched_files < offset:
+                    matched_files += 1
+                    break
                 results.append(
                     {
                         "path": relative,
@@ -416,6 +423,7 @@ class TaskWorkspace:
                         "content_state": "bounded_readback_available",
                     }
                 )
+                matched_files += 1
                 break
         return results
 

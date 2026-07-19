@@ -19,11 +19,26 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from agently.core.context._Cursor import decode_source_cursor, encode_source_cursor
 from agently.types.data import ContextBlock, ContextCandidate, ContextReadIntent
+from agently.types.plugins import ContextSourceCandidateWindow
 
 from .Binding import SkillBinding, SkillBindingError
 from .Package import SkillPackageRevision, SkillResourceDescriptor
 from .SkillLibrary import SkillLibrary
+
+
+def _source_kind_enabled(filters: Mapping[str, Any], kind: str) -> bool:
+    raw = filters.get("source_kinds")
+    if raw is None:
+        return True
+    if isinstance(raw, str):
+        offered = {raw.strip()}
+    elif isinstance(raw, Sequence) and not isinstance(raw, bytes | bytearray):
+        offered = {str(item).strip() for item in raw if str(item).strip()}
+    else:
+        return False
+    return not offered or kind in offered
 
 
 class SkillContextSource:
@@ -201,14 +216,7 @@ class SkillContextSource:
             ),
         )
 
-    async def async_list_candidates(
-        self,
-        intent: ContextReadIntent,
-        *,
-        limit: int,
-        filters: Mapping[str, Any] | None = None,
-    ) -> Sequence[ContextCandidate]:
-        del intent, filters
+    def _all_candidates(self) -> tuple[ContextCandidate, ...]:
         candidates: list[ContextCandidate] = []
         for binding, package in zip(self.bindings, self.packages):
             candidates.append(
@@ -325,7 +333,80 @@ class SkillContextSource:
                             },
                         )
                     )
-        return tuple(candidates[: max(0, int(limit))])
+        return tuple(candidates)
+
+    async def async_list_candidates(
+        self,
+        intent: ContextReadIntent,
+        *,
+        limit: int,
+        cursor: str | None = None,
+        filters: Mapping[str, Any] | None = None,
+    ) -> ContextSourceCandidateWindow:
+        page_size = int(limit)
+        if page_size <= 0:
+            raise ValueError("limit must be a positive integer.")
+        resolved_filters = dict(filters or intent.filters)
+        explicit_refs = set(intent.explicit_refs)
+        scope = {
+            "query": intent.query,
+            "explicit_refs": sorted(explicit_refs),
+            "roles": list(intent.roles),
+            "skill_revision_refs": [
+                package.revision_ref for package in self.packages
+            ],
+        }
+        if not _source_kind_enabled(resolved_filters, "skill_library"):
+            return ContextSourceCandidateWindow(
+                source_id=self.source_id,
+                source_revision=self.source_revision,
+                scope={**scope, "enabled": False},
+                candidates=(),
+                returned_candidates=0,
+                exhaustive=True,
+                cursor=cursor,
+            )
+        offset = decode_source_cursor(
+            cursor,
+            source_id=self.source_id,
+            source_revision=self.source_revision,
+            scope=scope,
+        )
+        all_candidates = self._all_candidates()
+        anchors = tuple(
+            candidate
+            for candidate in all_candidates
+            if candidate.required or candidate.source_ref in explicit_refs
+        )
+        optional = tuple(
+            candidate
+            for candidate in all_candidates
+            if not candidate.required and candidate.source_ref not in explicit_refs
+        )
+        page = optional[offset : offset + page_size]
+        next_offset = offset + len(page)
+        has_more = next_offset < len(optional)
+        next_cursor = (
+            encode_source_cursor(
+                source_id=self.source_id,
+                source_revision=self.source_revision,
+                scope=scope,
+                offset=next_offset,
+            )
+            if has_more
+            else None
+        )
+        candidates = (*anchors, *page)
+        return ContextSourceCandidateWindow(
+            source_id=self.source_id,
+            source_revision=self.source_revision,
+            scope=scope,
+            candidates=candidates,
+            returned_candidates=len(candidates),
+            exhaustive=not has_more,
+            cursor=cursor,
+            next_cursor=next_cursor,
+        )
 
     def _resolve_candidate(
         self,

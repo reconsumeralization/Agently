@@ -3454,6 +3454,15 @@ def test_taskboard_context_read_prompt_view_omits_reconstructable_provenance_noi
                 "diagnostics": [{"code": "diag", "message": "visible", "sha256": "1" * 64, "raw": {"bytes": 4096}}],
                 "bounded": {
                     "returned_results": 1,
+                    "continuation_available": True,
+                    "source_coverage": {
+                        "binding:repo": {
+                            "scope": {"path": ".", "query": "owner"},
+                            "returned_candidates": 8,
+                            "exhaustive": False,
+                            "continuation_available": True,
+                        }
+                    },
                     "diagnostics": [
                         {"code": "bounded", "message": "bounded visible", "sha256": "1" * 64, "raw": {"bytes": 4096}}
                     ],
@@ -3496,6 +3505,11 @@ def test_taskboard_context_read_prompt_view_omits_reconstructable_provenance_noi
 
     prompt_text = json.dumps(compact, ensure_ascii=False)
     assert "bounded source detail" in prompt_text
+    assert compact["output"]["bounded"]["continuation_available"] is True
+    assert compact["output"]["bounded"]["source_coverage"]["binding:repo"][
+        "exhaustive"
+    ] is False
+    assert '"cursor"' not in prompt_text
     assert '"sha256"' not in prompt_text
     assert '"bytes"' not in prompt_text
     assert '"media_type"' not in prompt_text

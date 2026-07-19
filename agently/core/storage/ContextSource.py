@@ -26,6 +26,7 @@ from agently.types.data import (
     RecordRetrievalMethod,
     RecordRetrievalSelection,
 )
+from agently.types.plugins import ContextSourceCandidateWindow
 
 from .RecordStore import RecordStore
 
@@ -113,38 +114,62 @@ class RecordStoreContextSource:
         intent: ContextReadIntent,
         *,
         limit: int,
+        cursor: str | None = None,
         filters: Mapping[str, Any] | None = None,
-    ) -> Sequence[ContextCandidate]:
-        resolved_filters = {
-            str(key): value
-            for key, value in dict(filters or intent.filters).items()
-            if str(key) not in _ADAPTER_FILTERS
-        }
+    ) -> ContextSourceCandidateWindow:
+        page_size = int(limit)
+        if page_size <= 0:
+            raise ValueError("limit must be a positive integer.")
+        if cursor is not None:
+            raise ValueError("RecordStore top-N Context windows do not continue.")
         raw_filters = filters or intent.filters
-        if not _source_kind_enabled(raw_filters, "record_store"):
-            return ()
-        tags_value = raw_filters.get("tags")
-        tags = (
-            tuple(str(item) for item in tags_value if str(item).strip())
-            if isinstance(tags_value, Sequence) and not isinstance(tags_value, (str, bytes, bytearray))
-            else None
-        )
+        requested_top_n = int(raw_filters.get("top_n") or page_size)
+        top_n = max(1, min(page_size, requested_top_n))
         selection = str(raw_filters.get("selection") or "top_n")
         if selection not in {"length", "top_n"}:
             selection = "top_n"
         method = str(raw_filters.get("method") or "auto")
         if method not in {"auto", "keyword", "vector", "hybrid"}:
             method = "auto"
+        scope = {
+            "query": intent.query,
+            "selection": selection,
+            "top_n": top_n,
+            "method": method,
+            "tags": list(raw_filters.get("tags") or ()),
+            "source_wide_exhaustive": False,
+        }
+        revision = self.source_revision
+        if not _source_kind_enabled(raw_filters, "record_store"):
+            return ContextSourceCandidateWindow(
+                source_id=self.source_id,
+                source_revision=revision,
+                scope={**scope, "enabled": False},
+                candidates=(),
+                returned_candidates=0,
+                exhaustive=True,
+            )
+        resolved_filters = {
+            str(key): value
+            for key, value in dict(raw_filters).items()
+            if str(key) not in _ADAPTER_FILTERS
+        }
+        tags_value = raw_filters.get("tags")
+        tags = (
+            tuple(str(item) for item in tags_value if str(item).strip())
+            if isinstance(tags_value, Sequence) and not isinstance(tags_value, (str, bytes, bytearray))
+            else None
+        )
         package = await self.record_store.retrieve(
             intent.query,
             tags=tags,
             filters=resolved_filters,
             selection=cast(RecordRetrievalSelection, selection),
-            top_n=max(0, int(limit)),
+            top_n=top_n,
             method=cast(RecordRetrievalMethod, method),
             rerank=bool(raw_filters.get("rerank", False)),
             max_candidates=raw_filters.get("max_candidates"),
-            budget={"max_items": max(0, int(limit)), "max_chars": max(4000, int(limit) * 2000)},
+            budget={"max_items": top_n, "max_chars": max(4000, top_n * 2000)},
         )
         candidates: list[ContextCandidate] = []
         seen_content: set[tuple[str, str, str, str]] = set()
@@ -169,7 +194,7 @@ class RecordStoreContextSource:
                 ContextCandidate(
                     block_key=f"record-store-source:{record_id}",
                     source_id=self.source_id,
-                    source_revision=self.source_revision,
+                    source_revision=revision,
                     source_ref=record_id,
                     binding_id=self.source_id,
                     role=self._record_role(ref),  # type: ignore[arg-type]
@@ -185,9 +210,16 @@ class RecordStoreContextSource:
                     },
                 )
             )
-            if len(candidates) >= max(0, int(limit)):
+            if len(candidates) >= top_n:
                 break
-        return tuple(candidates)
+        return ContextSourceCandidateWindow(
+            source_id=self.source_id,
+            source_revision=revision,
+            scope=scope,
+            candidates=tuple(candidates),
+            returned_candidates=len(candidates),
+            exhaustive=True,
+        )
 
     async def async_read(
         self,

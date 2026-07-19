@@ -18,7 +18,9 @@ import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from agently.core.context._Cursor import decode_source_cursor, encode_source_cursor
 from agently.types.data import ContextBlock, ContextCandidate, ContextReadIntent
+from agently.types.plugins import ContextSourceCandidateWindow
 
 from .TaskWorkspace import TaskWorkspace
 
@@ -61,25 +63,55 @@ class TaskWorkspaceContextSource:
         intent: ContextReadIntent,
         *,
         limit: int,
+        cursor: str | None = None,
         filters: Mapping[str, Any] | None = None,
-    ) -> Sequence[ContextCandidate]:
+    ) -> ContextSourceCandidateWindow:
+        page_size = int(limit)
+        if page_size <= 0:
+            raise ValueError("limit must be a positive integer.")
         resolved_filters = dict(filters or intent.filters)
-        if not _source_kind_enabled(resolved_filters, "task_workspace"):
-            return ()
         explicit = set(intent.explicit_refs)
         path = str(resolved_filters.get("path") or ".")
         pattern = str(resolved_filters.get("pattern") or "**/*")
         max_file_bytes = int(resolved_filters.get("max_file_bytes") or 200000)
         include_hidden = bool(resolved_filters.get("include_hidden", False))
+        revision = self.source_revision
+        scope = {
+            "query": intent.query,
+            "path": path,
+            "pattern": pattern,
+            "max_file_bytes": max_file_bytes,
+            "include_hidden": include_hidden,
+            "explicit_refs": sorted(explicit),
+        }
+        if not _source_kind_enabled(resolved_filters, "task_workspace"):
+            return ContextSourceCandidateWindow(
+                source_id=self.source_id,
+                source_revision=revision,
+                scope={**scope, "enabled": False},
+                candidates=(),
+                returned_candidates=0,
+                exhaustive=True,
+                cursor=cursor,
+            )
+        offset = decode_source_cursor(
+            cursor,
+            source_id=self.source_id,
+            source_revision=revision,
+            scope=scope,
+        )
         results = await self.task_workspace.search_files(
             intent.query,
             path=path,
             pattern=pattern,
-            max_results=max(0, int(limit)),
+            offset=offset,
+            max_results=page_size + 1,
             max_file_bytes=max_file_bytes,
             include_hidden=include_hidden,
         )
-        by_path = {str(item.get("path") or ""): item for item in results}
+        has_more = len(results) > page_size
+        page_results = results[:page_size]
+        by_path = {str(item.get("path") or ""): item for item in page_results}
         for source_ref in sorted(explicit):
             if source_ref in by_path:
                 continue
@@ -95,10 +127,13 @@ class TaskWorkspaceContextSource:
                 "sha256": info.get("sha256"),
                 "media_type": info.get("media_type"),
             }
+        ordered_paths = [ref for ref in sorted(explicit) if ref in by_path]
+        ordered_paths.extend(
+            relative for relative in by_path if relative not in explicit
+        )
         candidates: list[ContextCandidate] = []
-        for relative, result in by_path.items():
-            if len(candidates) >= max(0, int(limit)):
-                break
+        for relative in ordered_paths:
+            result = by_path[relative]
             matched_line = int(str(result.get("line") or 0))
             matched_text = str(result.get("text") or result.get("snippet") or relative)
             total_bytes = int(str(result.get("bytes") or 0))
@@ -106,7 +141,7 @@ class TaskWorkspaceContextSource:
                 ContextCandidate(
                     block_key=f"task-workspace-source:{len(candidates) + 1}",
                     source_id=self.source_id,
-                    source_revision=self.source_revision,
+                    source_revision=revision,
                     source_ref=relative,
                     binding_id=self.source_id,
                     role="information",
@@ -122,7 +157,26 @@ class TaskWorkspaceContextSource:
                     },
                 )
             )
-        return tuple(candidates)
+        next_cursor = (
+            encode_source_cursor(
+                source_id=self.source_id,
+                source_revision=revision,
+                scope=scope,
+                offset=offset + len(page_results),
+            )
+            if has_more
+            else None
+        )
+        return ContextSourceCandidateWindow(
+            source_id=self.source_id,
+            source_revision=revision,
+            scope=scope,
+            candidates=tuple(candidates),
+            returned_candidates=len(candidates),
+            exhaustive=not has_more,
+            cursor=cursor,
+            next_cursor=next_cursor,
+        )
 
     async def async_read(
         self,

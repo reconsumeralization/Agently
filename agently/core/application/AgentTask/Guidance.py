@@ -23,17 +23,19 @@ _GUIDANCE_PREVIEW_CHARS = 800
 
 
 class AgentTaskGuidanceMixin(AgentTaskMixinBase):
+    def _task_context_semantic_selector(self) -> Any:
+        request_factory = getattr(self.agent, "create_temp_request", None)
+        return (
+            ModelRequestContextSelector(request_factory)
+            if callable(request_factory)
+            else None
+        )
+
     def _task_context_reader(self, *, phase: str, consumer_id: str) -> Any:
         key = (str(consumer_id), str(phase))
         reader = self.context_readers.get(key)
         if reader is not None:
             return reader
-        request_factory = getattr(self.agent, "create_temp_request", None)
-        selector = (
-            ModelRequestContextSelector(request_factory)
-            if callable(request_factory)
-            else None
-        )
         raw_chars = self.context_budget.get("chars", 6000)
         try:
             max_chars = max(1, int(raw_chars))
@@ -47,7 +49,7 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
                 max_blocks=64,
                 max_block_chars=min(max_chars, 6000),
             ),
-            semantic_selector=selector,
+            semantic_selector=self._task_context_semantic_selector(),
         )
         self.context_readers[key] = reader
         return reader
@@ -132,6 +134,12 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
 
     @staticmethod
     def _project_task_context_package(package: Any) -> dict[str, Any]:
+        source_coverage = package.to_dict().get("source_coverage", {})
+        continuation_available = any(
+            bool(record.get("continuation_available"))
+            for record in source_coverage.values()
+            if isinstance(record, Mapping)
+        )
         items = [
             {
                 "id": block.block_id,
@@ -185,6 +193,8 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
             "omitted": [item.to_dict() for item in package.omissions],
             "diagnostics": [item.to_dict() for item in package.diagnostics],
             "used_chars": package.used_chars,
+            "source_coverage": source_coverage,
+            "continuation_available": continuation_available,
             "skill_projection": {
                 "schema_version": "agently.context_package.skill_projection.v2",
                 "skills": list(skills.values()),

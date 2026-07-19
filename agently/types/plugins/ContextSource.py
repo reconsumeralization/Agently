@@ -14,10 +14,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from agently.types.data import ContextBlock, ContextCandidate, ContextReadIntent
+from agently.types.data.context import ContextSourceCandidateWindow
 
 
 @runtime_checkable
@@ -34,8 +35,9 @@ class ContextSource(Protocol):
         intent: ContextReadIntent,
         *,
         limit: int,
+        cursor: str | None = None,
         filters: Mapping[str, Any] | None = None,
-    ) -> Sequence[ContextCandidate]: ...
+    ) -> ContextSourceCandidateWindow: ...
 
     async def async_read(
         self,
@@ -46,4 +48,4 @@ class ContextSource(Protocol):
     ) -> ContextBlock: ...
 
 
-__all__ = ["ContextSource"]
+__all__ = ["ContextSource", "ContextSourceCandidateWindow"]

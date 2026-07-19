@@ -89,6 +89,10 @@ def _context_package_from_dict(value: Mapping[str, Any]) -> ContextPackage:
         consumer_id=str(value.get("consumer_id") or ""),
         phase=str(value.get("phase") or ""),
         source_revisions=cast(Mapping[str, str], value.get("source_revisions") or {}),
+        source_coverage=cast(
+            Mapping[str, Mapping[str, Any]],
+            value.get("source_coverage") or {},
+        ),
         blocks=blocks,
         omissions=omissions,
         diagnostics=diagnostics,
@@ -350,11 +354,12 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                 continue
             consumer_id = str(raw_consumer.get("consumer_id") or "")
             phase = str(state.get("phase") or "")
-            reader = self._task_context_reader(
-                phase=phase,
-                consumer_id=consumer_id,
+            reader = self.task_context.restore_reader(
+                state,
+                packages=self.context_packages,
+                semantic_selector=self._task_context_semantic_selector(),
             )
-            reader._restore_state(state, packages=self.context_packages)
+            self.context_readers[(consumer_id, phase)] = reader
 
     async def _write_resume_snapshot(self, iteration_index: int, verification: dict[str, Any]) -> None:
         """Persist a resumable snapshot keyed by task_id after an iteration.

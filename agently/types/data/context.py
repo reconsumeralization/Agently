@@ -103,6 +103,58 @@ def _freeze_str_mapping(value: Mapping[str, str] | None) -> Mapping[str, str]:
     return MappingProxyType(frozen)
 
 
+def _freeze_source_coverage(
+    value: Mapping[str, Mapping[str, Any]] | None,
+) -> Mapping[str, Mapping[str, Any]]:
+    frozen: dict[str, Mapping[str, Any]] = {}
+    required_fields = {
+        "scope",
+        "returned_candidates",
+        "exhaustive",
+        "continuation_available",
+    }
+    for raw_binding_id, raw_record in dict(value or {}).items():
+        binding_id = _require_text(str(raw_binding_id), "source_coverage binding_id")
+        if not isinstance(raw_record, Mapping):
+            raise ValueError("source_coverage records must be mappings.")
+        record = dict(raw_record)
+        unknown = set(record) - required_fields
+        missing = required_fields - set(record)
+        if unknown or missing:
+            raise ValueError(
+                "source_coverage records require exactly scope, returned_candidates, "
+                "exhaustive, and continuation_available."
+            )
+        if not isinstance(record["scope"], Mapping):
+            raise ValueError("source_coverage scope must be a mapping.")
+        returned_candidates = record["returned_candidates"]
+        if (
+            not isinstance(returned_candidates, int)
+            or isinstance(returned_candidates, bool)
+            or returned_candidates < 0
+        ):
+            raise ValueError("source_coverage returned_candidates must be non-negative.")
+        exhaustive = record["exhaustive"]
+        continuation_available = record["continuation_available"]
+        if not isinstance(exhaustive, bool):
+            raise ValueError("source_coverage exhaustive must be boolean.")
+        if not isinstance(continuation_available, bool):
+            raise ValueError("source_coverage continuation_available must be boolean.")
+        if exhaustive and continuation_available:
+            raise ValueError(
+                "source_coverage cannot be exhaustive with continuation available."
+            )
+        frozen[binding_id] = _freeze_mapping(
+            {
+                "scope": dict(record["scope"]),
+                "returned_candidates": returned_candidates,
+                "exhaustive": exhaustive,
+                "continuation_available": continuation_available,
+            }
+        )
+    return MappingProxyType(frozen)
+
+
 def _validate_role(role: str) -> ContextRole:
     if role not in _CONTEXT_ROLES:
         raise ValueError(f"Unknown Context role: {role!r}.")
@@ -205,6 +257,62 @@ class ContextCandidate:
             "completeness": self.completeness,
             "metadata": _thaw_value(self.metadata),
         }
+
+
+@dataclass(frozen=True)
+class ContextSourceCandidateWindow:
+    """Internal ContextSource page carrier with source-scoped coverage."""
+
+    source_id: str
+    source_revision: str
+    scope: Mapping[str, Any]
+    candidates: tuple[ContextCandidate, ...] = ()
+    returned_candidates: int = 0
+    exhaustive: bool = True
+    cursor: str | None = None
+    next_cursor: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_id", _require_text(self.source_id, "source_id"))
+        object.__setattr__(
+            self,
+            "source_revision",
+            _require_text(self.source_revision, "source_revision"),
+        )
+        object.__setattr__(self, "scope", _freeze_mapping(self.scope))
+        candidates = tuple(self.candidates)
+        for candidate in candidates:
+            if not isinstance(candidate, ContextCandidate):
+                raise ValueError("candidates must contain ContextCandidate values.")
+            if candidate.source_id != self.source_id:
+                raise ValueError("candidate source_id does not match its source window.")
+            if candidate.source_revision != self.source_revision:
+                raise ValueError(
+                    "candidate source_revision does not match its source window."
+                )
+        object.__setattr__(self, "candidates", candidates)
+        if (
+            not isinstance(self.returned_candidates, int)
+            or isinstance(self.returned_candidates, bool)
+            or self.returned_candidates < 0
+        ):
+            raise ValueError("returned_candidates must be a non-negative integer.")
+        if self.returned_candidates != len(candidates):
+            raise ValueError("returned_candidates must equal the candidate count.")
+        if not isinstance(self.exhaustive, bool):
+            raise ValueError("exhaustive must be boolean.")
+        for name in ("cursor", "next_cursor"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string when provided.")
+            if len(value) > 4096:
+                raise ValueError(f"{name} cannot exceed 4096 characters.")
+        if self.exhaustive and self.next_cursor is not None:
+            raise ValueError("next_cursor cannot be set for an exhaustive window.")
+        if self.cursor is not None and self.cursor == self.next_cursor:
+            raise ValueError("next_cursor must advance beyond the current cursor.")
 
 
 @dataclass(frozen=True)
@@ -407,6 +515,7 @@ class ContextPackage:
     consumer_id: str
     phase: str
     source_revisions: Mapping[str, str]
+    source_coverage: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     blocks: tuple[ContextBlock, ...] = ()
     omissions: tuple[ContextOmission, ...] = ()
     diagnostics: tuple[ContextDiagnostic, ...] = ()
@@ -421,6 +530,11 @@ class ContextPackage:
         ):
             raise ValueError("context_revision must be a non-negative integer.")
         object.__setattr__(self, "source_revisions", _freeze_str_mapping(self.source_revisions))
+        object.__setattr__(
+            self,
+            "source_coverage",
+            _freeze_source_coverage(self.source_coverage),
+        )
         object.__setattr__(self, "blocks", tuple(self.blocks))
         object.__setattr__(self, "omissions", tuple(self.omissions))
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
@@ -437,6 +551,7 @@ class ContextPackage:
             "consumer_id": self.consumer_id,
             "phase": self.phase,
             "source_revisions": dict(self.source_revisions),
+            "source_coverage": _thaw_value(self.source_coverage),
             "blocks": [block.to_dict() for block in self.blocks],
             "omissions": [omission.to_dict() for omission in self.omissions],
             "diagnostics": [diagnostic.to_dict() for diagnostic in self.diagnostics],
@@ -486,6 +601,7 @@ __all__ = [
     "ContextReadIntent",
     "ContextRole",
     "ContextSourceBindingSnapshot",
+    "ContextSourceCandidateWindow",
     "TaskContextEntrySnapshot",
     "TaskContextSnapshot",
 ]

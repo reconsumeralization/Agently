@@ -257,6 +257,8 @@ async def test_agent_task_skill_projection_uses_skill_domain_binding_and_mode(
     projected = AgentTask._project_task_context_package(package)
     skill = projected["skill_projection"]["skills"][0]
 
+    assert projected["source_coverage"] == package.to_dict()["source_coverage"]
+    assert projected["continuation_available"] is False
     assert skill["binding_id"] == binding.binding_id
     assert skill["mode"] == "model_decision"
     assert projected["skill_projection"]["required_skill_ids"] == []
@@ -562,6 +564,7 @@ async def test_agent_task_resume_restores_skill_context_and_context_audit(
     restored_package = next(
         item for item in resumed.context_packages if item.package_id == package.package_id
     )
+    assert restored_package.source_coverage == package.source_coverage
     restored_skill = resumed._project_task_context_package(restored_package)["skill_projection"]["skills"][0]
     assert restored_skill["binding_id"] == skill_binding.binding_id
     assert restored_skill["revision_ref"] == skill_binding.revision_ref

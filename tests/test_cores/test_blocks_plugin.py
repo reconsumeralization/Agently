@@ -340,6 +340,8 @@ async def test_blocks_context_read_uses_bound_context_reader():
     assert output["context_package"]["blocks"][0]["content"] == "The task deadline is 2026-07-01."
     assert output["locator_refs"][0]["source_ref"] == "task/deadline"
     assert output["evidence_snippets"][0]["content"] == "The task deadline is 2026-07-01."
+    assert output["bounded"]["source_coverage"] == {}
+    assert output["bounded"]["continuation_available"] is False
 
 
 @pytest.mark.asyncio

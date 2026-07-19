@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -31,6 +33,7 @@ from agently.types.data import (
     TaskContextEntrySnapshot,
     TaskContextSnapshot,
 )
+from agently.types.plugins import ContextSourceCandidateWindow
 
 from .Selection import ContextSelection, ContextSemanticSelector
 
@@ -44,6 +47,61 @@ class _CollectedCandidate:
     offered: ContextCandidate
     source_candidate: ContextCandidate | None
     direct_entry: TaskContextEntrySnapshot | None
+
+
+@dataclass(frozen=True)
+class _ContinuationState:
+    cursor: str | None
+    exhaustive: bool
+    scope: Mapping[str, Any]
+
+
+def _canonical_intent_value(value: Any) -> Any:
+    if value is None:
+        return {"type": "none", "value": None}
+    if isinstance(value, bool):
+        return {"type": "bool", "value": value}
+    if isinstance(value, int):
+        return {"type": "int", "value": value}
+    if isinstance(value, float):
+        return {"type": "float", "value": repr(value)}
+    if isinstance(value, str):
+        return {"type": "str", "value": value}
+    if isinstance(value, bytes):
+        return {"type": "bytes", "value": value.hex()}
+    if isinstance(value, Mapping):
+        return {
+            "type": "mapping",
+            "value": [
+                [str(key), _canonical_intent_value(item)]
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            ],
+        }
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return {
+            "type": "sequence",
+            "value": [_canonical_intent_value(item) for item in value],
+        }
+    value_type = f"{value.__class__.__module__}.{value.__class__.__qualname__}"
+    return {"type": value_type, "value": repr(value)}
+
+
+def _intent_fingerprint(intent: ContextReadIntent) -> str:
+    canonical = _canonical_intent_value(
+        {
+            "query": intent.query,
+            "explicit_refs": intent.explicit_refs,
+            "roles": intent.roles,
+            "filters": intent.filters,
+        }
+    )
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _content_chars(content: Any) -> int:
@@ -65,7 +123,13 @@ class ContextReader:
         phase: str,
         budget: ContextBudget,
         semantic_selector: ContextSemanticSelector | None = None,
+        _owner_token: object | None = None,
     ) -> None:
+        if not bool(getattr(task_context, "_owns_reader_token", lambda _token: False)(_owner_token)):
+            raise TypeError(
+                "ContextReader instances must be created by TaskContext.reader(...) "
+                "or TaskContext.restore_reader(...)."
+            )
         self.task_context = task_context
         self.consumer = consumer
         self.phase = str(phase)
@@ -74,6 +138,9 @@ class ContextReader:
         self._snapshot: TaskContextSnapshot = task_context.snapshot()
         self._disclosed: set[tuple[str, str, str, str]] = set()
         self._packages: list[ContextPackage] = []
+        self._continuations: dict[
+            tuple[str, str, str], _ContinuationState
+        ] = {}
 
     @property
     def snapshot(self) -> TaskContextSnapshot:
@@ -143,6 +210,21 @@ class ContextReader:
                 "max_block_chars": self.budget.max_block_chars,
             },
             "disclosed": [list(identity) for identity in sorted(self._disclosed)],
+            "continuations": [
+                {
+                    "binding_id": binding_id,
+                    "source_revision": source_revision,
+                    "intent_fingerprint": intent_fingerprint,
+                    "cursor": continuation.cursor,
+                    "exhaustive": continuation.exhaustive,
+                    "scope": dict(continuation.scope),
+                }
+                for (
+                    binding_id,
+                    source_revision,
+                    intent_fingerprint,
+                ), continuation in sorted(self._continuations.items())
+            ],
         }
 
     def _restore_state(
@@ -150,8 +232,14 @@ class ContextReader:
         state: Mapping[str, Any],
         *,
         packages: Sequence[ContextPackage] = (),
+        _owner_token: object | None = None,
     ) -> None:
         """Restore only state owned by this exact consumer/phase reader."""
+
+        if not self.task_context._owns_reader_token(_owner_token):
+            raise TypeError(
+                "ContextReader state must be restored by TaskContext.restore_reader(...)."
+            )
 
         if str(state.get("task_context_id") or "") != self._snapshot.context_id:
             raise ValueError("ContextReader state belongs to a different TaskContext.")
@@ -180,6 +268,48 @@ class ContextReader:
                     raise ValueError("ContextReader disclosed identities require four non-empty fields.")
                 disclosed.add((identity[0], identity[1], identity[2], identity[3]))
         self._disclosed = disclosed
+        continuations: dict[tuple[str, str, str], _ContinuationState] = {}
+        raw_continuations = state.get("continuations")
+        if raw_continuations is not None:
+            if not isinstance(raw_continuations, Sequence) or isinstance(
+                raw_continuations,
+                str | bytes | bytearray,
+            ):
+                raise ValueError("ContextReader continuations must be a sequence.")
+            for raw_continuation in raw_continuations:
+                if not isinstance(raw_continuation, Mapping):
+                    raise ValueError("ContextReader continuation entries must be mappings.")
+                binding_id = str(raw_continuation.get("binding_id") or "").strip()
+                source_revision = str(
+                    raw_continuation.get("source_revision") or ""
+                ).strip()
+                intent_fingerprint = str(
+                    raw_continuation.get("intent_fingerprint") or ""
+                ).strip()
+                if not binding_id or not source_revision or len(intent_fingerprint) != 64:
+                    raise ValueError("ContextReader continuation identity is invalid.")
+                cursor = raw_continuation.get("cursor")
+                if cursor is not None and (
+                    not isinstance(cursor, str)
+                    or not cursor.strip()
+                    or len(cursor) > 4096
+                ):
+                    raise ValueError("ContextReader continuation cursor is invalid.")
+                exhaustive = raw_continuation.get("exhaustive")
+                if not isinstance(exhaustive, bool):
+                    raise ValueError("ContextReader continuation exhaustive must be boolean.")
+                scope = raw_continuation.get("scope")
+                if not isinstance(scope, Mapping):
+                    raise ValueError("ContextReader continuation scope must be a mapping.")
+                key = (binding_id, source_revision, intent_fingerprint)
+                if key in continuations:
+                    raise ValueError("ContextReader continuation identities cannot repeat.")
+                continuations[key] = _ContinuationState(
+                    cursor=cursor,
+                    exhaustive=exhaustive,
+                    scope=dict(scope),
+                )
+        self._continuations = continuations
         self._packages = [
             package
             for package in packages
@@ -208,9 +338,18 @@ class ContextReader:
     async def _collect(
         self,
         intent: ContextReadIntent,
-    ) -> tuple[list[_CollectedCandidate], list[ContextDiagnostic]]:
+    ) -> tuple[
+        list[_CollectedCandidate],
+        list[ContextDiagnostic],
+        dict[str, dict[str, Any]],
+        dict[tuple[str, str, str], _ContinuationState],
+    ]:
         collected: list[_CollectedCandidate] = []
         diagnostics: list[ContextDiagnostic] = []
+        source_coverage: dict[str, dict[str, Any]] = {}
+        pending_continuations: dict[
+            tuple[str, str, str], _ContinuationState
+        ] = {}
         sequence = 0
 
         for entry in self.task_context._entry_snapshots():
@@ -245,17 +384,37 @@ class ContextReader:
             )
 
         source_limit = max(self.budget.max_blocks * 4, self.budget.max_blocks)
+        intent_fingerprint = _intent_fingerprint(intent)
         for binding in self._snapshot.bindings:
             source = self.task_context._binding_source(binding.binding_id)
+            continuation_key = (
+                binding.binding_id,
+                binding.source_revision,
+                intent_fingerprint,
+            )
+            continuation = self._continuations.get(continuation_key)
+            cursor = continuation.cursor if continuation is not None else None
             try:
-                candidates = await source.async_list_candidates(
+                window = await source.async_list_candidates(
                     intent,
                     limit=source_limit,
+                    cursor=cursor,
                     filters={
                         **dict(intent.filters),
                         "context_binding_scope": binding.scope,
                     },
                 )
+                if not isinstance(window, ContextSourceCandidateWindow):
+                    raise TypeError(
+                        "ContextSource.async_list_candidates must return "
+                        "ContextSourceCandidateWindow."
+                    )
+                if window.source_id != binding.source_id:
+                    raise ValueError("Context source window identity changed.")
+                if window.source_revision != binding.source_revision:
+                    raise ValueError("Context source window revision changed.")
+                if window.cursor != cursor:
+                    raise ValueError("Context source window cursor does not match the request.")
             except Exception as error:
                 diagnostics.append(
                     ContextDiagnostic(
@@ -270,7 +429,22 @@ class ContextReader:
                     )
                 )
                 continue
-            for source_candidate in candidates:
+            source_coverage[binding.binding_id] = {
+                "scope": dict(window.scope),
+                "returned_candidates": window.returned_candidates,
+                "exhaustive": window.exhaustive,
+                "continuation_available": window.next_cursor is not None,
+            }
+            pending_continuations[continuation_key] = _ContinuationState(
+                cursor=(
+                    window.next_cursor
+                    if window.next_cursor is not None
+                    else window.cursor
+                ),
+                exhaustive=window.exhaustive,
+                scope=dict(window.scope),
+            )
+            for source_candidate in window.candidates:
                 if intent.roles and source_candidate.role not in intent.roles:
                     continue
                 sequence += 1
@@ -295,7 +469,7 @@ class ContextReader:
                         direct_entry=None,
                     )
                 )
-        return collected, diagnostics
+        return collected, diagnostics, source_coverage, pending_continuations
 
     @staticmethod
     def _identity(candidate: ContextCandidate) -> tuple[str, str, str, str]:
@@ -517,6 +691,7 @@ class ContextReader:
                                 code="context.required_content_lossy_failed",
                                 message="Required Context lossy digest could not be built.",
                                 details={
+                                    "binding_id": candidate.binding_id,
                                     "source_ref": candidate.source_ref,
                                     "error_type": error.__class__.__name__,
                                     "error": str(error),
@@ -574,6 +749,7 @@ class ContextReader:
                                 "within this consumer budget."
                             ),
                             details={
+                                "binding_id": candidate.binding_id,
                                 "source_ref": candidate.source_ref,
                                 "estimated_chars": candidate.estimated_chars,
                                 "available_chars": read_limit,
@@ -603,6 +779,7 @@ class ContextReader:
                         code="context.source_read_failed",
                         message="A selected Context candidate could not be read.",
                         details={
+                            "binding_id": candidate.binding_id,
                             "source_ref": candidate.source_ref,
                             "error_type": error.__class__.__name__,
                             "error": str(error),
@@ -628,6 +805,7 @@ class ContextReader:
                         code="context.required_content_incompatible",
                         message="Required Context content was not returned completely.",
                         details={
+                            "binding_id": candidate.binding_id,
                             "source_ref": candidate.source_ref,
                             "completeness": completeness,
                         },
@@ -653,7 +831,12 @@ class ContextReader:
         self._assert_current()
         resolved_intent = self._coerce_intent(intent)
         for attempt in range(2):
-            collected, diagnostics = await self._collect(resolved_intent)
+            (
+                collected,
+                diagnostics,
+                source_coverage,
+                pending_continuations,
+            ) = await self._collect(resolved_intent)
             try:
                 self._assert_current()
             except ContextStaleError:
@@ -748,10 +931,36 @@ class ContextReader:
             consumer_id=self.consumer.consumer_id,
             phase=self.phase,
             source_revisions=self._snapshot.source_revisions,
+            source_coverage=source_coverage,
             blocks=tuple(blocks),
             omissions=tuple(omissions),
             diagnostics=tuple(diagnostics),
         )
+        cross_source_blocking_diagnostics = {
+            "context.semantic_selector_unavailable",
+            "context.selection_failed",
+            "context.selection_invalid",
+        }
+        if not any(
+            item.code in cross_source_blocking_diagnostics
+            for item in diagnostics
+        ):
+            failed_binding_ids = {
+                str(item.details.get("binding_id") or "")
+                for item in diagnostics
+                if item.code
+                in {
+                    "context.source_read_failed",
+                    "context.required_content_incompatible",
+                }
+            }
+            self._continuations.update(
+                {
+                    key: continuation
+                    for key, continuation in pending_continuations.items()
+                    if key[0] not in failed_binding_ids
+                }
+            )
         self._packages.append(package)
         return package
 

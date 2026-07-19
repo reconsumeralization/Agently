@@ -15,13 +15,14 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from agently.types.data import (
     ContextBudget,
     ContextConsumer,
+    ContextPackage,
     ContextRole,
     ContextSourceBindingSnapshot,
     TaskContextEntrySnapshot,
@@ -61,6 +62,7 @@ class TaskContext:
         self._revision = 0
         self._bindings: dict[str, _SourceBinding] = {}
         self._entries: dict[str, TaskContextEntrySnapshot] = {}
+        self.__reader_owner_token = object()
 
     @property
     def revision(self) -> int:
@@ -210,7 +212,64 @@ class TaskContext:
             phase=_require_text(phase, "phase"),
             budget=resolved_budget,
             semantic_selector=semantic_selector,
+            _owner_token=self.__reader_owner_token,
         )
+
+    def restore_reader(
+        self,
+        state: Mapping[str, Any],
+        *,
+        packages: Sequence[ContextPackage] = (),
+        semantic_selector: Any = None,
+    ) -> "ContextReader":
+        if not isinstance(state, Mapping):
+            raise ValueError("ContextReader state must be a mapping.")
+        if str(state.get("task_context_id") or "") != self.context_id:
+            raise ValueError("ContextReader state belongs to a different TaskContext.")
+        raw_consumer = state.get("consumer")
+        if not isinstance(raw_consumer, Mapping):
+            raise ValueError("ContextReader state requires a consumer mapping.")
+        raw_capabilities = raw_consumer.get("capabilities")
+        if raw_capabilities is None:
+            raw_capabilities = {}
+        if not isinstance(raw_capabilities, Mapping):
+            raise ValueError("ContextReader consumer capabilities must be a mapping.")
+        raw_model = raw_consumer.get("model")
+        consumer = ContextConsumer(
+            consumer_id=_require_text(raw_consumer.get("consumer_id"), "consumer_id"),
+            model=(
+                _require_text(raw_model, "model")
+                if raw_model is not None
+                else None
+            ),
+            capabilities=dict(raw_capabilities),
+        )
+        raw_budget = state.get("budget")
+        if not isinstance(raw_budget, Mapping):
+            raise ValueError("ContextReader state requires a budget mapping.")
+        try:
+            budget = ContextBudget(
+                max_chars=int(raw_budget["max_chars"]),
+                max_blocks=int(raw_budget["max_blocks"]),
+                max_block_chars=int(raw_budget["max_block_chars"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("ContextReader state has an invalid budget mapping.") from error
+        reader = self.reader(
+            consumer=consumer,
+            phase=_require_text(state.get("phase"), "phase"),
+            budget=budget,
+            semantic_selector=semantic_selector,
+        )
+        reader._restore_state(
+            state,
+            packages=packages,
+            _owner_token=self.__reader_owner_token,
+        )
+        return reader
+
+    def _owns_reader_token(self, token: object | None) -> bool:
+        return token is self.__reader_owner_token
 
     def _iter_source_bindings(self) -> Iterator[_SourceBinding]:
         return iter(tuple(self._bindings.values()))

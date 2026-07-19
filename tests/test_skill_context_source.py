@@ -82,10 +82,11 @@ async def test_skill_context_source_exposes_typed_progressive_candidates(tmp_pat
     binding = SkillBinding.create(package, task_id="task-1", mode="required")
     source = SkillContextSource(library, bindings=(binding,))
 
-    candidates = await source.async_list_candidates(
+    window = await source.async_list_candidates(
         ContextReadIntent(query="Create the report"),
         limit=100,
     )
+    candidates = window.candidates
     by_path = {item.metadata.get("resource_path", "core"): item for item in candidates}
 
     assert source.source_id == "skill-context:task-1"
@@ -124,10 +125,11 @@ async def test_skill_without_resources_does_not_offer_an_empty_optional_index(
             SkillBinding.create(installed, task_id="minimal-task", mode="required"),
         ),
     )
-    candidates = await source.async_list_candidates(
+    window = await source.async_list_candidates(
         ContextReadIntent(query="Apply the procedure"),
         limit=100,
     )
+    candidates = window.candidates
     context = TaskContext("minimal-task")
     context.attach(source, required=True)
     package = await context.reader(
@@ -189,10 +191,11 @@ async def test_oversized_markdown_reference_discloses_selected_section_within_bu
         library,
         bindings=(SkillBinding.create(package, task_id="section-task", mode="required"),),
     )
-    candidates = await source.async_list_candidates(
+    window = await source.async_list_candidates(
         ContextReadIntent(query="Use the exact Search Action API"),
         limit=100,
     )
+    candidates = window.candidates
     whole = next(
         item
         for item in candidates
@@ -247,10 +250,11 @@ async def test_oversized_skill_can_build_explicit_lossy_outline_with_section_ref
         library,
         bindings=(SkillBinding.create(package, task_id="large-task", mode="required"),),
     )
-    candidates = await source.async_list_candidates(
+    window = await source.async_list_candidates(
         ContextReadIntent(query="Execute and verify"),
         limit=100,
     )
+    candidates = window.candidates
     core = next(item for item in candidates if item.metadata["resource_path"] == "SKILL.md")
     sections = [
         item for item in candidates if str(item.metadata["resource_path"]).startswith("SKILL.md#section-")
@@ -354,7 +358,8 @@ async def test_skill_script_read_returns_descriptor_not_executable_object(tmp_pa
         library,
         bindings=(SkillBinding.create(package, task_id="task-1", mode="required"),),
     )
-    candidates = await source.async_list_candidates(ContextReadIntent(query="Validate"), limit=100)
+    window = await source.async_list_candidates(ContextReadIntent(query="Validate"), limit=100)
+    candidates = window.candidates
     script = next(item for item in candidates if item.role == "capability")
 
     block = await source.async_read(script, max_chars=1000)
@@ -371,6 +376,39 @@ async def test_skill_script_read_returns_descriptor_not_executable_object(tmp_pa
     assert not callable(block.content)
     assert "action" not in block.metadata
     assert "permission" not in block.metadata
+
+
+@pytest.mark.asyncio
+async def test_skill_context_source_keeps_required_core_on_every_optional_page(
+    tmp_path: Path,
+) -> None:
+    library = SkillLibrary(tmp_path / "library")
+    package = library.install(_write_skill(tmp_path / "skill"), trust="trusted")
+    source = SkillContextSource(
+        library,
+        bindings=(SkillBinding.create(package, task_id="paged-skill", mode="required"),),
+    )
+    intent = ContextReadIntent(query="Apply and verify")
+
+    first = await source.async_list_candidates(intent, limit=1)
+    second = await source.async_list_candidates(
+        intent,
+        limit=1,
+        cursor=first.next_cursor,
+    )
+
+    assert [item.metadata["resource_path"] for item in first.candidates if item.required] == [
+        "SKILL.md"
+    ]
+    assert [item.metadata["resource_path"] for item in second.candidates if item.required] == [
+        "SKILL.md"
+    ]
+    first_optional = [item.source_ref for item in first.candidates if not item.required]
+    second_optional = [item.source_ref for item in second.candidates if not item.required]
+    assert len(first_optional) == 1
+    assert len(second_optional) == 1
+    assert first_optional != second_optional
+    assert first.next_cursor is not None
 
 
 def test_untrusted_skill_cannot_create_active_instruction_binding(tmp_path: Path) -> None:

@@ -1645,6 +1645,12 @@ async def _execute_context_read_block(
         )
     )
     package_view = package.to_dict()
+    source_coverage = package_view.get("source_coverage", {})
+    continuation_available = any(
+        bool(record.get("continuation_available"))
+        for record in source_coverage.values()
+        if isinstance(record, Mapping)
+    ) if isinstance(source_coverage, Mapping) else False
     locator_refs: list[dict[str, Any]] = []
     evidence_snippets: list[dict[str, Any]] = []
     for item in package_view.get("blocks", []):
@@ -1691,6 +1697,8 @@ async def _execute_context_read_block(
             "returned_results": len(locator_refs),
             "used_chars": package_view.get("used_chars", 0),
             "omitted_count": len(package_view.get("omissions", [])),
+            "source_coverage": source_coverage,
+            "continuation_available": continuation_available,
         },
         "diagnostics": list(package_view.get("diagnostics", [])),
     }

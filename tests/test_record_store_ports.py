@@ -60,7 +60,7 @@ async def test_record_store_context_source_obeys_source_kind_filter(tmp_path) ->
     await store.put("Revenue increased", collection="evidence", kind="fact")
     source = RecordStoreContextSource(store)
 
-    candidates = await source.async_list_candidates(
+    window = await source.async_list_candidates(
         ContextReadIntent(
             query="Revenue",
             filters={"source_kinds": ["record_store"]},
@@ -75,5 +75,11 @@ async def test_record_store_context_source_obeys_source_kind_filter(tmp_path) ->
         limit=5,
     )
 
-    assert [candidate.metadata["collection"] for candidate in candidates] == ["evidence"]
-    assert excluded == ()
+    assert [candidate.metadata["collection"] for candidate in window.candidates] == ["evidence"]
+    assert window.exhaustive is True
+    assert window.next_cursor is None
+    assert window.scope["selection"] == "top_n"
+    assert window.scope["top_n"] == 5
+    assert window.scope["source_wide_exhaustive"] is False
+    assert excluded.candidates == ()
+    assert excluded.exhaustive is True

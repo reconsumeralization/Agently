@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -20,6 +21,7 @@ from agently.types.data import (
     TaskContextEntrySnapshot,
     TaskContextSnapshot,
 )
+from agently.types.plugins import ContextSourceCandidateWindow
 
 
 def _block(
@@ -172,6 +174,92 @@ def test_package_disclosure_is_not_request_consumption() -> None:
     assert "request_id" not in public
     assert "consumed" not in public
     assert "consumption_id" not in public
+
+
+def test_context_package_exposes_coverage_without_cursor_capability() -> None:
+    package = ContextPackage(
+        package_id="package:coverage",
+        task_context_id="context:task-1",
+        context_revision=1,
+        consumer_id="planner",
+        phase="planning",
+        source_revisions={"binding:repo": "commit:abc"},
+        source_coverage={
+            "binding:repo": {
+                "scope": {"path": ".", "query": "execution owner"},
+                "returned_candidates": 8,
+                "exhaustive": False,
+                "continuation_available": True,
+            }
+        },
+    )
+
+    public = package.to_dict()
+
+    assert public["source_coverage"]["binding:repo"] == {
+        "scope": {"path": ".", "query": "execution owner"},
+        "returned_candidates": 8,
+        "exhaustive": False,
+        "continuation_available": True,
+    }
+    assert "cursor" not in json.dumps(public)
+    with pytest.raises(TypeError):
+        package.source_coverage["binding:repo"]["scope"]["path"] = "src"  # type: ignore[index]
+
+
+def test_context_source_candidate_window_validates_source_page_contract() -> None:
+    candidate = ContextCandidate(
+        block_key="candidate:1",
+        source_id="source:repo",
+        source_revision="commit:abc",
+        source_ref="agently/core/Agent.py",
+        binding_id="source:repo",
+        role="information",
+        summary="Agent implementation",
+        estimated_chars=100,
+    )
+
+    window = ContextSourceCandidateWindow(
+        source_id="source:repo",
+        source_revision="commit:abc",
+        scope={"path": "agently/core", "query": "owner"},
+        candidates=(candidate,),
+        returned_candidates=1,
+        exhaustive=False,
+        cursor="page:1",
+        next_cursor="page:2",
+    )
+
+    assert window.candidates == (candidate,)
+    assert window.next_cursor == "page:2"
+    with pytest.raises(TypeError):
+        window.scope["path"] = "."  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"returned_candidates": -1}, "returned_candidates"),
+        ({"exhaustive": True, "next_cursor": "page:2"}, "next_cursor"),
+        ({"cursor": ""}, "cursor"),
+        ({"next_cursor": "x" * 4097}, "next_cursor"),
+    ],
+)
+def test_context_source_candidate_window_rejects_invalid_coverage(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    values: dict[str, object] = {
+        "source_id": "source:repo",
+        "source_revision": "commit:abc",
+        "scope": {"path": "."},
+        "returned_candidates": 0,
+        "exhaustive": False,
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        ContextSourceCandidateWindow(**values)  # type: ignore[arg-type]
 
 
 def test_budget_consumer_intent_and_snapshot_are_explicit_values() -> None:

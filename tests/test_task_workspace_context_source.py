@@ -93,10 +93,11 @@ async def test_task_workspace_context_source_performs_source_local_search_and_ex
     workspace = TaskWorkspace(tmp_path, mode="read_only", execution_id="task-1")
     source = TaskWorkspaceContextSource(workspace)
 
-    candidates = await source.async_list_candidates(
+    window = await source.async_list_candidates(
         ContextReadIntent(query="Revenue"),
         limit=20,
     )
+    candidates = window.candidates
 
     assert [item.source_ref for item in candidates] == ["report.md"]
     assert candidates[0].role == "information"
@@ -114,7 +115,42 @@ async def test_task_workspace_context_source_performs_source_local_search_and_ex
         ),
         limit=20,
     )
-    assert excluded == ()
+    assert excluded.candidates == ()
+    assert excluded.exhaustive is True
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_pages_matching_files(tmp_path: Path) -> None:
+    for index in range(5):
+        (tmp_path / f"report-{index}.md").write_text(
+            f"shared marker {index}",
+            encoding="utf-8",
+        )
+    source = TaskWorkspaceContextSource(
+        TaskWorkspace(tmp_path, mode="read_only", execution_id="task-pages")
+    )
+    intent = ContextReadIntent(query="shared marker")
+
+    first = await source.async_list_candidates(intent, limit=2)
+    second = await source.async_list_candidates(
+        intent,
+        limit=2,
+        cursor=first.next_cursor,
+    )
+
+    assert [item.source_ref for item in first.candidates] == [
+        "report-0.md",
+        "report-1.md",
+    ]
+    assert [item.source_ref for item in second.candidates] == [
+        "report-2.md",
+        "report-3.md",
+    ]
+    assert first.exhaustive is False
+    assert first.next_cursor is not None
+    assert set(item.source_ref for item in first.candidates).isdisjoint(
+        item.source_ref for item in second.candidates
+    )
 
 
 def test_task_workspace_source_revision_observes_external_file_change(tmp_path: Path) -> None:

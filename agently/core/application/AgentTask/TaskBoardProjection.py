@@ -749,6 +749,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "retrieval_selected_count",
             "retrieval_omitted",
             "returned_results",
+            "continuation_available",
             "file_returned_results",
             "index_returned_results",
             "index_total_matches",
@@ -763,6 +764,23 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "truncated",
         )
         compact = {key: bounded.get(key) for key in keep_keys if key in bounded}
+        raw_coverage = bounded.get("source_coverage")
+        if isinstance(raw_coverage, Mapping):
+            compact["source_coverage"] = {
+                str(binding_id): {
+                    "scope": cls._compact_verifier_prompt_value(
+                        record.get("scope", {}),
+                        max_chars=700,
+                    ),
+                    "returned_candidates": record.get("returned_candidates", 0),
+                    "exhaustive": bool(record.get("exhaustive")),
+                    "continuation_available": bool(
+                        record.get("continuation_available")
+                    ),
+                }
+                for binding_id, record in list(raw_coverage.items())[:16]
+                if isinstance(record, Mapping)
+            }
         diagnostics = bounded.get("diagnostics")
         if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
             compact["diagnostics"] = cls._model_hot_diagnostics(list(diagnostics)[:4])
