@@ -173,9 +173,18 @@ diagnostics, never internal cache keys or provider vectors.
 Context delivery is media-aware. Plain text and source-parsed text may enter a
 package; the built-in TaskWorkspace source parses supported PDF, DOCX, XLSX,
 and PPTX files before disclosure. A document whose parser or optional
-dependency is unavailable is ref-only. Images, archives, executables, audio,
-video, unknown formats, and arbitrary bytes are never coerced into guessed
-text. Their index projection is limited to the canonical filename/ref.
+dependency is unavailable is ref-only. A PDF or Office descriptor and exact read
+must both preserve `context_representation=parsed_text`, and the exact body must
+be text; a caller-supplied string without that parser provenance is not admitted.
+Known non-text MIME types or file extensions cannot be overridden by a conflicting
+`content_kind="text"` claim. Conflicting type signals fail closed to a non-text
+or unknown representation. Mainstream Python, Node.js, Go, C, and C++ source
+extensions are classified as text, including empty source files.
+
+Images, archives, executables, audio, video, unknown formats, and arbitrary bytes
+are never coerced into guessed text. Their model-visible projection is limited to
+the canonical filename/ref. Source-provided summaries, OCR text, and inferred
+contents are stripped; MIME, digest, and size facts may remain host-side for audit.
 
 An image is ref-only unless the exact consumer explicitly declares image
 attachment support:
@@ -204,9 +213,10 @@ Agently does not infer vision support from a model name or from a generic
 `attachments=True` flag. When explicitly supported, ContextReader emits a
 validated image attachment block and AgentTask binds it through the
 ModelRequest attachment channel; the data URL is not serialized into the text
-context pack. Image interpretation remains model-owned. An invalid or empty
-attachment fails the selected read instead of falling back to a filename-based
-guess.
+context pack. Without that explicit capability the model receives only the
+filename/ref, never a generated summary or OCR substitute. Image interpretation
+remains model-owned. An invalid or empty attachment fails the selected read
+instead of falling back to a filename-based guess.
 
 Required content remains fail-closed when it cannot fit. A caller that has
 explicitly accepted a lossy projection may request

@@ -442,6 +442,31 @@ class MediaContextSource(MemoryContextSource):
         )
 
 
+class DroppedDocumentProofContextSource(MediaContextSource):
+    async def async_read_exact(
+        self,
+        source_ref: str,
+        *,
+        max_chars: int,
+        representation: str | None = None,
+        range_start: int = 0,
+    ) -> ContextSourceRead:
+        del max_chars, range_start
+        self.read_refs.append(source_ref)
+        self.representations.append(representation)
+        return ContextSourceRead(
+            source_id=self.source_id,
+            source_revision=self.source_revision,
+            source_ref=source_ref,
+            content="text whose parser provenance was dropped",
+            completeness="complete",
+            metadata={
+                **dict(self._candidates[0].metadata),
+                "context_representation": "text",
+            },
+        )
+
+
 @pytest.mark.asyncio
 async def test_context_reader_hides_image_body_and_untrusted_summary_without_vlm_capability() -> None:
     candidate = _candidate(
@@ -672,7 +697,78 @@ async def test_context_reader_classifies_non_text_files_without_source_kind_hint
 
 
 @pytest.mark.asyncio
-async def test_context_reader_rejects_unparsed_document_bytes() -> None:
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "src/main.cjs",
+        "src/main.cts",
+        "src/main.go",
+        "src/main.mjs",
+        "src/main.mts",
+        "src/types.pyi",
+        "src/main.c",
+        "src/main.cc",
+        "src/main.cpp",
+        "include/main.h",
+        "include/main.hpp",
+    ],
+)
+async def test_context_reader_classifies_mainstream_source_code_as_text(
+    source_ref: str,
+) -> None:
+    candidate = _candidate(
+        source_ref,
+        summary="source code",
+        metadata={"path": source_ref},
+    )
+    source = MediaContextSource(candidate, "int main() { return 0; }")
+    context = TaskContext(f"task-source-code-{source_ref}")
+    context.attach(source, binding_id="binding:source-code")
+
+    package = await context.reader(consumer="code-worker").async_read("read source")
+
+    assert package.blocks[0].content == "int main() { return 0; }"
+    assert package.blocks[0].completeness == "complete"
+    assert source.read_refs == [source_ref]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_ref", "media_type"),
+    [
+        ("reports/disguised.pdf", "application/pdf"),
+        ("assets/disguised.png", "image/png"),
+        ("artifacts/disguised.zip", "application/zip"),
+    ],
+)
+async def test_context_reader_fails_closed_on_text_claim_for_non_text_file(
+    source_ref: str,
+    media_type: str,
+) -> None:
+    candidate = _candidate(
+        source_ref,
+        summary="guessed non-text content",
+        metadata={
+            "path": source_ref,
+            "media_type": media_type,
+            "content_kind": "text",
+            "summary": "guessed non-text content",
+        },
+    )
+    source = MediaContextSource(candidate, "content that must remain cold")
+    context = TaskContext(f"task-conflicting-type-{source_ref}")
+    context.attach(source, binding_id="binding:conflicting-type")
+
+    package = await context.reader(consumer="text-worker").async_read("inspect file")
+
+    assert package.blocks[0].content is None
+    assert package.blocks[0].completeness == "ref_only"
+    assert "summary" not in package.blocks[0].metadata
+    assert source.read_refs == []
+
+
+@pytest.mark.asyncio
+async def test_context_reader_keeps_unparsed_document_bytes_ref_only() -> None:
     candidate = _candidate(
         "reports/raw.pdf",
         metadata={
@@ -686,12 +782,93 @@ async def test_context_reader_rejects_unparsed_document_bytes() -> None:
 
     package = await context.reader(consumer="text-worker").async_read("read report")
 
-    assert package.blocks == ()
-    assert package.omissions[0].reason == "source_read_failed"
+    assert package.blocks[0].source_ref == "reports/raw.pdf"
+    assert package.blocks[0].content is None
+    assert package.blocks[0].completeness == "ref_only"
+    assert package.blocks[0].metadata["context_representation"] == "metadata_only"
+    assert source.read_refs == []
     assert any(
-        item.code == "context.source_read_failed"
+        item.code == "context.media_content_ref_only"
         for item in package.diagnostics
     )
+
+
+@pytest.mark.asyncio
+async def test_context_reader_keeps_unverified_document_text_ref_only() -> None:
+    candidate = _candidate(
+        "reports/unverified.pdf",
+        summary="untrusted document content guess",
+        metadata={
+            "path": "reports/unverified.pdf",
+            "media_type": "application/pdf",
+            "content_kind": "pdf",
+            "summary": "untrusted document content guess",
+        },
+    )
+    source = MediaContextSource(candidate, "text without parser provenance")
+    context = TaskContext("task-unverified-document-text")
+    context.attach(source, binding_id="binding:unverified-pdf")
+
+    package = await context.reader(consumer="text-worker").async_read("read report")
+
+    assert package.blocks[0].source_ref == "reports/unverified.pdf"
+    assert package.blocks[0].content is None
+    assert package.blocks[0].completeness == "ref_only"
+    assert package.blocks[0].metadata["context_representation"] == "metadata_only"
+    assert "summary" not in package.blocks[0].metadata
+    assert source.read_refs == []
+
+
+@pytest.mark.asyncio
+async def test_context_reader_rejects_document_exact_read_that_drops_parser_proof() -> None:
+    candidate = _candidate(
+        "reports/provenance-dropped.pdf",
+        metadata={
+            "path": "reports/provenance-dropped.pdf",
+            "media_type": "application/pdf",
+            "content_kind": "pdf",
+            "context_representation": "parsed_text",
+        },
+    )
+    source = DroppedDocumentProofContextSource(candidate, "unused")
+    context = TaskContext("task-document-proof-dropped")
+    context.attach(source, binding_id="binding:proof-dropped")
+
+    package = await context.reader(consumer="text-worker").async_read("read report")
+
+    assert package.blocks == ()
+    assert package.omissions[0].reason == "source_read_failed"
+    assert source.representations == ["parsed_text"]
+    assert any(
+        item.code == "context.source_read_failed"
+        and item.details["error_type"] == "ValueError"
+        for item in package.diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_reader_hides_unverified_direct_document_guess() -> None:
+    context = TaskContext("task-direct-unverified-document")
+    context.put(
+        role="information",
+        content="guessed document body",
+        entry_id="entry:unverified-document",
+        source_ref="reports/direct.pdf",
+        metadata={
+            "path": "reports/direct.pdf",
+            "media_type": "application/pdf",
+            "content_kind": "pdf",
+            "summary": "guessed direct document contents",
+        },
+    )
+
+    package = await context.reader(consumer="text-worker").async_read("read report")
+
+    assert package.blocks[0].source_ref == "reports/direct.pdf"
+    assert package.blocks[0].content is None
+    assert package.blocks[0].completeness == "ref_only"
+    assert package.blocks[0].metadata["context_representation"] == "metadata_only"
+    assert "summary" not in package.blocks[0].metadata
 
 
 @pytest.mark.asyncio
@@ -765,6 +942,7 @@ async def test_context_reader_accepts_source_parsed_document_text(
             "path": source_ref,
             "media_type": media_type,
             "content_kind": content_kind,
+            "context_representation": "parsed_text",
         },
     )
     source = MediaContextSource(candidate, "authoritative parsed text")
@@ -774,7 +952,7 @@ async def test_context_reader_accepts_source_parsed_document_text(
     package = await context.reader(consumer="worker").async_read("read report")
 
     assert package.blocks[0].content == "authoritative parsed text"
-    assert source.representations == [None]
+    assert source.representations == ["parsed_text"]
 
 
 @pytest.mark.asyncio

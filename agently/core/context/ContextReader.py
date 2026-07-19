@@ -48,19 +48,33 @@ from ._Index import (
 
 _TEXT_FILE_EXTENSIONS = {
     "",
+    ".c",
+    ".cc",
+    ".cjs",
     ".cfg",
     ".conf",
+    ".cpp",
     ".css",
+    ".cts",
     ".csv",
+    ".cxx",
     ".env",
+    ".go",
+    ".h",
+    ".hh",
+    ".hpp",
     ".html",
+    ".hxx",
     ".ini",
     ".js",
     ".json",
     ".jsx",
     ".log",
     ".md",
+    ".mjs",
+    ".mts",
     ".py",
+    ".pyi",
     ".rst",
     ".sh",
     ".toml",
@@ -431,49 +445,44 @@ class ContextReader:
         metadata: Mapping[str, Any],
         source_ref: str = "",
     ) -> str:
-        content_kind = str(metadata.get("content_kind") or "").strip().lower()
-        if content_kind:
-            if content_kind in {"text", "pdf", "office", "image", "binary", "unknown"}:
-                return content_kind
-            if content_kind.startswith("image/"):
+        def classify_type_hint(value: Any) -> str:
+            normalized = str(value or "").split(";", 1)[0].strip().lower()
+            if not normalized:
+                return ""
+            if normalized in {
+                "text",
+                "pdf",
+                "office",
+                "image",
+                "binary",
+                "unknown",
+            }:
+                return normalized
+            if normalized.startswith("image/"):
                 return "image"
-            if content_kind == "application/pdf":
+            if normalized == "application/pdf":
                 return "pdf"
-            if content_kind.startswith(
+            if normalized.startswith(
                 "application/vnd.openxmlformats-officedocument"
             ):
                 return "office"
-            if content_kind.startswith("text/") or content_kind in _TEXT_MEDIA_TYPES:
+            if normalized.startswith("text/") or normalized in _TEXT_MEDIA_TYPES:
                 return "text"
             if (
-                content_kind in _BINARY_MEDIA_TYPES
-                or content_kind.startswith("audio/")
-                or content_kind.startswith("video/")
+                normalized in _BINARY_MEDIA_TYPES
+                or normalized.startswith("audio/")
+                or normalized.startswith("video/")
             ):
                 return "binary"
             return "unknown"
-        media_type = str(
+
+        declared_kind = classify_type_hint(metadata.get("content_kind"))
+        media_kind = classify_type_hint(
             metadata.get("media_type")
             or metadata.get("mime_type")
             or metadata.get("content_type")
             or ""
-        ).split(";", 1)[0].strip().lower()
-        if media_type.startswith("image/"):
-            return "image"
-        if media_type == "application/pdf":
-            return "pdf"
-        if media_type.startswith("application/vnd.openxmlformats-officedocument"):
-            return "office"
-        if media_type.startswith("text/") or media_type in _TEXT_MEDIA_TYPES:
-            return "text"
-        if (
-            media_type in _BINARY_MEDIA_TYPES
-            or media_type.startswith("audio/")
-            or media_type.startswith("video/")
-        ):
-            return "binary"
-        if media_type:
-            return "unknown"
+        )
 
         locator = str(
             source_ref
@@ -484,16 +493,36 @@ class ContextReader:
         filename = locator.rsplit("/", 1)[-1]
         suffix = f".{filename.rsplit('.', 1)[-1]}" if "." in filename else ""
         if suffix == ".pdf":
-            return "pdf"
-        if suffix in _OFFICE_FILE_EXTENSIONS:
-            return "office"
-        if suffix in _IMAGE_FILE_EXTENSIONS:
-            return "image"
-        if suffix in _BINARY_FILE_EXTENSIONS:
-            return "binary"
-        if suffix in _TEXT_FILE_EXTENSIONS:
-            return "text" if suffix else ""
-        if suffix:
+            suffix_kind = "pdf"
+        elif suffix in _OFFICE_FILE_EXTENSIONS:
+            suffix_kind = "office"
+        elif suffix in _IMAGE_FILE_EXTENSIONS:
+            suffix_kind = "image"
+        elif suffix in _BINARY_FILE_EXTENSIONS:
+            suffix_kind = "binary"
+        elif suffix in _TEXT_FILE_EXTENSIONS:
+            suffix_kind = "text" if suffix else ""
+        elif suffix:
+            suffix_kind = "unknown"
+        else:
+            suffix_kind = ""
+
+        concrete_non_text = {
+            kind
+            for kind in (declared_kind, media_kind, suffix_kind)
+            if kind in {"pdf", "office", "image", "binary"}
+        }
+        if len(concrete_non_text) > 1:
+            return "unknown"
+        if concrete_non_text:
+            return next(iter(concrete_non_text))
+        if declared_kind == "unknown":
+            return "unknown"
+        if declared_kind == "text":
+            return "text"
+        if "text" in {media_kind, suffix_kind}:
+            return "text"
+        if "unknown" in {media_kind, suffix_kind}:
             return "unknown"
         return ""
 
@@ -545,6 +574,8 @@ class ContextReader:
             candidate.metadata,
             candidate.source_ref,
         )
+        if content_kind in {"pdf", "office"}:
+            return "parsed_text" if declared == "parsed_text" else "metadata_only"
         if content_kind == "image":
             return (
                 "image_attachment"
@@ -589,11 +620,14 @@ class ContextReader:
         declared = str(
             metadata.get("context_representation") or ""
         ).strip().lower()
-        if declared == "metadata_only" or content_kind in {
-            "image",
-            "binary",
-            "unknown",
-        }:
+        document_without_parsed_text = (
+            content_kind in {"pdf", "office"} and declared != "parsed_text"
+        )
+        if (
+            declared == "metadata_only"
+            or document_without_parsed_text
+            or content_kind in {"image", "binary", "unknown"}
+        ):
             # A descriptor is an index projection, not authority to interpret
             # arbitrary bytes. For non-text media, only the canonical ref/name
             # may participate in semantic selection.
@@ -652,9 +686,15 @@ class ContextReader:
                 entry_metadata,
                 source_ref,
             )
+            entry_representation = str(
+                entry_metadata.get("context_representation") or ""
+            ).strip().lower()
             entry_summary = str(entry_metadata.get("summary") or source_ref)
             entry_estimated_chars = _content_chars(entry.content)
-            if entry_content_kind in {"image", "binary", "unknown"}:
+            if entry_content_kind in {"image", "binary", "unknown"} or (
+                entry_content_kind in {"pdf", "office"}
+                and entry_representation != "parsed_text"
+            ):
                 entry_summary = source_ref
                 entry_estimated_chars = len(source_ref)
                 representation = (
@@ -937,6 +977,12 @@ class ContextReader:
                     representation="image_attachment",
                 )
                 content_chars = 0
+            elif representation == "parsed_text":
+                if not isinstance(content, str):
+                    raise ValueError(
+                        "Direct TaskContext parsed document content must be textual."
+                    )
+                content_chars = len(content)
             else:
                 if isinstance(content, bytes | bytearray):
                     raise ValueError(
@@ -988,6 +1034,18 @@ class ContextReader:
             raise ValueError(
                 "Context image exact read did not return a non-empty image attachment payload."
             )
+        if representation == "parsed_text":
+            raw_representation = str(
+                raw.metadata.get("context_representation") or ""
+            ).strip().lower()
+            if raw_representation != "parsed_text" or not isinstance(
+                raw.content,
+                str,
+            ):
+                raise ValueError(
+                    "Context document exact read must preserve parsed_text "
+                    "provenance and return textual content."
+                )
         self._assert_current()
         content_chars = (
             0
@@ -1288,7 +1346,13 @@ class ContextReader:
                     )
                 continue
             try:
-                block = await self._read_block(item, max_chars=read_limit)
+                block = await self._read_block(
+                    item,
+                    max_chars=read_limit,
+                    representation=(
+                        "parsed_text" if representation == "parsed_text" else None
+                    ),
+                )
             except ContextStaleError:
                 raise
             except Exception as error:

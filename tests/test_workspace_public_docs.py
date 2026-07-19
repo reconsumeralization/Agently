@@ -59,6 +59,20 @@ def test_context_docs_keep_index_internal_and_use_descriptor_source_ports() -> N
         assert stale_surface not in chinese
 
 
+def test_context_docs_define_strict_document_and_image_admission() -> None:
+    english = _read("docs/en/requests/workspace.md")
+    chinese = _read("docs/cn/requests/workspace.md")
+
+    assert "context_representation=parsed_text" in english
+    assert "descriptor and exact read" in english
+    assert "conflicting type signals" in english.lower()
+    assert "OCR" in english
+    assert "context_representation=parsed_text" in chinese
+    assert "descriptor 与 exact read" in chinese
+    assert "类型信号冲突" in chinese
+    assert "OCR" in chinese
+
+
 def test_session_memory_docs_route_task_recall_through_task_context_source() -> None:
     english = _read("docs/en/requests/session-memory.md")
     chinese = _read("docs/cn/requests/session-memory.md")

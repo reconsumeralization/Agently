@@ -157,8 +157,15 @@ diagnostic，不暴露内部 cache key 或 provider vector。
 
 Context 交付会区分媒体类型。纯文本以及由来源解析出的文本可以进入 package；内置
 TaskWorkspace source 会先解析受支持的 PDF、DOCX、XLSX 与 PPTX 文件。若解析器或
-可选依赖不可用，该文档只交付引用。图片、压缩包、可执行文件、音视频、未知格式和
-任意二进制字节都不会被强制转换为猜测文本；它们进入索引的投影只包含规范文件名/引用。
+可选依赖不可用，该文档只交付引用。PDF 或 Office 的 descriptor 与 exact read 必须
+同时保持 `context_representation=parsed_text`，且精确读取结果必须是文本；调用方提供但
+没有解析来源证明的字符串不能进入上下文。已知的非文本 MIME 或文件后缀不能被冲突的
+`content_kind="text"` 声明覆盖；类型信号冲突时按非文本或 unknown 保守关闭。Python、
+Node.js、Go、C 与 C++ 的主流源码后缀按文本处理，包括空源码文件。
+
+图片、压缩包、可执行文件、音视频、未知格式和任意二进制字节都不会被强制转换为猜测
+文本；模型侧投影只包含规范文件名/引用。来源提供的摘要、OCR 文本和推测内容会被移除；
+MIME、摘要哈希和大小等事实只能在宿主侧作为审计元数据保留。
 
 图片只有在具体 consumer 显式声明支持图片附件时才会进入附件通道，否则只交付引用：
 
@@ -184,8 +191,9 @@ execution = agent.goal("Review the attached chart").strategy(
 
 Agently 不根据模型名推断视觉能力，通用的 `attachments=True` 也不代表支持图片理解。
 显式支持时，ContextReader 生成经过校验的图片附件块，AgentTask 通过 ModelRequest
-附件通道绑定；data URL 不会序列化进文本 context pack。图片理解仍由模型负责。附件
-为空或格式非法时，本次读取失败，不会退化为根据文件名猜测内容。
+附件通道绑定；data URL 不会序列化进文本 context pack。没有该显式能力时，模型只会
+收到文件名/引用，不会收到生成的摘要或 OCR 替代内容。图片理解仍由模型负责。附件为空
+或格式非法时，本次读取失败，不会退化为根据文件名猜测内容。
 
 required 内容超出预算时默认仍然 fail closed。只有 Skill 或调用方显式接受有损投影
 时，才可设置 `metadata={"required_overflow": "lossy_digest"}`。此时 Skill source

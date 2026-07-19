@@ -343,6 +343,45 @@ async def test_task_workspace_context_source_parses_xlsx_for_context(
     assert not isinstance(readback.content, bytes)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "main.cjs",
+        "main.cts",
+        "main.go",
+        "main.mjs",
+        "main.mts",
+        "types.pyi",
+        "main.c",
+        "main.cc",
+        "main.cpp",
+        "main.h",
+        "main.hpp",
+    ],
+)
+async def test_task_workspace_context_source_keeps_empty_mainstream_code_as_text(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    (tmp_path / filename).write_text("", encoding="utf-8")
+    workspace = TaskWorkspace(
+        tmp_path,
+        mode="read_only",
+        execution_id=f"empty-source-{filename}",
+    )
+    source = TaskWorkspaceContextSource(workspace)
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=10,
+    )
+
+    assert workspace.inspect_file(filename)["content_kind"] == "text"
+    assert page.descriptors[0].metadata["context_representation"] == "text"
+
+
 def test_task_workspace_has_no_cross_source_context_builder(tmp_path: Path) -> None:
     workspace = TaskWorkspace(tmp_path)
 
