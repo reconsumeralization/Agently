@@ -1468,6 +1468,52 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         )
         return evidence_refs
 
+    @classmethod
+    def _taskboard_irrelevant_reacquired_evidence_state(
+        cls,
+        *,
+        target_subjects: Sequence[str],
+    ) -> tuple[TerminalIssue, dict[str, Any], str]:
+        """Track repeated irrelevant reacquisition without treating new refs as progress.
+
+        Different irrelevant source refs must not reset convergence.  Prefer the
+        host-issued success-criterion identities as the stable problem subject;
+        claim identities are used only when no criterion identity is available.
+        """
+
+        normalized_subjects = sorted(
+            {
+                str(subject).strip()
+                for subject in target_subjects
+                if str(subject or "").strip()
+            }
+        )
+        criterion_subjects = [
+            subject
+            for subject in normalized_subjects
+            if subject.startswith("criterion:")
+        ]
+        stable_subjects = criterion_subjects or normalized_subjects
+        contract_subject = "|".join(stable_subjects) or "taskboard_final_verification"
+        issue = TerminalIssue(
+            "taskboard_final_repair",
+            "irrelevant_reacquired_evidence",
+            contract_subject,
+        )
+        repair_contract = {
+            "criterion_subjects": stable_subjects,
+            "relevance_status": "not_used_by_target_check",
+        }
+        state_digest = relevant_state_digest(
+            {
+                "criterion_subjects": stable_subjects,
+                "repair_contract": {
+                    "relevance_status": "not_used_by_target_check",
+                },
+            }
+        )
+        return issue, repair_contract, state_digest
+
     async def _request_taskboard_final_evidence_retrieval_plan(
         self,
         *,
@@ -1644,6 +1690,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             replan_signal is not None
             and str(replan_signal.get("status") or "").strip() == "replan_segment"
         )
+        relevance_diagnostic: dict[str, Any] | None = None
         if evidence_reacquisition:
             prior_reacquisition = (
                 self._taskboard_latest_completed_evidence_reacquisition(
@@ -1677,13 +1724,50 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                         if verified_new_reference_ids
                         else "not_used_by_target_check"
                     ),
+                    "retry_scheduled": False,
                     "revision_id": effective_revision.revision_id,
                 }
+                (
+                    relevance_issue,
+                    relevance_contract,
+                    relevance_digest,
+                ) = self._taskboard_irrelevant_reacquired_evidence_state(
+                    target_subjects=target_subjects,
+                )
+                if verified_new_reference_ids:
+                    self._terminal_convergence_state.mark_resolved(
+                        relevance_issue
+                    )
+                else:
+                    relevance_convergence = (
+                        self._terminal_convergence_state.record_detection(
+                            relevance_issue,
+                            relevance_digest,
+                            repair_contract=relevance_contract,
+                            verifier_called=True,
+                        )
+                    )
+                    relevance_diagnostic["convergence"] = {
+                        **dict(DataFormatter.sanitize(relevance_convergence)),
+                        "issue": {
+                            "gate_kind": relevance_issue.gate_kind,
+                            "issue_code": relevance_issue.issue_code,
+                            "contract_subject": relevance_issue.contract_subject,
+                        },
+                        "relevant_state_digest": relevance_digest,
+                    }
                 self.diagnostics.setdefault(
                     "taskboard_evidence_relevance",
                     [],
                 ).append(relevance_diagnostic)
-                if not verified_new_reference_ids:
+                self.diagnostics["terminal_convergence"] = (
+                    self._terminal_convergence_state.snapshot()
+                )
+                if (
+                    not verified_new_reference_ids
+                    and relevance_diagnostic["convergence"].get("terminal")
+                    is True
+                ):
                     return None
         grounding_repair_contract: dict[str, Any] | None = None
         raw_repair_contract = final_verification.get("material_claim_repair_contract")
@@ -2203,6 +2287,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 "missing_criteria": diagnostic["missing_criteria"],
             }
         )
+        if relevance_diagnostic is not None:
+            relevance_diagnostic["retry_scheduled"] = True
         return repaired_revision
 
 

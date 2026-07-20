@@ -14218,7 +14218,7 @@ def _revision_with_completed_evidence_reacquisition(
     )
 
 
-def test_taskboard_replan_rejects_new_evidence_not_used_by_its_target_check(
+def test_taskboard_replan_does_not_count_irrelevant_evidence_but_schedules_next_scoped_retry(
     tmp_path,
 ):
     task = AgentTask(
@@ -14253,13 +14253,109 @@ def test_taskboard_replan_rejects_new_evidence_not_used_by_its_target_check(
                 "evidence_refs": ["ref_unrelated"],
             },
         },
+        evidence_retrieval_plan={
+            "query_groups": [
+                {
+                    "query": "router implementation forward top-k experts",
+                    "expected_role": "evidence_snippet",
+                    "source_kinds": ["pinned_repository"],
+                    "path": "src/router.py",
+                    "max_results": 2,
+                }
+            ]
+        },
     )
 
-    assert repaired is None
+    assert repaired is not None
     diagnostic = task.diagnostics["taskboard_evidence_relevance"][-1]
     assert diagnostic["verified_new_reference_ids"] == []
     assert diagnostic["target_subjects"] == ["criterion:architecture"]
     assert diagnostic["status"] == "not_used_by_target_check"
+    assert diagnostic["retry_scheduled"] is True
+    evidence_card = next(
+        card
+        for card in repaired.graph.cards
+        if card.id.startswith("final-verification-evidence")
+        and card.metadata.get("generated_by")
+        == "agent_task.taskboard.final_verification_evidence_reacquisition"
+    )
+    assert evidence_card.allowed_execution_shape == "control"
+    assert evidence_card.evidence_contract["scoped_retrieval"]["query_groups"][0][
+        "path"
+    ] == "src/router.py"
+
+
+def test_taskboard_replan_stops_after_three_same_semantic_irrelevant_evidence_results(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-irrelevant-evidence-convergence").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-irrelevant-evidence-convergence",
+        goal="Produce a source-grounded architecture report.",
+        success_criteria=["Architecture claims use direct code evidence."],
+        execution="taskboard",
+    )
+    revision = _revision_with_completed_evidence_reacquisition(
+        task.id,
+        new_reference_ids=["ref_irrelevant_new_source"],
+    )
+    verification = {
+        "is_complete": False,
+        "missing_criteria": ["Architecture evidence remains incomplete."],
+        "criterion_checks": [
+            {
+                "criterion_id": "criterion:architecture",
+                "satisfied": False,
+                "evidence_ids": ["ref_old_search_excerpt"],
+            }
+        ],
+        "replan_signal": {
+            "status": "replan_segment",
+            "evidence_refs": ["ref_old_search_excerpt"],
+        },
+    }
+    retrieval_plan = {
+        "query_groups": [
+            {
+                "query": "router implementation forward top-k experts",
+                "expected_role": "evidence_snippet",
+                "source_kinds": ["pinned_repository"],
+                "max_results": 2,
+            }
+        ]
+    }
+
+    first = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification=verification,
+        evidence_retrieval_plan=retrieval_plan,
+    )
+    second = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification=verification,
+        evidence_retrieval_plan=retrieval_plan,
+    )
+    third = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification=verification,
+        evidence_retrieval_plan=retrieval_plan,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert third is None
+    diagnostics = task.diagnostics["taskboard_evidence_relevance"]
+    assert [item["retry_scheduled"] for item in diagnostics] == [True, True, False]
+    convergence = diagnostics[-1]["convergence"]
+    assert convergence["occurrence"] == 3
+    assert convergence["state_changed"] is False
+    assert convergence["terminal"] is True
+    assert convergence["issue"]["issue_code"] == "irrelevant_reacquired_evidence"
 
 
 def test_taskboard_replan_accepts_new_evidence_used_by_its_target_check(
