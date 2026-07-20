@@ -63,7 +63,12 @@ def scoped_retrieval_policy(
         },
         "result_capacity": {
             "max_model_visible_results": SCOPED_RETRIEVAL_RESULT_CAPACITY,
-            "overflow_behavior": "reject_before_block_graph_compilation",
+            "overflow_behavior": {
+                "taskboard": (
+                    "split_into_bounded_context_batches_before_graph_compilation"
+                ),
+                "flat": "reject_before_block_graph_compilation",
+            },
         },
     }
 

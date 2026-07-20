@@ -3732,7 +3732,10 @@ def test_block_carrier_exposes_compact_scoped_retrieval_policy():
     assert policy["executor_owner"] == "ContextReader through Blocks context_read"
     assert policy["result_capacity"] == {
         "max_model_visible_results": 64,
-        "overflow_behavior": "reject_before_block_graph_compilation",
+        "overflow_behavior": {
+            "taskboard": "split_into_bounded_context_batches_before_graph_compilation",
+            "flat": "reject_before_block_graph_compilation",
+        },
     }
 
 
