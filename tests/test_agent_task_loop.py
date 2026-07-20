@@ -17750,6 +17750,174 @@ async def test_terminal_verification_uses_one_semantic_request_without_grounding
     assert "status='replan_segment'" in captured["instruct"]
 
 
+@pytest.mark.asyncio
+async def test_terminal_verification_exposes_staged_delivery_as_pre_promotion_contract(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-staged-terminal-verifier").use_task_workspace(
+        tmp_path / "task_workspace",
+        mode="read_write",
+    )
+    task = AgentTask(
+        agent,
+        task_id="staged-terminal-verifier",
+        goal="Deliver the accepted report at Workspace-root final.md.",
+        success_criteria=[
+            "The report content is complete and the accepted bytes are delivered at final.md."
+        ],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    candidate_path = "working/taskboard/finalize/terminal-candidates/final.md"
+    await task.task_workspace.write_file(candidate_path, "# Report\n\nComplete report body.\n")
+    identity = await task.task_workspace._promote_file_identity(
+        candidate_path,
+        role="task_workspace_artifact",
+    )
+    readback = await task.task_workspace.read_file(candidate_path, max_bytes=4000)
+    candidate_ref = {
+        **identity,
+        "path": candidate_path,
+        "bytes": readback["bytes"],
+        "sha256": readback["sha256"],
+        "content_kind": "text",
+        "role": "task_workspace_artifact",
+        "source": "test.staged_terminal_candidate",
+        "preview": readback["content"],
+        "read_bytes": readback["read_bytes"],
+        "truncated": False,
+        "complete_readback_verified": True,
+        "staged_target_path": "final.md",
+        "promotion_state": "staged",
+    }
+    staged_promotion = {
+        "source_path": candidate_path,
+        "target_path": "final.md",
+        "source_sha256": readback["sha256"],
+        "source_content_version_id": identity["content_version_id"],
+    }
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        id = "staged-terminal-verification-request-1"
+
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            return self
+
+        def get_result(self):
+            return self
+
+        async def async_get_data(self):
+            return {
+                "is_complete": True,
+                "requires_block": False,
+                "reason": "The staged candidate satisfies the semantic criteria.",
+                "failure_analysis": "",
+                "acceptance_delta": [],
+                "missing_criteria": [],
+                "replan_instruction": "",
+                "repair_constraints": [],
+                "next_step_requirements": [],
+                "final_result_required": True,
+                "final_result": "",
+                "criterion_checks": [
+                    {
+                        "criterion_id": "criterion:1",
+                        "satisfied": True,
+                        "summary": "The candidate is complete; delivery is host-owned after acceptance.",
+                        "evidence_ids": [],
+                    }
+                ],
+                "material_claim_coverage_complete": True,
+                "material_claim_checks": [],
+            }
+
+    async def noop_async(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: FakeRequest())
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_apply_language_policy_to_request",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_ensure_task_workspace_artifact_targeted_readback_evidence",
+        noop_async,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_emit_process_progress_from_output",
+        noop_async,
+    )
+
+    await task._request_verification(
+        1,
+        plan={"deliverable_mode": "task_workspace_artifact"},
+        execution_result={
+            "status": "completed",
+            "file_refs": [candidate_ref],
+            "artifact_refs": [candidate_ref],
+            "staged_promotions": [staged_promotion],
+        },
+        execution_meta={"status": "completed", "logs": {}},
+        context_pack={
+            "goal": task.goal,
+            "profile": "",
+            "items": [],
+            "omitted": [],
+            "diagnostics": {},
+        },
+    )
+
+    assert not task.task_workspace.resolve_file_path("final.md").exists()
+    assert captured["input"]["terminal_delivery_contract"] == {
+        "phase": "pre_promotion_candidate_verification",
+        "candidate_mappings": [
+            {
+                "candidate_path": candidate_path,
+                "required_target_path": "final.md",
+                "candidate_state": "complete_readback_verified",
+                "target_state": "deferred_until_semantic_acceptance",
+            }
+        ],
+        "semantic_acceptance_scope": (
+            "Judge the staged candidate bytes against every semantic success criterion."
+        ),
+        "post_acceptance_host_guards": [
+            "atomically promote the exact verifier-accepted candidate bytes",
+            "completely read back every required target",
+            "verify target digest and byte count before terminal completion",
+        ],
+    }
+    assert "pre_promotion_candidate_verification" in captured["instruct"]
+    assert "must not reject the candidate merely because the target path is absent" in captured[
+        "instruct"
+    ]
+    current_candidate = await task._current_terminal_candidate()
+    assert task._terminal_delivery_contract_for_verifier(
+        {
+            "staged_promotions": [
+                {
+                    **staged_promotion,
+                    "source_content_version_id": "stale-content-version",
+                }
+            ]
+        },
+        current_candidate,
+    ) == {}
+
+
 def test_verification_normalizes_structured_replan_signal_and_offered_evidence_refs(tmp_path):
     agent = _create_agent("agent-verifier-replan-signal").use_task_workspace(
         tmp_path / "task_workspace"

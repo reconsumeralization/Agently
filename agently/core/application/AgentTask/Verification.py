@@ -1007,6 +1007,89 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         normalized["strict_terminal_gates_applied"] = True
         return normalized
 
+    def _terminal_delivery_contract_for_verifier(
+        self,
+        execution_result: Any,
+        terminal_candidate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Project a verified staged-delivery phase without exposing promotion mechanics."""
+
+        if not isinstance(execution_result, Mapping):
+            return {}
+        raw_promotions = execution_result.get("staged_promotions")
+        if not isinstance(raw_promotions, Sequence) or isinstance(
+            raw_promotions,
+            str | bytes | bytearray,
+        ):
+            return {}
+        raw_carriers = terminal_candidate.get("carriers")
+        carriers = (
+            [item for item in raw_carriers if isinstance(item, Mapping)]
+            if isinstance(raw_carriers, Sequence)
+            and not isinstance(raw_carriers, str | bytes | bytearray)
+            else []
+        )
+        carrier_versions = {
+            (
+                self._task_workspace_artifact_display_path(carrier.get("path")),
+                str(carrier.get("content_version_id") or "").strip(),
+            )
+            for carrier in carriers
+            if str(carrier.get("kind") or "") == "task_workspace_artifact"
+            and str(carrier.get("status") or "") == "materialized"
+        }
+        required_targets = {
+            self._task_workspace_artifact_display_path(path)
+            for path in self._required_task_workspace_deliverables()
+            if self._task_workspace_artifact_display_path(path)
+        }
+        candidate_mappings: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_promotion in raw_promotions:
+            if not isinstance(raw_promotion, Mapping):
+                continue
+            candidate_path = self._task_workspace_artifact_display_path(
+                raw_promotion.get("source_path")
+            )
+            required_target_path = self._task_workspace_artifact_display_path(
+                raw_promotion.get("target_path")
+            )
+            content_version_id = str(
+                raw_promotion.get("source_content_version_id") or ""
+            ).strip()
+            mapping_key = (candidate_path, required_target_path)
+            if (
+                not candidate_path
+                or not required_target_path
+                or required_target_path not in required_targets
+                or (candidate_path, content_version_id) not in carrier_versions
+                or mapping_key in seen
+            ):
+                continue
+            seen.add(mapping_key)
+            candidate_mappings.append(
+                {
+                    "candidate_path": candidate_path,
+                    "required_target_path": required_target_path,
+                    "candidate_state": "complete_readback_verified",
+                    "target_state": "deferred_until_semantic_acceptance",
+                }
+            )
+        if not candidate_mappings:
+            return {}
+        return {
+            "phase": "pre_promotion_candidate_verification",
+            "candidate_mappings": candidate_mappings,
+            "semantic_acceptance_scope": (
+                "Judge the staged candidate bytes against every semantic success criterion."
+            ),
+            "post_acceptance_host_guards": [
+                "atomically promote the exact verifier-accepted candidate bytes",
+                "completely read back every required target",
+                "verify target digest and byte count before terminal completion",
+            ],
+        }
+
     async def _request_verification(
         self,
         iteration_index: int,
@@ -1122,6 +1205,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             ),
         )
         strict_candidate = await self._current_terminal_candidate()
+        terminal_delivery_contract = self._terminal_delivery_contract_for_verifier(
+            normalized_execution_result,
+            strict_candidate,
+        )
         capability_preflight = await self._terminal_capability_evidence_preflight(
             candidate=strict_candidate,
             execution_evidence_summary=raw_cumulative_evidence_summary,
@@ -1219,6 +1306,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             ),
             "grounding_guard": self._compact_grounding_guard_for_verifier(grounding_guard),
             "trusted_task_workspace_artifacts": trusted_task_workspace_artifacts,
+            "terminal_delivery_contract": terminal_delivery_contract,
             "capability_evidence_requirements": capability_evidence_requirements,
             "context_pack": self._compact_context_pack_for_verifier(
                 cast("TaskContextView", verification_context_pack)
@@ -1350,6 +1438,14 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "are the completion evidence; final_result may be a concise path/ref summary and must not copy the full "
             "artifact body only to satisfy a structured field. trusted_task_workspace_artifacts is a body-light TaskWorkspace "
             "location/status index with no selection identity, and the index itself does not prove artifact content. "
+            "When terminal_delivery_contract.phase='pre_promotion_candidate_verification', each candidate_mappings item is a "
+            "host-validated complete readback of the exact bytes proposed for required_target_path. Judge those candidate bytes "
+            "against the semantic success criteria and treat them as the provisional carrier for that required target. The target "
+            "path is intentionally absent until semantic acceptance: the host will then atomically promote the accepted bytes, "
+            "completely read back the target, and verify its digest and byte count. Therefore criterion_checks and is_complete "
+            "must not reject the candidate merely because the target path is absent during "
+            "pre_promotion_candidate_verification. Reject it for content, evidence, or other semantic gaps when warranted; "
+            "post-acceptance promotion/readback failures remain host-owned terminal failures. "
             "For source-grounded TaskWorkspace artifacts, verify the artifact "
             "body in evidence_ledger readback and targeted-readback items "
             "against visible source_refs, Action evidence, "

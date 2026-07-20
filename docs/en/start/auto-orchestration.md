@@ -691,8 +691,14 @@ relocates that intermediate artifact to `working/taskboard/<card-id>/...` and
 keeps the declared final path for the final synthesis or finalization card.
 Framework-generated final repair cards stage the declared deliverable under a
 card-scoped terminal-candidate path. They do not overwrite the root path during
-repair. Only a successful terminal verifier can atomically promote the staged
-bytes to the declared root path and trigger complete root readback.
+repair. During terminal verification, a host-validated delivery contract maps
+that completely read candidate to its required target. The verifier judges the
+candidate's content and evidence as the provisional carrier for the target; it
+must not reject the candidate merely because the target does not exist before
+acceptance. Only a successful semantic verdict can trigger the host-owned,
+digest-pinned promotion of those exact bytes to the declared root path. The host
+then performs complete target readback and digest/byte-count checks before the
+task can complete.
 Flat source refs carry the same boundary: repository clone/list manifest paths
 are `ref_only` until a file read, artifact readback, or bounded content preview
 is visible. A verifier or repair planner can reuse exact paths as retrieval
