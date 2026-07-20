@@ -1073,7 +1073,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         current_card.update(
             {
                 "failure_policy": "degradable",
-                "status": "setback",
+                "status": "skipped",
                 "metadata": current_metadata,
             }
         )

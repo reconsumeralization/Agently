@@ -40,6 +40,8 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         key = (str(consumer_id), str(phase))
         reader = self.context_readers.get(key)
         if reader is not None:
+            if not reader.is_current:
+                reader.refresh()
             return reader
         raw_chars = self.context_budget.get("chars", 6000)
         try:

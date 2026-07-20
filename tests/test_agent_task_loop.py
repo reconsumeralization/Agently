@@ -17637,6 +17637,102 @@ async def test_agent_task_loop_progress_model_omits_developer_diagnostics(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_agent_task_rebases_cached_context_reader_after_bound_source_revision_changes(
+    tmp_path,
+):
+    agent = _create_agent("agent-task-context-reader-rebase").use_task_workspace(
+        tmp_path / "task-workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="context-reader-rebase",
+        goal="Read pinned evidence across TaskBoard revisions.",
+        success_criteria=["The later read uses the current TaskContext snapshot."],
+        execution="taskboard",
+    )
+    reader = task._task_context_reader(
+        phase="execution",
+        consumer_id="agent_task:context-reader-rebase:blocks:collect",
+    )
+
+    await task.task_workspace.write_file("evidence_summary.md", "new evidence")
+
+    assert reader.is_current is False
+    current_reader = task._task_context_reader(
+        phase="execution",
+        consumer_id="agent_task:context-reader-rebase:blocks:collect",
+    )
+
+    assert current_reader is reader
+    assert current_reader.is_current is True
+    workspace_binding_id = f"task_workspace_binding:{task.id}"
+    assert current_reader.snapshot.source_revisions[
+        workspace_binding_id
+    ] == task.task_context.snapshot().source_revisions[
+        workspace_binding_id
+    ]
+
+
+def test_taskboard_auto_readback_patch_stops_scheduling_the_superseded_card(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("taskboard-auto-readback-superseded").use_task_workspace(
+            tmp_path / "task-workspace"
+        ),
+        task_id="taskboard-auto-readback-superseded",
+        goal="Collect bounded repository evidence.",
+        success_criteria=["The continuation owns the remaining read."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "collect",
+            "objective": "Collect the first bounded repository excerpts.",
+            "allowed_execution_shape": "control",
+            "failure_policy": "required",
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(card=card, revision=revision)
+
+    patch = task._taskboard_control_auto_patch(
+        context,
+        {
+            "status": "setback",
+            "sufficient": False,
+            "next_board_action": "readback",
+            "gaps": ["The first excerpts are too shallow."],
+        },
+        scoped_retrieval={
+            "query_groups": [
+                {
+                    "query": "router implementation",
+                    "source_kinds": ["pinned_repository"],
+                    "path": "router.py",
+                    "max_results": 1,
+                }
+            ]
+        },
+    )
+
+    assert patch is not None
+    patched = TaskBoardValidator().apply_patch(revision, patch)
+    schedule = TaskBoardValidator().schedule(patched)
+    patched_cards = patched.graph.card_by_id()
+
+    assert patched_cards["collect"].metadata["superseded_by"] == "collect.continue"
+    assert patched_cards["collect"].status == "skipped"
+    assert "collect" not in schedule.runnable_card_ids
+    assert schedule.runnable_card_ids == ("collect.evidence",)
+
+
+@pytest.mark.asyncio
 async def test_agent_task_loop_progress_model_does_not_delay_stream_close(tmp_path):
     class SlowProgressRequester(MockAgentTaskRequester):
         name = "SlowProgressRequester"
