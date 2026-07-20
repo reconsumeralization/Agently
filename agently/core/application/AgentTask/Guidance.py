@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from agently.core.context import ModelRequestContextSelector
 from agently.types.data import (
     ContextBudget,
@@ -28,6 +31,10 @@ _GUIDANCE_PREVIEW_CHARS = 800
 
 
 class AgentTaskGuidanceMixin(AgentTaskMixinBase):
+    _TASK_CONTEXT_EVIDENCE_ROLES = frozenset(
+        {"information", "state", "artifact"}
+    )
+
     def _task_context_semantic_selector(self) -> Any:
         request_factory = getattr(self.agent, "create_temp_request", None)
         return (
@@ -217,6 +224,150 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         reader.ensure_required_delivery(package)
         self.context_packages.append(package)
         return package
+
+    @staticmethod
+    def _task_context_block_content_version(block: Any) -> tuple[str, Any]:
+        representation = str(
+            getattr(block, "metadata", {}).get("context_representation") or ""
+        ).strip()
+        content = (
+            None
+            if representation == "image_attachment"
+            else DataFormatter.sanitize(getattr(block, "content", None))
+        )
+        encoded = json.dumps(
+            content,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest(), content
+
+    @classmethod
+    def _task_context_package_evidence_items(cls, package: Any) -> list[dict[str, Any]]:
+        """Project model-visible source facts into the canonical evidence domain.
+
+        ContextPackage remains the disclosure/read owner.  AgentTask only adds
+        host-issued evidence identity for body-bearing information, state, and
+        artifact blocks; procedural instruction/example/capability/index blocks
+        remain context and cannot silently become business evidence.
+        """
+
+        items: list[dict[str, Any]] = []
+        for block in getattr(package, "blocks", ()):
+            role = str(getattr(block, "role", "") or "").strip()
+            if role not in cls._TASK_CONTEXT_EVIDENCE_ROLES:
+                continue
+            completeness = str(
+                getattr(block, "completeness", "") or ""
+            ).strip()
+            status = (
+                "failed"
+                if completeness == "failed"
+                else "empty"
+                if completeness == "empty"
+                else "ok"
+            )
+            content_digest, content = cls._task_context_block_content_version(
+                block
+            )
+            body_state = (
+                "full"
+                if completeness == "complete" and content not in (None, "", [], {})
+                else "truncated"
+                if completeness in {"truncated", "lossy"}
+                and content not in (None, "", [], {})
+                else "ref_only"
+            )
+            identity_payload = {
+                "task_context_id": str(getattr(package, "task_context_id", "") or ""),
+                "block_key": str(getattr(block, "block_key", "") or ""),
+                "source_id": str(getattr(block, "source_id", "") or ""),
+                "source_revision": str(
+                    getattr(block, "source_revision", "") or ""
+                ),
+                "source_ref": str(getattr(block, "source_ref", "") or ""),
+                "binding_id": str(getattr(block, "binding_id", "") or ""),
+                "content_digest": content_digest,
+                "completeness": completeness,
+            }
+            identity_digest = hashlib.sha256(
+                json.dumps(
+                    identity_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            metadata = getattr(block, "metadata", {})
+            item: dict[str, Any] = {
+                "id": f"task_context:{identity_digest}",
+                "kind": "task_context.content",
+                "status": status,
+                "body_state": body_state,
+                "block_id": str(getattr(block, "block_id", "") or ""),
+                "source_id": identity_payload["source_id"],
+                "source_revision": identity_payload["source_revision"],
+                "source_ref": identity_payload["source_ref"],
+                "binding_id": identity_payload["binding_id"],
+                "evidence_role": role,
+                "content_version_id": f"context_content:{content_digest}",
+                "locator": identity_payload["source_ref"],
+                "provenance": {
+                    "source": "task_context",
+                    "package_id": str(getattr(package, "package_id", "") or ""),
+                    "task_context_id": identity_payload["task_context_id"],
+                    "context_revision": getattr(package, "context_revision", None),
+                    "consumer_id": str(getattr(package, "consumer_id", "") or ""),
+                    "phase": str(getattr(package, "phase", "") or ""),
+                    "block_key": identity_payload["block_key"],
+                },
+                "aliases": [
+                    str(value)
+                    for value in (
+                        identity_payload["source_ref"],
+                        *tuple(getattr(block, "refs", ()) or ()),
+                    )
+                    if str(value or "").strip()
+                ],
+            }
+            if body_state != "ref_only":
+                item["body"] = content
+            if isinstance(metadata, Mapping):
+                for field in (
+                    "path",
+                    "record_id",
+                    "collection",
+                    "source_url",
+                    "selected_url",
+                    "requested_url",
+                    "canonical_url",
+                    "url",
+                    "href",
+                ):
+                    if metadata.get(field) not in (None, "", [], {}):
+                        item[field] = DataFormatter.sanitize(metadata.get(field))
+            items.append(DataFormatter.sanitize(item))
+        return items
+
+    def _task_context_package_evidence_ledger(
+        self,
+        package: Any,
+        *,
+        max_items: int = 64,
+        body_chars: int = 1800,
+    ) -> dict[str, Any]:
+        return self._stable_evidence_ledger_view(
+            {
+                "evidence_items": self._task_context_package_evidence_items(
+                    package
+                )
+            },
+            max_items=max_items,
+            body_chars=body_chars,
+            budget_selection="content_first",
+        )
 
     def _record_task_context_consumption(
         self,

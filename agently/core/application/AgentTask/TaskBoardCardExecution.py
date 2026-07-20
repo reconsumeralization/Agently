@@ -2277,18 +2277,54 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         if scoped_retrieval:
             carrier_plan["scoped_retrieval"] = scoped_retrieval
 
+        card_request_evidence_ledger = evidence_ledger
+
         async def run_control_work_unit(_context: Mapping[str, Any]) -> Mapping[str, Any]:
+            nonlocal card_request_evidence_ledger
             carrier_output_policy = self._carrier_output_policy_from_block_context(_context)
             request_context_pack, context_package = await self._read_task_context_view(
                 phase="card",
                 consumer_id=f"agent_task:{self.id}:taskboard-control:{context.card.id}",
                 intent=f"Execute TaskBoard control card {context.card.id}: {context.card.objective}",
             )
+            context_evidence_ledger = self._task_context_package_evidence_ledger(
+                context_package,
+                max_items=64,
+                body_chars=1800,
+            )
+            card_request_evidence_ledger = self._taskboard_card_binding_evidence_ledger(
+                evidence_ledger,
+                context_evidence_ledger,
+            )
+            context_reference_ids = {
+                str(item.get("reference_id") or "")
+                for item in context_evidence_ledger.get("items", [])
+                if isinstance(item, Mapping)
+                and str(item.get("reference_id") or "").strip()
+            }
+            request_prompt_evidence_ledger = self._model_evidence_ledger_projection(
+                card_request_evidence_ledger,
+                max_items=64,
+            )
+            for item in request_prompt_evidence_ledger.get("items", []):
+                if not isinstance(item, dict) or str(
+                    item.get("reference_id") or ""
+                ) not in context_reference_ids:
+                    continue
+                # The same bounded body is already carried by context_pack.
+                # Keep one identity-bearing locator in the ledger instead of
+                # paying to duplicate the text in both prompt fields.
+                item.pop("body_preview", None)
+                item["body_location"] = "context_pack.items (match source_ref)"
             request = self.agent.create_temp_request()
             self._bind_task_context_attachments(request, context_package)
             self._apply_language_policy_to_request(request, language_policy)
+            request_base_payload = dict(control_input_payload)
+            request_base_payload["evidence_ledger"] = DataFormatter.sanitize(
+                request_prompt_evidence_ledger
+            )
             request_payload = self._taskboard_card_payload_with_scoped_retrieval_results(
-                control_input_payload,
+                request_base_payload,
                 _context,
             )
             request_payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
@@ -2436,7 +2472,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         summary = self._execution_log_summary(cast(dict[str, Any], execution_meta))
         execution_evidence_ledger = self._evidence_ledger_from_execution_meta(cast(Mapping[str, Any], execution_meta))
         card_evidence_ledger = self._taskboard_card_binding_evidence_ledger(
-            evidence_ledger,
+            card_request_evidence_ledger,
             execution_evidence_ledger,
         )
         evidence_use_guard = validate_evidence_use(collect_evidence_use(card_output), card_evidence_ledger)

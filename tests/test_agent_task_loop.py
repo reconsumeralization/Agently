@@ -13980,6 +13980,169 @@ def test_taskboard_evidence_reacquisition_requires_new_source_content_not_final_
     assert repeated.metadata["evidence_reacquisition_proof"]["new_content_identity_count"] == 0
 
 
+@pytest.mark.asyncio
+async def test_taskboard_control_binds_new_task_context_body_into_live_evidence_ledger(
+    tmp_path,
+    monkeypatch,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-context-evidence-binding").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-context-evidence-binding",
+        goal="Acquire direct repository evidence before repairing the report.",
+        success_criteria=["New direct source evidence is verifier-visible."],
+        execution="taskboard",
+    )
+    task.task_context.put(
+        entry_id="repository-info-swift",
+        role="information",
+        content=(
+            "struct RepositoryInfo {\n"
+            '    let projectURL = "https://github.com/Tencent/YOLO-Master"\n'
+            "}\n"
+        ),
+        source_ref="examples/YOLO-Master/mac/Sources/YOLOMasterApp/Info.swift",
+        required=True,
+        metadata={"content_kind": "text"},
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "final-verification-evidence",
+            "objective": "Acquire one new verifier-visible repository body.",
+            "required_outputs": ["New bounded source evidence."],
+            "allowed_execution_shape": "control",
+            "evidence_contract": {
+                "kind": "taskboard_final_verification_evidence_reacquisition",
+                "done_when": "At least one new body-bearing source reference exists.",
+                "baseline_content_identities": [],
+                "minimum_new_content_identity_count": 1,
+                "eligible_source_roles": [
+                    "action",
+                    "source",
+                    "task_workspace_readback",
+                ],
+                "excluded_artifact_paths": ["final.md"],
+            },
+            "metadata": {
+                "generated_by": (
+                    "agent_task.taskboard.final_verification_evidence_reacquisition"
+                )
+            },
+        }
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-context-evidence-binding",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [card.to_dict()],
+            },
+        }
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        id = "taskboard-context-evidence-binding-request"
+
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output"] = value
+            captured["format"] = format
+            return self
+
+        def get_result(self):
+            return self
+
+    async def consume_control_request(_card_id, _result_handle):
+        offered = [
+            item
+            for item in captured["input"]["evidence_ledger"]["items"]
+            if item.get("kind") == "task_context.content"
+            and item.get("source_ref")
+            == "examples/YOLO-Master/mac/Sources/YOLOMasterApp/Info.swift"
+        ]
+        captured["offered_context_evidence"] = offered
+        evidence_use = (
+            [
+                {
+                    "claim": "The disclosed repository body names the YOLO-Master project URL.",
+                    "evidence_ids": [offered[0]["reference_id"]],
+                    "support_type": "content",
+                }
+            ]
+            if offered
+            else []
+        )
+        return {
+            "status": "completed",
+            "answer": "Acquired a bounded repository body.",
+            "sufficient": True,
+            "next_board_action": "continue",
+            "evidence_use": evidence_use,
+            "remaining_work": [],
+        }
+
+    async def run_work_unit(*, handler, **_kwargs):
+        output = await handler({"state": {"evidence_items": []}})
+        return output["execution_result"], output["execution_meta"], None
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task.agent, "create_temp_request", FakeRequest)
+    monkeypatch.setattr(cast(Any, task), "_consume_taskboard_control_request", consume_control_request)
+    monkeypatch.setattr(cast(Any, task), "_run_work_unit_through_blocks", run_work_unit)
+    monkeypatch.setattr(cast(Any, task), "_apply_language_policy_to_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._run_taskboard_card(
+        context,
+        cast(
+            Any,
+            {
+                "goal": task.goal,
+                "profile": "",
+                "items": [],
+                "omitted": [],
+                "diagnostics": {},
+            },
+        ),
+    )
+
+    assert result.status == "completed", result.preview
+    assert len(captured["offered_context_evidence"]) == 1
+    offered = captured["offered_context_evidence"][0]
+    assert offered["reference_id"].startswith("ref_")
+    assert offered["body_state"] in {"bounded", "full"}
+    assert "body_preview" not in offered
+    assert offered["body_location"] == "context_pack.items (match source_ref)"
+    context_item = next(
+        item
+        for item in captured["input"]["context_pack"]["items"]
+        if item["source_ref"]
+        == "examples/YOLO-Master/mac/Sources/YOLOMasterApp/Info.swift"
+    )
+    assert "Tencent/YOLO-Master" in context_item["content"]
+    proof = result.metadata["evidence_reacquisition_proof"]
+    assert proof["satisfied"] is True
+    assert proof["validated_new_reference_ids"] == [offered["reference_id"]]
+
+
 def _revision_with_completed_evidence_reacquisition(
     board_id: str,
     *,
