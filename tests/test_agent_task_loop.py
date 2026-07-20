@@ -18047,11 +18047,33 @@ def test_taskboard_auto_readback_patch_stops_scheduling_the_superseded_card(
             "failure_policy": "required",
         }
     )
-    revision = TaskBoardRevision.create(
-        board_id=task.id,
-        graph=TaskBoardGraph.from_value(
-            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
-        ),
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-0",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [card.to_dict()],
+            },
+            "card_results": {
+                "collect": TaskBoardCardResult(
+                    card_id="collect",
+                    status="setback",
+                    metadata={
+                        "evidence_ledger": {
+                            "items": [
+                                {
+                                    "reference_id": "ref_first_page",
+                                    "status": "ok",
+                                    "body_state": "bounded",
+                                    "body_preview": "router page one",
+                                }
+                            ]
+                        }
+                    },
+                ).to_dict()
+            },
+        }
     )
     context = SimpleNamespace(card=card, revision=revision)
 
@@ -18084,6 +18106,48 @@ def test_taskboard_auto_readback_patch_stops_scheduling_the_superseded_card(
     assert patched_cards["collect"].status == "skipped"
     assert "collect" not in schedule.runnable_card_ids
     assert schedule.runnable_card_ids == ("collect.evidence",)
+    assert patched_cards["collect.evidence"].depends_on == ("collect",)
+    assert patched_cards["collect.continue"].depends_on == (
+        "collect",
+        "collect.evidence",
+    )
+
+    progressed = TaskBoardValidator().apply_patch(
+        patched,
+        {
+            "base_revision": patched.revision_id,
+            "source": "test.complete_continuation_evidence",
+            "operations": [
+                {
+                    "op": "record_card_result",
+                    "result": TaskBoardCardResult(
+                        card_id="collect.evidence",
+                        status="completed",
+                        metadata={
+                            "evidence_ledger": {
+                                "items": [
+                                    {
+                                        "reference_id": "ref_second_page",
+                                        "status": "ok",
+                                        "body_state": "bounded",
+                                        "body_preview": "router page two",
+                                    }
+                                ]
+                            }
+                        },
+                    ).to_dict(),
+                }
+            ],
+        },
+    )
+    continuation_view = build_task_board_evidence_view(
+        progressed,
+        card_ids=patched_cards["collect.continue"].depends_on,
+    )
+    assert {
+        str(item.get("reference_id") or "")
+        for item in continuation_view.evidence_items
+    } >= {"ref_first_page", "ref_second_page"}
 
 
 @pytest.mark.asyncio

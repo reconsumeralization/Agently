@@ -1079,6 +1079,12 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         )
         dependencies = list(getattr(card, "depends_on", ()) or [])
         readback_dependencies = cls._taskboard_auto_readback_scope(card, graph)
+        evidence_dependencies = list(
+            dict.fromkeys([*readback_dependencies, current_id])
+        )
+        continuation_dependencies = list(
+            dict.fromkeys([current_id, *dependencies, *support_card_ids])
+        )
         gaps = cls._normalize_string_list(card_output.get("gaps"))
         remaining_work = cls._normalize_string_list(card_output.get("remaining_work"))
         if scoped_retrieval_plan:
@@ -1121,7 +1127,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 f"{'; '.join(final_task_workspace_deliverables)}"
             )
         shared_evidence_metadata = {
-            "evidence_scope": readback_dependencies,
+            "evidence_scope": evidence_dependencies,
             "generated_by": patch_source,
             "source_card_id": current_id,
             "terminal_convergence_subject": convergence_subject,
@@ -1154,7 +1160,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 {
                     "id": evidence_acquisition_card_id,
                     "objective": evidence_objective,
-                    "depends_on": readback_dependencies,
+                    "depends_on": evidence_dependencies,
                     "required_outputs": (
                         ["Expanded bounded scoped retrieval evidence or diagnostics explaining why it remains insufficient."]
                         if scoped_retrieval_plan
@@ -1170,7 +1176,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 {
                     "id": local_readback_card_id,
                     "objective": local_readback_objective,
-                    "depends_on": readback_dependencies,
+                    "depends_on": evidence_dependencies,
                     "required_outputs": (
                         ["Bounded TaskWorkspace target-ref readback previews or diagnostics explaining inaccessible refs."]
                         if task_workspace_target_refs
@@ -1192,7 +1198,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                     "card": {
                         "id": continuation_id,
                         "objective": continuation_objective,
-                        "depends_on": [*dependencies, *support_card_ids],
+                        "depends_on": continuation_dependencies,
                         "required_outputs": list(getattr(card, "required_outputs", ()) or ()),
                         "allowed_execution_shape": str(getattr(card, "allowed_execution_shape", "") or "control"),
                         "failure_policy": str(getattr(card, "failure_policy", "") or "required"),
