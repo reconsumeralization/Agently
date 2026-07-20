@@ -1224,6 +1224,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             # the dependency-preserving dispatch policy to every model-backed
             # TaskBoard child without imposing the Action-card round bound.
             self._apply_taskboard_action_loop_round_dispatch_policy(execution)
+            if (
+                self._taskboard_card_scoped_retrieval(context.card)
+                and not self._taskboard_card_required_action_ids(context.card)
+            ):
+                self._disable_child_execution_action_loop(execution)
             if self._taskboard_card_execution_shape(context.card) == "actions":
                 # A TaskBoard action card already owns the bounded work unit.
                 # Plan its Action commands once, execute them, and let the same
@@ -1285,9 +1290,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "Before making factual claims, writing a deliverable, or marking the card completed, explicitly "
                 "read every omitted or truncated Action output whose content is required by the done_when or success "
                 "criteria. Consume the returned bounded page; do not read a recall Action's output as a new artifact. If "
-                "scoped_retrieval_results is present, those are already executed bounded "
-                "TaskWorkspace search facts; use visible evidence_snippet content only within the excerpt, and treat "
+                "scoped_retrieval_results is present, those are already executed bounded Context source facts; use "
+                "visible evidence_snippet content only within the excerpt, and treat "
                 "locator_ref records as targets for later readback/search rather than source-content proof. "
+                "TaskWorkspace Actions can access only the bound task file space; they cannot inspect a pinned "
+                "repository or another Context source unless an explicit Action capability provides that source. "
                 "Treat evidence_ledger as the authoritative grounding ledger for dependency evidence. Use only an "
                 "exact offered evidence_ledger.items[].reference_id in evidence_use.evidence_ids; no other prompt "
                 "field is an evidence identity. failed/empty items support unavailable or missing-data claims "
@@ -1927,7 +1934,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "business fact, incident date, deployment date, publication date, approval date, or validation date "
             "unless the goal or verifier-visible evidence explicitly provides it. "
             "do not plan or call tools from this request. taskboard_evidence_view is the compact evidence summary "
-            "and preserve cold refs as pointers. Treat evidence_ledger as the authoritative grounding ledger and "
+            "and preserve cold refs as pointers. When scoped_retrieval_results is present, those are already executed "
+            "bounded Context source facts; use visible evidence_snippet content only within its excerpt and bind "
+            "claims to the corresponding evidence_ledger reference_id. TaskWorkspace is the bound task file space, "
+            "not an alias for a pinned repository or another Context source. Treat evidence_ledger as the authoritative "
+            "grounding ledger and "
             "bind factual claims through only exact offered evidence_ledger.items[].reference_id values in "
             "evidence_use.evidence_ids; no other prompt field is an evidence identity. failed/empty items support "
             "unavailability only; ref_only "
@@ -2157,6 +2168,9 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "rationale": "Execute one TaskBoard control card through the shared Block carrier.",
             "step_scope": {},
         }
+        scoped_retrieval = self._taskboard_card_scoped_retrieval(context.card)
+        if scoped_retrieval:
+            carrier_plan["scoped_retrieval"] = scoped_retrieval
 
         async def run_control_work_unit(_context: Mapping[str, Any]) -> Mapping[str, Any]:
             carrier_output_policy = self._carrier_output_policy_from_block_context(_context)
@@ -2168,7 +2182,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             request = self.agent.create_temp_request()
             self._bind_task_context_attachments(request, context_package)
             self._apply_language_policy_to_request(request, language_policy)
-            request_payload = dict(control_input_payload)
+            request_payload = self._taskboard_card_payload_with_scoped_retrieval_results(
+                control_input_payload,
+                _context,
+            )
             request_payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
             if isinstance(carrier_output_policy, Mapping):
                 request_payload["carrier_output_policy"] = DataFormatter.sanitize(dict(carrier_output_policy))

@@ -671,14 +671,14 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                     cls._compact_taskboard_context_read(item)
                     for item in execution_results
                     if str(item.get("kind") or "") == "context_read"
-                ][:8]
+                ]
                 if operations:
                     return operations
         direct_operations = block_carrier.get("context_reads")
         if isinstance(direct_operations, Sequence) and not isinstance(direct_operations, (str, bytes, bytearray)):
             return [
                 cls._compact_taskboard_context_read(item)
-                for item in list(direct_operations)[:8]
+                for item in direct_operations
                 if isinstance(item, Mapping)
             ]
         return []

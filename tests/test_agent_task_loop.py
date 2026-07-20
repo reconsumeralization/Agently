@@ -2096,12 +2096,40 @@ def test_task_reference_catalog_snapshot_preserves_tokens_and_rejects_stale_targ
 
     catalog = TaskReferenceCatalog("agent_task_resume_refs")
     evidence = catalog.add_evidence(
-        {"id": "source.one", "kind": "action_evidence", "status": "ok", "body_state": "bounded", "body": "one"}
+        {
+            "id": "source.one",
+            "kind": "evidence_snippet",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "one",
+            "execution_block_id": "read:one",
+            "block_id": "context-block:one",
+            "source_id": "source:one",
+            "source_revision": "revision:one",
+            "source_ref": "src/one.py",
+            "binding_id": "binding:one",
+            "query": "one",
+            "range_start": 0,
+        }
     )
     snapshot = catalog.snapshot()
     restored = TaskReferenceCatalog.from_snapshot("agent_task_resume_refs", snapshot)
 
-    assert restored.resolve(str(evidence["reference_id"]))["target"]["id"] == "source.one"
+    restored_target = restored.resolve(str(evidence["reference_id"]))["target"]
+    assert restored_target["id"] == "source.one"
+    assert restored_target["execution_block_id"] == "read:one"
+    assert restored_target["block_id"] == "context-block:one"
+    assert restored_target["source_id"] == "source:one"
+    assert restored_target["source_revision"] == "revision:one"
+    assert restored_target["source_ref"] == "src/one.py"
+    assert restored_target["binding_id"] == "binding:one"
+    with pytest.raises(ValueError, match="retargeted"):
+        catalog.add_evidence(
+            {
+                **evidence,
+                "binding_id": "binding:other",
+            }
+        )
 
     damaged = json.loads(json.dumps(snapshot))
     damaged["references"][str(evidence["reference_id"])]["evidence_id"] = "evd_missing"
@@ -3628,6 +3656,10 @@ def test_block_carrier_exposes_compact_scoped_retrieval_policy():
     assert policy["roles"]["evidence_snippet"] == "bounded readable excerpt"
     assert policy["query_owner"] == "planner_or_control_model"
     assert policy["executor_owner"] == "ContextReader through Blocks context_read"
+    assert policy["result_capacity"] == {
+        "max_model_visible_results": 64,
+        "overflow_behavior": "reject_before_block_graph_compilation",
+    }
 
 
 def test_flat_step_plan_preserves_scoped_retrieval_query_groups(tmp_path):
@@ -3790,6 +3822,46 @@ def test_block_carrier_compiles_scoped_retrieval_before_agent_step(tmp_path):
     assert execution_plan.edges[0].from_plan_block == execution_plan.plan_blocks[0].id
     assert execution_plan.edges[0].to_plan_block == execution_plan.plan_blocks[1].id
     assert execution_plan.edges[0].binding["target_input"] == "scoped_retrieval_results"
+
+
+def test_block_carrier_rejects_scoped_retrieval_beyond_evidence_capacity(tmp_path):
+    agent = _create_agent("agent-task-scoped-retrieval-capacity").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="scoped-retrieval-capacity",
+        goal="Keep every model-visible retrieval result citable.",
+        success_criteria=["Every delivered result has a host evidence identity."],
+    )
+    plan = task._normalize_step_plan(
+        {
+            "execution_shape": "actions",
+            "step_instruction": "Read the bounded sources.",
+            "scoped_retrieval": {
+                "query_groups": [
+                    {
+                        "query": f"source-{index}",
+                        "expected_role": "evidence_snippet",
+                        "max_results": 1,
+                    }
+                    for index in range(65)
+                ]
+            },
+        }
+    )
+    context_pack: dict[str, Any] = {
+        "goal": task.goal,
+        "items": [],
+        "omitted": [],
+        "diagnostics": {},
+        "profile": "test",
+    }
+    work_unit = task._build_flat_work_unit_intent(1, plan, cast(Any, context_pack))
+
+    assert len(plan["scoped_retrieval"]["query_groups"]) == 65
+    with pytest.raises(ValueError, match="evidence capacity"):
+        task._build_blocks_execution_plan(work_unit, plan, cast(Any, context_pack))
 
 
 def test_block_carrier_keeps_source_specific_filters_in_separate_query_groups(tmp_path):
@@ -4363,6 +4435,28 @@ async def test_taskboard_card_scoped_retrieval_uses_block_carrier(tmp_path):
     assert scoped_results[0]["evidence_snippets"][0]["content"].strip() == (
         "Project Atlas owner is Priya Shah."
     )
+    assert scoped_results[0]["locator_refs"] == []
+    assert "retained/ops-note.md" in str(
+        scoped_results[0]["evidence_snippets"][0]["source_ref"]
+    )
+    snippet_reference_id = scoped_results[0]["evidence_snippets"][0][
+        "reference_id"
+    ]
+    current_evidence = [
+        item
+        for item in seen["payload"]["evidence_ledger"]["items"]
+        if item.get("reference_id") == snippet_reference_id
+    ]
+    assert len(current_evidence) == 1
+    assert current_evidence[0]["reference_id"]
+    assert "retained/ops-note.md" in str(current_evidence[0]["source_ref"])
+    assert "body_preview" not in current_evidence[0]
+    current_kinds = {
+        item["kind"] for item in seen["payload"]["evidence_ledger"]["items"]
+    }
+    assert "evidence_snippet" in current_kinds
+    assert "context_read.read" not in current_kinds
+    assert "locator_ref" not in current_kinds
     assert execution_result["scoped_retrieval_results"][0]["bounded"]["returned_results"] == 1
     block_kinds = [block["kind"] for block in execution_meta["blocks"]["execution_block_graph"]["execution_blocks"]]
     assert block_kinds == ["context_read", "agent_step"]
@@ -4388,6 +4482,460 @@ async def test_taskboard_card_scoped_retrieval_uses_block_carrier(tmp_path):
     )
     prompt_operation = prompt_view["cards"][0]["context_reads"][0]
     assert "Project Atlas owner is Priya Shah." in prompt_operation["output"]["first_evidence_snippet"]["content"]
+
+
+def test_taskboard_scoped_retrieval_ledger_keeps_all_content_over_pointer_flood(
+    tmp_path,
+):
+    agent = _create_agent("taskboard-scoped-retrieval-content-priority").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-scoped-retrieval-content-priority",
+        goal="Keep every bounded source excerpt visible.",
+        success_criteria=["Every scoped source excerpt has a model-visible evidence id."],
+        execution="taskboard",
+    )
+    evidence_items = []
+    for index in range(22):
+        source_ref = f"src/file_{index}.py"
+        evidence_items.extend(
+            [
+                {
+                    "id": f"block-{index}",
+                    "kind": "context_read.read",
+                    "status": "ok",
+                    "body_state": "ref_only",
+                    "provenance": {"source": "blocks.execution_block_results"},
+                },
+                {
+                    "id": f"locator-{index}",
+                    "kind": "locator_ref",
+                    "status": "ok",
+                    "body_state": "ref_only",
+                    "source_ref": source_ref,
+                    "provenance": {
+                        "source": "blocks.context_read",
+                        "source_ref": source_ref,
+                    },
+                },
+                {
+                    "id": f"snippet-{index}",
+                    "kind": "evidence_snippet",
+                    "status": "ok",
+                    "body_state": "bounded",
+                    "source_ref": source_ref,
+                    "body": f"bounded source excerpt {index}",
+                    "provenance": {
+                        "source": "blocks.context_read",
+                        "source_ref": source_ref,
+                    },
+                },
+            ]
+        )
+
+    payload = task._taskboard_card_payload_with_scoped_retrieval_results(
+        {},
+        {"state": {"evidence_items": evidence_items}},
+    )
+
+    content_refs = {
+        str(item.get("source_ref") or "")
+        for item in payload["evidence_ledger"]["items"]
+        if str(item.get("kind") or "") == "evidence_snippet"
+        and str(item.get("body_preview") or "").startswith("bounded source excerpt")
+    }
+    assert content_refs == {f"src/file_{index}.py" for index in range(22)}
+
+
+def test_taskboard_scoped_retrieval_joins_full_source_identity(tmp_path):
+    task = AgentTask(
+        _create_agent("taskboard-scoped-full-identity").use_task_workspace(tmp_path),
+        task_id="taskboard-scoped-full-identity",
+        goal="Join same-ref retrievals to their canonical source binding.",
+        success_criteria=["Every source body is joined one-to-one."],
+        execution="taskboard",
+    )
+
+    def identity(binding_id: str, block_id: str, execution_block_id: str) -> dict[str, Any]:
+        return {
+            "execution_block_id": execution_block_id,
+            "block_id": block_id,
+            "source_id": "source:shared",
+            "source_revision": "revision:1",
+            "source_ref": "src/shared.py",
+            "binding_id": binding_id,
+            "range_start": 0,
+        }
+
+    first_identity = identity("binding:first", "context-block:first", "read:first")
+    second_identity = identity("binding:second", "context-block:second", "read:second")
+    evidence_items = [
+        {
+            "id": "snippet:second",
+            "kind": "evidence_snippet",
+            "status": "ok",
+            "body_state": "bounded",
+            "query": "shared query",
+            "body": "second source body",
+            "provenance": {"source": "blocks.context_read", **second_identity},
+            **second_identity,
+        },
+        {
+            "id": "snippet:first",
+            "kind": "evidence_snippet",
+            "status": "ok",
+            "body_state": "bounded",
+            "query": "shared query",
+            "body": "first source body",
+            "provenance": {"source": "blocks.context_read", **first_identity},
+            **first_identity,
+        },
+    ]
+    execution_block_results = [
+        {
+            "kind": "context_read",
+            "execution_block_id": source_identity["execution_block_id"],
+            "output": {
+                "operation": "read",
+                "query": "shared query",
+                "bounded": {"returned_results": 1},
+                "locator_refs": [],
+                "evidence_snippets": [
+                    {
+                        "role": "evidence_snippet",
+                        "content_state": "complete",
+                        "content": body,
+                        **source_identity,
+                    }
+                ],
+                "diagnostics": [],
+            },
+        }
+        for source_identity, body in (
+            (first_identity, "first source body"),
+            (second_identity, "second source body"),
+        )
+    ]
+
+    payload = task._taskboard_card_payload_with_scoped_retrieval_results(
+        {},
+        {
+            "state": {
+                "evidence_items": evidence_items,
+                "execution_block_results": execution_block_results,
+            }
+        },
+    )
+
+    snippets = [
+        result["evidence_snippets"][0]
+        for result in payload["scoped_retrieval_results"]
+    ]
+    expected_binding_by_body = {
+        "first source body": "binding:first",
+        "second source body": "binding:second",
+    }
+    assert [snippet["content"] for snippet in snippets] == [
+        "first source body",
+        "second source body",
+    ]
+    for snippet in snippets:
+        assert set(snippet).isdisjoint(
+            {"execution_block_id", "block_id", "source_id", "binding_id"}
+        )
+        resolved = task._task_references().resolve(snippet["reference_id"])
+        assert resolved["target"]["binding_id"] == expected_binding_by_body[
+            snippet["content"]
+        ]
+        assert resolved["target"]["block_id"].startswith("context-block:")
+        assert resolved["target"]["source_revision"] == snippet["source_revision"]
+
+
+def test_taskboard_scoped_retrieval_excludes_body_when_identity_join_is_missing(tmp_path):
+    task = AgentTask(
+        _create_agent("taskboard-scoped-missing-identity").use_task_workspace(tmp_path),
+        task_id="taskboard-scoped-missing-identity",
+        goal="Never expose an unjoined source body.",
+        success_criteria=["Every visible body has a host evidence identity."],
+        execution="taskboard",
+    )
+    block_context = {
+        "state": {
+            "evidence_items": [],
+            "execution_block_results": [
+                {
+                    "kind": "context_read",
+                    "execution_block_id": "read:missing",
+                    "output": {
+                        "operation": "read",
+                        "query": "missing join",
+                        "bounded": {"returned_results": 1},
+                        "locator_refs": [],
+                        "evidence_snippets": [
+                            {
+                                "role": "evidence_snippet",
+                                "content_state": "complete",
+                                "content": "must not reach model input",
+                                "execution_block_id": "read:missing",
+                                "block_id": "context-block:missing",
+                                "source_id": "source:missing",
+                                "source_revision": "revision:missing",
+                                "source_ref": "src/missing.py",
+                                "binding_id": "binding:missing",
+                                "range_start": 0,
+                            }
+                        ],
+                        "diagnostics": [],
+                    },
+                }
+            ],
+        }
+    }
+
+    payload = task._taskboard_card_payload_with_scoped_retrieval_results(
+        {},
+        block_context,
+    )
+
+    result = payload["scoped_retrieval_results"][0]
+    assert result["evidence_snippets"] == []
+    assert any(
+        diagnostic.get("code")
+        == "agent_task.scoped_retrieval.evidence_identity_unresolved"
+        for diagnostic in result["diagnostics"]
+    )
+    assert "must not reach model input" not in json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_taskboard_control_card_executes_scoped_retrieval_before_model_request(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("taskboard-control-scoped-retrieval").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-control-scoped-retrieval",
+        goal="Ground the control decision in the retained source.",
+        success_criteria=["The control decision cites the retained source."],
+        execution="taskboard",
+    )
+    await task.task_workspace.write_file(
+        "retained/router.md",
+        "Sparse router top k is 2.\n",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "assess-router",
+            "objective": "Assess the router from its exact retained source.",
+            "allowed_execution_shape": "control",
+            "metadata": {
+                "scoped_retrieval": {
+                    "query_groups": [
+                        {
+                            "query": "Sparse router top k is 2",
+                            "expected_role": "evidence_snippet",
+                            "source_kinds": ["task_workspace"],
+                            "path": "retained",
+                            "pattern": "**",
+                            "max_results": 1,
+                        }
+                    ]
+                }
+            },
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeControlRequest:
+        id = "taskboard-control-scoped-retrieval-request"
+
+        def __init__(self):
+            self.slots: dict[str, Any] = {}
+
+        def input(self, value):
+            self.slots["input"] = value
+            captured["input"] = value
+            return self
+
+        def info(self, value):
+            self.slots["info"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output"] = value
+            captured["format"] = format
+            return self
+
+        def get_result(self):
+            return self
+
+        async def get_async_generator(self, *, type):
+            assert type == "instant"
+            if False:
+                yield None
+
+        async def async_get_data(self, *, raise_ensure_failure=False):
+            offered = self.slots.get("info", {}).get("offered_context_blocks")
+            if isinstance(offered, list):
+                return {
+                    "selected_keys": [
+                        item["block_key"]
+                        for item in offered
+                    ]
+                }
+            assert raise_ensure_failure is False
+            return {
+                "status": "setback",
+                "sufficient": False,
+                "next_board_action": "readback",
+                "remaining_work": ["Continue from the bounded router source."],
+            }
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: FakeControlRequest())
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_apply_language_policy_to_request",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = await task._run_taskboard_control_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "setback", json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
+    scoped_results = captured["input"]["scoped_retrieval_results"]
+    assert scoped_results[0]["evidence_snippets"][0]["content"].strip() == (
+        "Sparse router top k is 2."
+    )
+    assert scoped_results[0]["locator_refs"] == []
+    snippet_reference_id = scoped_results[0]["evidence_snippets"][0][
+        "reference_id"
+    ]
+    assert "retained/router.md" in str(
+        scoped_results[0]["evidence_snippets"][0]["source_ref"]
+    )
+    current_evidence = [
+        item
+        for item in captured["input"]["evidence_ledger"]["items"]
+        if item.get("reference_id") == snippet_reference_id
+    ]
+    assert len(current_evidence) == 1, captured["input"]["evidence_ledger"]
+    assert current_evidence[0]["reference_id"]
+    assert "body_preview" not in current_evidence[0]
+    assert "bounded Context source facts" in captured["instruct"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_pure_scoped_retrieval_card_disables_child_action_loop(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("taskboard-pure-scoped-retrieval").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-pure-scoped-retrieval",
+        goal="Read the retained source without treating TaskWorkspace as another source.",
+        success_criteria=["The retained source is read once."],
+        execution="taskboard",
+    )
+    await task.task_workspace.write_file("retained/source.md", "Exact retained evidence.\n")
+    card = TaskBoardCard.from_value(
+        {
+            "id": "gather-evidence",
+            "objective": "Gather the exact retained evidence.",
+            "allowed_execution_shape": "auto",
+            "metadata": {
+                "scoped_retrieval": {
+                    "query_groups": [
+                        {
+                            "query": "Exact retained evidence",
+                            "source_kinds": ["task_workspace"],
+                            "path": "retained/source.md",
+                            "max_results": 1,
+                        }
+                    ]
+                }
+            },
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_run_bounded_child_execution(**kwargs: Any):
+        execution = kwargs["execution"]
+        captured["action_loop_enabled"] = execution.request.settings.get(
+            "action.loop.enabled",
+            True,
+        )
+        captured["tool_loop_enabled"] = execution.request.settings.get(
+            "tool.loop.enabled",
+            True,
+        )
+        captured["input_payload"] = kwargs["input_payload"]
+        return (
+            {
+                "status": "completed",
+                "answer": "The exact retained evidence was gathered.",
+                "remaining_work": [],
+            },
+            {
+                "execution_id": "taskboard-pure-scoped-retrieval:child",
+                "status": "completed",
+                "route": {"selected_route": "model_request", "status": "completed"},
+                "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+            },
+        )
+
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_run_bounded_child_execution",
+        fake_run_bounded_child_execution,
+    )
+
+    result = await task._run_taskboard_agent_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert result.status == "completed"
+    assert captured["action_loop_enabled"] is False
+    assert captured["tool_loop_enabled"] is False
+    assert captured["input_payload"]["scoped_retrieval_results"][0]["bounded"]["returned_results"] == 1
 
 
 def test_task_workspace_artifact_bounded_step_schema_excludes_long_body_fields():

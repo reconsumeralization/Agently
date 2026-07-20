@@ -1898,6 +1898,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         *,
         max_items: int = 80,
         offered_reference_ids: set[str] | None = None,
+        include_host_identity: bool = False,
     ) -> list[dict[str, Any]]:
         """Project stable evidence choices with only facts needed for binding.
 
@@ -1936,6 +1937,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "action_id",
                 "path",
                 "url",
+                "source_ref",
+                "source_revision",
+                "query",
+                "range_start",
+                "query_match",
                 "criterion_id",
                 "claim",
                 "topic",
@@ -1949,6 +1955,40 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 value = item.get(field)
                 if value not in (None, "", [], {}):
                     candidate[field] = DataFormatter.sanitize(value)
+            if include_host_identity:
+                for field in (
+                    "execution_block_id",
+                    "block_id",
+                    "source_id",
+                    "binding_id",
+                ):
+                    value = item.get(field)
+                    if value not in (None, "", [], {}):
+                        candidate[field] = DataFormatter.sanitize(value)
+            provenance = item.get("provenance")
+            if isinstance(provenance, Mapping):
+                for field in (
+                    "source_revision",
+                    "source_ref",
+                    "path",
+                ):
+                    if candidate.get(field) not in (None, "", [], {}):
+                        continue
+                    value = provenance.get(field)
+                    if value not in (None, "", [], {}):
+                        candidate[field] = DataFormatter.sanitize(value)
+                if include_host_identity:
+                    for field in (
+                        "execution_block_id",
+                        "block_id",
+                        "source_id",
+                        "binding_id",
+                    ):
+                        if candidate.get(field) not in (None, "", [], {}):
+                            continue
+                        value = provenance.get(field)
+                        if value not in (None, "", [], {}):
+                            candidate[field] = DataFormatter.sanitize(value)
             input_preview = item.get("input_preview")
             if input_preview not in (None, "", [], {}):
                 candidate["input_preview"] = cls._compact_verifier_prompt_value(input_preview, max_chars=600)
@@ -1969,12 +2009,14 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         *,
         max_items: int = 80,
         offered_reference_ids: set[str] | None = None,
+        include_host_identity: bool = False,
     ) -> dict[str, Any]:
         """Expose one host-issued identity per model-visible evidence item."""
         candidates = cls._evidence_binding_repair_candidate_refs(
             evidence_ledger,
             max_items=max_items,
             offered_reference_ids=offered_reference_ids,
+            include_host_identity=include_host_identity,
         )
         eligible_reference_ids: set[str] = set()
         for key in ("items", "overflow_item_refs"):

@@ -10,7 +10,7 @@ from agently.core import AgentTask, SkillLibrary
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
 from agently.core.application.AgentTask.BlockCarrier import scoped_retrieval_policy
 from agently.core.context import TaskContext
-from agently.types.data import ContextBlock, ContextPackage
+from agently.types.data import ContextBlock, ContextOmission, ContextPackage
 
 
 def _write_skill(root: Path) -> Path:
@@ -374,6 +374,39 @@ async def test_agent_task_skill_projection_uses_skill_domain_binding_and_mode(
     assert skill["binding_id"] == binding.binding_id
     assert skill["mode"] == "model_decision"
     assert projected["skill_projection"]["required_skill_ids"] == []
+
+
+def test_agent_task_context_projection_bounds_optional_omission_details() -> None:
+    omissions = tuple(
+        ContextOmission(
+            block_key=f"block:{index}",
+            source_ref=f"src/file_{index}.py",
+            reason="explicitly_skipped",
+        )
+        for index in range(120)
+    )
+    package = ContextPackage(
+        package_id="package:bounded-omissions",
+        task_context_id="task-context:bounded-omissions",
+        context_revision=1,
+        consumer_id="agent_task:test:control",
+        phase="card",
+        source_revisions={"binding:repo": "rev:1"},
+        source_coverage={},
+        blocks=(),
+        omissions=omissions,
+    )
+
+    projected = AgentTask._project_task_context_package(package)
+
+    assert len(projected["omitted"]) == 8
+    assert projected["omission_summary"] == {
+        "total": 120,
+        "required": 0,
+        "details_returned": 8,
+        "details_omitted": 112,
+        "reason_counts": {"explicitly_skipped": 120},
+    }
 
 
 @pytest.mark.asyncio

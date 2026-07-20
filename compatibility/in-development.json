@@ -131,7 +131,7 @@
       "reader": "ContextReader",
       "package": "ContextPackage",
       "derived_index_owner": "TaskContext internal ContextIndex",
-      "source_protocol": "ContextSource async_enumerate_descriptors plus async_read_exact; sources own canonical truth while TaskContext owns disposable derived partitions",
+      "source_protocol": "ContextSource async_enumerate_descriptors plus async_read_exact, with optional ContextSourceScopedRead for deterministic bounded location only after one canonical ref is selected; sources own canonical truth while TaskContext owns disposable derived partitions",
       "source_kinds": "open adapter vocabulary",
       "source_adapters": [
         "SkillContextSource",
@@ -139,7 +139,8 @@
         "RecordStoreContextSource",
         "AgentlyMemoryContextSource"
       ],
-      "selection_contract": "ContextIndex owns structural, lexical, and optional hybrid candidate retrieval; ContextReader owns consumer-local offsets, exact readback, budgets, and optional ModelRequest structured selection with host-issued keys. Required and explicit blocks cannot be silently dropped; unknown source kinds fail before enumeration."
+      "selection_contract": "ContextIndex owns structural, lexical, and optional hybrid candidate retrieval; ContextReader owns consumer-local offsets, exact or selected-ref scoped readback, budgets, and optional ModelRequest structured selection with host-issued keys. An exact non-wildcard path with one authorized candidate is host-selected without another semantic request. Required and explicit blocks cannot be silently dropped; unknown source kinds fail before enumeration.",
+      "model_hot_projection_contract": "ContextPackage retains full omission and diagnostic facts for audit. AgentTask joins every scoped body one-to-one against host-side execution-block, ContextBlock, source-revision, binding, and canonical-ref identity before disclosure; missing or ambiguous joins exclude the body with diagnostics. Model-hot projections expose one host-issued reference_id plus task-relevant source labels, omit opaque host identities, bound repetitive optional omission details with aggregate reason counts, and do not duplicate the same body in the evidence ledger. A scoped plan may reserve at most 64 model-visible results across query-group max_results; overflow is rejected before Blocks graph compilation rather than silently truncated."
     },
     "task_workspace": {
       "surface": [

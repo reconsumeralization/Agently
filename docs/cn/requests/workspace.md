@@ -21,6 +21,11 @@ Agently 把过去混在 Workspace 里的职责拆成四个所有者。
 内置 adapter 覆盖 SkillLibrary、TaskWorkspace、RecordStore 与 SessionMemory
 recall；应用也可以挂载自己的 source kind，例如经授权的固定仓库 adapter。
 
+source 还可以实现可选的 `ContextSourceScopedRead` protocol。ContextReader 只在
+canonical ref 已经选定并通过授权后使用它，在该 ref 内定位一个确定性的有界范围。
+这是 source mechanism，不是第二套 index 或语义相关性 owner；未实现时仍回退
+`async_read_exact(...)`。
+
 ## 文件边界：TaskWorkspace
 
 ```python
@@ -149,11 +154,16 @@ candidate 需要相关性判断时，使用 Agently `ModelRequest` semantic sele
 
 ContextIndex 把 source descriptor 枚举成以 revision/profile/provider 为 key 的
 partition，可使用 `structural`、`lexical` 或宿主配置的 `hybrid` 候选检索；精确 bytes
-仍由 source 的 `async_read_exact(...)` 返回。可复用 partition 可以避免重复构建未变化
+仍由 source 的 `async_read_exact(...)` 返回，或在 ref 选定后由可选的确定性 scoped-read
+端口返回。可复用 partition 可以避免重复构建未变化
 的 embedding；只有 policy 允许时 vector failure 才降级，并写入 package diagnostic。
 ContextReader 负责 consumer-local offset、去重、可选 ModelRequest selection、精确
 readback 与 package budget。返回 package 暴露逐 binding 的 `source_coverage` 与 index
 diagnostic，不暴露内部 cache key 或 provider vector。
+
+不可变 ContextPackage 保留完整 omission 与 diagnostic 事实用于审计。AgentTask 的
+model-hot view 会限制重复的可选 omission 明细并增加原因计数；required delivery 仍在
+该投影之前 fail closed。
 
 Context 交付会区分媒体类型。纯文本以及由来源解析出的文本可以进入 package；内置
 TaskWorkspace source 会先解析受支持的 PDF、DOCX、XLSX 与 PPTX 文件。若解析器或

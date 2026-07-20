@@ -683,6 +683,23 @@ def _compact_ledger_item(
     for field in ("owner", "locator", "content_version"):
         if str(item.get(field) or "").strip():
             compact[field] = str(item.get(field))
+    for field in (
+        "execution_block_id",
+        "block_id",
+        "source_id",
+        "source_ref",
+        "source_revision",
+        "binding_id",
+        "evidence_role",
+        "query",
+        "content_state",
+        "range_start",
+        "line_start",
+        "line_end",
+        "query_match",
+    ):
+        if item.get(field) not in (None, "", [], {}):
+            compact[field] = DataFormatter.sanitize(item.get(field))
     if item.get("total_bytes") is not None:
         compact["total_bytes"] = item.get("total_bytes")
     for field in ("range", "read_identity"):

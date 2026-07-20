@@ -24,6 +24,12 @@ adapters cover SkillLibrary, TaskWorkspace, RecordStore, and SessionMemory
 recall. Applications may attach their own source kind, such as an authorized
 pinned-repository adapter.
 
+A source may additionally implement the optional `ContextSourceScopedRead`
+protocol. ContextReader uses it only after the canonical ref has been selected
+and authorized, to locate a deterministic bounded range inside that ref. It is
+a source mechanism—not a second index or semantic relevance owner—and ordinary
+`async_read_exact(...)` remains the fallback.
+
 ## File boundary: TaskWorkspace
 
 ```python
@@ -163,12 +169,17 @@ reconstructed.
 ContextIndex enumerates source descriptors into revision/profile/provider-keyed
 partitions. It may use `structural`, `lexical`, or host-configured `hybrid`
 candidate retrieval, but exact bytes still come from the source's
-`async_read_exact(...)` port. Reusable partitions may avoid rebuilding
+`async_read_exact(...)` port or, after ref selection, its optional deterministic
+scoped-read port. Reusable partitions may avoid rebuilding
 unchanged embeddings; vector failure degrades only when policy allows it and is
 reported in package diagnostics. ContextReader owns consumer-local offsets,
 deduplication, optional ModelRequest selection, exact readback, and package
 budgets. The returned package exposes per-binding `source_coverage` and index
 diagnostics, never internal cache keys or provider vectors.
+
+The immutable ContextPackage retains complete omission and diagnostic facts for
+audit. Model-hot AgentTask views bound repetitive optional omission details and
+add reason counts; required delivery still fails closed before that projection.
 
 Context delivery is media-aware. Plain text and source-parsed text may enter a
 package; the built-in TaskWorkspace source parses supported PDF, DOCX, XLSX,

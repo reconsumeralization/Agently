@@ -21,6 +21,7 @@ from typing import Any, Literal, cast
 
 WorkUnitOrigin = Literal["flat_step", "taskboard_card"]
 CarrierControlFormat = Literal["json", "hybrid", "xml_field", "flat_markdown", "yaml_literal"]
+SCOPED_RETRIEVAL_RESULT_CAPACITY = 64
 
 
 def scoped_retrieval_policy(
@@ -59,6 +60,10 @@ def scoped_retrieval_policy(
             "max_results": 8,
             "snippet_limit": 1200,
             "file_context_lines": 3,
+        },
+        "result_capacity": {
+            "max_model_visible_results": SCOPED_RETRIEVAL_RESULT_CAPACITY,
+            "overflow_behavior": "reject_before_block_graph_compilation",
         },
     }
 

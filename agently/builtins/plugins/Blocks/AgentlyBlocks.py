@@ -984,7 +984,7 @@ def _ledger_items_from_context_read(
             if snippet.get("content") is not None
             else snippet.get("snippet", snippet.get("text"))
         )
-        body_state = "truncated" if snippet.get("truncated") is True else "bounded"
+        body_state = _ledger_body_state_from_ref(snippet)
         items.append(
             _ledger_item(
                 "evidence_snippet",
@@ -1206,6 +1206,10 @@ def _ledger_context_provenance(
         "source_ref",
         "binding_id",
         "path",
+        "range_start",
+        "line_start",
+        "line_end",
+        "query_match",
         "source_url",
         "selected_url",
         "requested_url",
@@ -1225,6 +1229,12 @@ def _ledger_context_provenance(
 def _ledger_ref_fields(ref: Mapping[str, Any], *, evidence_role: str, query: Any = None) -> dict[str, Any]:
     fields: dict[str, Any] = {"evidence_role": evidence_role}
     for key in (
+        "execution_block_id",
+        "block_id",
+        "source_id",
+        "source_revision",
+        "source_ref",
+        "binding_id",
         "path",
         "record_id",
         "collection",
@@ -1240,6 +1250,8 @@ def _ledger_ref_fields(ref: Mapping[str, Any], *, evidence_role: str, query: Any
         "line",
         "line_start",
         "line_end",
+        "range_start",
+        "query_match",
     ):
         if ref.get(key) not in (None, "", [], {}):
             fields[key] = ref.get(key)
@@ -1661,17 +1673,32 @@ async def _execute_context_read_block(
     for item in package_view.get("blocks", []):
         if not isinstance(item, Mapping):
             continue
+        item_metadata = item.get("metadata")
+        item_metadata = dict(item_metadata) if isinstance(item_metadata, Mapping) else {}
+        scoped_location = {
+            key: item_metadata.get(key)
+            for key in (
+                "path",
+                "range_start",
+                "line_start",
+                "line_end",
+                "query_match",
+            )
+            if item_metadata.get(key) not in (None, "", [], {})
+        }
         locator_refs.append(
             {
                 "role": "locator_ref",
                 "content_state": "bounded_readback_available",
                 "source": "blocks.context_read",
+                "execution_block_id": block.id,
                 "block_id": item.get("block_id"),
                 "source_id": item.get("source_id"),
                 "source_revision": item.get("source_revision"),
                 "source_ref": item.get("source_ref"),
                 "binding_id": item.get("binding_id"),
                 "refs": list(item.get("refs") or ()),
+                **scoped_location,
             }
         )
         evidence_snippets.append(
@@ -1679,10 +1706,16 @@ async def _execute_context_read_block(
                 "role": "evidence_snippet",
                 "content_state": item.get("completeness"),
                 "source": "blocks.context_read",
+                "execution_block_id": block.id,
+                "block_id": item.get("block_id"),
+                "source_id": item.get("source_id"),
+                "source_revision": item.get("source_revision"),
                 "source_ref": item.get("source_ref"),
+                "binding_id": item.get("binding_id"),
                 "content": item.get("content"),
                 "chars": item.get("content_chars"),
                 "refs": list(item.get("refs") or ()),
+                **scoped_location,
             }
         )
     return {

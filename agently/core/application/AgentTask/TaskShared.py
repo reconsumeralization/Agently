@@ -58,6 +58,7 @@ from agently.utils.LanguagePolicy import (
 
 from .BlockCarrier import (
     CarrierOutputPolicy,
+    SCOPED_RETRIEVAL_RESULT_CAPACITY,
     WorkUnitIntent,
     WorkUnitResult,
     scoped_retrieval_policy,
@@ -1057,6 +1058,7 @@ __all__ = [
     "AgentTaskStatus",
     "BaseAgent",
     "CarrierOutputPolicy",
+    "SCOPED_RETRIEVAL_RESULT_CAPACITY",
     "DataFormatter",
     "FunctionShifter",
     "ReplanSignal",

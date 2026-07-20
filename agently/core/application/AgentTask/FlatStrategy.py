@@ -1186,14 +1186,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     expanded = dict(template)
                     expanded["query"] = content_query
                     query_groups.append(expanded)
-                    if len(query_groups) >= 8:
-                        break
-                if len(query_groups) >= 8:
-                    break
                 continue
             query_groups.append(candidate)
-            if len(query_groups) >= 8:
-                break
         if not query_groups:
             return {}
         raw_fallback_order = raw.get("fallback_order") or raw.get("fallbacks")
@@ -1238,7 +1232,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             text = str(value or "").strip()
             if text and text not in queries:
                 queries.append(text)
-        return queries[:8]
+        return queries
 
     def _normalize_step_deliverable_mode(self, plan: dict[str, Any]) -> None:
         raw_mode = str(plan.get("deliverable_mode") or "").strip().lower().replace("-", "_")

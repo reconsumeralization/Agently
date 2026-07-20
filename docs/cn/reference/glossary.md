@@ -40,11 +40,17 @@ provider 不拥有源码准备或 TaskWorkspace policy。详见
 `ContextPackage` 构造；consumer-local offset 是私有状态，没有脱离 TaskContext 的
 独立生命周期。它不修改 source、不安装 Skill、不执行 Action，也不决定任务完成。
 
+选定一个 canonical ref 后，它可以使用可选的 `ContextSourceScopedRead` mechanism，
+在该 ref 内做确定性有界定位。该 mechanism 不拥有语义相关性；未实现时回退 source 的
+普通 exact-read 端口。
+
 ## ContextPackage
 
 `ContextReader` 针对精确 intent、consumer、phase 和 TaskContext snapshot 生成的
 不可变交付值。它包含有界 blocks、diagnostics、披露事实与逐 binding source
 coverage，但不包含 source cursor。它不是 canonical task state，也不拥有 source。
+即使应用只把有界 omission 摘要投影进 model-hot request，完整 omission 事实仍保留在
+这个值中。
 
 ## ContextIndex
 

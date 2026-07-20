@@ -113,6 +113,34 @@ class MemoryContextSource:
         )
 
 
+class ScopedMemoryContextSource(MemoryContextSource):
+    def __init__(
+        self,
+        candidates: Sequence[ContextCandidate],
+        blocks: Mapping[str, ContextBlock],
+    ) -> None:
+        super().__init__(candidates, blocks)
+        self.scoped_queries: list[str] = []
+
+    async def async_read_scoped(
+        self,
+        source_ref: str,
+        *,
+        query: str,
+        max_chars: int,
+        representation: str | None = None,
+        range_start: int = 0,
+    ) -> ContextSourceRead:
+        self.scoped_queries.append(query)
+        result = await self.async_read_exact(
+            source_ref,
+            max_chars=max_chars,
+            representation=representation,
+            range_start=range_start,
+        )
+        return replace(result, metadata={**dict(result.metadata), "query": query})
+
+
 class SelfRevisingListSource(MemoryContextSource):
     async def async_enumerate_descriptors(
         self,
@@ -270,6 +298,57 @@ async def test_read_intent_can_bound_candidates_and_exact_read_chars() -> None:
     assert len(package.blocks) == 2
     assert all(block.content_chars == 12 for block in package.blocks)
     assert all(block.completeness == "truncated" for block in package.blocks)
+
+
+@pytest.mark.asyncio
+async def test_single_optional_candidate_does_not_spend_semantic_selector() -> None:
+    candidate = _candidate("docs/only.md")
+    source = MemoryContextSource(
+        [candidate],
+        {candidate.source_ref: _source_block(candidate.source_ref, content="only source")},
+    )
+    selector = RecordingSelector("all")
+    context = TaskContext("single-candidate-selection")
+    context.attach(source)
+
+    package = await context.reader(
+        consumer="worker",
+        semantic_selector=selector,
+    ).async_read(
+        ContextReadIntent(
+            "Read the exactly scoped source",
+            filters={"path": "docs/only.md"},
+        )
+    )
+
+    assert [block.source_ref for block in package.blocks] == ["docs/only.md"]
+    assert selector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_scoped_source_can_disclose_different_ranges_of_the_same_ref() -> None:
+    candidate = _candidate("src/router.py")
+    source = ScopedMemoryContextSource(
+        [candidate],
+        {
+            candidate.source_ref: _source_block(
+                candidate.source_ref,
+                content="class RankAllocator:\n    pass\nclass RouterCalibration:\n    pass\n",
+            )
+        },
+    )
+    context = TaskContext("scoped-same-ref")
+    context.attach(source)
+    reader = context.reader(consumer="worker")
+
+    first = await reader.async_read("class RankAllocator")
+    second = await reader.async_read("class RouterCalibration")
+    repeated = await reader.async_read("class RouterCalibration")
+
+    assert [block.source_ref for block in first.blocks] == ["src/router.py"]
+    assert [block.source_ref for block in second.blocks] == ["src/router.py"]
+    assert repeated.blocks == ()
+    assert source.scoped_queries == ["class RankAllocator", "class RouterCalibration"]
 
 
 @pytest.mark.asyncio

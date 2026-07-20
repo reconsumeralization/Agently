@@ -37,6 +37,7 @@ from agently.types.data import (
     TaskContextEntrySnapshot,
     TaskContextSnapshot,
 )
+from agently.types.plugins.ContextSource import ContextSourceScopedRead
 
 from .Selection import ContextSelection, ContextSemanticSelector
 from ._Index import (
@@ -237,7 +238,7 @@ class ContextReader:
         self.budget = budget
         self.semantic_selector = semantic_selector
         self._snapshot: TaskContextSnapshot = task_context.snapshot()
-        self._disclosed: set[tuple[str, str, str, str]] = set()
+        self._disclosed: set[tuple[str, str, str, str, str]] = set()
         self._packages: list[ContextPackage] = []
         self._continuations: dict[
             tuple[str, str, str], _ContinuationState
@@ -362,7 +363,7 @@ class ContextReader:
         )
         if consumer_id != self.consumer.consumer_id or str(state.get("phase") or "") != self.phase:
             raise ValueError("ContextReader state belongs to a different consumer or phase.")
-        disclosed: set[tuple[str, str, str, str]] = set()
+        disclosed: set[tuple[str, str, str, str, str]] = set()
         raw_disclosed = state.get("disclosed")
         if isinstance(raw_disclosed, Sequence) and not isinstance(
             raw_disclosed,
@@ -375,9 +376,11 @@ class ContextReader:
                 ):
                     raise ValueError("ContextReader disclosed identities must be sequences.")
                 identity = tuple(str(item) for item in raw_identity)
-                if len(identity) != 4 or any(not item for item in identity):
-                    raise ValueError("ContextReader disclosed identities require four non-empty fields.")
-                disclosed.add((identity[0], identity[1], identity[2], identity[3]))
+                if len(identity) != 5 or any(not item for item in identity):
+                    raise ValueError("ContextReader disclosed identities require five non-empty fields.")
+                disclosed.add(
+                    (identity[0], identity[1], identity[2], identity[3], identity[4])
+                )
         self._disclosed = disclosed
         continuations: dict[tuple[str, str, str], _ContinuationState] = {}
         raw_continuations = state.get("continuations")
@@ -843,14 +846,44 @@ class ContextReader:
             )
         return collected, diagnostics, source_coverage, pending_continuations
 
-    @staticmethod
-    def _identity(candidate: ContextCandidate) -> tuple[str, str, str, str]:
+    def _disclosure_identity(
+        self,
+        candidate: ContextCandidate,
+        intent: ContextReadIntent,
+    ) -> tuple[str, str, str, str, str]:
+        scope = "canonical_source"
+        try:
+            source = self.task_context._binding_source(candidate.binding_id)
+        except KeyError:
+            # Direct TaskContext entries use their entry id as the disclosure
+            # binding identity and have no attached ContextSource mechanism.
+            source = None
+        if intent.query.strip() and isinstance(source, ContextSourceScopedRead):
+            # A source-local scoped read may disclose multiple bounded ranges of
+            # the same canonical ref.  The ref remains the trusted identity;
+            # the intent fingerprint only scopes this reader's dedupe history.
+            scope = f"scoped_intent:{_intent_fingerprint(intent)}"
         return (
             candidate.binding_id,
             candidate.source_revision,
             candidate.source_ref,
             candidate.role,
+            scope,
         )
+
+    @staticmethod
+    def _single_candidate_is_exactly_scoped(
+        intent: ContextReadIntent,
+        candidate: ContextCandidate,
+    ) -> bool:
+        raw_path = intent.filters.get("path")
+        if not isinstance(raw_path, str):
+            return False
+        path = raw_path.strip()
+        if not path or any(character in path for character in "*?["):
+            return False
+        candidate_path = str(candidate.metadata.get("path") or candidate.source_ref).strip()
+        return path == candidate_path or path == candidate.source_ref
 
     async def _select_optional(
         self,
@@ -866,8 +899,19 @@ class ContextReader:
             return (), [], "explicitly_skipped"
         if available_chars <= 0 or available_blocks <= 0:
             return (), [], "selection_budget_exhausted"
-        if len(candidates) == 1 and self.semantic_selector is None:
-            return (candidates[0].offered.block_key,), [], None
+        # One bounded candidate has no inter-candidate choice to rank.  When a
+        # semantic selector is configured, an unscoped candidate still goes
+        # through it; without one, reading the only candidate merely discloses
+        # evidence and does not declare semantic usefulness or acceptance.
+        # An exact structural path has no semantic choice even when a selector
+        # is configured.
+        if len(candidates) == 1:
+            exactly_scoped = self._single_candidate_is_exactly_scoped(
+                intent,
+                candidates[0].offered,
+            )
+            if self.semantic_selector is None or exactly_scoped:
+                return (candidates[0].offered.block_key,), [], None
         if self.semantic_selector is None:
             return (
                 (),
@@ -960,6 +1004,7 @@ class ContextReader:
         *,
         max_chars: int,
         representation: str | None = None,
+        query: str = "",
     ) -> ContextBlock:
         candidate = item.offered
         if item.direct_entry is not None:
@@ -1007,12 +1052,21 @@ class ContextReader:
         if item.source_descriptor is None:
             raise RuntimeError("Collected Context candidate has no readable source.")
         source = self.task_context._binding_source(candidate.binding_id)
-        raw = await source.async_read_exact(
-            candidate.source_ref,
-            max_chars=max_chars,
-            representation=representation,
-            range_start=0,
-        )
+        if query and isinstance(source, ContextSourceScopedRead):
+            raw = await source.async_read_scoped(
+                candidate.source_ref,
+                query=query,
+                max_chars=max_chars,
+                representation=representation,
+                range_start=0,
+            )
+        else:
+            raw = await source.async_read_exact(
+                candidate.source_ref,
+                max_chars=max_chars,
+                representation=representation,
+                range_start=0,
+            )
         if not isinstance(raw, ContextSourceRead):
             raise TypeError("ContextSource.async_read_exact must return ContextSourceRead.")
         if (
@@ -1131,7 +1185,7 @@ class ContextReader:
                         metadata=descriptor_metadata,
                     )
                 )
-                self._disclosed.add(self._identity(candidate))
+                self._disclosed.add(self._disclosure_identity(candidate, intent))
                 if representation == "metadata_only":
                     diagnostics.append(
                         ContextDiagnostic(
@@ -1161,6 +1215,7 @@ class ContextReader:
                         item,
                         max_chars=1,
                         representation="image_attachment",
+                        query=intent.query,
                     )
                 except ContextStaleError:
                     raise
@@ -1194,7 +1249,7 @@ class ContextReader:
                     )
                     continue
                 blocks.append(block)
-                self._disclosed.add(self._identity(candidate))
+                self._disclosed.add(self._disclosure_identity(candidate, intent))
                 diagnostics.append(
                     ContextDiagnostic(
                         code="context.image_attachment_delivered",
@@ -1270,6 +1325,7 @@ class ContextReader:
                             item,
                             max_chars=read_limit,
                             representation="lossy_digest",
+                            query=intent.query,
                         )
                     except ContextStaleError:
                         raise
@@ -1294,7 +1350,9 @@ class ContextReader:
                         ):
                             blocks.append(block)
                             remaining_chars -= block.content_chars
-                            self._disclosed.add(self._identity(candidate))
+                            self._disclosed.add(
+                                self._disclosure_identity(candidate, intent)
+                            )
                             diagnostics.append(
                                 ContextDiagnostic(
                                     code="context.required_content_lossy",
@@ -1352,6 +1410,7 @@ class ContextReader:
                     representation=(
                         "parsed_text" if representation == "parsed_text" else None
                     ),
+                    query=intent.query,
                 )
             except ContextStaleError:
                 raise
@@ -1418,7 +1477,7 @@ class ContextReader:
                 continue
             blocks.append(block)
             remaining_chars -= block.content_chars
-            self._disclosed.add(self._identity(candidate))
+            self._disclosed.add(self._disclosure_identity(candidate, intent))
         return remaining_chars
 
     async def async_read(self, intent: str | ContextReadIntent) -> ContextPackage:
@@ -1456,7 +1515,8 @@ class ContextReader:
             if (
                 not candidate.required
                 and not is_explicit
-                and self._identity(candidate) in self._disclosed
+                and self._disclosure_identity(candidate, resolved_intent)
+                in self._disclosed
             ):
                 omissions.append(
                     ContextOmission(

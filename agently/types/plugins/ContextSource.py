@@ -53,6 +53,26 @@ class ContextSource(Protocol):
 
 
 @runtime_checkable
+class ContextSourceScopedRead(Protocol):
+    """Optional bounded-range lookup inside one selected canonical source ref.
+
+    ContextIndex and ContextReader still own candidate selection and packaging.
+    This capability only locates one literal query inside an already authorized
+    ref; it does not own semantic relevance or acceptance judgment.
+    """
+
+    async def async_read_scoped(
+        self,
+        source_ref: str,
+        *,
+        query: str,
+        max_chars: int,
+        representation: str | None = None,
+        range_start: int = 0,
+    ) -> ContextSourceRead: ...
+
+
+@runtime_checkable
 class ContextSourceChangeFeed(Protocol):
     """Optional trustworthy descriptor-delta capability."""
 
@@ -65,4 +85,8 @@ class ContextSourceChangeFeed(Protocol):
     ) -> ContextSourceChangeSet: ...
 
 
-__all__ = ["ContextSource", "ContextSourceChangeFeed"]
+__all__ = [
+    "ContextSource",
+    "ContextSourceChangeFeed",
+    "ContextSourceScopedRead",
+]

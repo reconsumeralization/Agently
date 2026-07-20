@@ -63,6 +63,29 @@ selection, reads canonical source content, and applies disclosure budgets. The
 model receives only the resulting blocks, refs, omissions, coverage, and
 diagnostics—not an entire source tree or internal vectors.
 
+After one canonical ref is structurally selected, a source may optionally
+support deterministic bounded location inside that ref. This source-scoped read
+does not choose relevance or accept evidence; `ContextReader` still owns the
+read session and falls back to the ordinary bounded exact read when the optional
+port is absent. An exact non-wildcard path that leaves one authorized candidate
+does not need another model request merely to select that same candidate.
+
+The complete `ContextPackage` remains available for audit. AgentTask model-hot
+projections bound repetitive optional-omission details and carry aggregate
+reason counts, so an unselected source catalog does not become prompt content.
+When scoped evidence snippets are already present, each snippet carries one
+host-issued `reference_id`; repeated locator/body copies stay out of the hot
+prompt while canonical provenance remains host-side. The host joins each body
+one-to-one with its execution block, ContextBlock, source revision, binding,
+and canonical ref before disclosure. A missing or ambiguous join excludes the
+body and emits a diagnostic. Opaque execution/block/binding identities remain
+host-side; the model selects only `reference_id` plus relevant source labels.
+
+A scoped-retrieval plan may reserve at most 64 model-visible results across its
+query groups (the sum of each `max_results`). Overflow is rejected before the
+Blocks graph is compiled; it is never silently truncated. Split larger reads
+into consumer-owned continuation batches.
+
 Embedding usage and model prompt usage are separate facts. A cache hit or
 smaller ContextPackage can explain an efficiency change, but only complete
 provider-observed prompt-token usage from comparable requests proves a model

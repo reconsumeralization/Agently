@@ -291,6 +291,19 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
                         "source_ref": block.source_ref,
                     }
                 )
+        omission_records = [item.to_dict() for item in package.omissions]
+        reason_counts: dict[str, int] = {}
+        for item in omission_records:
+            reason = str(item.get("reason") or "unspecified")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        omission_details = sorted(
+            enumerate(omission_records),
+            key=lambda pair: (
+                not bool(pair[1].get("required")),
+                pair[0],
+            ),
+        )[:8]
+        projected_omissions = [item for _index, item in omission_details]
         return {
             "schema_version": "agently.context_package.agent_task.v2",
             "package_id": package.package_id,
@@ -298,7 +311,19 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
             "context_revision": package.context_revision,
             "profile": "task_context",
             "items": items,
-            "omitted": [item.to_dict() for item in package.omissions],
+            # ContextPackage retains the complete audit record.  Model-hot
+            # projections carry bounded details plus counts so a large source
+            # catalog cannot consume the request merely by being unselected.
+            "omitted": projected_omissions,
+            "omission_summary": {
+                "total": len(omission_records),
+                "required": sum(
+                    bool(item.get("required")) for item in omission_records
+                ),
+                "details_returned": len(projected_omissions),
+                "details_omitted": len(omission_records) - len(projected_omissions),
+                "reason_counts": reason_counts,
+            },
             "diagnostics": [item.to_dict() for item in package.diagnostics],
             "used_chars": package.used_chars,
             "source_coverage": source_coverage,

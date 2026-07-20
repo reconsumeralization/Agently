@@ -43,12 +43,19 @@ consumer-local offsets are private; it has no lifecycle independent from
 TaskContext. It does not mutate sources, install Skills, execute Actions, or
 decide task completion.
 
+After selecting one canonical ref, it may use an optional
+`ContextSourceScopedRead` mechanism for deterministic bounded location inside
+that ref. The mechanism does not own semantic relevance and falls back to the
+source's ordinary exact-read port when absent.
+
 ## ContextPackage
 
 The immutable delivery value produced by a `ContextReader` for one exact
 intent, consumer, phase, and TaskContext snapshot. It contains bounded blocks,
 diagnostics, disclosure facts, and per-binding source coverage, but never a
-source cursor. It is not canonical task state and does not own sources.
+source cursor. It is not canonical task state and does not own sources. Full
+omission facts remain in this value even when an application projects only a
+bounded omission summary into a model-hot request.
 
 ## ContextIndex
 
