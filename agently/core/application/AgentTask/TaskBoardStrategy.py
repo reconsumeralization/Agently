@@ -242,6 +242,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 f"across three executions: {card.id}."
             )
             terminal_result = {
+                "terminal": True,
                 "status": "blocked",
                 "accepted": False,
                 "artifact_status": "partial",

@@ -2719,6 +2719,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
 
                 async def run_handler(
                     handler_func,
+                    handler_data: TriggerFlowRuntimeData[Any, Any, Any],
                     *,
                     handler_id: str,
                     bound_operator: dict[str, Any] | None,
@@ -2752,7 +2753,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                                 ),
                                 chunk_run_context=bound_chunk_run_context,
                             ):
-                                return await handler_func
+                                return await handler_func(handler_data)
                         except BaseException as error:
                             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                                 raise
@@ -2815,22 +2816,22 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                         self._active_handler_count -= 1
                         self._mark_activity()
 
-                handler_task = FunctionShifter.asyncify(handler)(
-                    TriggerFlowRuntimeData(
-                        trigger_event=signal.trigger_event,
-                        trigger_type=signal.trigger_type,
-                        value=signal.value,
-                        execution=self,
-                        _layer_marks=signal.layer_marks.copy(),
-                        signal=signal,
-                        chunk_run_context=chunk_run_context,
-                    )
+                handler_func = FunctionShifter.asyncify(handler)
+                handler_data = TriggerFlowRuntimeData(
+                    trigger_event=signal.trigger_event,
+                    trigger_type=signal.trigger_type,
+                    value=signal.value,
+                    execution=self,
+                    _layer_marks=signal.layer_marks.copy(),
+                    signal=signal,
+                    chunk_run_context=chunk_run_context,
                 )
                 tasks.append(
                     self._track_task(
                         asyncio.ensure_future(
                             run_handler(
-                                handler_task,
+                                handler_func,
+                                handler_data,
                                 handler_id=handler_id,
                                 bound_operator=operator,
                                 bound_chunk_run_context=chunk_run_context,

@@ -2418,6 +2418,7 @@ def test_taskboard_required_card_setback_stops_on_third_cross_tick_occurrence(tm
     assert first is None
     assert second is None
     assert third is not None
+    assert third["terminal"] is True
     assert third["status"] == "blocked"
     assert third["accepted"] is False
     assert third["artifact_status"] == "partial"
@@ -2431,6 +2432,100 @@ def test_taskboard_required_card_setback_stops_on_third_cross_tick_occurrence(tm
     assert task.status == "blocked"
     assert task.result == third
     assert task.diagnostics["terminal_convergence"]["records"]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_card_terminal_convergence_closes_outer_agent_task_lifecycle(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-convergence-outer-lifecycle").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-convergence-outer-lifecycle",
+        goal="Produce the required evidence.",
+        success_criteria=["The required evidence is present."],
+        execution="taskboard",
+        max_iterations=None,
+    )
+    graph = TaskBoardGraph.from_value(
+        {
+            "graph_id": "taskboard-convergence-outer-lifecycle-graph",
+            "cards": [
+                {
+                    "id": "final-verification-repair",
+                    "objective": "Repair the final evidence gap.",
+                    "failure_policy": "required",
+                    "allowed_execution_shape": "auto",
+                    "metadata": {
+                        "generated_by": "agent_task.taskboard.final_verification_repair",
+                    },
+                }
+            ],
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=graph,
+    ).next_revision(
+        graph,
+        card_results={
+            "final-verification-repair": TaskBoardCardResult(
+                card_id="final-verification-repair",
+                status="setback",
+                preview={
+                    "next_board_action": "continue",
+                    "gaps": ["Evidence is still unavailable."],
+                },
+            )
+        },
+    )
+    plan_calls = 0
+
+    async def pass_stage(frame):
+        return frame
+
+    async def plan_stage(frame):
+        nonlocal plan_calls
+        plan_calls += 1
+        if plan_calls > 1:
+            raise AssertionError(
+                "Outer AgentTask lifecycle replanned after terminal card convergence."
+            )
+        return frame
+
+    async def execute_stage(frame):
+        terminal = None
+        for _ in range(3):
+            terminal = task._taskboard_card_convergence_result(
+                revision,
+                executed_card_ids=("final-verification-repair",),
+            )
+        assert terminal is not None
+        frame["iteration_result"] = terminal
+        return frame
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task, "_taskboard_context_prepare_stage", pass_stage)
+    monkeypatch.setattr(task, "_taskboard_work_plan_stage", plan_stage)
+    monkeypatch.setattr(task, "_taskboard_work_execute_stage", execute_stage)
+    monkeypatch.setattr(task, "_taskboard_outputs_materialize_stage", pass_stage)
+    monkeypatch.setattr(task, "_taskboard_evidence_ingest_stage", pass_stage)
+    monkeypatch.setattr(task, "_taskboard_terminal_verify_stage", pass_stage)
+    monkeypatch.setattr(task, "_record_phase", noop)
+    monkeypatch.setattr(task, "_emit", noop)
+    monkeypatch.setattr(task, "_ensure_final_reflection", noop)
+
+    result = await task.async_run()
+
+    assert plan_calls == 1
+    assert result["terminal"] is True
+    assert result["status"] == "blocked"
+    assert result["terminal_convergence"]["stopped_after_third_occurrence"] is True
 
 
 def test_taskboard_tick_executed_card_ids_falls_back_when_failed_tick_collected_nothing():

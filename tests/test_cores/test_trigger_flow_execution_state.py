@@ -9,6 +9,7 @@ from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.types.data import RunContext
 from agently.types.data.event import normalize_triggerflow_event_type
 from agently.types.trigger_flow import AGGREGATION_SCOPE_META_KEY
+from agently.utils import FunctionShifter
 
 
 def test_trigger_flow_sync_start_returns_close_snapshot():
@@ -237,6 +238,56 @@ async def test_trigger_flow_signal_net_nested_emit_respects_concurrency_cap():
     assert snapshot["$final_result"] == {"results": [10, 20, 30]}
     assert max_active_count == 1
     assert {"dynamic.root", "dynamic.child"}.issubset(completed_events)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_defers_handler_awaitable_creation_until_concurrency_permit(
+    monkeypatch,
+):
+    flow = TriggerFlow(name="deferred-handler-awaitable")
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+    handler_awaitables_created = 0
+
+    async def prepare(data: TriggerFlowRuntimeData):
+        await data.async_emit_nowait("dynamic.item", {"item": 1})
+        await data.async_emit_nowait("dynamic.item", {"item": 2})
+
+    async def dynamic_handler(_data: TriggerFlowRuntimeData):
+        handler_started.set()
+        await release_handler.wait()
+
+    original_asyncify = FunctionShifter.asyncify
+
+    def tracking_asyncify(func):
+        async_func = original_asyncify(func)
+        if func is not dynamic_handler:
+            return async_func
+
+        def create_awaitable(*args, **kwargs):
+            nonlocal handler_awaitables_created
+            handler_awaitables_created += 1
+            return async_func(*args, **kwargs)
+
+        return create_awaitable
+
+    monkeypatch.setattr(FunctionShifter, "asyncify", staticmethod(tracking_asyncify))
+    flow.to(prepare)
+    execution = flow.create_execution(auto_close=False, concurrency=1)
+    execution.on(
+        "dynamic.item",
+        dynamic_handler,
+        binding_id="test.deferred_handler_awaitable",
+    )
+
+    await execution.async_start(None)
+    await asyncio.wait_for(handler_started.wait(), timeout=1)
+    await asyncio.sleep(0.01)
+    try:
+        assert handler_awaitables_created == 1
+    finally:
+        release_handler.set()
+        await execution.async_close(timeout=1)
 
 
 def test_trigger_flow_signal_net_rejects_anonymous_durable_handler():
