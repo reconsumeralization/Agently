@@ -64,7 +64,9 @@ reuses revision/profile/embedding-provider-keyed descriptor partitions and
 supports structural, lexical, or optional hybrid candidate retrieval. It is
 not independently constructed, exported as a public manager, or treated as
 source truth; canonical content still comes from each ContextSource exact-read
-port.
+port. Applications configure its mechanism through
+`TaskContext.configure_index(...)`; hybrid ranking only narrows the candidate
+window, while ContextReader/ModelRequest retains semantic selection.
 
 ## ensure (third tuple slot)
 

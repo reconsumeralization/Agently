@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from agently.core.context import TaskContext
+from agently.core.context import ContextSelection, TaskContext
 from agently.types.data import (
     ContextBudget,
     ContextReadIntent,
@@ -131,6 +131,16 @@ class FailingEmbeddingProvider:
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         del texts
         raise RuntimeError("embedding unavailable")
+
+
+class RecordingSelector:
+    def __init__(self) -> None:
+        self.candidate_counts: list[int] = []
+
+    async def async_select(self, *, candidates, **kwargs) -> ContextSelection:
+        del kwargs
+        self.candidate_counts.append(len(candidates))
+        return ContextSelection(selected_keys=())
 
 
 class ChangingDescriptorSource(CountingDescriptorSource):
@@ -369,11 +379,11 @@ async def test_warm_hybrid_reuses_partition_embeddings_and_counts_query_separate
     source = CountingDescriptorSource([descriptor("alpha"), descriptor("beta")])
     first = TaskContext("hybrid-cold")
     second = TaskContext("hybrid-warm")
-    first._configure_index_mechanisms(
+    first.configure_index(
         embedding_provider=embedder,
         strategy="hybrid",
     )
-    second._configure_index_mechanisms(
+    second.configure_index(
         embedding_provider=embedder,
         strategy="hybrid",
     )
@@ -396,10 +406,81 @@ async def test_warm_hybrid_reuses_partition_embeddings_and_counts_query_separate
 
 
 @pytest.mark.asyncio
+async def test_hybrid_index_bounds_semantic_candidate_disclosure_to_reader_capacity() -> None:
+    embedder = CountingEmbeddingProvider()
+    selector = RecordingSelector()
+    source = CountingDescriptorSource(
+        [descriptor(f"alpha-{index:02d}") for index in range(40)]
+    )
+    context = TaskContext("hybrid-candidate-window")
+    context.configure_index(
+        embedding_provider=embedder,
+        strategy="hybrid",
+    )
+    context.attach(source)
+
+    await context.reader(
+        consumer="worker",
+        budget=ContextBudget(
+            max_chars=20_000,
+            max_blocks=4,
+            max_block_chars=5_000,
+        ),
+        semantic_selector=selector,
+    ).async_read("alpha")
+
+    assert selector.candidate_counts == [4]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_index_skips_query_embedding_when_filters_leave_one_candidate() -> None:
+    embedder = CountingEmbeddingProvider()
+    source = CountingDescriptorSource([descriptor("src/only.py")])
+    context = TaskContext("hybrid-single-candidate")
+    context.configure_index(
+        embedding_provider=embedder,
+        strategy="hybrid",
+    )
+    context.attach(source)
+
+    package = await context.reader(consumer="worker").async_read(
+        ContextReadIntent("exact symbol", filters={"path": "src/only.py"})
+    )
+    facts = _index_diagnostic(package)
+
+    assert facts["effective_strategy"] == "hybrid"
+    assert facts["embedding_build_texts"] == 1
+    assert facts["embedding_query_texts"] == 0
+    assert embedder.embedded_texts == 1
+
+
+@pytest.mark.asyncio
+async def test_structural_index_preserves_wider_semantic_candidate_window() -> None:
+    selector = RecordingSelector()
+    source = CountingDescriptorSource(
+        [descriptor(f"item-{index:02d}") for index in range(40)]
+    )
+    context = TaskContext("structural-candidate-window")
+    context.attach(source)
+
+    await context.reader(
+        consumer="worker",
+        budget=ContextBudget(
+            max_chars=20_000,
+            max_blocks=4,
+            max_block_chars=5_000,
+        ),
+        semantic_selector=selector,
+    ).async_read("inspect candidates")
+
+    assert selector.candidate_counts == [16]
+
+
+@pytest.mark.asyncio
 async def test_optional_vector_failure_degrades_and_required_vector_fails_closed() -> None:
     optional_source = CountingDescriptorSource([descriptor("alpha")])
     optional = TaskContext("optional-vector")
-    optional._configure_index_mechanisms(
+    optional.configure_index(
         embedding_provider=FailingEmbeddingProvider(),
         strategy="hybrid",
     )
@@ -410,7 +491,7 @@ async def test_optional_vector_failure_degrades_and_required_vector_fails_closed
 
     required_source = CountingDescriptorSource([descriptor("required-alpha")])
     required = TaskContext("required-vector")
-    required._configure_index_mechanisms(
+    required.configure_index(
         embedding_provider=FailingEmbeddingProvider(),
         strategy="hybrid",
     )
@@ -426,7 +507,7 @@ async def test_trustworthy_delta_reembeds_only_changed_descriptors() -> None:
     embedder = CountingEmbeddingProvider()
     source = ChangingDescriptorSource()
     first = TaskContext("delta-first")
-    first._configure_index_mechanisms(
+    first.configure_index(
         embedding_provider=embedder,
         strategy="hybrid",
     )
@@ -436,7 +517,7 @@ async def test_trustworthy_delta_reembeds_only_changed_descriptors() -> None:
 
     source.advance()
     second = TaskContext("delta-second")
-    second._configure_index_mechanisms(
+    second.configure_index(
         embedding_provider=embedder,
         strategy="hybrid",
     )
@@ -455,7 +536,7 @@ async def test_change_feed_failure_records_explicit_full_rebuild_fallback() -> N
     embedder = CountingEmbeddingProvider()
     source = FailingChangeFeedSource()
     first = TaskContext("delta-fallback-first")
-    first._configure_index_mechanisms(
+    first.configure_index(
         embedding_provider=embedder,
         strategy="hybrid",
     )
@@ -464,7 +545,7 @@ async def test_change_feed_failure_records_explicit_full_rebuild_fallback() -> N
 
     source.advance()
     second = TaskContext("delta-fallback-second")
-    second._configure_index_mechanisms(
+    second.configure_index(
         embedding_provider=embedder,
         strategy="hybrid",
     )

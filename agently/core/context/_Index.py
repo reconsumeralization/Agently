@@ -630,6 +630,12 @@ class _ContextIndex:
                 )
             )
             return ranked, "lexical", 0, 0, 0, partition.vector_error
+        if len(descriptors) == 1:
+            # Authorization and structural filters already reduced the scope
+            # to one canonical descriptor. Once the configured hybrid
+            # partition is known to be available, there is no remaining order
+            # to improve and no reason to spend a query embedding.
+            return descriptors, "hybrid", 0, 0, 0, None
         query_chars = len(intent.query)
         try:
             raw_query_vectors = await self.embedding_provider.embed_texts([intent.query])

@@ -689,9 +689,10 @@ relying on a buried JSON preview. When a non-final
 TaskBoard card proposes a required final path such as `final.md`, AgentTask
 relocates that intermediate artifact to `working/taskboard/<card-id>/...` and
 keeps the declared final path for the final synthesis or finalization card.
-Framework-generated final repair or continuation cards that are marked with the
-required final deliverable path are authorized to write that path, so repair
-does not loop by repeatedly producing only working evidence files.
+Framework-generated final repair cards stage the declared deliverable under a
+card-scoped terminal-candidate path. They do not overwrite the root path during
+repair. Only a successful terminal verifier can atomically promote the staged
+bytes to the declared root path and trigger complete root readback.
 Flat source refs carry the same boundary: repository clone/list manifest paths
 are `ref_only` until a file read, artifact readback, or bounded content preview
 is visible. A verifier or repair planner can reuse exact paths as retrieval
@@ -708,6 +709,16 @@ the intended business date or source timestamp explicitly when it matters. The
 contract is context for model decisions, planning, evidence selection, and
 source-boundary handling; it must not be used as a business fact by itself and
 does not set model-call, tool-call, node-count, iteration, or wall-clock caps.
+
+When a model-authored TaskBoard card contains an otherwise valid scoped
+TaskContext retrieval plan whose reserved `max_results` total exceeds 64, the
+host preserves its Context source kinds and splits it into bounded retrieval
+cards plus one dependent continuation. It does not silently truncate the plan
+or rewrite pinned repositories, Skills, Memory, or other Context sources as
+TaskWorkspace Actions. The normalization is observable through
+`agent_task.taskboard.plan.normalized`. A single query group larger than the
+capacity, invalid result counts, or unknown source kinds still fail closed for
+structured replanning.
 
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 TaskWorkspace file refs with bounded cold readback previews. Framework-generated
@@ -767,6 +778,14 @@ This keeps exact `acceptance_delta`, repair constraints, next-step
 requirements, and available evidence anchors visible to the consumer that
 actually rewrites or reads the artifact, without putting cold integrity metadata
 back into the model-hot path.
+
+If terminal verification requests a new evidence segment rather than a mounted
+capability repair, a dedicated ModelRequest selects bounded semantic queries
+from the TaskContext source kinds actually offered by the host. The resulting
+evidence card continues to execute through ContextReader. Completion requires
+the card's `evidence_use` bindings to name the exact new body-bearing reference
+identities added to EvidenceLedger; prose claiming that evidence was acquired
+cannot satisfy this guard.
 
 For TaskBoard, an authored required `action_succeeded` capability requirement
 also owns repair dispatch. If that exact Action evidence is missing and the

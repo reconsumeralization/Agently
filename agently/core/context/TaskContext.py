@@ -28,7 +28,7 @@ from agently.types.data import (
     TaskContextEntrySnapshot,
     TaskContextSnapshot,
 )
-from agently.types.plugins import ContextSource
+from agently.types.plugins import ContextSource, EmbeddingProvider
 
 from ._Index import _ContextIndex, _ContextIndexProfile, _ContextIndexQueryResult
 
@@ -240,12 +240,19 @@ class TaskContext:
             for source_kind, entry in catalog.items()
         }
 
-    def _configure_index_mechanisms(
+    def configure_index(
         self,
         *,
-        embedding_provider: Any = None,
+        embedding_provider: EmbeddingProvider | None = None,
         strategy: str = "structural",
     ) -> None:
+        """Configure the TaskContext-owned derived candidate index.
+
+        The index only narrows and orders source-owned descriptors.  A
+        consumer-bound ContextReader remains responsible for semantic
+        selection, exact readback, and ContextPackage construction.
+        """
+
         normalized_strategy = str(strategy or "structural").strip().lower()
         if normalized_strategy not in {"structural", "lexical", "hybrid"}:
             raise ValueError(
@@ -260,6 +267,15 @@ class TaskContext:
             ),
             embedding_provider=embedding_provider,
         )
+
+    def _index_candidate_limit(self, max_blocks: int) -> int:
+        """Return the reader-facing candidate window for this index profile."""
+
+        if self._index.profile.candidate_strategy == "hybrid":
+            # Hybrid ranking has already provided a mechanism-level shortlist;
+            # do not multiply it before the model-owned semantic selection.
+            return max_blocks
+        return max_blocks * 4
 
     def reader(
         self,

@@ -731,7 +731,9 @@ class ContextReader:
                 )
             )
 
-        source_limit = max(self.budget.max_blocks * 4, self.budget.max_blocks)
+        source_limit = self.task_context._index_candidate_limit(
+            self.budget.max_blocks
+        )
         requested_candidate_limit = intent.metadata.get("candidate_limit")
         if requested_candidate_limit is not None:
             if (

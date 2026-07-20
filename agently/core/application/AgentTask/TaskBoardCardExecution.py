@@ -737,6 +737,14 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             metadata.get("final_task_workspace_deliverables")
         )
 
+    def _taskboard_final_repair_candidate_paths(self, context: Any) -> list[str]:
+        return [
+            self._taskboard_terminal_candidate_path(context, path)
+            for path in self._taskboard_final_repair_write_paths(
+                getattr(context, "card", None)
+            )
+        ]
+
     async def _taskboard_task_workspace_content_snapshot(
         self,
         paths: Sequence[str],
@@ -774,31 +782,70 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         *,
         before: Mapping[str, Mapping[str, Any]],
     ) -> TaskBoardCardResult:
-        paths = self._taskboard_final_repair_write_paths(
+        root_paths = self._taskboard_final_repair_write_paths(
             getattr(context, "card", None)
         )
-        if not paths:
+        if not root_paths:
             return result
-        after = await self._taskboard_task_workspace_content_snapshot(paths)
-        changed_paths = [
+        candidate_paths = self._taskboard_final_repair_candidate_paths(context)
+        raw_before_root = before.get("root")
+        before_root = {
+            str(path): dict(item)
+            for path, item in raw_before_root.items()
+            if isinstance(item, Mapping)
+        } if isinstance(raw_before_root, Mapping) else {}
+        raw_before_candidate = before.get("candidate")
+        before_candidate = {
+            str(path): dict(item)
+            for path, item in raw_before_candidate.items()
+            if isinstance(item, Mapping)
+        } if isinstance(raw_before_candidate, Mapping) else {}
+        after_root = await self._taskboard_task_workspace_content_snapshot(root_paths)
+        after_candidate = await self._taskboard_task_workspace_content_snapshot(
+            candidate_paths
+        )
+        changed_candidate_paths = [
             path
-            for path in paths
-            if after.get(path, {}).get("available") is True
+            for path in candidate_paths
+            if after_candidate.get(path, {}).get("available") is True
             and (
-                str(after.get(path, {}).get("content_version_id") or "")
-                != str(before.get(path, {}).get("content_version_id") or "")
-                or str(after.get(path, {}).get("sha256") or "")
-                != str(before.get(path, {}).get("sha256") or "")
+                str(after_candidate.get(path, {}).get("content_version_id") or "")
+                != str(before_candidate.get(path, {}).get("content_version_id") or "")
+                or str(after_candidate.get(path, {}).get("sha256") or "")
+                != str(before_candidate.get(path, {}).get("sha256") or "")
             )
         ]
-        unchanged_paths = [path for path in paths if path not in changed_paths]
-        changed = bool(changed_paths)
+        changed_root_paths = [
+            path
+            for path in root_paths
+            if (
+                str(after_root.get(path, {}).get("content_version_id") or "")
+                != str(before_root.get(path, {}).get("content_version_id") or "")
+                or str(after_root.get(path, {}).get("sha256") or "")
+                != str(before_root.get(path, {}).get("sha256") or "")
+                or bool(after_root.get(path, {}).get("available"))
+                != bool(before_root.get(path, {}).get("available"))
+            )
+        ]
+        unchanged_candidate_paths = [
+            path for path in candidate_paths if path not in changed_candidate_paths
+        ]
+        unchanged_root_paths = [
+            path for path in root_paths if path not in changed_root_paths
+        ]
+        changed = bool(changed_candidate_paths) and not changed_root_paths
         proof = {
             "changed": changed,
-            "changed_paths": changed_paths,
-            "unchanged_paths": unchanged_paths,
-            "before": DataFormatter.sanitize(before),
-            "after": DataFormatter.sanitize(after),
+            "changed_paths": changed_candidate_paths,
+            "unchanged_paths": unchanged_candidate_paths,
+            "changed_candidate_paths": changed_candidate_paths,
+            "unchanged_candidate_paths": unchanged_candidate_paths,
+            "changed_root_paths": changed_root_paths,
+            "unchanged_root_paths": unchanged_root_paths,
+            "candidate_before": DataFormatter.sanitize(before_candidate),
+            "candidate_after": DataFormatter.sanitize(after_candidate),
+            "root_before": DataFormatter.sanitize(before_root),
+            "root_after": DataFormatter.sanitize(after_root),
         }
         metadata = dict(result.metadata)
         metadata["task_workspace_write_proof"] = proof
@@ -816,13 +863,19 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             )
 
         diagnostic = {
-            "code": "taskboard.final_repair.task_workspace_content_unchanged",
-            "message": (
-                "The final-verification repair card returned completed without changing "
-                "an authorized TaskWorkspace deliverable content version."
+            "code": (
+                "taskboard.final_repair.root_changed_before_acceptance"
+                if changed_root_paths
+                else "taskboard.final_repair.terminal_candidate_unchanged"
             ),
-            "paths": paths,
-            "unchanged_paths": unchanged_paths,
+            "message": (
+                "The final-verification repair card must change its staging candidate "
+                "without changing the root deliverable before terminal acceptance."
+            ),
+            "root_paths": root_paths,
+            "candidate_paths": candidate_paths,
+            "changed_root_paths": changed_root_paths,
+            "unchanged_candidate_paths": unchanged_candidate_paths,
         }
         preview = result.preview
         if isinstance(preview, Mapping):
@@ -831,7 +884,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             preview["remaining_work"] = self._merge_string_lists(
                 preview.get("remaining_work"),
                 [
-                    "Write a corrected TaskWorkspace deliverable and preserve verifier-visible readback evidence."
+                    "Write a corrected terminal candidate and preserve verifier-visible readback evidence."
                 ],
             )
             raw_diagnostics = preview.get("diagnostics")
@@ -907,8 +960,44 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         new_reference_ids = self._merge_string_lists(
             [item.get("reference_id") for item in new_items]
         )
+        evidence_use_guard = result.metadata.get("evidence_use_guard")
+        normalized_evidence_use = (
+            evidence_use_guard.get("normalized_evidence_use")
+            if isinstance(evidence_use_guard, Mapping)
+            else None
+        )
+        claimed_reference_ids: list[str] = []
+        if isinstance(normalized_evidence_use, Sequence) and not isinstance(
+            normalized_evidence_use,
+            str | bytes | bytearray,
+        ):
+            for binding in normalized_evidence_use:
+                if not isinstance(binding, Mapping):
+                    continue
+                claimed_reference_ids = self._merge_string_lists(
+                    [*claimed_reference_ids, *self._normalize_string_list(binding.get("evidence_ids"))]
+                )
+        validated_new_reference_ids = [
+            reference_id
+            for reference_id in new_reference_ids
+            if reference_id in set(claimed_reference_ids)
+        ]
+        guard_blocking_count = (
+            self._taskboard_evidence_guard_blocking_count(evidence_use_guard)
+            if isinstance(evidence_use_guard, Mapping)
+            else 1
+        )
+        validated_new_items = [
+            item
+            for item in new_items
+            if str(item.get("reference_id") or "")
+            in set(validated_new_reference_ids)
+        ]
         proof = {
-            "satisfied": len(new_items) >= minimum_new_count,
+            "satisfied": (
+                len(validated_new_reference_ids) >= minimum_new_count
+                and guard_blocking_count == 0
+            ),
             "minimum_new_content_identity_count": minimum_new_count,
             "baseline_content_identity_count": len(baseline_identities),
             "current_content_identity_count": len(items),
@@ -917,6 +1006,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 str(item.get("identity") or "") for item in new_items
             ],
             "new_reference_ids": new_reference_ids,
+            "claimed_reference_ids": claimed_reference_ids,
+            "validated_new_reference_ids": validated_new_reference_ids,
+            "validated_new_items": DataFormatter.sanitize(validated_new_items),
+            "evidence_use_guard_blocking_count": guard_blocking_count,
             "eligible_source_roles": eligible_source_roles,
             "excluded_artifact_paths": excluded_artifact_paths,
         }
@@ -939,13 +1032,19 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             )
 
         diagnostic = {
-            "code": "taskboard.final_repair.evidence_reacquisition_no_content_delta",
+            "code": (
+                "taskboard.final_repair.evidence_reacquisition_no_content_delta"
+                if not new_items
+                else "taskboard.final_repair.evidence_reacquisition_unbound_content_delta"
+            ),
             "message": (
-                "The evidence-reacquisition card returned completed without adding "
-                "a new eligible body-bearing source content identity."
+                "The evidence-reacquisition card returned completed without binding "
+                "the required new body-bearing source identities through validated evidence_use."
             ),
             "minimum_new_content_identity_count": minimum_new_count,
             "new_content_identity_count": len(new_items),
+            "new_reference_ids": new_reference_ids,
+            "validated_new_reference_ids": validated_new_reference_ids,
             "excluded_artifact_paths": excluded_artifact_paths,
         }
         preview = result.preview
@@ -980,12 +1079,18 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         )
 
     async def _run_taskboard_card(self, context: Any, context_pack: "TaskContextView") -> TaskBoardCardResult:
-        repair_write_paths = self._taskboard_final_repair_write_paths(
+        repair_root_paths = self._taskboard_final_repair_write_paths(
             getattr(context, "card", None)
         )
-        repair_write_before = await self._taskboard_task_workspace_content_snapshot(
-            repair_write_paths
-        )
+        repair_candidate_paths = self._taskboard_final_repair_candidate_paths(context)
+        repair_write_before = {
+            "root": await self._taskboard_task_workspace_content_snapshot(
+                repair_root_paths
+            ),
+            "candidate": await self._taskboard_task_workspace_content_snapshot(
+                repair_candidate_paths
+            ),
+        }
         if self._taskboard_card_uses_readback(context.card):
             result = await self._run_taskboard_readback_card(context, context_pack)
         elif self._taskboard_card_uses_control_request(context.card):

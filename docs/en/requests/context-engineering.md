@@ -63,6 +63,24 @@ selection, reads canonical source content, and applies disclosure budgets. The
 model receives only the resulting blocks, refs, omissions, coverage, and
 diagnostics—not an entire source tree or internal vectors.
 
+Configure the derived index on its public aggregate owner. The embedding
+provider is a mechanism adapter only; the consumer-bound ModelRequest selector
+still decides semantic relevance:
+
+```python
+task_context.configure_index(
+    strategy="hybrid",
+    embedding_provider=embedding_provider,
+)
+```
+
+In hybrid mode, vector/lexical ranking narrows the optional descriptor window
+to the reader's `max_blocks` before semantic selection instead of multiplying
+that window fourfold. The selector may still omit every candidate or choose an
+ordered subset within the delivery budget. When structural filters leave one
+canonical candidate, the index skips a query embedding because there is no
+remaining order to improve.
+
 After one canonical ref is structurally selected, a source may optionally
 support deterministic bounded location inside that ref. This source-scoped read
 does not choose relevance or accept evidence; `ContextReader` still owns the

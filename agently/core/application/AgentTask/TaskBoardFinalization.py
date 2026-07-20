@@ -1667,11 +1667,36 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                     final_verification,
                     blocking_state_facts=blocking_state_facts,
                 ):
-                    repair_revision = self._taskboard_final_verification_repair_revision(
-                        revision,
-                        final=final,
-                        final_verification=final_verification,
+                    raw_replan_signal = final_verification.get("replan_signal")
+                    replan_signal = (
+                        raw_replan_signal
+                        if isinstance(raw_replan_signal, Mapping)
+                        else {}
                     )
+                    evidence_replan = (
+                        str(replan_signal.get("status") or "").strip()
+                        == "replan_segment"
+                    )
+                    missing_capability_ids = self._normalize_string_list(
+                        final_verification.get("missing_capability_evidence")
+                    )
+                    evidence_retrieval_plan: dict[str, Any] | None = None
+                    evidence_plan_ready = True
+                    if evidence_replan and not missing_capability_ids:
+                        evidence_retrieval_plan = (
+                            await self._request_taskboard_final_evidence_retrieval_plan(
+                                revision=revision,
+                                final_verification=final_verification,
+                            )
+                        )
+                        evidence_plan_ready = bool(evidence_retrieval_plan)
+                    if evidence_plan_ready:
+                        repair_revision = self._taskboard_final_verification_repair_revision(
+                            revision,
+                            final=final,
+                            final_verification=final_verification,
+                            evidence_retrieval_plan=evidence_retrieval_plan,
+                        )
                 if repair_revision is not None:
                     await self._record_phase(
                         "taskboard_final_repair_requested",

@@ -168,11 +168,32 @@ class AgentTaskTaskBoardStrategyMixin(
                     }
                 ],
             }
+            reference_targets = self._taskboard_card_reference_targets(result)
+            metadata = getattr(card, "metadata", None)
+            generated_by = (
+                str(metadata.get("generated_by") or "").strip()
+                if isinstance(metadata, Mapping)
+                else ""
+            )
+            if generated_by == "agent_task.taskboard.final_verification_repair":
+                reference_targets = [
+                    target
+                    for target in reference_targets
+                    if "/terminal-candidates/"
+                    not in str(target.get("path") or "")
+                    and str(target.get("role") or "")
+                    != "taskboard_terminal_candidate"
+                ]
+            target_artifact_paths = self._normalize_string_list(
+                metadata.get("final_task_workspace_deliverables")
+                if isinstance(metadata, Mapping)
+                else None
+            )
             state_digest = relevant_state_digest(
                 {
-                    "source_reference_targets": self._taskboard_card_reference_targets(result),
+                    "source_reference_targets": reference_targets,
                     "capability_facts": {capability_id: "required" for capability_id in requires_capability_ids},
-                    "output_subjects": [contract_subject],
+                    "output_subjects": [contract_subject, *target_artifact_paths],
                     # setback/failed/blocked and regenerated repair-card ids are
                     # equivalent observations of the same unresolved contract.
                     # Model-authored output_digest prose is not a content
@@ -1063,6 +1084,16 @@ class AgentTaskTaskBoardStrategyMixin(
         if not isinstance(raw_plan, Mapping):
             raise TypeError("TaskBoard planning request must return a mapping.")
         raw_plan = self._normalize_taskboard_initial_plan(raw_plan)
+        host_diagnostics = self._taskboard_host_plan_diagnostics(raw_plan)
+        if host_diagnostics:
+            self.diagnostics.setdefault(
+                "taskboard_initial_plan_normalization",
+                [],
+            ).extend(DataFormatter.sanitize(host_diagnostics))
+            await self._emit(
+                "agent_task.taskboard.plan.normalized",
+                {"diagnostics": DataFormatter.sanitize(host_diagnostics)},
+            )
         return coerce_task_board_planning_result(
             raw_plan,
             board_id=self.id,
@@ -1071,6 +1102,137 @@ class AgentTaskTaskBoardStrategyMixin(
             planning_policy=policy,
             metadata={"execution_strategy": self.execution_strategy},
         )
+
+    @classmethod
+    def _taskboard_scoped_retrieval_capacity_analysis(
+        cls,
+        value: Any,
+    ) -> dict[str, Any]:
+        normalized = cls._normalize_scoped_retrieval_plan(value)
+        raw_groups = normalized.get("query_groups")
+        if not isinstance(raw_groups, Sequence) or isinstance(
+            raw_groups,
+            str | bytes | bytearray,
+        ):
+            return {"status": "absent", "plan": normalized}
+        groups = [dict(group) for group in raw_groups if isinstance(group, Mapping)]
+        if not groups:
+            return {"status": "absent", "plan": normalized}
+        reserved: list[int] = []
+        for group in groups:
+            try:
+                max_results = int(group.get("max_results", 8))
+            except (TypeError, ValueError):
+                return {
+                    "status": "unpartitionable",
+                    "plan": normalized,
+                    "reason": "invalid_max_results",
+                    "capacity": SCOPED_RETRIEVAL_RESULT_CAPACITY,
+                    "reserved_results": 0,
+                    "largest_group": 0,
+                    "batches": [],
+                }
+            if max_results <= 0:
+                return {
+                    "status": "unpartitionable",
+                    "plan": normalized,
+                    "reason": "invalid_max_results",
+                    "capacity": SCOPED_RETRIEVAL_RESULT_CAPACITY,
+                    "reserved_results": 0,
+                    "largest_group": max_results,
+                    "batches": [],
+                }
+            reserved.append(max_results)
+        total = sum(reserved)
+        largest = max(reserved)
+        if total <= SCOPED_RETRIEVAL_RESULT_CAPACITY:
+            return {
+                "status": "within_capacity",
+                "plan": normalized,
+                "capacity": SCOPED_RETRIEVAL_RESULT_CAPACITY,
+                "reserved_results": total,
+                "largest_group": largest,
+                "batches": [normalized],
+                "batch_reserved_results": [total],
+            }
+        if largest > SCOPED_RETRIEVAL_RESULT_CAPACITY:
+            return {
+                "status": "unpartitionable",
+                "plan": normalized,
+                "reason": "individual_group_exceeds_capacity",
+                "capacity": SCOPED_RETRIEVAL_RESULT_CAPACITY,
+                "reserved_results": total,
+                "largest_group": largest,
+                "batches": [],
+            }
+
+        batch_groups: list[list[dict[str, Any]]] = []
+        batch_reserved_results: list[int] = []
+        current_groups: list[dict[str, Any]] = []
+        current_reserved = 0
+        for group, group_reserved in zip(groups, reserved, strict=True):
+            if current_groups and (
+                current_reserved + group_reserved
+                > SCOPED_RETRIEVAL_RESULT_CAPACITY
+            ):
+                batch_groups.append(current_groups)
+                batch_reserved_results.append(current_reserved)
+                current_groups = []
+                current_reserved = 0
+            current_groups.append(group)
+            current_reserved += group_reserved
+        if current_groups:
+            batch_groups.append(current_groups)
+            batch_reserved_results.append(current_reserved)
+
+        shared = {
+            key: DataFormatter.sanitize(item)
+            for key, item in normalized.items()
+            if key != "query_groups"
+        }
+        batches = [
+            {
+                **shared,
+                "query_groups": DataFormatter.sanitize(batch),
+            }
+            for batch in batch_groups
+        ]
+        return {
+            "status": "batched",
+            "plan": normalized,
+            "capacity": SCOPED_RETRIEVAL_RESULT_CAPACITY,
+            "reserved_results": total,
+            "largest_group": largest,
+            "batches": batches,
+            "batch_reserved_results": batch_reserved_results,
+        }
+
+    @classmethod
+    def _taskboard_raw_card_scoped_retrieval(cls, card: Mapping[str, Any]) -> dict[str, Any]:
+        for container in (
+            card,
+            card.get("metadata"),
+            card.get("evidence_contract"),
+        ):
+            if not isinstance(container, Mapping):
+                continue
+            normalized = cls._normalize_scoped_retrieval_plan(
+                container.get("scoped_retrieval")
+            )
+            if normalized:
+                return normalized
+        return {}
+
+    @staticmethod
+    def _taskboard_remove_raw_card_scoped_retrieval(card: dict[str, Any]) -> None:
+        card.pop("scoped_retrieval", None)
+        for container_key in ("metadata", "evidence_contract"):
+            container = card.get(container_key)
+            if not isinstance(container, Mapping):
+                continue
+            normalized = dict(container)
+            normalized.pop("scoped_retrieval", None)
+            card[container_key] = normalized
 
     def _normalize_taskboard_initial_plan(
         self,
@@ -1270,6 +1432,143 @@ class AgentTaskTaskBoardStrategyMixin(
                         for dependency_id in dependencies
                     ]
 
+        capacity_prepared: list[Any] = []
+        for index, raw_card in enumerate(prepared):
+            if not isinstance(raw_card, dict):
+                capacity_prepared.append(raw_card)
+                continue
+            scoped_retrieval = self._taskboard_raw_card_scoped_retrieval(raw_card)
+            capacity = self._taskboard_scoped_retrieval_capacity_analysis(
+                scoped_retrieval
+            )
+            if capacity.get("status") == "unpartitionable":
+                normalization_diagnostics.append(
+                    {
+                        "code": (
+                            "taskboard.scoped_retrieval.capacity_overflow_unpartitionable"
+                        ),
+                        "card_id": str(
+                            raw_card.get("id")
+                            or raw_card.get("card_id")
+                            or f"card-{index + 1}"
+                        ),
+                        "capacity": capacity.get("capacity"),
+                        "reserved_results": capacity.get("reserved_results"),
+                        "largest_group": capacity.get("largest_group"),
+                        "reason": capacity.get("reason"),
+                        "fallback": "structured_model_replan",
+                    }
+                )
+                capacity_prepared.append(raw_card)
+                continue
+            if capacity.get("status") != "batched":
+                capacity_prepared.append(raw_card)
+                continue
+
+            card = dict(raw_card)
+            card_id = str(card.get("id") or card.get("card_id") or "").strip()
+            if not card_id:
+                card_id = f"card-{index + 1}"
+                while card_id in used_ids:
+                    card_id = f"{card_id}-scoped"
+                card["id"] = card_id
+                used_ids.add(card_id)
+            original_dependencies = self._normalize_string_list(card.get("depends_on"))
+            batch_cards: list[dict[str, Any]] = []
+            batch_ids: list[str] = []
+            batches = capacity.get("batches")
+            batch_plans = (
+                [dict(batch) for batch in batches if isinstance(batch, Mapping)]
+                if isinstance(batches, Sequence)
+                and not isinstance(batches, str | bytes | bytearray)
+                else []
+            )
+            for batch_index, batch_plan in enumerate(batch_plans, start=1):
+                base_batch_id = f"{card_id}.retrieval-{batch_index}"
+                batch_id = base_batch_id
+                suffix = 2
+                while batch_id in used_ids:
+                    batch_id = f"{base_batch_id}-{suffix}"
+                    suffix += 1
+                used_ids.add(batch_id)
+                batch_ids.append(batch_id)
+                batch_card = dict(card)
+                batch_card["id"] = batch_id
+                batch_card.pop("card_id", None)
+                batch_card["objective"] = (
+                    f"Run bounded scoped retrieval batch {batch_index}/{len(batch_plans)} "
+                    f"for card {card_id}; preserve the declared Context source ownership."
+                )
+                batch_card["action_block"] = batch_card["objective"]
+                batch_card["done_when"] = (
+                    "The bounded ContextReader batch returned host-identified evidence or "
+                    "structured source diagnostics."
+                )
+                batch_card["required_outputs"] = [
+                    "Host-identified bounded scoped retrieval evidence or structured diagnostics."
+                ]
+                batch_card["depends_on"] = original_dependencies
+                batch_card["allowed_execution_shape"] = "control"
+                batch_card.pop("action_commands", None)
+                batch_card.pop("requires_capability_ids", None)
+                batch_card.pop("final_task_workspace_deliverables", None)
+                self._taskboard_remove_raw_card_scoped_retrieval(batch_card)
+                batch_card["scoped_retrieval"] = DataFormatter.sanitize(batch_plan)
+                batch_metadata = dict(batch_card.get("metadata") or {})
+                convergence_subject = str(
+                    batch_metadata.get("terminal_convergence_subject") or ""
+                ).strip() or f"taskboard_card:{card_id}"
+                batch_metadata.update(
+                    {
+                        "generated_by": (
+                            "agent_task.taskboard.scoped_retrieval_capacity_batch"
+                        ),
+                        "source_card_id": card_id,
+                        "retrieval_batch_index": batch_index,
+                        "retrieval_batch_count": len(batch_plans),
+                        "terminal_convergence_subject": convergence_subject,
+                    }
+                )
+                batch_card["metadata"] = batch_metadata
+                batch_cards.append(batch_card)
+
+            continuation = dict(card)
+            self._taskboard_remove_raw_card_scoped_retrieval(continuation)
+            continuation["depends_on"] = self._merge_string_lists(
+                [*original_dependencies, *batch_ids]
+            )
+            continuation.pop("action_commands", None)
+            if not self._normalize_string_list(
+                continuation.get("requires_capability_ids")
+            ):
+                continuation["allowed_execution_shape"] = "control"
+            continuation_metadata = dict(continuation.get("metadata") or {})
+            continuation_metadata.update(
+                {
+                    "generated_by": (
+                        "agent_task.taskboard.scoped_retrieval_capacity_continuation"
+                    ),
+                    "retrieval_batch_card_ids": batch_ids,
+                }
+            )
+            continuation["metadata"] = continuation_metadata
+            capacity_prepared.extend([*batch_cards, continuation])
+            normalization_diagnostics.append(
+                {
+                    "code": "taskboard.scoped_retrieval.capacity_overflow_batched",
+                    "card_id": card_id,
+                    "capacity": capacity.get("capacity"),
+                    "reserved_results": capacity.get("reserved_results"),
+                    "largest_group": capacity.get("largest_group"),
+                    "batch_card_ids": batch_ids,
+                    "batch_reserved_results": capacity.get(
+                        "batch_reserved_results"
+                    ),
+                    "source_owner_preserved": True,
+                }
+            )
+        prepared = capacity_prepared
+
         normalized["cards"] = prepared
         if split_final_ids:
             normalization_diagnostics.append(
@@ -1279,6 +1578,8 @@ class AgentTaskTaskBoardStrategyMixin(
                 }
             )
         if normalization_diagnostics:
+            for diagnostic in normalization_diagnostics:
+                diagnostic["owner"] = "host"
             diagnostics = normalized.get("diagnostics")
             normalized_diagnostics = (
                 [dict(item) for item in diagnostics if isinstance(item, Mapping)]
@@ -1289,6 +1590,24 @@ class AgentTaskTaskBoardStrategyMixin(
             normalized_diagnostics.extend(normalization_diagnostics)
             normalized["diagnostics"] = normalized_diagnostics
         return normalized
+
+    @staticmethod
+    def _taskboard_host_plan_diagnostics(
+        plan: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        raw_diagnostics = plan.get("diagnostics")
+        if not isinstance(raw_diagnostics, Sequence) or isinstance(
+            raw_diagnostics,
+            str | bytes | bytearray,
+        ):
+            return []
+        return [
+            dict(item)
+            for item in raw_diagnostics
+            if isinstance(item, Mapping)
+            and str(item.get("owner") or "") == "host"
+            and str(item.get("code") or "").startswith("taskboard.")
+        ]
 
     def _initial_taskboard_plan_from_shape_analysis(self):
         if self.execution_strategy != "auto":
@@ -1301,6 +1620,12 @@ class AgentTaskTaskBoardStrategyMixin(
         if not isinstance(raw_plan, Mapping) or not raw_plan:
             return None
         raw_plan = self._normalize_taskboard_initial_plan(raw_plan)
+        host_diagnostics = self._taskboard_host_plan_diagnostics(raw_plan)
+        if host_diagnostics:
+            self.diagnostics.setdefault(
+                "taskboard_initial_plan_normalization",
+                [],
+            ).extend(DataFormatter.sanitize(host_diagnostics))
         policy = resolve_task_board_planning_policy(
             self._taskboard_effort(),
             metadata={

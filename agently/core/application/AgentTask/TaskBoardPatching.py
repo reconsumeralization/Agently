@@ -1418,7 +1418,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                     contract.get("criterion_subjects")
                 ),
                 "new_reference_ids": cls._normalize_string_list(
-                    proof.get("new_reference_ids")
+                    proof.get("validated_new_reference_ids")
                 ),
             }
         return None
@@ -1468,12 +1468,160 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         )
         return evidence_refs
 
+    async def _request_taskboard_final_evidence_retrieval_plan(
+        self,
+        *,
+        revision: Any,
+        final_verification: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Ask the model for semantic queries while the host owns execution policy."""
+
+        retrieval_policy = self._task_context_retrieval_policy()
+        source_kinds = retrieval_policy.get("source_kinds")
+        if not isinstance(source_kinds, Mapping) or not source_kinds:
+            self.diagnostics.setdefault(
+                "taskboard_final_repair_retrieval_plan_errors",
+                [],
+            ).append(
+                {
+                    "code": "taskboard.final_verification.no_context_sources",
+                    "revision_id": str(getattr(revision, "revision_id", "") or ""),
+                }
+            )
+            return {}
+        request = self.agent.create_temp_request()
+        request.input(
+            {
+                "task_id": self.id,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "verification_gap": {
+                    "reason": str(final_verification.get("reason") or ""),
+                    "missing_criteria": self._normalize_string_list(
+                        final_verification.get("missing_criteria")
+                    ),
+                    "next_step_requirements": self._normalize_string_list(
+                        final_verification.get("next_step_requirements")
+                    ),
+                    "acceptance_delta": self._normalize_string_list(
+                        final_verification.get("acceptance_delta")
+                    ),
+                    "replan_signal": DataFormatter.sanitize(
+                        final_verification.get("replan_signal") or {}
+                    ),
+                },
+                "retrieval_policy": retrieval_policy,
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
+                "language_policy": self._language_policy(),
+                "board_state": {
+                    "revision_id": str(
+                        getattr(revision, "revision_id", "") or ""
+                    ),
+                    "completed_card_ids": [
+                        str(card_id)
+                        for card_id, result in dict(
+                            getattr(revision, "card_results", {}) or {}
+                        ).items()
+                        if str(getattr(result, "status", "") or "").strip().lower()
+                        == "completed"
+                    ],
+                },
+            }
+        )
+        request.instruct(
+            "Plan only the bounded TaskContext retrieval needed to close the stated verification gap. "
+            "Choose semantic query text and exact source_kinds only from retrieval_policy.source_kinds. "
+            "Return scoped_retrieval.query_groups; do not choose lexical/vector mechanisms, do not call Actions, "
+            "and do not write the final artifact. TaskContext/ContextReader owns source reads. TaskWorkspace "
+            "Actions cannot read a pinned repository, RecordStore, Skill, or external Context source unless it "
+            "was explicitly materialized into TaskWorkspace. Keep every max_results positive. The host will "
+            "validate capacity and deterministically split an otherwise valid over-capacity plan into ordered "
+            "TaskBoard batches without changing query semantics. Use expected_role=evidence_snippet when the "
+            "verifier needs body evidence and locator_ref only for discovery."
+        )
+        request.output(
+            {
+                "scoped_retrieval": (
+                    dict,
+                    "Required bounded retrieval plan: {query_groups: [{query, expected_role, source_kinds, path?, pattern?, filters?, max_results?, snippet_limit?}]}. Source kinds must be exact offered keys.",
+                    True,
+                ),
+                "planning_summary": (
+                    str,
+                    "One concise summary of why these queries cover the verification gap.",
+                    False,
+                ),
+            },
+            format="json",
+        )
+        result_handle = request.get_result()
+        raw_result = await self._await_task_request(
+            result_handle.async_get_data(),
+            stage="taskboard_evidence_retrieval_plan",
+        )
+        raw_plan = (
+            raw_result.get("scoped_retrieval")
+            if isinstance(raw_result, Mapping)
+            else None
+        )
+        plan = self._normalize_scoped_retrieval_plan(raw_plan)
+        raw_groups = plan.get("query_groups")
+        groups = (
+            [dict(group) for group in raw_groups if isinstance(group, Mapping)]
+            if isinstance(raw_groups, Sequence)
+            and not isinstance(raw_groups, str | bytes | bytearray)
+            else []
+        )
+        offered_source_kinds = {str(key) for key in source_kinds}
+        invalid_source_kinds: list[str] = []
+        for group in groups:
+            for source_kind in self._normalize_string_list(
+                group.get("source_kinds")
+            ):
+                if source_kind not in offered_source_kinds:
+                    invalid_source_kinds.append(source_kind)
+        if not groups or invalid_source_kinds:
+            self.diagnostics.setdefault(
+                "taskboard_final_repair_retrieval_plan_errors",
+                [],
+            ).append(
+                {
+                    "code": (
+                        "taskboard.final_verification.invalid_evidence_retrieval_plan"
+                    ),
+                    "revision_id": str(
+                        getattr(revision, "revision_id", "") or ""
+                    ),
+                    "query_group_count": len(groups),
+                    "invalid_source_kinds": sorted(set(invalid_source_kinds)),
+                    "offered_source_kinds": sorted(offered_source_kinds),
+                }
+            )
+            return {}
+        analysis = self._taskboard_scoped_retrieval_capacity_analysis(plan)
+        diagnostic = {
+            "code": "taskboard.final_verification.evidence_retrieval_plan",
+            "revision_id": str(getattr(revision, "revision_id", "") or ""),
+            "request_id": str(getattr(result_handle, "id", "") or ""),
+            "query_group_count": len(groups),
+            "capacity_status": analysis.get("status"),
+            "reserved_results": analysis.get("reserved_results"),
+            "capacity": analysis.get("capacity"),
+            "batch_reserved_results": analysis.get("batch_reserved_results"),
+        }
+        self.diagnostics.setdefault(
+            "taskboard_final_repair_retrieval_plans",
+            [],
+        ).append(diagnostic)
+        return DataFormatter.sanitize(plan)
+
     def _taskboard_final_verification_repair_revision(
         self,
         revision: Any,
         *,
         final: Mapping[str, Any],
         final_verification: Mapping[str, Any],
+        evidence_retrieval_plan: Mapping[str, Any] | None = None,
     ) -> TaskBoardRevision | None:
         from agently.core.orchestration.TaskBoard import apply_task_board_patch
 
@@ -1669,9 +1817,53 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             existing_ids.add(candidate)
             return candidate
 
+        evidence_retrieval_batches: list[dict[str, Any]] = []
+        if evidence_reacquisition and evidence_retrieval_plan:
+            retrieval_capacity = self._taskboard_scoped_retrieval_capacity_analysis(
+                evidence_retrieval_plan
+            )
+            if retrieval_capacity.get("status") == "unpartitionable":
+                self.diagnostics.setdefault(
+                    "taskboard_final_repair_retrieval_plan_errors",
+                    [],
+                ).append(
+                    {
+                        "code": (
+                            "taskboard.final_verification.evidence_retrieval_plan_unpartitionable"
+                        ),
+                        "capacity": retrieval_capacity.get("capacity"),
+                        "reserved_results": retrieval_capacity.get(
+                            "reserved_results"
+                        ),
+                        "largest_group": retrieval_capacity.get("largest_group"),
+                        "reason": retrieval_capacity.get("reason"),
+                        "revision_id": effective_revision.revision_id,
+                    }
+                )
+                return None
+            raw_batches = retrieval_capacity.get("batches")
+            if isinstance(raw_batches, Sequence) and not isinstance(
+                raw_batches,
+                str | bytes | bytearray,
+            ):
+                evidence_retrieval_batches = [
+                    dict(DataFormatter.sanitize(batch))
+                    for batch in raw_batches
+                    if isinstance(batch, Mapping)
+                ]
+        evidence_reacquisition_ids: list[str] = []
+        if evidence_reacquisition:
+            batch_count = max(1, len(evidence_retrieval_batches))
+            for batch_index in range(batch_count):
+                prefix = (
+                    "final-verification-evidence"
+                    if batch_count == 1
+                    else f"final-verification-evidence-{batch_index + 1}"
+                )
+                evidence_reacquisition_ids.append(unique_id(prefix))
         evidence_reacquisition_id = (
-            unique_id("final-verification-evidence")
-            if evidence_reacquisition
+            evidence_reacquisition_ids[0]
+            if evidence_reacquisition_ids
             else ""
         )
         repair_id = unique_id("final-verification-repair")
@@ -1755,7 +1947,8 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             )
         if evidence_reacquisition:
             repair_completion_instruction = (
-                f" Use the new verifier-visible evidence produced by dependency card {evidence_reacquisition_id}. "
+                " Use the new verifier-visible evidence produced by dependency card(s) "
+                f"{', '.join(evidence_reacquisition_ids)}. "
                 "Do not lower, relax, or replace the original success criteria. Produce a complete corrected "
                 "deliverable grounded in that dependency evidence."
             )
@@ -1804,6 +1997,9 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             evidence_contract["evidence_reacquisition_card_id"] = (
                 evidence_reacquisition_id
             )
+            evidence_contract["evidence_reacquisition_card_ids"] = (
+                evidence_reacquisition_ids
+            )
             if prior_grounding_repair_contract is not None:
                 evidence_contract["prior_material_claim_repair_contract"] = (
                     prior_grounding_repair_contract
@@ -1826,7 +2022,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             evidence_contract["capability_evidence_requirements"] = action_requirements
             evidence_contract["requires_capability_ids"] = required_action_ids
             metadata["requires_capability_ids"] = required_action_ids
-        evidence_card: dict[str, Any] | None = None
+        evidence_cards: list[dict[str, Any]] = []
         if evidence_reacquisition:
             eligible_source_roles = [
                 "action",
@@ -1888,25 +2084,51 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 )
                 evidence_card_contract["requires_capability_ids"] = required_action_ids
                 evidence_card_metadata["requires_capability_ids"] = required_action_ids
-            evidence_card = {
-                "id": evidence_reacquisition_id,
-                "objective": (
-                    "Acquire additional verifier-visible evidence for the final verification gaps: "
-                    f"{gap_text}. Do not lower, relax, or replace the original success criteria. Merely "
-                    "rewriting or qualifying the deliverable is not evidence acquisition and must not count "
-                    "as progress. Use mounted readback or source capabilities to obtain new bounded evidence. "
-                    "Do not write or rewrite the final deliverable in this card. If the required evidence is "
-                    "unavailable, return setback or blocked with the missing source boundary."
-                ),
-                "depends_on": completed_dependencies,
-                "required_outputs": [evidence_done_when],
-                "allowed_execution_shape": (
-                    "actions" if action_requirements else "auto"
-                ),
-                "failure_policy": "required",
-                "evidence_contract": evidence_card_contract,
-                "metadata": evidence_card_metadata,
-            }
+            batch_count = len(evidence_reacquisition_ids)
+            for batch_index, evidence_card_id in enumerate(
+                evidence_reacquisition_ids,
+                start=1,
+            ):
+                card_contract = dict(evidence_card_contract)
+                card_metadata = dict(evidence_card_metadata)
+                scoped_retrieval = (
+                    evidence_retrieval_batches[batch_index - 1]
+                    if batch_index <= len(evidence_retrieval_batches)
+                    else {}
+                )
+                if scoped_retrieval:
+                    card_contract["scoped_retrieval"] = DataFormatter.sanitize(
+                        scoped_retrieval
+                    )
+                    card_metadata["scoped_retrieval"] = DataFormatter.sanitize(
+                        scoped_retrieval
+                    )
+                    card_metadata["retrieval_policy"] = scoped_retrieval_policy()
+                    card_metadata["retrieval_batch_index"] = batch_index
+                    card_metadata["retrieval_batch_count"] = batch_count
+                evidence_cards.append(
+                    {
+                        "id": evidence_card_id,
+                        "objective": (
+                            "Acquire additional verifier-visible evidence for the final verification gaps: "
+                            f"{gap_text}. Do not lower, relax, or replace the original success criteria. Merely "
+                            "rewriting or qualifying the deliverable is not evidence acquisition and must not count "
+                            "as progress. Use the declared scoped TaskContext retrieval plan or mounted capabilities "
+                            "to obtain new bounded evidence. Do not write or rewrite the final deliverable in this card. "
+                            "If the required evidence is unavailable, return setback or blocked with the missing source boundary."
+                        ),
+                        "depends_on": completed_dependencies,
+                        "required_outputs": [evidence_done_when],
+                        "allowed_execution_shape": (
+                            "actions"
+                            if action_requirements
+                            else ("control" if scoped_retrieval else "auto")
+                        ),
+                        "failure_policy": "required",
+                        "evidence_contract": card_contract,
+                        "metadata": card_metadata,
+                    }
+                )
         repair_card = {
             "id": repair_id,
             "objective": (
@@ -1916,7 +2138,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 + repair_completion_instruction
             ),
             "depends_on": (
-                [evidence_reacquisition_id]
+                evidence_reacquisition_ids
                 if evidence_reacquisition
                 else completed_dependencies
             ),
@@ -1928,7 +2150,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "allowed_execution_shape": (
                 "actions"
                 if action_requirements
-                else ("control" if grounding_patch_mode else "auto")
+                else "control"
             ),
             "failure_policy": "required",
             "evidence_contract": evidence_contract,
@@ -1938,12 +2160,13 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "code": "taskboard.final_verification.repair_patch",
             "repair_card_id": repair_id,
             "evidence_reacquisition_card_id": evidence_reacquisition_id,
+            "evidence_reacquisition_card_ids": evidence_reacquisition_ids,
             "depends_on": repair_card["depends_on"],
             "missing_criteria": self._normalize_string_list(final_verification.get("missing_criteria")),
             "reason": str(final_verification.get("reason") or ""),
         }
         operations: list[dict[str, Any]] = []
-        if evidence_card is not None:
+        for evidence_card in evidence_cards:
             operations.append({"op": "add_card", "card": evidence_card})
         operations.extend(
             [
@@ -1974,6 +2197,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             {
                 "repair_card_id": repair_id,
                 "evidence_reacquisition_card_id": evidence_reacquisition_id,
+                "evidence_reacquisition_card_ids": evidence_reacquisition_ids,
                 "previous_revision_id": effective_revision.revision_id,
                 "revision_id": repaired_revision.revision_id,
                 "missing_criteria": diagnostic["missing_criteria"],

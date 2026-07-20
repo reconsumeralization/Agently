@@ -2539,6 +2539,80 @@ def test_taskboard_required_repair_converges_across_non_satisfying_statuses(tmp_
     assert terminal["terminal_convergence"]["stopped_after_third_occurrence"] is True
 
 
+def test_taskboard_required_repair_convergence_ignores_staging_candidate_versions(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-repair-staging-convergence").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-repair-staging-convergence",
+        goal="Repair the terminal deliverable.",
+        success_criteria=["The terminal deliverable passes verification."],
+        execution="taskboard",
+    )
+    terminal = None
+    for index in range(1, 4):
+        card_id = f"final-verification-repair-{index}"
+        graph = TaskBoardGraph.from_value(
+            {
+                "graph_id": f"repair-staging-convergence-{index}",
+                "cards": [
+                    {
+                        "id": card_id,
+                        "objective": "Repair the same terminal verification gap.",
+                        "failure_policy": "required",
+                        "metadata": {
+                            "generated_by": "agent_task.taskboard.final_verification_repair",
+                            "terminal_convergence_subject": "taskboard_final_verification",
+                            "final_task_workspace_deliverables": ["final.md"],
+                        },
+                    }
+                ],
+            }
+        )
+        revision = TaskBoardRevision.create(
+            board_id=f"repair-staging-convergence-{index}",
+            graph=graph,
+        ).next_revision(
+            graph,
+            card_results={
+                card_id: TaskBoardCardResult(
+                    card_id=card_id,
+                    status="setback",
+                    file_refs=(
+                        {
+                            "path": (
+                                f"working/taskboard/{card_id}/terminal-candidates/final.md"
+                            ),
+                            "content_version_id": f"version-{index}",
+                            "role": "taskboard_terminal_candidate",
+                        },
+                    ),
+                    diagnostics=(
+                        {
+                            "code": (
+                                "taskboard.final_repair.task_workspace_content_unchanged"
+                            )
+                        },
+                    ),
+                )
+            },
+        )
+        terminal = task._taskboard_card_convergence_result(
+            revision,
+            executed_card_ids=(card_id,),
+        )
+        if index < 3:
+            assert terminal is None
+
+    assert terminal is not None
+    assert terminal["terminal_convergence"]["occurrence"] == 3
+    assert terminal["terminal_convergence"]["issue"]["contract_subject"] == (
+        "taskboard_final_verification"
+    )
+
+
 @pytest.mark.parametrize("stale_status", ("setback", "failed", "blocked"))
 def test_taskboard_convergence_does_not_recount_stale_result_from_other_tick(
     tmp_path,
@@ -3862,6 +3936,135 @@ def test_block_carrier_rejects_scoped_retrieval_beyond_evidence_capacity(tmp_pat
     assert len(plan["scoped_retrieval"]["query_groups"]) == 65
     with pytest.raises(ValueError, match="evidence capacity"):
         task._build_blocks_execution_plan(work_unit, plan, cast(Any, context_pack))
+
+
+def test_taskboard_initial_plan_splits_scoped_retrieval_overflow_into_ordered_batches(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("taskboard-scoped-overflow-batches").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-scoped-overflow-batches",
+        goal="Inspect the pinned repository without losing source ownership.",
+        success_criteria=["Every bounded repository query is represented."],
+        execution="taskboard",
+    )
+    raw_groups = [
+        {
+            "query": f"repository fact {index}",
+            "expected_role": "evidence_snippet",
+            "source_kinds": ["pinned_repository"],
+            "max_results": 4,
+        }
+        for index in range(20)
+    ]
+
+    normalized = task._normalize_taskboard_initial_plan(
+        {
+            "board_goal": "Inspect the repository.",
+            "cards": [
+                {
+                    "id": "repo_survey",
+                    "objective": "Collect repository evidence.",
+                    "depends_on": [],
+                    "allowed_execution_shape": "auto",
+                    "scoped_retrieval": {"query_groups": raw_groups},
+                },
+                {
+                    "id": "write_report",
+                    "objective": "Write the report.",
+                    "depends_on": ["repo_survey"],
+                    "final_task_workspace_deliverables": ["final.md"],
+                },
+            ],
+        }
+    )
+
+    cards = {card["id"]: card for card in normalized["cards"]}
+    assert list(cards) == [
+        "repo_survey.retrieval-1",
+        "repo_survey.retrieval-2",
+        "repo_survey",
+        "write_report",
+    ]
+    first_groups = cards["repo_survey.retrieval-1"]["scoped_retrieval"]["query_groups"]
+    second_groups = cards["repo_survey.retrieval-2"]["scoped_retrieval"]["query_groups"]
+    assert [group["query"] for group in [*first_groups, *second_groups]] == [
+        group["query"] for group in raw_groups
+    ]
+    assert sum(group["max_results"] for group in first_groups) == 64
+    assert sum(group["max_results"] for group in second_groups) == 16
+    assert all(
+        group["source_kinds"] == ["pinned_repository"]
+        for group in [*first_groups, *second_groups]
+    )
+    assert cards["repo_survey.retrieval-1"]["allowed_execution_shape"] == "control"
+    assert cards["repo_survey.retrieval-2"]["allowed_execution_shape"] == "control"
+    assert "scoped_retrieval" not in cards["repo_survey"]
+    assert cards["repo_survey"]["allowed_execution_shape"] == "control"
+    assert cards["repo_survey"]["depends_on"] == [
+        "repo_survey.retrieval-1",
+        "repo_survey.retrieval-2",
+    ]
+    assert cards["write_report"]["depends_on"] == ["repo_survey"]
+    overflow = next(
+        item
+        for item in normalized["diagnostics"]
+        if item["code"] == "taskboard.scoped_retrieval.capacity_overflow_batched"
+    )
+    assert overflow["reserved_results"] == 80
+    assert overflow["capacity"] == 64
+    assert overflow["batch_reserved_results"] == [64, 16]
+    assert overflow["owner"] == "host"
+    assert task._taskboard_host_plan_diagnostics(normalized) == [overflow]
+
+
+def test_taskboard_initial_plan_does_not_rewrite_one_illegal_scoped_query_group(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("taskboard-scoped-overflow-illegal-group").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-scoped-overflow-illegal-group",
+        goal="Reject an impossible scoped retrieval group.",
+        success_criteria=["No query is silently truncated."],
+        execution="taskboard",
+    )
+
+    normalized = task._normalize_taskboard_initial_plan(
+        {
+            "cards": [
+                {
+                    "id": "repo_survey",
+                    "objective": "Collect repository evidence.",
+                    "scoped_retrieval": {
+                        "query_groups": [
+                            {
+                                "query": "impossible group",
+                                "source_kinds": ["pinned_repository"],
+                                "max_results": 65,
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    )
+
+    assert [card["id"] for card in normalized["cards"]] == ["repo_survey"]
+    assert normalized["cards"][0]["scoped_retrieval"]["query_groups"][0][
+        "max_results"
+    ] == 65
+    diagnostic = next(
+        item
+        for item in normalized["diagnostics"]
+        if item["code"]
+        == "taskboard.scoped_retrieval.capacity_overflow_unpartitionable"
+    )
+    assert diagnostic["largest_group"] == 65
+    assert diagnostic["fallback"] == "structured_model_replan"
 
 
 def test_block_carrier_keeps_source_specific_filters_in_separate_query_groups(tmp_path):
@@ -12727,7 +12930,7 @@ def test_taskboard_final_verification_failure_creates_repair_revision(tmp_path):
     ]
     assert len(repair_ids) == 1
     repair = cards[repair_ids[0]]
-    assert repair.allowed_execution_shape == "auto"
+    assert repair.allowed_execution_shape == "control"
     assert set(repair.depends_on) == {"collect", "draft"}
     assert "Remove unsupported sub-section labels." in repair.evidence_contract["missing_criteria"]
     assert repair.evidence_contract["prior_final_evidence_use"] == [
@@ -12922,6 +13125,7 @@ async def test_taskboard_final_repair_cannot_complete_without_task_workspace_con
         graph={"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]},
     )
     context = SimpleNamespace(card=card, revision=revision, dependency_results={})
+    candidate_path = task._taskboard_terminal_candidate_path(context, "final.md")
 
     async def fake_agent_card(*_args, **_kwargs):
         return TaskBoardCardResult(
@@ -12943,15 +13147,20 @@ async def test_taskboard_final_repair_cannot_complete_without_task_workspace_con
 
     assert result.status == "setback"
     assert result.metadata["task_workspace_write_proof"]["changed"] is False
-    assert result.metadata["task_workspace_write_proof"]["unchanged_paths"] == ["final.md"]
+    assert result.metadata["task_workspace_write_proof"]["unchanged_candidate_paths"] == [
+        candidate_path
+    ]
+    assert result.metadata["task_workspace_write_proof"]["unchanged_root_paths"] == [
+        "final.md"
+    ]
     assert any(
-        item.get("code") == "taskboard.final_repair.task_workspace_content_unchanged"
+        item.get("code") == "taskboard.final_repair.terminal_candidate_unchanged"
         for item in result.diagnostics
     )
 
 
 @pytest.mark.asyncio
-async def test_taskboard_final_repair_completion_records_task_workspace_content_change(
+async def test_taskboard_final_repair_completion_records_terminal_candidate_change_without_root_promotion(
     tmp_path,
     monkeypatch,
 ):
@@ -12983,9 +13192,11 @@ async def test_taskboard_final_repair_completion_records_task_workspace_content_
     )
     context = SimpleNamespace(card=card, revision=revision, dependency_results={})
 
+    candidate_path = task._taskboard_terminal_candidate_path(context, "final.md")
+
     async def fake_agent_card(*_args, **_kwargs):
         write = await task.task_workspace.write_file(
-            "final.md",
+            candidate_path,
             "# Corrected\n\nThe unsupported claim was removed.\n",
         )
         return TaskBoardCardResult(
@@ -13005,10 +13216,13 @@ async def test_taskboard_final_repair_completion_records_task_workspace_content_
     assert result.status == "completed"
     proof = result.metadata["task_workspace_write_proof"]
     assert proof["changed"] is True
-    assert proof["changed_paths"] == ["final.md"]
-    assert proof["before"]["final.md"]["content_version_id"] != proof["after"]["final.md"][
-        "content_version_id"
-    ]
+    assert proof["changed_candidate_paths"] == [candidate_path]
+    assert proof["unchanged_root_paths"] == ["final.md"]
+    assert proof["candidate_before"][candidate_path]["content_version_id"] != proof[
+        "candidate_after"
+    ][candidate_path]["content_version_id"]
+    root = await task.task_workspace.read_file("final.md")
+    assert root["content"] == "# Original\n\nUnsupported claim.\n"
 
 
 def _completed_taskboard_revision_for_final_repair(board_id: str) -> TaskBoardRevision:
@@ -13245,7 +13459,7 @@ def test_taskboard_material_claim_evidence_gap_replans_segment_before_carrier_pa
     assert evidence_card.metadata["repair_source"] == (
         "verification_evidence_reacquisition"
     )
-    assert repair.allowed_execution_shape == "auto"
+    assert repair.allowed_execution_shape == "control"
     assert repair.metadata["repair_source"] == "verification_evidence_reacquisition"
     assert repair.evidence_contract["replan_signal"] == replan_signal
     assert repair.evidence_contract["prior_material_claim_repair_contract"] == repair_contract
@@ -13262,6 +13476,177 @@ def test_taskboard_material_claim_evidence_gap_replans_segment_before_carrier_pa
     assert "TaskWorkspace replace patch" not in repair.objective
     schedule = TaskBoard(repaired, handler=lambda _context: None).schedule()
     assert schedule.runnable_card_ids == (evidence_card.id,)
+
+
+def test_taskboard_evidence_replan_uses_bounded_context_batches_instead_of_actions(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-evidence-context-replan").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-evidence-context-replan",
+        goal="Produce a source-grounded repository report.",
+        success_criteria=["Direct repository evidence supports every claim."],
+        execution="taskboard",
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+    retrieval_plan = {
+        "query_groups": [
+            {
+                "query": f"repository evidence {index}",
+                "expected_role": "evidence_snippet",
+                "source_kinds": ["pinned_repository"],
+                "max_results": 4,
+            }
+            for index in range(20)
+        ]
+    }
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": "final.md"},
+        final_verification={
+            "is_complete": False,
+            "requires_block": False,
+            "missing_criteria": ["Read direct implementation and test evidence."],
+            "replan_signal": {
+                "status": "replan_segment",
+                "reason": "The current evidence does not cover implementation and tests.",
+            },
+        },
+        evidence_retrieval_plan=retrieval_plan,
+    )
+
+    assert repaired is not None
+    evidence_cards = [
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by")
+        == "agent_task.taskboard.final_verification_evidence_reacquisition"
+    ]
+    assert len(evidence_cards) == 2
+    assert all(card.allowed_execution_shape == "control" for card in evidence_cards)
+    assert [
+        sum(
+            int(group.get("max_results", 8))
+            for group in card.evidence_contract["scoped_retrieval"]["query_groups"]
+        )
+        for card in evidence_cards
+    ] == [64, 16]
+    assert all(
+        group["source_kinds"] == ["pinned_repository"]
+        for card in evidence_cards
+        for group in card.evidence_contract["scoped_retrieval"]["query_groups"]
+    )
+    repair = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by")
+        == "agent_task.taskboard.final_verification_repair"
+    )
+    assert repair.depends_on == tuple(card.id for card in evidence_cards)
+    assert repair.evidence_contract["evidence_reacquisition_card_ids"] == [
+        card.id for card in evidence_cards
+    ]
+
+
+@pytest.mark.asyncio
+async def test_taskboard_evidence_replan_requests_scoped_plan_through_model_request(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-evidence-plan-request").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-evidence-plan-request",
+        goal="Produce a source-grounded repository report.",
+        success_criteria=["Direct repository evidence supports every claim."],
+        execution="taskboard",
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        id = "taskboard-evidence-plan-request-1"
+
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruct"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output"] = value
+            captured["format"] = format
+            return self
+
+        def get_result(self):
+            return self
+
+        async def async_get_data(self):
+            return {
+                "scoped_retrieval": {
+                    "query_groups": [
+                        {
+                            "query": "model yaml depth width scales",
+                            "expected_role": "evidence_snippet",
+                            "source_kinds": ["pinned_repository"],
+                            "max_results": 4,
+                        },
+                        {
+                            "query": "train and validation entrypoints",
+                            "expected_role": "evidence_snippet",
+                            "source_kinds": ["pinned_repository"],
+                            "max_results": 4,
+                        },
+                    ]
+                },
+                "planning_summary": "Read model configuration and executable entrypoints.",
+            }
+
+    monkeypatch.setattr(agent, "create_temp_request", lambda: FakeRequest())
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_task_context_retrieval_policy",
+        lambda: {
+            **scoped_retrieval_policy(),
+            "source_kinds": {
+                "pinned_repository": {
+                    "binding_ids": ["repository:yolo"],
+                    "required": True,
+                    "description": "Pinned repository snapshot",
+                }
+            },
+        },
+    )
+
+    plan = await task._request_taskboard_final_evidence_retrieval_plan(
+        revision=_completed_taskboard_revision_for_final_repair(task.id),
+        final_verification={
+            "missing_criteria": ["Read direct configuration and entrypoint evidence."],
+            "next_step_requirements": ["Use the pinned repository source."],
+            "replan_signal": {
+                "status": "replan_segment",
+                "reason": "Current evidence only covers the README.",
+            },
+        },
+    )
+
+    assert plan["query_groups"][0]["source_kinds"] == ["pinned_repository"]
+    assert captured["input"]["retrieval_policy"]["source_kinds"] == {
+        "pinned_repository": {
+            "binding_ids": ["repository:yolo"],
+            "required": True,
+            "description": "Pinned repository snapshot",
+        }
+    }
+    assert "TaskWorkspace Actions cannot read" in captured["instruct"]
+    assert captured["output"]["scoped_retrieval"][0] is dict
+    assert captured["format"] == "json"
 
 
 def test_taskboard_card_done_when_uses_evidence_contract_then_required_outputs(tmp_path):
@@ -13341,6 +13726,12 @@ def test_taskboard_evidence_reacquisition_requires_new_source_content_not_final_
         card_id=card.id,
         status="completed",
         preview={"status": "completed", "remaining_work": []},
+        metadata={
+            "evidence_use_guard": {
+                "blocking_count": 0,
+                "normalized_evidence_use": [],
+            }
+        },
     )
 
     no_evidence = task._enforce_taskboard_evidence_reacquisition_proof(
@@ -13387,15 +13778,53 @@ def test_taskboard_evidence_reacquisition_requires_new_source_content_not_final_
             "body": "class UltraEfficientRouter(nn.Module):\n    def forward(self, x): ...",
         }
     )
-    with_source = task._enforce_taskboard_evidence_reacquisition_proof(
+    false_claim = task._enforce_taskboard_evidence_reacquisition_proof(
         context,
         completed,
+    )
+
+    assert false_claim.status == "setback"
+    false_proof = false_claim.metadata["evidence_reacquisition_proof"]
+    assert false_proof["new_content_identity_count"] == 1
+    assert false_proof["validated_new_reference_ids"] == []
+    assert false_proof["satisfied"] is False
+
+    with_source = task._enforce_taskboard_evidence_reacquisition_proof(
+        context,
+        TaskBoardCardResult(
+            card_id=card.id,
+            status="completed",
+            preview={
+                "status": "completed",
+                "remaining_work": [],
+                "evidence_use": [
+                    {
+                        "claim": "The repository implementation was acquired.",
+                        "evidence_ids": [source["reference_id"]],
+                        "support_type": "content",
+                    }
+                ],
+            },
+            metadata={
+                "evidence_use_guard": {
+                    "blocking_count": 0,
+                    "normalized_evidence_use": [
+                        {
+                            "claim": "The repository implementation was acquired.",
+                            "evidence_ids": [source["reference_id"]],
+                            "support_type": "content",
+                        }
+                    ],
+                }
+            },
+        ),
     )
 
     assert with_source.status == "completed"
     proof = with_source.metadata["evidence_reacquisition_proof"]
     assert proof["new_content_identity_count"] == 1
     assert proof["new_reference_ids"] == [source["reference_id"]]
+    assert proof["validated_new_reference_ids"] == [source["reference_id"]]
 
     baseline = task._taskboard_grounding_evidence_snapshot(
         excluded_artifact_paths=["final.md"],
@@ -13434,6 +13863,18 @@ def test_taskboard_evidence_reacquisition_requires_new_source_content_not_final_
             card_id=repeated_card.id,
             status="completed",
             preview={"status": "completed", "remaining_work": []},
+            metadata={
+                "evidence_use_guard": {
+                    "blocking_count": 0,
+                    "normalized_evidence_use": [
+                        {
+                            "claim": "The repository implementation was acquired.",
+                            "evidence_ids": [source["reference_id"]],
+                            "support_type": "content",
+                        }
+                    ],
+                }
+            },
         ),
     )
 
@@ -13503,6 +13944,7 @@ def _revision_with_completed_evidence_reacquisition(
                         "evidence_reacquisition_proof": {
                             "satisfied": True,
                             "new_reference_ids": new_reference_ids,
+                            "validated_new_reference_ids": new_reference_ids,
                         }
                     },
                 ).to_dict(),
@@ -13735,7 +14177,7 @@ def test_taskboard_inline_material_claim_repair_does_not_open_task_workspace_pat
         for card in repaired.graph.cards
         if card.metadata.get("generated_by") == "agent_task.taskboard.final_verification_repair"
     )
-    assert repair.allowed_execution_shape == "auto"
+    assert repair.allowed_execution_shape == "control"
     assert "material_claim_patch_paths" not in repair.evidence_contract
     assert repair.metadata["final_task_workspace_deliverables"] == ["final.md"]
     assert "Produce a complete corrected deliverable" in repair.objective
@@ -13804,7 +14246,7 @@ def test_taskboard_final_verification_non_action_repair_keeps_capabilities_avail
         for card in repaired.graph.cards
         if card.metadata.get("generated_by") == "agent_task.taskboard.final_verification_repair"
     )
-    assert repair.allowed_execution_shape == "auto"
+    assert repair.allowed_execution_shape == "control"
     assert "capability_evidence_requirements" not in repair.evidence_contract
     assert "requires_capability_ids" not in repair.metadata
 
