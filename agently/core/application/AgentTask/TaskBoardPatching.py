@@ -262,7 +262,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             and not isinstance(raw_paths, str | bytes | bytearray)
             else [raw_paths]
             if raw_paths is not None
-            else self._required_task_workspace_deliverables()
+            else []
         )
         paths: list[str] = []
         for item in candidates:

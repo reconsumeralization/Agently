@@ -14800,6 +14800,7 @@ def test_taskboard_inline_material_claim_repair_does_not_open_task_workspace_pat
     assert repair.metadata["final_task_workspace_deliverables"] == ["final.md"]
     assert "Produce a complete corrected deliverable" in repair.objective
     assert "TaskWorkspace replace patch" not in repair.objective
+    assert task._taskboard_grounding_patch_paths(SimpleNamespace(card=repair)) == []
 
 
 @pytest.mark.parametrize(
