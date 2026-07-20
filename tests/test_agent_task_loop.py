@@ -13743,6 +13743,8 @@ async def test_taskboard_evidence_replan_requests_scoped_plan_through_model_requ
         }
     }
     assert "TaskWorkspace Actions cannot read" in captured["instruct"]
+    assert "pattern is only a file-name glob" in captured["instruct"]
+    assert "filters.content_contains" in captured["instruct"]
     assert captured["output"]["scoped_retrieval"][0] is dict
     assert captured["format"] == "json"
 
@@ -14141,6 +14143,265 @@ async def test_taskboard_control_binds_new_task_context_body_into_live_evidence_
     proof = result.metadata["evidence_reacquisition_proof"]
     assert proof["satisfied"] is True
     assert proof["validated_new_reference_ids"] == [offered["reference_id"]]
+
+
+def test_taskboard_dependency_evidence_refs_are_prioritized_in_bounded_prompt_ledger(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("taskboard-dependency-evidence-priority").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-dependency-evidence-priority",
+        goal="Repair the report from newly acquired dependency evidence.",
+        success_criteria=["The repair can bind every dependency-cited source."],
+        execution="taskboard",
+    )
+    evidence_items = [
+        task._task_reference_catalog.add_evidence(
+            {
+                "id": f"repository-source-{index}",
+                "kind": "evidence_snippet",
+                "status": "ok",
+                "body_state": "bounded",
+                "source_ref": f"src/source_{index}.py",
+                "body": f"bounded source body {index}",
+            }
+        )
+        for index in range(70)
+    ]
+    target_reference_id = evidence_items[-1]["reference_id"]
+    evidence_ledger = task._stable_evidence_ledger_view(
+        {"evidence_items": evidence_items},
+        max_items=120,
+        body_chars=1800,
+    )
+    dependency_result = TaskBoardCardResult(
+        card_id="final-verification-evidence",
+        status="completed",
+        preview={
+            "status": "completed",
+            "evidence_use": [
+                {
+                    "claim": "The newly acquired source closes the verification gap.",
+                    "evidence_ids": [target_reference_id],
+                    "support_type": "content",
+                }
+            ],
+        },
+        metadata={
+            "evidence_ledger": evidence_ledger,
+            "evidence_use_guard": {
+                "blocking_count": 0,
+                "normalized_evidence_use": [
+                    {
+                        "claim": "The newly acquired source closes the verification gap.",
+                        "evidence_ids": [target_reference_id],
+                        "support_type": "content",
+                    }
+                ],
+            },
+        },
+    )
+    rejected_dependency_result = TaskBoardCardResult(
+        card_id="rejected-evidence",
+        status="setback",
+        preview={
+            "evidence_use": [
+                {
+                    "claim": "This binding was rejected by the host guard.",
+                    "evidence_ids": [evidence_items[-2]["reference_id"]],
+                    "support_type": "content",
+                }
+            ]
+        },
+        metadata={
+            "evidence_use_guard": {
+                "blocking_count": 1,
+                "normalized_evidence_use": [],
+            }
+        },
+    )
+
+    preferred_reference_ids = task._taskboard_dependency_evidence_reference_ids(
+        {
+            dependency_result.card_id: dependency_result,
+            rejected_dependency_result.card_id: rejected_dependency_result,
+        }
+    )
+    projection = task._model_evidence_ledger_projection(
+        evidence_ledger,
+        max_items=64,
+        preferred_reference_ids=preferred_reference_ids,
+    )
+
+    assert preferred_reference_ids == {target_reference_id}
+    assert projection["items"][0]["reference_id"] == target_reference_id
+    assert target_reference_id in {
+        item["reference_id"] for item in projection["items"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_taskboard_control_prompt_keeps_dependency_cited_ref_past_ledger_cap(
+    tmp_path,
+    monkeypatch,
+):
+    task = AgentTask(
+        _create_agent("taskboard-control-dependency-ref-priority").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-control-dependency-ref-priority",
+        goal="Repair the final report from the acquired evidence.",
+        success_criteria=["The repair cites the acquired source."],
+        execution="taskboard",
+    )
+    evidence_items = [
+        task._task_reference_catalog.add_evidence(
+            {
+                "id": f"dependency-source-{index}",
+                "kind": "evidence_snippet",
+                "status": "ok",
+                "body_state": "bounded",
+                "source_ref": f"src/dependency_{index}.py",
+                "body": f"dependency body {index}",
+            }
+        )
+        for index in range(70)
+    ]
+    target_reference_id = evidence_items[-1]["reference_id"]
+    dependency_result = TaskBoardCardResult(
+        card_id="evidence",
+        status="completed",
+        preview={
+            "status": "completed",
+            "evidence_use": [
+                {
+                    "claim": "The newest dependency source closes the gap.",
+                    "evidence_ids": [target_reference_id],
+                    "support_type": "content",
+                }
+            ],
+        },
+        metadata={
+            "evidence_ledger": task._stable_evidence_ledger_view(
+                {"evidence_items": evidence_items},
+                max_items=120,
+                body_chars=1800,
+            ),
+            "evidence_use_guard": {
+                "blocking_count": 0,
+                "normalized_evidence_use": [
+                    {
+                        "claim": "The newest dependency source closes the gap.",
+                        "evidence_ids": [target_reference_id],
+                        "support_type": "content",
+                    }
+                ],
+            },
+        },
+    )
+    evidence_card = TaskBoardCard.from_value(
+        {
+            "id": "evidence",
+            "objective": "Acquire source evidence.",
+            "status": "completed",
+        }
+    )
+    repair_card = TaskBoardCard.from_value(
+        {
+            "id": "repair",
+            "objective": "Repair the final report from dependency evidence.",
+            "depends_on": ["evidence"],
+            "allowed_execution_shape": "control",
+        }
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-dependency-ref-priority",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [evidence_card.to_dict(), repair_card.to_dict()],
+            },
+            "card_results": {"evidence": dependency_result.to_dict()},
+        }
+    )
+    context = SimpleNamespace(
+        card=repair_card,
+        revision=revision,
+        dependency_results={"evidence": dependency_result},
+        planning_policy=None,
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        id = "taskboard-control-dependency-ref-priority-request"
+
+        def input(self, value):
+            captured["input"] = value
+            return self
+
+        def instruct(self, value):
+            return self
+
+        def output(self, value, *, format):
+            return self
+
+        def get_result(self):
+            return self
+
+    async def consume_control_request(_card_id, _result_handle):
+        return {
+            "status": "setback",
+            "sufficient": False,
+            "next_board_action": "continue",
+            "remaining_work": ["Continue the bounded repair."],
+        }
+
+    async def run_work_unit(*, handler, **_kwargs):
+        output = await handler({"state": {"evidence_items": []}})
+        return output["execution_result"], output["execution_meta"], None
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(task.agent, "create_temp_request", FakeRequest)
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_consume_taskboard_control_request",
+        consume_control_request,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_run_work_unit_through_blocks",
+        run_work_unit,
+    )
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_apply_language_policy_to_request",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(cast(Any, task), "_emit", noop)
+
+    result = await task._run_taskboard_control_card(
+        context,
+        cast(
+            Any,
+            {
+                "goal": task.goal,
+                "profile": "",
+                "items": [],
+                "omitted": [],
+                "diagnostics": {},
+            },
+        ),
+    )
+
+    assert result.status == "setback"
+    assert captured["input"]["evidence_ledger"]["items"][0]["reference_id"] == (
+        target_reference_id
+    )
 
 
 def _revision_with_completed_evidence_reacquisition(

@@ -720,6 +720,13 @@ TaskWorkspace Actions. The normalization is observable through
 capacity, invalid result counts, or unknown source kinds still fail closed for
 structured replanning.
 
+Inside a scoped query group, `path` selects a file or directory scope and
+`pattern` is only a file-name glob such as `*.py` or `**`. To position a
+bounded read at an exact code symbol or text fragment inside the selected
+source, use `filters.content_contains`; each exact locator is normalized into
+its own bounded query group. Keep semantic intent in `query`. Do not put code
+symbols or content phrases in `pattern`.
+
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 TaskWorkspace file refs with bounded cold readback previews. Framework-generated
 readback cards scope evidence to direct dependencies plus upstream evidence

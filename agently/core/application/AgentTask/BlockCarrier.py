@@ -55,6 +55,7 @@ def scoped_retrieval_policy(
             "Treat truncated evidence snippets as factual partial context; downstream consumers decide whether to request wider scoped retrieval or readback.",
             "Do not let retrieval hits decide semantic usefulness or task acceptance.",
             "For record_store records, put record collection in filters.collection; path is only for file search or exact record paths; use filters.kind only when the exact record kind is provided, never infer a generic kind such as note.",
+            "For file-backed sources, pattern is a file-name glob only. Use filters.content_contains for an exact code symbol or text locator; ContextReader turns each exact locator into its own bounded query group.",
         ],
         "bounded_defaults": {
             "max_results": 8,

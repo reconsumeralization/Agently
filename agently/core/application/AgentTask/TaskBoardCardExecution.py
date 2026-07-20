@@ -41,6 +41,61 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             return []
         return cls._merge_string_lists(candidates)
 
+    @staticmethod
+    def _taskboard_dependency_evidence_reference_ids(
+        dependency_results: Mapping[str, Any],
+    ) -> set[str]:
+        """Return host-validated refs explicitly used by dependency results.
+
+        These refs are not a second identity domain. They are only a hot-path
+        priority hint so a bounded downstream prompt does not evict the exact
+        evidence that its declared dependency just consumed.
+        """
+
+        reference_ids: set[str] = set()
+        for raw_result in dependency_results.values():
+            metadata = (
+                raw_result.get("metadata")
+                if isinstance(raw_result, Mapping)
+                else getattr(raw_result, "metadata", None)
+            )
+            if not isinstance(metadata, Mapping):
+                continue
+            guard = metadata.get("evidence_use_guard")
+            if not isinstance(guard, Mapping):
+                continue
+            try:
+                blocking_count = int(guard.get("blocking_count") or 0)
+            except (TypeError, ValueError):
+                blocking_count = 1
+            if blocking_count != 0:
+                continue
+            uses = guard.get("normalized_evidence_use")
+            if not isinstance(uses, Sequence) or isinstance(
+                uses,
+                str | bytes | bytearray,
+            ):
+                continue
+            for use in uses:
+                if not isinstance(use, Mapping):
+                    continue
+                raw_ids = use.get("evidence_ids")
+                if isinstance(raw_ids, str):
+                    values = [raw_ids]
+                elif isinstance(raw_ids, Sequence) and not isinstance(
+                    raw_ids,
+                    str | bytes | bytearray,
+                ):
+                    values = raw_ids
+                else:
+                    values = []
+                reference_ids.update(
+                    str(value).strip()
+                    for value in values
+                    if str(value or "").strip()
+                )
+        return reference_ids
+
     def _taskboard_stage_terminal_action_commands(
         self,
         context: Any,
@@ -1268,9 +1323,13 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             max_items=120,
             body_chars=1800,
         )
+        dependency_reference_ids = self._taskboard_dependency_evidence_reference_ids(
+            context.dependency_results
+        )
         prompt_evidence_ledger = self._model_evidence_ledger_projection(
             evidence_ledger,
             max_items=64,
+            preferred_reference_ids=dependency_reference_ids,
         )
         card_value = context.card.to_dict()
         done_when = self._taskboard_card_done_when(context.card)
@@ -1963,9 +2022,13 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             max_items=120,
             body_chars=1800,
         )
+        dependency_reference_ids = self._taskboard_dependency_evidence_reference_ids(
+            context.dependency_results
+        )
         prompt_evidence_ledger = self._model_evidence_ledger_projection(
             evidence_ledger,
             max_items=64,
+            preferred_reference_ids=dependency_reference_ids,
         )
         preflight_diagnostics = task_board_preflight_diagnostics(
             context.revision,
@@ -2305,6 +2368,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             request_prompt_evidence_ledger = self._model_evidence_ledger_projection(
                 card_request_evidence_ledger,
                 max_items=64,
+                preferred_reference_ids=dependency_reference_ids,
             )
             for item in request_prompt_evidence_ledger.get("items", []):
                 if not isinstance(item, dict) or str(

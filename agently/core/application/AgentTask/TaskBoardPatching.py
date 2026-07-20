@@ -1589,13 +1589,16 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "was explicitly materialized into TaskWorkspace. Keep every max_results positive. The host will "
             "validate capacity and deterministically split an otherwise valid over-capacity plan into ordered "
             "TaskBoard batches without changing query semantics. Use expected_role=evidence_snippet when the "
-            "verifier needs body evidence and locator_ref only for discovery."
+            "verifier needs body evidence and locator_ref only for discovery. path is a file or directory scope, "
+            "and pattern is only a file-name glob such as '*.py' or '**'; never put a code symbol or content "
+            "phrase in pattern. When an exact symbol or text fragment must position a bounded read inside a known "
+            "source file, put that exact locator in filters.content_contains (one exact locator per query group)."
         )
         request.output(
             {
                 "scoped_retrieval": (
                     dict,
-                    "Required bounded retrieval plan: {query_groups: [{query, expected_role, source_kinds, path?, pattern?, filters?, max_results?, snippet_limit?}]}. Source kinds must be exact offered keys.",
+                    "Required bounded retrieval plan: {query_groups: [{query, expected_role, source_kinds, path?, pattern?, filters?: {content_contains?: [exact source text]}, max_results?, snippet_limit?}]}. pattern is a file-name glob only; use filters.content_contains for exact code/text locators. Source kinds must be exact offered keys.",
                     True,
                 ),
                 "planning_summary": (
