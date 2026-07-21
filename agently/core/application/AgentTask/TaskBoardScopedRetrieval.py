@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from .TaskShared import *
 
 
@@ -32,6 +35,25 @@ class AgentTaskTaskBoardScopedRetrievalMixin(AgentTaskMixinBase):
         "source_id",
         "binding_id",
     )
+
+    @classmethod
+    def _taskboard_scoped_retrieval_plan_digest(
+        cls,
+        scoped_retrieval: Mapping[str, Any] | None,
+    ) -> str:
+        """Return one stable host-owned identity for a normalized retrieval plan."""
+
+        normalized = cls._normalize_scoped_retrieval_plan(scoped_retrieval)
+        if not normalized:
+            return ""
+        encoded = json.dumps(
+            DataFormatter.sanitize(normalized),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _scoped_evidence_identity_value(record: Mapping[str, Any], field: str) -> Any:

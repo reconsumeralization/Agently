@@ -1179,6 +1179,17 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             )
             preview_diagnostics.append(diagnostic)
             preview["diagnostics"] = preview_diagnostics
+        plan_digest = self._taskboard_scoped_retrieval_plan_digest(
+            evidence_contract.get("scoped_retrieval")
+        )
+        exhaustion_patch = (
+            self._taskboard_evidence_reacquisition_exhaustion_patch(
+                context,
+                plan_digest=plan_digest,
+            )
+            if plan_digest
+            else None
+        )
         return TaskBoardCardResult(
             card_id=result.card_id,
             status="setback",
@@ -1187,7 +1198,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             artifact_refs=result.artifact_refs,
             file_refs=result.file_refs,
             diagnostics=(*result.diagnostics, diagnostic),
-            patch_proposal=result.patch_proposal,
+            patch_proposal=exhaustion_patch or result.patch_proposal,
             metadata=metadata,
         )
 

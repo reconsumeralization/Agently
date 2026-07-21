@@ -14349,6 +14349,292 @@ def test_taskboard_evidence_reacquisition_requires_new_source_content_not_final_
 
 
 @pytest.mark.asyncio
+async def test_taskboard_no_delta_evidence_reacquisition_supersedes_exhausted_plan_and_repair(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-exhausted-evidence-plan").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-exhausted-evidence-plan",
+        goal="Acquire new repository evidence before repairing final.md.",
+        success_criteria=["Direct code evidence supports the report."],
+        execution="taskboard",
+    )
+    scoped_retrieval = {
+        "query_groups": [
+            {
+                "query": "ES_MOE forward expert aggregation",
+                "expected_role": "evidence_snippet",
+                "source_kinds": ["pinned_repository"],
+                "path": "ultralytics/nn/modules/tasks.py",
+                "max_results": 2,
+            }
+        ]
+    }
+    plan_digest = task._taskboard_scoped_retrieval_plan_digest(scoped_retrieval)
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-exhausted-evidence-plan",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {
+                        "id": "draft",
+                        "objective": "Draft the report.",
+                        "required_outputs": ["A candidate report."],
+                        "status": "completed",
+                    },
+                    {
+                        "id": "final-verification-evidence",
+                        "objective": "Acquire new verifier-visible source evidence.",
+                        "depends_on": ["draft"],
+                        "required_outputs": ["New bounded source evidence."],
+                        "allowed_execution_shape": "control",
+                        "failure_policy": "required",
+                        "evidence_contract": {
+                            "kind": "taskboard_final_verification_evidence_reacquisition",
+                            "baseline_content_identities": [],
+                            "minimum_new_content_identity_count": 1,
+                            "eligible_source_roles": ["source"],
+                            "scoped_retrieval": scoped_retrieval,
+                            "scoped_retrieval_plan_digest": plan_digest,
+                        },
+                        "metadata": {
+                            "generated_by": (
+                                "agent_task.taskboard.final_verification_evidence_reacquisition"
+                            ),
+                            "scoped_retrieval": scoped_retrieval,
+                            "scoped_retrieval_plan_digest": plan_digest,
+                        },
+                    },
+                    {
+                        "id": "final-verification-repair",
+                        "objective": "Repair final.md using the new evidence.",
+                        "depends_on": ["final-verification-evidence"],
+                        "required_outputs": ["Corrected final.md"],
+                        "failure_policy": "required",
+                        "metadata": {
+                            "generated_by": "agent_task.taskboard.final_verification_repair",
+                        },
+                    },
+                ],
+            },
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                    preview={"status": "completed", "answer": "candidate"},
+                ).to_dict(),
+            },
+        }
+    )
+
+    async def handler(context):
+        assert context.card.id == "final-verification-evidence"
+        return task._enforce_taskboard_evidence_reacquisition_proof(
+            context,
+            TaskBoardCardResult(
+                card_id=context.card.id,
+                status="completed",
+                preview={"status": "completed", "remaining_work": []},
+                metadata={
+                    "evidence_use_guard": {
+                        "blocking_count": 0,
+                        "normalized_evidence_use": [],
+                    }
+                },
+            ),
+        )
+
+    tick = await TaskBoard(revision, handler=handler).async_run_tick()
+    cards = tick.revision.graph.card_by_id()
+    schedule = TaskBoard(tick.revision, handler=lambda _context: None).schedule()
+
+    assert tick.revision.card_results["final-verification-evidence"].status == "setback"
+    assert cards["final-verification-evidence"].status == "skipped"
+    assert cards["final-verification-evidence"].metadata["superseded_reason"] == (
+        "evidence_reacquisition_plan_exhausted"
+    )
+    assert cards["final-verification-repair"].status == "skipped"
+    assert cards["final-verification-repair"].metadata["superseded_reason"] == (
+        "evidence_reacquisition_dependency_exhausted"
+    )
+    assert schedule.runnable_card_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_taskboard_retrieval_planner_rejects_exhausted_plan_digest_and_accepts_changed_plan(
+    tmp_path,
+    monkeypatch,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-replan-plan-identity").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-replan-plan-identity",
+        goal="Acquire new repository evidence for the architecture gap.",
+        success_criteria=["Architecture claims use direct code evidence."],
+        execution="taskboard",
+    )
+    exhausted_plan = {
+        "query_groups": [
+            {
+                "query": "ES_MOE forward expert aggregation",
+                "expected_role": "evidence_snippet",
+                "source_kinds": ["pinned_repository"],
+                "path": "ultralytics/nn/modules/tasks.py",
+                "max_results": 2,
+            }
+        ]
+    }
+    changed_plan = {
+        "query_groups": [
+            {
+                "query": "parse_model ES_MOE construction call site",
+                "expected_role": "evidence_snippet",
+                "source_kinds": ["pinned_repository"],
+                "path": "ultralytics/nn/tasks.py",
+                "filters": {"content_contains": ["ES_MOE"]},
+                "max_results": 2,
+            }
+        ]
+    }
+    exhausted_digest = task._taskboard_scoped_retrieval_plan_digest(exhausted_plan)
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-awaiting-new-evidence-plan",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    {
+                        "id": "draft",
+                        "objective": "Draft report.",
+                        "required_outputs": ["candidate"],
+                        "status": "completed",
+                    },
+                    {
+                        "id": "final-verification-evidence",
+                        "objective": "Acquire evidence.",
+                        "depends_on": ["draft"],
+                        "required_outputs": ["new evidence"],
+                        "status": "skipped",
+                        "evidence_contract": {
+                            "kind": "taskboard_final_verification_evidence_reacquisition",
+                            "scoped_retrieval": exhausted_plan,
+                            "scoped_retrieval_plan_digest": exhausted_digest,
+                        },
+                        "metadata": {
+                            "generated_by": (
+                                "agent_task.taskboard.final_verification_evidence_reacquisition"
+                            ),
+                            "superseded_reason": "evidence_reacquisition_plan_exhausted",
+                            "scoped_retrieval": exhausted_plan,
+                            "scoped_retrieval_plan_digest": exhausted_digest,
+                        },
+                    },
+                ],
+            },
+            "card_results": {
+                "draft": TaskBoardCardResult(
+                    card_id="draft",
+                    status="completed",
+                ).to_dict(),
+                "final-verification-evidence": TaskBoardCardResult(
+                    card_id="final-verification-evidence",
+                    status="setback",
+                    metadata={
+                        "evidence_reacquisition_proof": {
+                            "satisfied": False,
+                            "new_content_identity_count": 0,
+                        }
+                    },
+                ).to_dict(),
+            },
+        }
+    )
+    responses = [exhausted_plan, changed_plan]
+    captured_inputs: list[dict[str, Any]] = []
+
+    class FakeRequest:
+        id = "taskboard-replan-plan-identity-request"
+
+        def input(self, value):
+            captured_inputs.append(value)
+            return self
+
+        def instruct(self, _value):
+            return self
+
+        def output(self, _value, *, format):
+            assert format == "json"
+            return self
+
+        def get_result(self):
+            return self
+
+        async def async_get_data(self):
+            return {"scoped_retrieval": responses.pop(0)}
+
+    monkeypatch.setattr(task.agent, "create_temp_request", FakeRequest)
+    monkeypatch.setattr(
+        task,
+        "_task_context_retrieval_policy",
+        lambda: scoped_retrieval_policy(
+            {
+                "pinned_repository": {
+                    "binding_ids": ["repo:yolo-master"],
+                    "required": True,
+                    "description": "Pinned YOLO-Master repository source.",
+                }
+            }
+        ),
+    )
+
+    verification = {
+        "reason": "The parse/forward integration remains unproved.",
+        "missing_criteria": ["Prove the ES_MOE construction and aggregation path."],
+        "replan_signal": {"status": "replan_segment"},
+    }
+    identical = await task._request_taskboard_final_evidence_retrieval_plan(
+        revision=revision,
+        final_verification=verification,
+    )
+    changed = await task._request_taskboard_final_evidence_retrieval_plan(
+        revision=revision,
+        final_verification=verification,
+    )
+
+    assert identical == {}
+    assert changed == task._normalize_scoped_retrieval_plan(changed_plan)
+    for request_input in captured_inputs:
+        exhausted = request_input["board_state"]["exhausted_retrieval_plans"]
+        assert exhausted == [
+            {
+                "card_id": "final-verification-evidence",
+                "plan_digest": exhausted_digest,
+                "query_group_count": 1,
+                "source_kinds": ["pinned_repository"],
+                "query_summaries": [
+                    {
+                        "query": "ES_MOE forward expert aggregation",
+                        "expected_role": "evidence_snippet",
+                        "source_kinds": ["pinned_repository"],
+                        "path": "ultralytics/nn/modules/tasks.py",
+                    }
+                ],
+            }
+        ]
+    errors = task.diagnostics["taskboard_final_repair_retrieval_plan_errors"]
+    assert errors[-1]["code"] == (
+        "taskboard.final_verification.exhausted_evidence_retrieval_plan_replayed"
+    )
+    assert errors[-1]["plan_digest"] == exhausted_digest
+
+
+@pytest.mark.asyncio
 async def test_taskboard_control_binds_new_task_context_body_into_live_evidence_ledger(
     tmp_path,
     monkeypatch,

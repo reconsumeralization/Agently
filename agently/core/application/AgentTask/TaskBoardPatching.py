@@ -47,6 +47,196 @@ _TASKBOARD_WORKSPACE_REPLACE_NEW_KEYS = (
 
 class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
     @classmethod
+    def _taskboard_exhausted_retrieval_plans(
+        cls,
+        revision: Any,
+    ) -> list[dict[str, Any]]:
+        """Project bounded identities for evidence plans that cannot be replayed."""
+
+        effective_revision = TaskBoardRevision.from_value(revision)
+        exhausted: list[dict[str, Any]] = []
+        seen_digests: set[str] = set()
+        for card in effective_revision.graph.cards:
+            evidence_contract = getattr(card, "evidence_contract", None)
+            if not isinstance(evidence_contract, Mapping) or str(
+                evidence_contract.get("kind") or ""
+            ).strip() != "taskboard_final_verification_evidence_reacquisition":
+                continue
+            metadata = getattr(card, "metadata", None)
+            result = effective_revision.card_results.get(card.id)
+            result_metadata = getattr(result, "metadata", None)
+            proof = (
+                result_metadata.get("evidence_reacquisition_proof")
+                if isinstance(result_metadata, Mapping)
+                else None
+            )
+            explicitly_exhausted = (
+                isinstance(metadata, Mapping)
+                and str(metadata.get("superseded_reason") or "").strip()
+                == "evidence_reacquisition_plan_exhausted"
+            )
+            proof_rejected = isinstance(proof, Mapping) and proof.get("satisfied") is False
+            if not explicitly_exhausted and not proof_rejected:
+                continue
+            plan = cls._normalize_scoped_retrieval_plan(
+                evidence_contract.get("scoped_retrieval")
+                or (metadata.get("scoped_retrieval") if isinstance(metadata, Mapping) else None)
+            )
+            plan_digest = str(
+                evidence_contract.get("scoped_retrieval_plan_digest")
+                or (metadata.get("scoped_retrieval_plan_digest") if isinstance(metadata, Mapping) else "")
+                or cls._taskboard_scoped_retrieval_plan_digest(plan)
+            ).strip()
+            if not plan or not plan_digest or plan_digest in seen_digests:
+                continue
+            seen_digests.add(plan_digest)
+            raw_groups = plan.get("query_groups")
+            groups = (
+                [group for group in raw_groups if isinstance(group, Mapping)]
+                if isinstance(raw_groups, Sequence)
+                and not isinstance(raw_groups, str | bytes | bytearray)
+                else []
+            )
+            source_kinds = sorted(
+                {
+                    source_kind
+                    for group in groups
+                    for source_kind in cls._normalize_string_list(
+                        group.get("source_kinds")
+                    )
+                }
+            )
+            query_summaries: list[dict[str, Any]] = []
+            for group in groups[:8]:
+                summary = {
+                    "query": str(group.get("query") or "")[:320],
+                    "expected_role": str(
+                        group.get("expected_role") or ""
+                    )[:80],
+                    "source_kinds": cls._normalize_string_list(
+                        group.get("source_kinds")
+                    )[:8],
+                }
+                for field in ("path", "pattern"):
+                    value = str(group.get(field) or "").strip()
+                    if value:
+                        summary[field] = value[:500]
+                filters = group.get("filters")
+                if isinstance(filters, Mapping):
+                    content_contains = cls._normalize_string_list(
+                        filters.get("content_contains")
+                    )[:4]
+                    if content_contains:
+                        summary["content_contains"] = [
+                            value[:320] for value in content_contains
+                        ]
+                query_summaries.append(summary)
+            exhausted.append(
+                {
+                    "card_id": card.id,
+                    "plan_digest": plan_digest,
+                    "query_group_count": len(groups),
+                    "source_kinds": source_kinds,
+                    "query_summaries": query_summaries,
+                }
+            )
+            if len(exhausted) >= 8:
+                break
+        return exhausted
+
+    @classmethod
+    def _taskboard_evidence_reacquisition_exhaustion_patch(
+        cls,
+        context: Any,
+        *,
+        plan_digest: str,
+    ) -> dict[str, Any] | None:
+        """Supersede one exhausted evidence plan and its stale generated repair."""
+
+        revision = getattr(context, "revision", None)
+        card = getattr(context, "card", None)
+        if revision is None or card is None:
+            return None
+        effective_revision = TaskBoardRevision.from_value(revision)
+        current_id = str(getattr(card, "id", "") or "").strip()
+        if not current_id:
+            return None
+        operations: list[dict[str, Any]] = []
+
+        current_card = dict(card.to_dict() if hasattr(card, "to_dict") else {})
+        if not current_card:
+            return None
+        current_metadata = dict(current_card.get("metadata") or {})
+        current_metadata.update(
+            {
+                "superseded_by": "taskboard_final_verification_replan",
+                "superseded_reason": "evidence_reacquisition_plan_exhausted",
+                "scoped_retrieval_plan_digest": plan_digest,
+            }
+        )
+        current_card.update({"status": "skipped", "metadata": current_metadata})
+        operations.append({"op": "update_card", "card": current_card})
+
+        superseded_repair_ids: list[str] = []
+        for candidate in effective_revision.graph.cards:
+            if current_id not in set(getattr(candidate, "depends_on", ()) or ()):
+                continue
+            candidate_metadata = getattr(candidate, "metadata", None)
+            if not isinstance(candidate_metadata, Mapping) or str(
+                candidate_metadata.get("generated_by") or ""
+            ).strip() != "agent_task.taskboard.final_verification_repair":
+                continue
+            candidate_result = effective_revision.card_results.get(candidate.id)
+            if candidate_result is not None and str(
+                getattr(candidate_result, "status", "") or ""
+            ).strip().lower() == "completed":
+                continue
+            replacement = dict(candidate.to_dict())
+            replacement_metadata = dict(replacement.get("metadata") or {})
+            replacement_metadata.update(
+                {
+                    "superseded_by": "taskboard_final_verification_replan",
+                    "superseded_reason": (
+                        "evidence_reacquisition_dependency_exhausted"
+                    ),
+                    "exhausted_evidence_card_id": current_id,
+                    "scoped_retrieval_plan_digest": plan_digest,
+                }
+            )
+            replacement.update(
+                {"status": "skipped", "metadata": replacement_metadata}
+            )
+            operations.append({"op": "update_card", "card": replacement})
+            superseded_repair_ids.append(candidate.id)
+
+        diagnostic = {
+            "code": "taskboard.final_repair.evidence_reacquisition_replan_required",
+            "message": (
+                "The host rejected an evidence-reacquisition result without a new "
+                "content identity and superseded the exhausted plan before replanning."
+            ),
+            "card_id": current_id,
+            "scoped_retrieval_plan_digest": plan_digest,
+            "superseded_repair_card_ids": superseded_repair_ids,
+        }
+        operations.extend(
+            [
+                {"op": "append_diagnostic", "diagnostic": diagnostic},
+                {"op": "set_board_status", "status": "running"},
+            ]
+        )
+        return DataFormatter.sanitize(
+            {
+                "base_revision": effective_revision.revision_id,
+                "source": (
+                    "agent_task.taskboard.evidence_reacquisition_plan_exhausted"
+                ),
+                "operations": operations,
+                "diagnostics": [diagnostic],
+            }
+        )
+
+    @classmethod
     def _taskboard_control_output_allows_task_workspace_delivery(cls, card_output: Any) -> bool:
         if not isinstance(card_output, Mapping):
             return True
@@ -1568,6 +1758,14 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 }
             )
             return {}
+        exhausted_retrieval_plans = self._taskboard_exhausted_retrieval_plans(
+            revision
+        )
+        exhausted_plan_digests = {
+            str(item.get("plan_digest") or "")
+            for item in exhausted_retrieval_plans
+            if str(item.get("plan_digest") or "")
+        }
         request = self.agent.create_temp_request()
         request.input(
             {
@@ -1604,6 +1802,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                         if str(getattr(result, "status", "") or "").strip().lower()
                         == "completed"
                     ],
+                    "exhausted_retrieval_plans": exhausted_retrieval_plans,
                 },
             }
         )
@@ -1619,7 +1818,10 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "verifier needs body evidence and locator_ref only for discovery. path is a file or directory scope, "
             "and pattern is only a file-name glob such as '*.py' or '**'; never put a code symbol or content "
             "phrase in pattern. When an exact symbol or text fragment must position a bounded read inside a known "
-            "source file, put that exact locator in filters.content_contains (one exact locator per query group)."
+            "source file, put that exact locator in filters.content_contains (one exact locator per query group). "
+            "board_state.exhausted_retrieval_plans lists host-owned digests of plans that produced no new "
+            "eligible evidence identity. When that list is non-empty, return a semantically changed plan; do not "
+            "repeat an exhausted plan. The host will reject a digest-identical replacement before execution."
         )
         request.output(
             {
@@ -1680,6 +1882,24 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 }
             )
             return {}
+        plan_digest = self._taskboard_scoped_retrieval_plan_digest(plan)
+        if plan_digest in exhausted_plan_digests:
+            self.diagnostics.setdefault(
+                "taskboard_final_repair_retrieval_plan_errors",
+                [],
+            ).append(
+                {
+                    "code": (
+                        "taskboard.final_verification.exhausted_evidence_retrieval_plan_replayed"
+                    ),
+                    "revision_id": str(
+                        getattr(revision, "revision_id", "") or ""
+                    ),
+                    "plan_digest": plan_digest,
+                    "exhausted_plan_digests": sorted(exhausted_plan_digests),
+                }
+            )
+            return {}
         analysis = self._taskboard_scoped_retrieval_capacity_analysis(plan)
         diagnostic = {
             "code": "taskboard.final_verification.evidence_retrieval_plan",
@@ -1690,6 +1910,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             "reserved_results": analysis.get("reserved_results"),
             "capacity": analysis.get("capacity"),
             "batch_reserved_results": analysis.get("batch_reserved_results"),
+            "plan_digest": plan_digest,
         }
         self.diagnostics.setdefault(
             "taskboard_final_repair_retrieval_plans",
@@ -2227,11 +2448,22 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                     else {}
                 )
                 if scoped_retrieval:
+                    scoped_retrieval_plan_digest = (
+                        self._taskboard_scoped_retrieval_plan_digest(
+                            scoped_retrieval
+                        )
+                    )
                     card_contract["scoped_retrieval"] = DataFormatter.sanitize(
                         scoped_retrieval
                     )
+                    card_contract["scoped_retrieval_plan_digest"] = (
+                        scoped_retrieval_plan_digest
+                    )
                     card_metadata["scoped_retrieval"] = DataFormatter.sanitize(
                         scoped_retrieval
+                    )
+                    card_metadata["scoped_retrieval_plan_digest"] = (
+                        scoped_retrieval_plan_digest
                     )
                     card_metadata["retrieval_policy"] = scoped_retrieval_policy()
                     card_metadata["retrieval_batch_index"] = batch_index
