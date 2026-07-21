@@ -2903,6 +2903,7 @@ async def test_strict_grounding_overrides_broad_legacy_completion_and_stops_thir
                 "claim_kind": "external_fact",
                 "state": "unsupported",
                 "evidence_ids": [],
+                "required_for_criterion_ids": [],
                 "reason": "No offered evidence supports this external fact.",
             }
         ],
@@ -3140,6 +3141,7 @@ async def test_strict_grounding_validates_task_workspace_and_inline_terminal_car
                         "claim_kind": "external_fact",
                     "state": "supported",
                     "evidence_ids": [source["reference_id"]],
+                    "required_for_criterion_ids": [],
                     "reason": "The file fact is directly supported.",
                     },
                     {
@@ -3147,6 +3149,7 @@ async def test_strict_grounding_validates_task_workspace_and_inline_terminal_car
                         "claim_kind": "external_fact",
                     "state": "unsupported",
                     "evidence_ids": [],
+                    "required_for_criterion_ids": [],
                     "reason": "The inline claim has no offered support.",
                 },
             ],
@@ -8529,6 +8532,10 @@ class MockAgentTaskRequester:
             payload["criterion_checks"] = normalized_checks
         payload.setdefault("material_claim_coverage_complete", True)
         payload.setdefault("material_claim_checks", [])
+        if isinstance(payload["material_claim_checks"], list):
+            for raw_check in payload["material_claim_checks"]:
+                if isinstance(raw_check, dict):
+                    raw_check.setdefault("required_for_criterion_ids", [])
         return payload
 
     async def request_model(self, request_data: AgentlyRequestData):
@@ -13686,6 +13693,181 @@ def test_taskboard_material_claim_repair_keeps_root_deliverable_separate_from_st
     assert repair.evidence_contract["material_claim_patch_paths"] == [candidate_path]
 
 
+@pytest.mark.asyncio
+async def test_taskboard_grounding_patch_control_request_omits_unrelated_board_history(
+    tmp_path,
+    monkeypatch,
+):
+    task = AgentTask(
+        _create_agent("taskboard-grounding-compact-request").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-grounding-compact-request",
+        goal="Delete one optional unsupported claim.",
+        success_criteria=["The remaining report stays unchanged."],
+        execution="taskboard",
+        options={"required_deliverables": ["final.md"]},
+    )
+    candidate_path = "working/taskboard/report/terminal-candidates/final.md"
+    quote = "An optional unsupported claim."
+    await task.task_workspace.write_file(
+        candidate_path,
+        f"# Report\n\n{quote}\n\nSupported conclusion.\n",
+    )
+    task._lifecycle_state.replace_carriers(
+        [
+            {
+                "carrier_id": "car_compact_patch",
+                "kind": "task_workspace_artifact",
+                "required": True,
+                "path": candidate_path,
+                "target_path": "final.md",
+                "content_version_id": "cv_compact_patch",
+                "content_digest": hashlib.sha256(quote.encode()).hexdigest(),
+                "source_work_result_id": "work:compact-patch",
+                "status": "materialized",
+            }
+        ],
+        expected_version=task._lifecycle_state.state_version,
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+    repair_contract = {
+        "gate_kind": "factual_integrity",
+        "issue_code": "unsupported_material_claim",
+        "contract_subject": "carrier:car_compact_patch",
+        "requirements": [
+            {
+                "claim_key": "claim:optional",
+                "carrier_id": "car_compact_patch",
+                "path": candidate_path,
+                "content_version_id": "cv_compact_patch",
+                "artifact_quote": quote,
+                "state": "unsupported",
+                "required_for_criterion_ids": [],
+                "repair_policy": "delete_only",
+                "reason": "No offered evidence supports this optional statement.",
+            }
+        ],
+    }
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": candidate_path},
+        final_verification={
+            "is_complete": False,
+            "requires_block": False,
+            "material_claim_repair_contract": repair_contract,
+        },
+    )
+    assert repaired is not None
+    repair = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by")
+        == "agent_task.taskboard.final_verification_repair"
+    )
+    unrelated_body = "unrelated-history-" + ("x" * 120_000)
+    captured: dict[str, Any] = {}
+
+    class FakeControlRequest:
+        id = "compact-grounding-control-request"
+
+        def set(self, *_args, **_kwargs):
+            return self
+
+        def input(self, value):
+            captured["request_payload"] = value
+            return self
+
+        def instruct(self, value):
+            captured["instruction"] = value
+            return self
+
+        def output(self, value, *, format):
+            captured["output_schema"] = value
+            captured["output_format"] = format
+            return self
+
+        def get_result(self):
+            return self
+
+        async def get_async_generator(self, *, type):
+            assert type == "instant"
+            if False:
+                yield None
+
+        async def async_get_data(self, *, raise_ensure_failure=False):
+            assert raise_ensure_failure is False
+            return {
+                "status": "setback",
+                "sufficient": False,
+                "next_board_action": "repair",
+                "remaining_work": ["Patch not applied in projection test."],
+            }
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any):
+        payload = kwargs["work_unit"].input_payload
+        captured["work_unit_payload"] = payload
+        try:
+            handled = await kwargs["handler"]({})
+        except Exception as error:
+            captured["handler_error"] = repr(error)
+            raise
+        return (
+            handled["execution_result"],
+            handled["execution_meta"],
+            WorkUnitResult(id=str(kwargs["work_unit"].id), status="completed"),
+        )
+
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_run_work_unit_through_blocks",
+        fake_run_work_unit_through_blocks,
+    )
+    monkeypatch.setattr(
+        task.agent,
+        "create_temp_request",
+        lambda: FakeControlRequest(),
+    )
+    context = SimpleNamespace(
+        card=repair,
+        revision=repaired,
+        dependency_results={
+            "draft": {
+                "status": "completed",
+                "preview": {"unrelated_history": unrelated_body},
+            }
+        },
+        planning_policy=None,
+    )
+
+    result = await task._run_taskboard_control_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    assert "request_payload" in captured, {
+        "captured": captured,
+        "result": result.to_dict(),
+    }
+    payload = captured["request_payload"]
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert payload["grounding_patch_contract"] == repair_contract
+    assert payload["authorized_carrier"]["path"] == candidate_path
+    assert payload["authorized_carrier"]["content_version_id"] == (
+        "cv_compact_patch"
+    )
+    assert "dependency_results" not in payload
+    assert "taskboard_evidence_view" not in payload
+    assert "taskboard_scoped_evidence_view" not in payload
+    assert "evidence_ledger" not in payload
+    assert unrelated_body not in serialized
+    assert task.diagnostics["taskboard_grounding_patch_prompt_projection"][-1] == {
+        "card_id": repair.id,
+        "serialized_input_characters": len(serialized),
+        "projection": "authorized_carrier_and_dirty_claim_contract",
+    }
+
+
 def test_terminal_repair_contract_groups_requirements_by_canonical_carrier(tmp_path):
     task = AgentTask(
         _create_agent("terminal-repair-contract-groups").use_task_workspace(
@@ -17278,6 +17460,7 @@ def test_terminal_verifier_validates_the_exact_model_visible_reference_snapshot(
                 "claim_kind": "external_fact",
                 "state": "supported",
                 "evidence_ids": [source["reference_id"]],
+                "required_for_criterion_ids": ["criterion:1"],
                 "reason": "The offered Action evidence contains the exact fact.",
             }
         ],
@@ -17453,6 +17636,7 @@ def test_terminal_verifier_material_claim_keys_reconstruct_host_owned_identity(t
                     "claim_kind": "external_fact",
                     "state": "supported",
                     "evidence_ids": [source["reference_id"]],
+                    "required_for_criterion_ids": ["criterion:1"],
                     "reason": "The Action result directly supports the selected claim.",
                 }
             ],
@@ -17473,6 +17657,7 @@ def test_terminal_verifier_material_claim_keys_reconstruct_host_owned_identity(t
             "claim_kind": "external_fact",
             "state": "supported",
             "evidence_ids": [source["reference_id"]],
+            "required_for_criterion_ids": ["criterion:1"],
             "reason": "The Action result directly supports the selected claim.",
         }
     ]
@@ -17543,27 +17728,30 @@ def test_terminal_verifier_actual_case_simulation_separates_markdown_structure_f
                         "| Configuration | MoE expert-count and router-loss settings exist. |"
                     ]["claim_key"],
                     "claim_kind": "external_fact",
-                    "state": "supported",
-                    "evidence_ids": [source["reference_id"]],
-                    "reason": "The bounded repository read supports the table row.",
+                        "state": "supported",
+                        "evidence_ids": [source["reference_id"]],
+                        "required_for_criterion_ids": ["criterion:1"],
+                        "reason": "The bounded repository read supports the table row.",
                 },
                 {
                     "claim_key": by_text[
                         "The repository exposes MoE expert-count and router-loss settings."
                     ]["claim_key"],
                     "claim_kind": "external_fact",
-                    "state": "supported",
-                    "evidence_ids": [source["reference_id"]],
-                    "reason": "The bounded repository read supports the prose fact.",
+                        "state": "supported",
+                        "evidence_ids": [source["reference_id"]],
+                        "required_for_criterion_ids": ["criterion:1"],
+                        "reason": "The bounded repository read supports the prose fact.",
                 },
                 {
                     "claim_key": by_text[
                         "Recommendation: validate a minimal inference and routing-diagnostics path before adoption."
                     ]["claim_key"],
                     "claim_kind": "recommendation",
-                    "state": "reasonable_derived",
-                    "evidence_ids": [source["reference_id"]],
-                    "reason": "The recommendation is a bounded validation step derived from the observed surface.",
+                        "state": "reasonable_derived",
+                        "evidence_ids": [source["reference_id"]],
+                        "required_for_criterion_ids": ["criterion:1"],
+                        "reason": "The recommendation is a bounded validation step derived from the observed surface.",
                 },
             ],
         },
@@ -17977,6 +18165,7 @@ def test_verification_material_claim_audit_blocks_unsupported_external_fact(tmp_
                     "claim_kind": "external_fact",
                     "state": "unsupported",
                     "evidence_ids": [source["reference_id"]],
+                    "required_for_criterion_ids": [],
                     "reason": "The offered market source contains price movement, not revenue growth.",
                 }
             ],
@@ -17995,6 +18184,246 @@ def test_verification_material_claim_audit_blocks_unsupported_external_fact(tmp_
     assert verification["material_claim_repair_contract"]["requirements"][0][
         "repair_policy"
     ] == "delete_only"
+
+
+def test_verification_required_material_claim_reacquires_evidence_instead_of_deleting(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-required-material-claim").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="required-material-claim",
+        goal="Produce a repository adoption report.",
+        success_criteria=["Name the exact repository URL and pinned commit."],
+    )
+    carrier_id = "inline:" + "r" * 64
+    text = "Repository: https://github.com/Owner/Repo at " + "a" * 40
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": text,
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "kind": "inline_final_result",
+                "carrier_id": carrier_id,
+                "text": text,
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The repository identity lacks bindable evidence.",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": text,
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": False,
+                    "summary": "The required identity is not grounded.",
+                    "gaps": ["Acquire the pinned source descriptor."],
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_1",
+                    "claim_kind": "external_fact",
+                    "state": "supported",
+                    "evidence_ids": [],
+                    "required_for_criterion_ids": ["criterion:1"],
+                    "reason": "The repository identity was copied from the task source.",
+                }
+            ],
+            "replan_signal": {
+                "status": "repair",
+                "reason": "Patch the current carrier.",
+                "evidence_refs": [],
+            },
+        },
+        execution_evidence_summary={},
+        candidate_final_result=text,
+        terminal_candidate=candidate,
+    )
+
+    requirement = verification["material_claim_repair_contract"]["requirements"][0]
+    assert requirement["required_for_criterion_ids"] == ["criterion:1"]
+    assert requirement["repair_policy"] == "evidence_reacquisition_required"
+    assert verification["replan_signal"]["status"] == "replan_segment"
+    assert "delete_only" not in json.dumps(requirement, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_required_material_claim_replan_schedules_evidence_before_carrier_repair(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("required-claim-evidence-first").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="required-claim-evidence-first",
+        goal="Produce a grounded repository report.",
+        success_criteria=["Name the exact repository URL and pinned commit."],
+        execution="taskboard",
+        options={"required_deliverables": ["final.md"]},
+    )
+    candidate_path = "working/taskboard/report/terminal-candidates/final.md"
+    quote = "Repository: https://github.com/Owner/Repo"
+    await task.task_workspace.write_file(candidate_path, f"# Report\n\n{quote}\n")
+    task._lifecycle_state.replace_carriers(
+        [
+            {
+                "carrier_id": "car_required_claim",
+                "kind": "task_workspace_artifact",
+                "required": True,
+                "path": candidate_path,
+                "target_path": "final.md",
+                "content_version_id": "cv_required_claim",
+                "content_digest": hashlib.sha256(quote.encode()).hexdigest(),
+                "source_work_result_id": "work:required-claim",
+                "status": "materialized",
+            }
+        ],
+        expected_version=task._lifecycle_state.state_version,
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+    repair_contract = {
+        "gate_kind": "factual_integrity",
+        "issue_code": "required_material_claim_evidence_missing",
+        "contract_subject": "carrier:car_required_claim",
+        "requirements": [
+            {
+                "claim_key": "claim:required",
+                "carrier_id": "car_required_claim",
+                "path": candidate_path,
+                "content_version_id": "cv_required_claim",
+                "artifact_quote": quote,
+                "state": "unsupported",
+                "required_for_criterion_ids": ["criterion:1"],
+                "repair_policy": "evidence_reacquisition_required",
+                "reason": "No bindable repository identity is visible yet.",
+            }
+        ],
+    }
+    retrieval_plan = {
+        "query_groups": [
+            {
+                "query": "canonical repository URL and pinned commit",
+                "expected_role": "information",
+                "source_kinds": ["pinned_repository"],
+                "max_results": 1,
+            }
+        ]
+    }
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": candidate_path},
+        final_verification={
+            "is_complete": False,
+            "requires_block": False,
+            "reason": "Required repository identity evidence is missing.",
+            "missing_criteria": ["Name the exact repository URL and pinned commit."],
+            "material_claim_repair_contract": repair_contract,
+            "replan_signal": {"status": "replan_segment"},
+        },
+        evidence_retrieval_plan=retrieval_plan,
+    )
+
+    assert repaired is not None
+    evidence_card = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by")
+        == "agent_task.taskboard.final_verification_evidence_reacquisition"
+    )
+    repair_card = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by")
+        == "agent_task.taskboard.final_verification_repair"
+    )
+    assert evidence_card.id in repair_card.depends_on
+    assert repair_card.metadata["repair_source"] == (
+        "verification_evidence_reacquisition"
+    )
+    assert "material_claim_patch_paths" not in repair_card.evidence_contract
+    assert repair_card.evidence_contract["prior_material_claim_repair_contract"] == (
+        repair_contract
+    )
+
+
+@pytest.mark.parametrize(
+    "required_for_criterion_ids",
+    [["criterion:missing"], ["criterion:1", "criterion:1"]],
+)
+def test_verification_material_claim_rejects_untrusted_criterion_relationships(
+    tmp_path,
+    required_for_criterion_ids,
+):
+    task = AgentTask(
+        _create_agent("agent-untrusted-claim-criterion-link").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="untrusted-claim-criterion-link",
+        goal="Produce a grounded report.",
+        success_criteria=["Every required claim is grounded."],
+    )
+    carrier_id = "inline:" + "u" * 64
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": "One material fact.",
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "kind": "inline_final_result",
+                "carrier_id": carrier_id,
+                "text": "One material fact.",
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "Complete.",
+            "missing_criteria": [],
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "Checked.",
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_1",
+                    "claim_kind": "external_fact",
+                    "state": "unsupported",
+                    "evidence_ids": [],
+                    "required_for_criterion_ids": required_for_criterion_ids,
+                    "reason": "Not grounded.",
+                }
+            ],
+        },
+        execution_evidence_summary={},
+        terminal_candidate=candidate,
+    )
+
+    assert verification["material_claim_audit"]["structural_errors"]
+    assert verification["material_claim_repair_contract"]["gate_kind"] == (
+        "output_contract"
+    )
 
 
 @pytest.mark.parametrize("claim_kind", ["external_fact", "absence_claim"])
@@ -18059,6 +18488,7 @@ def test_verification_material_claim_audit_converts_invalid_reasonable_derived_f
                     "claim_kind": claim_kind,
                     "state": "reasonable_derived",
                     "evidence_ids": [source["reference_id"]],
+                    "required_for_criterion_ids": [],
                     "reason": "This conclusion was inferred from a partial directory listing.",
                 }
             ],
@@ -18132,6 +18562,7 @@ def test_verification_material_claim_audit_converts_supported_fact_without_evide
                     "claim_kind": "external_fact",
                     "state": "supported",
                     "evidence_ids": [],
+                    "required_for_criterion_ids": [],
                     "reason": "The claim was treated as supported without binding evidence.",
                 }
             ],
@@ -18210,6 +18641,7 @@ def test_verification_material_claim_audit_allows_reasonable_derived_analysis(tm
                     "claim_kind": "derived_analysis",
                     "state": "reasonable_derived",
                     "evidence_ids": [source["reference_id"]],
+                    "required_for_criterion_ids": ["criterion:1"],
                     "reason": "This is a bounded portfolio inference from the offered diversification fact.",
                 }
             ],
@@ -18457,6 +18889,10 @@ async def test_terminal_verification_uses_one_semantic_request_without_grounding
     )
     assert "claim_key" in material_check_schema
     assert material_check_schema["claim_key"][0].__args__ == ("claim_1",)
+    assert "required_for_criterion_ids" in material_check_schema
+    assert material_check_schema["required_for_criterion_ids"][0][0].__args__ == (
+        "criterion:1",
+    )
     assert "carrier_id" not in material_check_schema
     assert "artifact_quote" not in material_check_schema
     assert "absence_claim" in material_check_schema["claim_kind"][1]

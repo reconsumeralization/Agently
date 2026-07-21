@@ -442,12 +442,21 @@ returns every offered `criterion_id` exactly once in `criterion_checks`, plus
 request, the host structurally divides the visible current carriers into exact
 text spans and assigns each span one request-local `claim_key`. Each material
 claim check returns only one offered `claim_key`, a `claim_kind`, a semantic
-state, and offered evidence `reference_id` values. Direct facts may be
+state, offered evidence `reference_id` values, and
+`required_for_criterion_ids`. The last field contains only exact offered
+criterion ids and is empty for optional or extraneous claims. Direct facts may be
 `supported`, while bounded analysis or a
 recommendation may be `reasonable_derived` when its visible premises support a
 conservative conclusion; support does not require source wording to repeat the
 conclusion verbatim. `unsupported`, `contradicted`, and `unverifiable` checks
 cannot be accepted.
+
+An unsupported optional claim may produce a `delete_only` local patch. A claim
+required by a success criterion cannot: the host preserves that relationship
+and requires `replan_segment` evidence reacquisition. If no new authorized
+source, locator, or capability path remains, or the planner repeats an exhausted
+canonical retrieval plan, TaskBoard closes blocked or asks for clarification
+instead of replaying the same evidence/repair cards until a safety limit.
 
 Host code validates criterion ids, claim keys, evidence ids, and evidence
 eligibility, then reconstructs the canonical carrier id, exact quote, path, and
@@ -482,6 +491,11 @@ without parsing verifier prose. For a trusted file carrier, the repair path uses
 one bounded structured patch request and a host-validated exact replacement.
 It does not open a general AgentExecution/ActionRuntime round or authorize a
 whole-file rewrite merely because `write_file` is mounted.
+That patch request contains only the authorized carrier identity, exact dirty
+claim contract, bounded carrier quote, and output schema. Unrelated dependency
+results, board history, evidence-ledger bodies, and acceptance projections stay
+cold; request sizing is therefore a consequence of the dirty scope rather than
+an arbitrary token cap.
 
 TaskBoard evidence binding is repaired at the boundary that produced the
 structured `evidence_use`. Card, control, finalizer, and binding-repair prompt
@@ -799,6 +813,13 @@ evidence card continues to execute through ContextReader. Completion requires
 the card's `evidence_use` bindings to name the exact new body-bearing reference
 identities added to EvidenceLedger; prose claiming that evidence was acquired
 cannot satisfy this guard.
+
+Source adapters may expose small authoritative descriptor facts, such as a
+canonical repository URL and pinned commit, as ordinary typed `information`
+descriptors with exact reads. Once ContextReader discloses such a block,
+AgentTask gives it the same host-issued evidence binding as other eligible
+ContextPackage information; undisclosed adapter metadata does not become
+evidence automatically.
 
 For TaskBoard, an authored required `action_succeeded` capability requirement
 also owns repair dispatch. If that exact Action evidence is missing and the

@@ -385,10 +385,17 @@ carrier id、物理 path、content-version id 与 digest 标识；compact inline
 `criterion_checks` 中逐一返回本次提供的 `criterion_id`，并返回
 `material_claim_coverage_complete` 和 `material_claim_checks`。请求前，host 只按结构把当前
 carrier 的可见正文拆成精确文本 span，并为每个 span 分配一个请求内 `claim_key`。每个
-material claim check 只返回一个已提供的 `claim_key`、一个 `claim_kind`、语义状态，以及
-本次提供的 evidence `reference_id`。直接事实可以是 `supported`；如果可见前提足以支持
+material claim check 只返回一个已提供的 `claim_key`、一个 `claim_kind`、语义状态、本次提供的
+evidence `reference_id`，并返回 `required_for_criterion_ids`。最后这个字段只能包含本次提供的
+精确 criterion id；可选或额外 claim 返回空列表。直接事实可以是 `supported`；如果可见前提足以支持
 保守结论，分析或建议可以是 `reasonable_derived`，不要求来源逐字复述结论。
 `unsupported`、`contradicted` 与 `unverifiable` 都不能通过验收。
+
+不受 success criterion 要求的 unsupported claim 可以进入 `delete_only` 局部 patch；被某项
+criterion 要求的 claim 不可以。host 会保留这条关系并强制进入 `replan_segment` 证据重获取。
+如果没有新的已授权 source、locator 或 capability 路径，或者 planner 重复了已经耗尽的
+canonical retrieval plan，TaskBoard 会 blocked 或请求澄清，而不是重复执行相同 evidence/repair
+card 直到触发安全上限。
 
 host 会校验 criterion id、claim key、evidence id 与证据资格，再从本次 claim-key map
 确定性恢复 canonical carrier id、精确 quote、path 与 content version。它不分词 verifier
@@ -415,6 +422,9 @@ material-claim 失败会产生结构化 `material_claim_repair_contract`，Flat 
 消费 contract，不解析 verifier prose。可信 file carrier 的修复路径只运行一次有界结构化
 patch 请求，再由 host 校验并应用精确 replacement；它不会打开通用 AgentExecution /
 ActionRuntime round，也不会因为挂载了 `write_file` 就允许整文件重写。
+该 patch 请求只携带已授权 carrier identity、精确 dirty claim contract、有界 carrier quote
+和输出 schema。无关 dependency results、board history、EvidenceLedger 正文与 acceptance
+projection 都保留在冷侧；请求大小由 dirty scope 决定，而不是由任意 token 硬上限决定。
 
 TaskBoard 会在产出结构化 `evidence_use` 的边界修复证据绑定。card、control、finalizer
 与 binding-repair prompt ledger 中，每项都只向模型暴露一个稳定 `reference_id`，并
@@ -625,6 +635,11 @@ metadata 重新塞回模型热路径。
 查询，后续 evidence card 仍通过 ContextReader 执行。完成条件要求 card 的
 `evidence_use` 精确绑定 EvidenceLedger 在本 card 后新增的有正文 reference identity；
 模型自然语言声称“已经获得证据”不能绕过这项 host guard。
+
+source adapter 可以把 canonical repository URL、pinned commit 等小型权威 descriptor 事实
+作为普通 typed `information` descriptor 和 exact read 暴露。ContextReader 披露该 block 后，
+AgentTask 会像处理其他合格 ContextPackage information 一样为其签发 evidence binding；未披露
+的 adapter metadata 不会自动成为证据。
 
 对于 TaskBoard，已声明且 required 的 `action_succeeded` capability requirement 也拥有
 repair dispatch。如果缺失的正是该 Action evidence，并且能力已经挂载，TaskBoard 会创建

@@ -1457,6 +1457,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "for ordinary transformation, formatting, code, or writing output that makes no material external factual claim. "
             "If execution metadata, action records, diagnostics, command output, or verifier-visible evidence shows "
             "a failed required action or failed validation command, do not mark complete. "
+            "For every material_claim_checks item, return required_for_criterion_ids as the exact offered criterion ids whose "
+            "satisfaction semantically requires that claim; return an empty list when the claim is optional or extraneous. "
+            "Do not invent, copy criterion text into, omit duplicates from, or duplicate ids in this relationship. A required "
+            "claim that lacks supporting evidence needs status='replan_segment', not a carrier-only repair or deletion. "
             "If a criterion requires a script, command, test, or external validation to pass, require explicit "
             "successful evidence for that validation before completion. "
             "Decide final_result_required from the goal and success criteria: set it true when the task demands a "
@@ -1651,6 +1655,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                                 [evidence_reference_type],
                                 "Only exact offered evidence_ledger.items[].reference_id values.",
                                 False,
+                            ),
+                            "required_for_criterion_ids": (
+                                [criterion_id_type],
+                                "Exact offered criterion ids whose satisfaction requires this claim; empty when optional.",
+                                True,
                             ),
                             "reason": (str, "Concise support or failure reason.", True),
                         }
@@ -4018,6 +4027,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "contradicted",
             "unverifiable",
         }
+        offered_criterion_ids = {
+            f"criterion:{index}"
+            for index, _criterion in enumerate(self.success_criteria, start=1)
+        }
         seen_claim_keys: set[str] = set()
         for index, raw_check in enumerate(raw_checks):
             if not isinstance(raw_check, Mapping):
@@ -4038,6 +4051,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 [str(value or "").strip() for value in raw_evidence_ids]
                 if isinstance(raw_evidence_ids, Sequence)
                 and not isinstance(raw_evidence_ids, str | bytes | bytearray)
+                else []
+            )
+            raw_required_criterion_ids = raw_check.get(
+                "required_for_criterion_ids"
+            )
+            required_for_criterion_ids = (
+                [str(value or "").strip() for value in raw_required_criterion_ids]
+                if isinstance(raw_required_criterion_ids, Sequence)
+                and not isinstance(
+                    raw_required_criterion_ids,
+                    str | bytes | bytearray,
+                )
                 else []
             )
             check_errors: list[str] = []
@@ -4065,6 +4090,21 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             ]
             if unknown_evidence_ids:
                 check_errors.append("evidence_ids contains a reference outside the offered set")
+            if "required_for_criterion_ids" not in raw_check:
+                check_errors.append("required_for_criterion_ids is required")
+            if len(required_for_criterion_ids) != len(
+                set(required_for_criterion_ids)
+            ):
+                check_errors.append("required_for_criterion_ids contains duplicates")
+            unknown_required_criterion_ids = [
+                criterion_id
+                for criterion_id in required_for_criterion_ids
+                if not criterion_id or criterion_id not in offered_criterion_ids
+            ]
+            if unknown_required_criterion_ids:
+                check_errors.append(
+                    "required_for_criterion_ids contains a criterion outside the offered set"
+                )
             supported_without_evidence = state == "supported" and not evidence_ids
             if supported_without_evidence:
                 check_errors.append("supported material claims require at least one offered evidence reference")
@@ -4099,6 +4139,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "claim_kind": claim_kind,
                 "state": state,
                 "evidence_ids": evidence_ids,
+                "required_for_criterion_ids": required_for_criterion_ids,
                 "reason": reason,
             }
             checks.append(normalized_check)
@@ -4129,7 +4170,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 normalized_check["reason"] = (
                     f"{reason} Host validation: {targetable_support_failure}"
                 )
-                normalized_check["repair_policy"] = "delete_only"
+                normalized_check["repair_policy"] = (
+                    "evidence_reacquisition_required"
+                    if required_for_criterion_ids
+                    else "delete_only"
+                )
                 failed_checks.append(normalized_check)
             elif check_errors:
                 structural_errors.append(
@@ -4163,11 +4208,20 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     }
                 )
             elif state in {"unsupported", "contradicted", "unverifiable"}:
-                normalized_check["repair_policy"] = "delete_only"
+                normalized_check["repair_policy"] = (
+                    "evidence_reacquisition_required"
+                    if required_for_criterion_ids
+                    else "delete_only"
+                )
                 failed_checks.append(normalized_check)
         issue_code = ""
         if structural_errors:
             issue_code = "terminal_verifier_output_invalid"
+        elif any(
+            item.get("repair_policy") == "evidence_reacquisition_required"
+            for item in failed_checks
+        ):
+            issue_code = "required_material_claim_evidence_missing"
         elif any(item.get("state") == "contradicted" for item in failed_checks):
             issue_code = "contradicted_material_claim"
         elif failed_checks:
@@ -4190,6 +4244,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "claim_kind": item.get("claim_kind"),
                 "state": item.get("state"),
                 "evidence_ids": item.get("evidence_ids", []),
+                "required_for_criterion_ids": item.get(
+                    "required_for_criterion_ids", []
+                ),
                 "reason": item.get("reason"),
                 "repair_policy": item.get("repair_policy", "delete_only"),
                 **(
@@ -6014,6 +6071,36 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "reason": str(normalized.get("reason") or ""),
             }
         raw_status = str(signal_value.get("status") or "").strip()
+        material_claim_repair_contract = normalized.get(
+            "material_claim_repair_contract"
+        )
+        raw_material_requirements = (
+            material_claim_repair_contract.get("requirements")
+            if isinstance(material_claim_repair_contract, Mapping)
+            else None
+        )
+        required_claim_evidence_reacquisition = bool(
+            isinstance(raw_material_requirements, Sequence)
+            and not isinstance(
+                raw_material_requirements,
+                str | bytes | bytearray,
+            )
+            and any(
+                isinstance(requirement, Mapping)
+                and str(requirement.get("repair_policy") or "").strip()
+                == "evidence_reacquisition_required"
+                for requirement in raw_material_requirements
+            )
+        )
+        if required_claim_evidence_reacquisition:
+            normalized["required_claim_evidence_reacquisition"] = True
+            if raw_status in {"", "continue", "repair"}:
+                signal_value["status"] = "replan_segment"
+                signal_value["reason"] = (
+                    "A success-criterion-required material claim lacks bindable "
+                    "evidence and cannot be repaired by deleting the claim."
+                )
+                raw_status = "replan_segment"
         if normalized.get("is_complete") is True:
             signal_value["status"] = "continue"
         elif normalized.get("requires_block") is True:

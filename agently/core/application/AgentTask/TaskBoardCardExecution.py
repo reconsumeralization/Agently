@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 
 from .TaskShared import *
@@ -2232,6 +2233,44 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             and self._taskboard_grounding_patch_paths(context)
         )
         if grounding_patch_mode:
+            grounding_patch_contract = DataFormatter.sanitize(
+                grounding_repair_contract
+            )
+            grounding_carrier = self._terminal_carrier_for_repair_contract(
+                grounding_repair_contract
+            )
+            control_input_payload = {
+                "task_id": self.id,
+                "card_id": str(context.card.id),
+                "card_objective": str(
+                    getattr(context.card, "objective", "") or ""
+                ),
+                "grounding_patch_contract": grounding_patch_contract,
+                "authorized_carrier": {
+                    "carrier_id": str(
+                        getattr(grounding_carrier, "carrier_id", "") or ""
+                    ),
+                    "path": self._task_workspace_artifact_display_path(
+                        getattr(grounding_carrier, "path", "")
+                    ),
+                    "content_version_id": str(
+                        getattr(
+                            grounding_carrier,
+                            "content_version_id",
+                            "",
+                        )
+                        or ""
+                    ),
+                },
+                "required_outputs": list(
+                    getattr(context.card, "required_outputs", ()) or ()
+                ),
+                "task_workspace_delivery_policy": (
+                    self._taskboard_task_workspace_delivery_policy(context)
+                ),
+                "language_policy": language_policy,
+            }
+        if grounding_patch_mode:
             control_instruction += (
                 " This is a grounding-only TaskWorkspace repair. Do not return candidate_final_result, final_result, "
                 "artifact_markdown, or a complete artifact body. Set next_board_action='patch' and return only a "
@@ -2422,6 +2461,51 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         async def run_control_work_unit(_context: Mapping[str, Any]) -> Mapping[str, Any]:
             nonlocal card_request_evidence_ledger
             carrier_output_policy = self._carrier_output_policy_from_block_context(_context)
+            if grounding_patch_mode:
+                request = self.agent.create_temp_request()
+                self._apply_language_policy_to_request(request, language_policy)
+                request_payload = dict(control_input_payload)
+                if isinstance(carrier_output_policy, Mapping):
+                    request_payload["carrier_output_policy"] = (
+                        DataFormatter.sanitize(dict(carrier_output_policy))
+                    )
+                serialized_input_characters = len(
+                    json.dumps(
+                        DataFormatter.sanitize(request_payload),
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                )
+                self.diagnostics.setdefault(
+                    "taskboard_grounding_patch_prompt_projection", []
+                ).append(
+                    {
+                        "card_id": str(context.card.id),
+                        "serialized_input_characters": serialized_input_characters,
+                        "projection": "authorized_carrier_and_dirty_claim_contract",
+                    }
+                )
+                request.input(request_payload)
+                request.instruct(control_instruction)
+                request.output(
+                    dict(control_output_schema),
+                    format=self._carrier_control_output_format(
+                        carrier_output_policy
+                    ),
+                )
+                await self._emit(
+                    f"agent_task.taskboard.card.{self._stream_path_token(context.card.id)}.control.started",
+                    {"card_id": context.card.id},
+                )
+                result_handle = request.get_result()
+                return await self._await_taskboard_card_execution(
+                    self._consume_taskboard_control_request(
+                        context.card.id,
+                        result_handle,
+                    ),
+                    card_id=context.card.id,
+                    stage="control",
+                )
             request_context_pack, context_package = await self._read_task_context_view(
                 phase="card",
                 consumer_id=f"agent_task:{self.id}:taskboard-control:{context.card.id}",
