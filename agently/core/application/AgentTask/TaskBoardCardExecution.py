@@ -833,12 +833,29 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             metadata.get("final_task_workspace_deliverables")
         )
 
+    @classmethod
+    def _taskboard_final_repair_grounding_patch_paths(cls, card: Any) -> list[str]:
+        evidence_contract = getattr(card, "evidence_contract", None)
+        if not isinstance(evidence_contract, Mapping):
+            return []
+        return cls._normalize_string_list(
+            evidence_contract.get("material_claim_patch_paths")
+        )
+
     def _taskboard_final_repair_candidate_paths(self, context: Any) -> list[str]:
+        card = getattr(context, "card", None)
+        root_paths = self._taskboard_final_repair_write_paths(card)
+        root_path_set = set(root_paths)
+        grounding_patch_paths = [
+            path
+            for path in self._taskboard_final_repair_grounding_patch_paths(card)
+            if path not in root_path_set
+        ]
+        if grounding_patch_paths:
+            return grounding_patch_paths
         return [
             self._taskboard_terminal_candidate_path(context, path)
-            for path in self._taskboard_final_repair_write_paths(
-                getattr(context, "card", None)
-            )
+            for path in root_paths
         ]
 
     async def _taskboard_task_workspace_content_snapshot(

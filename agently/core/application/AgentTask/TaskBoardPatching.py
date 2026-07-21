@@ -1880,20 +1880,19 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         required_deliverables, _invalid_terminal_paths = self._taskboard_terminal_task_workspace_deliverables(
             effective_revision
         )
-        grounding_patch_paths = [
-            self._task_workspace_artifact_display_path(item)
-            for item in required_deliverables
-            if self._task_workspace_artifact_display_path(item)
-        ]
         repair_carrier = (
             self._terminal_carrier_for_repair_contract(grounding_repair_contract)
             if grounding_repair_contract is not None
             else None
         )
+        repair_carrier_path = ""
+        grounding_patch_paths: list[str] = []
         if repair_carrier is not None and repair_carrier.kind == "task_workspace_artifact":
-            candidate_path = self._task_workspace_artifact_display_path(repair_carrier.path)
-            if candidate_path and candidate_path not in grounding_patch_paths:
-                grounding_patch_paths.append(candidate_path)
+            repair_carrier_path = self._task_workspace_artifact_display_path(
+                repair_carrier.path
+            )
+            if repair_carrier_path:
+                grounding_patch_paths.append(repair_carrier_path)
 
         def safe_id(raw: str) -> str:
             text = "".join(ch if ch.isalnum() or ch in {"_", ".", "-"} else "-" for ch in raw.strip())
@@ -1974,7 +1973,18 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             in grounding_patch_paths
             and not action_requirements
         )
-        repair_deliverables = grounding_patch_paths if grounding_patch_mode else required_deliverables
+        repair_deliverables = list(required_deliverables)
+        if (
+            not repair_deliverables
+            and repair_carrier_path
+            and not self._taskboard_task_workspace_path_is_internal_working(
+                repair_carrier_path
+            )
+        ):
+            repair_deliverables.append(repair_carrier_path)
+        repair_output_subjects = (
+            grounding_patch_paths if grounding_patch_mode else repair_deliverables
+        )
         (
             acceptance_evidence_issue,
             acceptance_evidence_contract,
@@ -1982,7 +1992,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             verifier_used_evidence_refs,
         ) = self._taskboard_final_repair_acceptance_evidence_state(
             final_verification,
-            output_subjects=repair_deliverables,
+            output_subjects=repair_output_subjects,
         )
         acceptance_evidence_convergence = self._terminal_convergence_state.record_detection(
             acceptance_evidence_issue,

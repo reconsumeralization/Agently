@@ -13323,6 +13323,72 @@ async def test_taskboard_final_repair_completion_records_terminal_candidate_chan
     assert root["content"] == "# Original\n\nUnsupported claim.\n"
 
 
+@pytest.mark.asyncio
+async def test_taskboard_grounding_repair_write_proof_tracks_existing_candidate_separately_from_root(
+    tmp_path,
+    monkeypatch,
+):
+    agent = _create_agent("agent-taskboard-grounding-repair-write-proof").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-grounding-repair-write-proof",
+        goal="Repair the rejected claim in the staged final deliverable.",
+        success_criteria=["The repaired artifact is delivered after verification."],
+        execution="taskboard",
+        options={"required_deliverables": ["final.md"]},
+    )
+    candidate_path = "working/taskboard/adoption-report/terminal-candidates/final.md"
+    original = "# Report\n\nSupported paragraph.\n\nUnsupported absence claim.\n"
+    await task.task_workspace.write_file(candidate_path, original)
+    card = TaskBoardCard.from_value(
+        {
+            "id": "final-verification-repair",
+            "objective": "Delete the rejected absence claim.",
+            "required_outputs": ["A bounded TaskWorkspace replace patch."],
+            "evidence_contract": {
+                "material_claim_patch_paths": [candidate_path],
+            },
+            "metadata": {
+                "generated_by": "agent_task.taskboard.final_verification_repair",
+                "final_task_workspace_deliverables": ["final.md"],
+            },
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph={"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]},
+    )
+    context = SimpleNamespace(card=card, revision=revision, dependency_results={})
+
+    async def fake_agent_card(*_args, **_kwargs):
+        await task.task_workspace.write_file(
+            candidate_path,
+            original.replace("\nUnsupported absence claim.\n", "\n"),
+        )
+        return TaskBoardCardResult(
+            card_id=card.id,
+            status="completed",
+            preview={"status": "completed", "sufficient": True},
+        )
+
+    monkeypatch.setattr(cast(Any, task), "_run_taskboard_agent_card", fake_agent_card)
+
+    result = await task._run_taskboard_card(
+        context,
+        cast(Any, {"goal": task.goal, "items": []}),
+    )
+
+    assert result.status == "completed"
+    proof = result.metadata["task_workspace_write_proof"]
+    assert proof["changed"] is True
+    assert proof["changed_candidate_paths"] == [candidate_path]
+    assert proof["changed_root_paths"] == []
+    assert proof["unchanged_root_paths"] == ["final.md"]
+    assert not (tmp_path / "task_workspace" / "final.md").exists()
+
+
 def _completed_taskboard_revision_for_final_repair(board_id: str) -> TaskBoardRevision:
     card = TaskBoardCard.from_value(
         {
@@ -13488,6 +13554,74 @@ def test_taskboard_material_claim_repair_uses_structured_claim_contract(tmp_path
     assert "Do not return or rewrite the complete artifact body" in repair.objective
     assert "Produce a complete corrected deliverable" not in repair.objective
     assert repair.allowed_execution_shape == "control"
+
+
+def test_taskboard_material_claim_repair_keeps_root_deliverable_separate_from_staged_patch_path(
+    tmp_path,
+):
+    agent = _create_agent("agent-taskboard-grounding-staged-repair").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-grounding-staged-repair",
+        goal="Produce a grounded deliverable.",
+        success_criteria=["Every material claim is grounded."],
+        execution="taskboard",
+        options={"required_deliverables": ["final.md"]},
+    )
+    candidate_path = "working/taskboard/adoption-report/terminal-candidates/final.md"
+    task._lifecycle_state.replace_carriers(
+        [
+            {
+                "carrier_id": "car_grounded_candidate",
+                "kind": "task_workspace_artifact",
+                "required": True,
+                "path": candidate_path,
+                "content_version_id": "cv_grounded_candidate",
+                "content_digest": hashlib.sha256(b"Unsupported factual claim.").hexdigest(),
+                "source_work_result_id": "work:taskboard-repair",
+                "status": "materialized",
+            }
+        ],
+        expected_version=task._lifecycle_state.state_version,
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+    repair_contract = {
+        "gate_kind": "factual_integrity",
+        "issue_code": "unsupported_material_claim",
+        "contract_subject": "carrier:car_grounded_candidate",
+        "requirements": [
+            {
+                "claim_key": "claim:1",
+                "carrier_id": "car_grounded_candidate",
+                "path": candidate_path,
+                "content_version_id": "cv_grounded_candidate",
+                "artifact_quote": "Unsupported factual claim.",
+                "state": "unsupported",
+                "reason": "No eligible source supports it.",
+            }
+        ],
+    }
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": candidate_path},
+        final_verification={
+            "is_complete": False,
+            "requires_block": False,
+            "material_claim_repair_contract": repair_contract,
+        },
+    )
+
+    assert repaired is not None
+    repair = next(
+        card
+        for card in repaired.graph.cards
+        if card.metadata.get("generated_by") == "agent_task.taskboard.final_verification_repair"
+    )
+    assert repair.metadata["final_task_workspace_deliverables"] == ["final.md"]
+    assert repair.evidence_contract["material_claim_patch_paths"] == [candidate_path]
 
 
 def test_taskboard_material_claim_evidence_gap_replans_segment_before_carrier_patch(tmp_path):
