@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -53,6 +54,32 @@ def _load_real_samples_runner() -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_framework_real_sample_runner_uses_public_task_workspace_keyword():
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / "spec"
+        / "experiments"
+        / "flat-react-taskboard-real-samples"
+        / "flat_react_taskboard_real_samples.py"
+    )
+    tree = ast.parse(runner_path.read_text(encoding="utf-8"))
+    create_task_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_task"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "agent"
+    ]
+
+    assert create_task_calls
+    for call in create_task_calls:
+        keywords = {keyword.arg for keyword in call.keywords}
+        assert "workspace" not in keywords
+        assert "task_workspace" in keywords
 
 
 def test_block_carrier_summary_records_graph_facts_without_runner_verdict(tmp_path):
