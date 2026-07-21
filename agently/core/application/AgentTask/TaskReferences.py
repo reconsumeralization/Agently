@@ -258,6 +258,102 @@ class TaskReferenceCatalog:
             cards.append(dict(DataFormatter.sanitize(card)))
         return cards
 
+    @staticmethod
+    def _context_source_body(target: Mapping[str, Any]) -> str:
+        """Return the canonical textual body that may enter TaskContext.
+
+        Pointer-only evidence deliberately stays out of this projection.  The
+        reference catalog remains the identity owner; this method only exposes
+        immutable, body-bearing evidence to the TaskContext retrieval port.
+        """
+        for field in ("body", "content", "text", "snippet", "preview"):
+            value = target.get(field)
+            if isinstance(value, str) and value:
+                return value
+            if isinstance(value, Mapping) or (
+                isinstance(value, Sequence)
+                and not isinstance(value, str | bytes | bytearray)
+            ):
+                return json.dumps(
+                    DataFormatter.sanitize(value),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+        return ""
+
+    def context_source_records(
+        self,
+        *,
+        eligible_roles: Sequence[str] = (
+            "action",
+            "source",
+            "task_workspace_readback",
+        ),
+    ) -> tuple[dict[str, Any], ...]:
+        """Project body-bearing canonical evidence for TaskContext indexing."""
+        roles = {str(role).strip() for role in eligible_roles if str(role).strip()}
+        records: list[dict[str, Any]] = []
+        for reference_id, reference in self._references.items():
+            source_role = str(reference.get("source_role") or "")
+            if source_role not in roles:
+                continue
+            evidence_id = str(reference.get("evidence_id") or "")
+            evidence = self._evidence.get(evidence_id)
+            target = evidence.get("target") if isinstance(evidence, Mapping) else None
+            if not isinstance(target, Mapping):
+                raise ValueError("Task reference target is stale.")
+            body = self._context_source_body(target)
+            if not body:
+                continue
+            records.append(
+                dict(
+                    DataFormatter.sanitize(
+                        {
+                            "reference_id": reference_id,
+                            "evidence_id": evidence_id,
+                            "source_role": source_role,
+                            "kind": reference.get("kind"),
+                            "status": reference.get("status"),
+                            "body_state": reference.get("body_state"),
+                            "body": body,
+                            "target": {
+                                field: target.get(field)
+                                for field in (
+                                    "id",
+                                    "label",
+                                    "title",
+                                    "path",
+                                    "action_id",
+                                    "action_call_id",
+                                    "selection_key",
+                                    "source_id",
+                                    "source_revision",
+                                    "source_ref",
+                                    "query",
+                                    "range_start",
+                                    "provenance",
+                                )
+                                if target.get(field) not in (None, "", [], {})
+                            },
+                        }
+                    )
+                )
+            )
+        return tuple(records)
+
+    def context_source_revision(self) -> str:
+        """Digest only evidence that is actually readable through TaskContext."""
+        digest = hashlib.sha256()
+        for record in self.context_source_records():
+            digest.update(str(record.get("reference_id") or "").encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(record.get("evidence_id") or "").encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(record.get("body") or "").encode("utf-8"))
+            digest.update(b"\0")
+        return f"sha256:{digest.hexdigest()}"
+
     def bind(
         self,
         subject: str,
@@ -413,13 +509,47 @@ class TaskReferenceCatalog:
             "record_id",
             "source_url",
             "url",
-            "status",
-            "body_state",
         ):
             supplied = target.get(field)
             original = original_target.get(field)
             if supplied not in (None, "", [], {}) and original not in (None, "", [], {}) and supplied != original:
-                raise ValueError("Task evidence identity cannot be retargeted after allocation.")
+                raise ValueError(
+                    "Task evidence identity cannot be retargeted after allocation "
+                    f"(field={field})."
+                )
+        supplied_status = str(target.get("status") or "").strip()
+        original_status = str(original_target.get("status") or "").strip()
+        if supplied_status and original_status and supplied_status != original_status:
+            raise ValueError(
+                "Task evidence identity cannot be retargeted after allocation "
+                "(field=status)."
+            )
+        supplied_body_state = str(target.get("body_state") or "").strip()
+        original_body_state = str(original_target.get("body_state") or "").strip()
+        if (
+            supplied_body_state
+            and original_body_state
+            and supplied_body_state != original_body_state
+        ):
+            visibility_rank = {
+                "ref_only": 0,
+                "truncated": 1,
+                "bounded": 2,
+                "full": 3,
+            }
+            lossy_projection = self._is_lossy_projection(target)
+            supplied_rank = visibility_rank.get(supplied_body_state, -1)
+            original_rank = visibility_rank.get(original_body_state, -1)
+            if (
+                not lossy_projection
+                or supplied_rank < 0
+                or original_rank < 0
+                or supplied_rank > original_rank
+            ):
+                raise ValueError(
+                    "Task evidence identity cannot be retargeted after allocation "
+                    "(field=body_state)."
+                )
         return self._project_canonical_item(evidence, target_override=target)
 
     @staticmethod
@@ -479,6 +609,15 @@ class TaskReferenceCatalog:
     def _source_role(item: Mapping[str, Any]) -> str:
         kind = str(item.get("kind") or "").strip().lower()
         if str(item.get("action_call_id") or "").strip() or "action.result" in kind or kind == "action_evidence":
+            return "action"
+        if (
+            kind == "taskboard_action_artifact.readback"
+            and str(item.get("owner") or "").strip().lower() == "action_artifact"
+        ):
+            # This is a body snapshot of an Action-owned result, not a
+            # TaskWorkspace deliverable being transported toward promotion.
+            # Keep the readback as a distinct evidence object while retaining
+            # the source role of the operation that produced the body.
             return "action"
         declared_role = str(item.get("role") or "").strip().lower()
         source = str(item.get("source") or "").strip().lower()
@@ -579,15 +718,14 @@ def validate_reference_tokens(text: str, offered: Mapping[str, Any]) -> dict[str
     reference_ids = parse_reference_tokens(raw_text)
     if "[[ref:" in REFERENCE_TOKEN_PATTERN.sub("", raw_text):
         raise ValueError("Artifact contains a malformed reference token.")
-    if len(reference_ids) != len(set(reference_ids)):
-        raise ValueError("Artifact contains a duplicate reference token.")
-    for reference_id in reference_ids:
+    unique_reference_ids = list(dict.fromkeys(reference_ids))
+    for reference_id in unique_reference_ids:
         record = offered.get(reference_id)
         if not isinstance(record, Mapping) or record.get("reference_id") != reference_id:
             raise ValueError("Artifact reference token was not present in the offered source map.")
         if str(record.get("source_role") or "") == "transport":
             raise ValueError("Artifact reference token is not eligible as a grounding source role.")
-    return {"reference_ids": reference_ids}
+    return {"reference_ids": unique_reference_ids}
 
 
 __all__ = [

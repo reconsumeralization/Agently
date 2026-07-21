@@ -33,6 +33,7 @@ from agently.types.data import (
 
 from .LifecycleState import AgentTaskLifecycleState
 from .TaskShared import *
+from .TaskEvidenceContextSource import TaskEvidenceContextSource
 
 
 def _context_package_from_dict(value: Mapping[str, Any]) -> ContextPackage:
@@ -150,6 +151,8 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                 )
             elif isinstance(source, RecordStoreContextSource):
                 descriptor["kind"] = "record_store"
+            elif isinstance(source, TaskEvidenceContextSource):
+                descriptor["kind"] = "task_evidence"
             elif isinstance(source, SkillContextSource):
                 descriptor.update(
                     {
@@ -226,6 +229,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         *,
         task_workspace: TaskWorkspace,
         record_store: RecordStore,
+        task_references: TaskReferenceCatalog,
     ) -> TaskContext:
         raw_snapshot = context_state.get("task_context")
         raw_sources = context_state.get("sources")
@@ -258,6 +262,8 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                 source: Any = TaskWorkspaceContextSource(task_workspace)
             elif kind == "record_store":
                 source = RecordStoreContextSource(record_store)
+            elif kind == "task_evidence":
+                source = TaskEvidenceContextSource(task_references)
             elif kind == "skill_library":
                 library = getattr(agent, "skill_library", None)
                 if not isinstance(library, SkillLibrary):
@@ -575,11 +581,21 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
             scope={"task_id": str(task_id), "execution_id": str(task_id)},
             search_scope={"task_id": str(task_id), "execution_id": str(task_id)},
         )
+        raw_task_reference_catalog = state.get("task_reference_catalog")
+        restored_task_references = (
+            TaskReferenceCatalog.from_snapshot(
+                str(task_id),
+                raw_task_reference_catalog,
+            )
+            if isinstance(raw_task_reference_catalog, Mapping)
+            else TaskReferenceCatalog(str(task_id))
+        )
         restored_task_context = cls._restore_task_context(
             agent,
             context_state,
             task_workspace=restored_task_workspace,
             record_store=restored_record_store,
+            task_references=restored_task_references,
         )
         task = cast(
             _AgentTaskT,
@@ -601,13 +617,11 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
             ),
         )
         task_any = cast(Any, task)
+        # The restored TaskEvidenceContextSource already points at this exact
+        # catalog object.  Keep the task identity owner and retrieval adapter
+        # joined instead of replacing either side after Task construction.
+        task_any._task_reference_catalog = restored_task_references
         task_any._restore_context_history(context_state)
-        task_reference_catalog = state.get("task_reference_catalog")
-        if isinstance(task_reference_catalog, Mapping):
-            task_any._task_reference_catalog = TaskReferenceCatalog.from_snapshot(
-                str(task_id),
-                task_reference_catalog,
-            )
         terminal_convergence = state.get("terminal_convergence")
         if isinstance(terminal_convergence, Mapping):
             task_any._terminal_convergence_state = TerminalConvergenceState.from_snapshot(

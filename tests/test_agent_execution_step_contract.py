@@ -2357,7 +2357,7 @@ class MockTaskBoardControlDependencyReadbackRequester(MockAgentExecutionRequeste
                 "diagnostics": [],
             }
         elif _is_taskboard_control_request(text):
-            if "dependency_readbacks" in text and "Hidden evidence" in text:
+            if "evidence_ledger" in text and "Hidden evidence" in text:
                 MockTaskBoardControlDependencyReadbackRequester.dependency_readback_seen = True
                 if "source_refs" in text and "https://example.test/evidence" in text:
                     MockTaskBoardControlDependencyReadbackRequester.source_refs_seen = True
@@ -2368,7 +2368,7 @@ class MockTaskBoardControlDependencyReadbackRequester(MockAgentExecutionRequeste
                     "sufficient": True,
                     "next_board_action": "finalize",
                     "gaps": [],
-                    "evidence": ["dependency_readbacks included Hidden evidence"],
+                    "evidence": ["evidence_ledger included Hidden evidence"],
                     "remaining_work": [],
                     "diagnostics": [],
                 }
@@ -2633,14 +2633,14 @@ def test_taskboard_blocked_scoped_retrieval_card_adds_continuation_patch(tmp_pat
     next_revision = validator.apply_patch(revision, patch)
     cards = next_revision.graph.card_by_id()
     assert cards["review"].failure_policy == "degradable"
-    assert cards["review"].status == "setback"
+    assert cards["review"].status == "skipped"
     assert "review.evidence" in cards
     assert "review.continue" in cards
     assert cards["review.evidence"].allowed_execution_shape == "auto"
     scoped_plan = cards["review.evidence"].metadata["scoped_retrieval"]
     assert scoped_plan["query_groups"][0]["snippet_limit"] == 1200
     assert cards["review.evidence"].metadata["generated_by"] == "agent_task.taskboard.scoped_retrieval_continuation"
-    assert cards["review.continue"].depends_on == ("review.evidence",)
+    assert cards["review.continue"].depends_on == ("review", "review.evidence")
 
     repeated_patch = task._taskboard_scoped_retrieval_continuation_patch(
         SimpleNamespace(revision=next_revision, card=cards["review.continue"]),
@@ -2709,11 +2709,11 @@ def test_taskboard_control_readback_action_auto_patch_adds_continuation():
     next_revision = validator.apply_patch(revision, patch)
     cards = next_revision.graph.card_by_id()
     assert cards["final"].failure_policy == "degradable"
-    assert cards["final"].status == "setback"
+    assert cards["final"].status == "skipped"
     assert "final.readback" in cards
     assert "final.continue" in cards
     assert cards["final.readback"].allowed_execution_shape == "readback"
-    assert cards["final.continue"].depends_on == ("collect", "final.readback")
+    assert cards["final.continue"].depends_on == ("final", "collect", "final.readback")
     schedule = validator.schedule(next_revision)
     assert "final.readback" in schedule.runnable_card_ids
 
@@ -2818,7 +2818,7 @@ def test_taskboard_control_auto_readback_scope_includes_upstream_evidence_cards(
 
     assert cards["final.readback"].depends_on == ("analyze", "collect")
     assert cards["final.readback"].metadata["evidence_scope"] == ["analyze", "collect"]
-    assert cards["final.continue"].depends_on == ("analyze", "final.readback")
+    assert cards["final.continue"].depends_on == ("final", "analyze", "final.readback")
     schedule = validator.schedule(next_revision)
     assert "final.readback" in schedule.runnable_card_ids
 
@@ -2896,7 +2896,7 @@ def test_taskboard_control_invalid_readback_patch_proposal_becomes_framework_pat
     assert cards["final.evidence"].metadata["target_refs"] == [
         {"owner": "external", "locator": "https://example.test/source"}
     ]
-    assert cards["final.continue"].depends_on == ("collect", "final.evidence")
+    assert cards["final.continue"].depends_on == ("final", "collect", "final.evidence")
 
 
 def test_taskboard_control_direct_target_refs_become_action_evidence_patch():
@@ -2953,7 +2953,7 @@ def test_taskboard_control_direct_target_refs_become_action_evidence_patch():
         {"owner": "external", "locator": "https://example.test/examples.html"},
     ]
     assert "https://example.test/source.pdf" in cards["final.evidence"].objective
-    assert cards["final.continue"].depends_on == ("collect", "final.evidence")
+    assert cards["final.continue"].depends_on == ("final", "collect", "final.evidence")
 
 
 def test_taskboard_control_empty_model_patch_does_not_swallow_readback_intent():
@@ -3008,7 +3008,7 @@ def test_taskboard_control_empty_model_patch_does_not_swallow_readback_intent():
     assert cards["final.evidence"].metadata["target_refs"] == [
         {"owner": "external", "locator": "https://example.test/official.html"}
     ]
-    assert cards["final.continue"].depends_on == ("collect", "final.evidence")
+    assert cards["final.continue"].depends_on == ("final", "collect", "final.evidence")
 
 
 def test_taskboard_control_stream_display_meta_uses_locale_keys_not_hardcoded_labels():
@@ -3091,7 +3091,7 @@ def test_taskboard_control_task_workspace_target_refs_become_readback_patch():
         }
     ]
     assert "external_target_refs" not in cards["final.readback"].metadata
-    assert cards["final.continue"].depends_on == ("collect", "final.readback")
+    assert cards["final.continue"].depends_on == ("final", "collect", "final.readback")
     assert cards["final.continue"].metadata["readback_card_id"] == "final.readback"
     assert cards["final.continue"].metadata["evidence_card_id"] == ""
 
@@ -3185,6 +3185,7 @@ def test_taskboard_mixed_target_owners_create_separate_action_and_readback_cards
         {"owner": "task_workspace", "locator": "sources/local.md"}
     ]
     assert cards["final.continue"].depends_on == (
+        "final",
         "final.evidence",
         "final.readback",
     )
@@ -3347,7 +3348,7 @@ def test_taskboard_source_refs_mark_unread_intermediate_refs_before_target_readb
     assert cards["final.evidence"].metadata["target_refs"] == [
         {"owner": "external", "locator": "https://example.test/source.pdf"}
     ]
-    assert cards["final.continue"].depends_on == ("collect", "final.evidence")
+    assert cards["final.continue"].depends_on == ("final", "collect", "final.evidence")
     assert cards["final.continue"].metadata["final_task_workspace_deliverables"] == ["final.md"]
     assert "final.md" in cards["final.continue"].objective
 
@@ -3968,11 +3969,12 @@ async def test_taskboard_dependency_readback_advances_past_prior_range(tmp_path)
         {
             "artifact_refs": [artifact],
             "evidence_items": [
-                {
-                    "id": "prior-segment",
-                    "kind": "taskboard_action_artifact.readback",
-                    "status": "ok",
-                    "body_state": "truncated",
+                    {
+                        "id": "prior-segment",
+                        "kind": "taskboard_action_artifact.readback",
+                        "status": "ok",
+                        "body_state": "truncated",
+                        "body": "0123456789" * 6 + "0123",
                     "read_identity": {
                         "owner": "action_artifact",
                         "locator": artifact["selection_key"],
@@ -4014,11 +4016,12 @@ async def test_taskboard_dependency_readback_skips_exhausted_artifact(tmp_path):
         {
             "artifact_refs": [artifact],
             "evidence_items": [
-                {
-                    "id": "complete-segment",
-                    "kind": "taskboard_action_artifact.readback",
-                    "status": "ok",
-                    "body_state": "full",
+                    {
+                        "id": "complete-segment",
+                        "kind": "taskboard_action_artifact.readback",
+                        "status": "ok",
+                        "body_state": "full",
+                        "body": "complete Action artifact body",
                     "total_bytes": artifact["bytes"],
                     "read_identity": {
                         "owner": "action_artifact",
@@ -4037,6 +4040,9 @@ async def test_taskboard_dependency_readback_skips_exhausted_artifact(tmp_path):
     assert output["exhausted_ref_count"] == 1
     assert output["readbacks"] == []
     assert output["diagnostics"][0]["code"] == "taskboard.dependency_readback.no_unread_ranges"
+    assert output["frontier"]["integrity_complete"] is True
+    assert output["frontier"]["exhausted"] is True
+    assert output["frontier"]["pending_ref_count"] == 0
 
 
 def test_taskboard_task_level_read_progress_tracks_versioned_contiguous_ranges(tmp_path):
@@ -4172,7 +4178,7 @@ def test_taskboard_control_readback_required_patch_type_becomes_readback_patch()
     cards = next_revision.graph.card_by_id()
     assert cards["analyze.readback"].allowed_execution_shape == "readback"
     assert cards["analyze.readback"].depends_on == ("collect",)
-    assert cards["analyze.continue"].depends_on == ("collect", "analyze.readback")
+    assert cards["analyze.continue"].depends_on == ("analyze", "collect", "analyze.readback")
 
 
 def test_taskboard_control_blocked_output_does_not_allow_task_workspace_delivery():
@@ -6691,13 +6697,15 @@ async def test_taskboard_finalization_materializes_final_artifact_evidence_befor
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reference_mode", ["repeated_valid", "unknown"])
 async def test_taskboard_finalization_promotes_working_artifact_to_required_deliverable(
     tmp_path,
     monkeypatch,
+    reference_mode,
 ):
     agent = _create_agent("execution-taskboard-final-artifact-promotion").use_task_workspace(
         tmp_path / "task_workspace",
-        mode="read_write",
+        mode="read_only",
     )
     task = AgentTask(
         agent,
@@ -6713,12 +6721,29 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
             }
         },
     )
+    source_evidence = task._task_reference_catalog.add_evidence(
+        {
+            "id": "source.action.result",
+            "kind": "agent_task.action.result",
+            "action_call_id": "call-source",
+            "action_id": "source.read",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": "The source supports the report.",
+        }
+    )
+    source_token = (
+        f"[[ref:{source_evidence['reference_id']}]]"
+        if reference_mode == "repeated_valid"
+        else "[[ref:ref_unknown]]"
+    )
     source_path = "working/taskboard/synthesize/terminal-candidates/final.md"
     source_content = (
         "# Final Report\n\n"
         "## Required Evidence Section\n\n"
-        "The report is complete.\n\n"
+        f"The report is complete. {source_token}\n\n"
         + ("long body line\n" * 500)
+        + f"\nRepeated source citation: {source_token}\n"
         + "TAIL-MARKER-PROMOTED-FROM-WORKING-ARTIFACT"
     )
     await task.task_workspace.write_file(source_path, source_content)
@@ -6796,12 +6821,27 @@ async def test_taskboard_finalization_promotes_working_artifact_to_required_deli
     monkeypatch.setattr(task, "_emit", noop)
 
     terminal = await task._finalize_taskboard(completed_revision, context_pack=cast(dict[str, Any], {}))
-    final_target = task.task_workspace.resolve_file_path("final.md")
-    readback = await task.task_workspace.read_file("final.md", max_bytes=int(final_target.stat().st_size) + 1)
 
     assert verification_calls
+    if reference_mode == "unknown":
+        assert terminal["terminal"] is False
+        assert terminal["status"] == "repair_requested"
+        assert terminal["final_verification"]["is_complete"] is False
+        assert "taskboard_terminal_reference_token_invalid" in terminal[
+            "final_verification"
+        ]["guard_reasons"]
+        assert not task.task_workspace.resolve_file_path("final.md").exists()
+        return
+    final_target = task.task_workspace.resolve_file_path("final.md")
+    readback = await task.task_workspace.read_file("final.md", max_bytes=int(final_target.stat().st_size) + 1)
     assert terminal == {"terminal": True, "status": "completed"}
     assert task.result["accepted"] is True
+    assert len(task.result["artifact_refs"]) == 1
+    assert task._task_workspace_artifact_display_path(
+        task.result["artifact_refs"][0]["path"]
+    ) == "final.md"
+    assert task.result["artifact_refs"][0]["sha256"] == readback["sha256"]
+    assert task.result["artifact_refs"][0]["bytes"] == len(source_content.encode("utf-8"))
     assert readback["content"] == source_content
     assert "TAIL-MARKER-PROMOTED-FROM-WORKING-ARTIFACT" in str(readback["content"])
 
@@ -8085,8 +8125,6 @@ async def test_taskboard_control_card_runs_single_model_request_through_block_ca
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_full_data()
-    meta = await execution.async_get_meta()
-    task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     card_result = taskboard["revision"]["card_results"]["synthesize"]
 
@@ -8264,8 +8302,8 @@ async def test_taskboard_control_consumer_requests_readback_without_intermediate
     assert cards["review.readback"].allowed_execution_shape == "readback"
     assert cards["review.readback"].depends_on == ("collect",)
     assert cards["review.continue"].allowed_execution_shape == "control"
-    assert cards["review.continue"].depends_on == ("collect", "review.readback")
-    assert cards["review"].status == "setback"
+    assert cards["review.continue"].depends_on == ("review", "collect", "review.readback")
+    assert cards["review"].status == "skipped"
     assert cards["review"].metadata["superseded_by"] == "review.continue"
 
 
@@ -8399,7 +8437,6 @@ async def test_taskboard_card_can_read_dependency_action_artifact_refs(tmp_path)
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_full_data()
     meta = await execution.async_get_meta()
-    task_meta = meta["logs"]["route_logs"]["agent_task"]
     task_record = cast(AgentTask, execution.task_record)
     taskboard = cast(dict[str, Any], task_record._terminal_taskboard_state)
     review_result = taskboard["revision"]["card_results"]["review"]
@@ -8641,8 +8678,6 @@ async def test_taskboard_tick_timeout_does_not_cancel_running_cards(tmp_path):
     )
 
     result = await execution.async_get_full_data()
-    meta = await execution.async_get_meta()
-    task_meta = meta["logs"]["route_logs"]["agent_task"]
     revision = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)["revision"]
     slow_result = revision["card_results"]["slow"]
 
@@ -8673,9 +8708,7 @@ async def test_taskboard_control_no_progress_timeout_returns_structured_card_fai
 
     started_at = asyncio.get_running_loop().time()
     result = await execution.async_get_full_data()
-    meta = await execution.async_get_meta()
     elapsed = asyncio.get_running_loop().time() - started_at
-    task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     card_result = taskboard["revision"]["card_results"]["control-stall"]
     diagnostic = card_result["diagnostics"][0]
@@ -8774,8 +8807,6 @@ async def test_taskboard_action_card_stops_planning_after_one_successful_action_
 
     stream_items = [item async for item in execution.get_async_generator(type="instant")]
     result = await execution.async_get_full_data()
-    meta = await execution.async_get_meta()
-    task_meta = meta["logs"]["route_logs"]["agent_task"]
     taskboard = cast(dict[str, Any], cast(AgentTask, execution.task_record)._terminal_taskboard_state)
     partial_result = taskboard["revision"]["card_results"]["partial"]
     diagnostics = partial_result["diagnostics"]

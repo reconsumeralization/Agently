@@ -1403,6 +1403,36 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
             # carrier content may have changed since the cached criterion
             # verdict. Always verify the current terminal candidate once.
             terminal_guard_issues: list[dict[str, Any]] = []
+            for terminal_ref in trusted_final_refs:
+                terminal_path = self._task_workspace_artifact_display_path(
+                    terminal_ref.get("path")
+                )
+                if not terminal_path:
+                    continue
+                reference_validation = (
+                    await self._validate_terminal_artifact_reference_tokens(
+                        terminal_path,
+                        content_kind=str(
+                            terminal_ref.get("content_kind") or "unknown"
+                        ),
+                    )
+                )
+                if reference_validation.get("valid"):
+                    continue
+                reference_reason = str(
+                    reference_validation.get("reason")
+                    or "Terminal artifact reference-token validation failed."
+                )
+                terminal_guard_issues.append(
+                    {
+                        "code": "taskboard_terminal_reference_token_invalid",
+                        "reason": reference_reason,
+                        "requires_block": False,
+                        "missing_criteria": [
+                            "Repair malformed, unknown, or ineligible source references in the staged terminal carrier."
+                        ],
+                    }
+                )
             if invalid_internal_terminal_paths:
                 invalid_message = (
                     "A model-declared framework-internal working path cannot satisfy terminal delivery without an "

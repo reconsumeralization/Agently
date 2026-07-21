@@ -1183,12 +1183,38 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         plan_digest = self._taskboard_scoped_retrieval_plan_digest(
             evidence_contract.get("scoped_retrieval")
         )
+        dependency_frontier = result.metadata.get("dependency_readback_frontier")
+        dependency_frontier = (
+            dict(dependency_frontier)
+            if isinstance(dependency_frontier, Mapping)
+            else {}
+        )
+        action_frontier_digest = str(
+            dependency_frontier.get("plan_digest") or ""
+        ).strip()
+        action_frontier_exhausted = (
+            str(dependency_frontier.get("kind") or "").strip()
+            == "action_artifact_readback"
+            and bool(dependency_frontier.get("integrity_complete"))
+            and bool(dependency_frontier.get("exhausted"))
+            and int(dependency_frontier.get("candidate_ref_count") or 0) > 0
+            and int(dependency_frontier.get("pending_ref_count") or 0) == 0
+            and int(dependency_frontier.get("failed_count") or 0) == 0
+        )
+        exhaustion_digest = plan_digest or (
+            action_frontier_digest if action_frontier_exhausted and not new_items else ""
+        )
         exhaustion_patch = (
             self._taskboard_evidence_reacquisition_exhaustion_patch(
                 context,
-                plan_digest=plan_digest,
+                plan_digest=exhaustion_digest,
+                frontier_kind=(
+                    "scoped_retrieval"
+                    if plan_digest
+                    else "action_artifact_readback"
+                ),
             )
-            if plan_digest
+            if exhaustion_digest
             else None
         )
         return TaskBoardCardResult(
@@ -1995,6 +2021,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     "evidence_ledger": card_evidence_ledger,
                     "evidence_use_guard": evidence_use_guard,
                     "process_summary": process_summary,
+                    "dependency_readback_frontier": (
+                        self._taskboard_dependency_readback_frontier(
+                            dependency_readbacks
+                        )
+                    ),
                 },
             )
         return self._failed_taskboard_card_result(
@@ -2151,14 +2182,23 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "success_criteria": self.success_criteria,
             "task_context_contract": self._task_context_contract_for_model_prompt(),
             "card": context.card.to_dict(),
-            "dependency_results": self._compact_taskboard_dependency_results(context.dependency_results),
-            "taskboard_evidence_view": self._compact_taskboard_evidence_view_for_prompt(evidence_view),
+            "dependency_results": self._compact_taskboard_dependency_results_for_control(
+                context.dependency_results
+            ),
+            "taskboard_evidence_state": self._compact_taskboard_evidence_state_for_control(
+                evidence_view
+            ),
             "evidence_ledger": prompt_evidence_ledger,
-            "taskboard_acceptance_index": DataFormatter.sanitize(acceptance_index),
+            "taskboard_acceptance_index": self._compact_taskboard_acceptance_index_for_control(
+                acceptance_index
+            ),
             "taskboard_acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
-            "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
+            "taskboard_scoped_evidence_state": (
+                self._compact_taskboard_scoped_evidence_state_for_control(
+                    scoped_evidence_view
+                )
+            ),
             "taskboard_focus_payload": DataFormatter.sanitize(focus_payload),
-            "dependency_readbacks": dependency_readbacks,
             "available_readback": self._taskboard_available_readback(evidence_view),
             "source_ref_policy": self._taskboard_source_ref_policy(),
             "task_workspace_delivery_policy": self._taskboard_task_workspace_delivery_policy(context),
@@ -2179,8 +2219,10 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "or historical source material with its time boundary. Do not treat the runtime/current date as a "
             "business fact, incident date, deployment date, publication date, approval date, or validation date "
             "unless the goal or verifier-visible evidence explicitly provides it. "
-            "do not plan or call tools from this request. taskboard_evidence_view is the compact evidence summary "
-            "and preserve cold refs as pointers. When scoped_retrieval_results is present, those are already executed "
+            "do not plan or call tools from this request. taskboard_evidence_state is lifecycle-only; "
+            "evidence_ledger is the one authoritative body-bearing evidence projection, while "
+            "taskboard_scoped_evidence_state only identifies the dirty acceptance subset. Preserve cold refs as "
+            "pointers. When scoped_retrieval_results is present, those are already executed "
             "bounded Context source facts; use visible evidence_snippet content only within its excerpt and bind "
             "claims to the corresponding evidence_ledger reference_id. TaskWorkspace is the bound task file space, "
             "not an alias for a pinned repository or another Context source. Treat evidence_ledger as the authoritative "
@@ -2188,10 +2230,9 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "bind factual claims through only exact offered evidence_ledger.items[].reference_id values in "
             "evidence_use.evidence_ids; no other prompt field is an evidence identity. failed/empty items support "
             "unavailability only; ref_only "
-            "items support only discovery/ref-pointer claims until readback evidence exists. dependency_readbacks contains bounded "
-            "readback previews for dependency Action artifacts that were structurally truncated or marked "
-            "full_value_available; inspect those before declaring dependency evidence missing. If bounded previews "
-            "and dependency_readbacks are insufficient, set next_board_action to 'readback' or 'repair' and explain "
+            "items support only discovery/ref-pointer claims until readback evidence exists. Dependency Action "
+            "readbacks are normalized into evidence_ledger rather than duplicated in another field. If its bounded "
+            "body previews are insufficient, set next_board_action to 'readback' or 'repair' and explain "
             "the exact missing refs or gaps instead of inventing facts. If a concrete URL, path, or ref must be "
             "fetched or materialized before continuing, put it in target_refs as an object with exact owner and "
             "locator fields; owner must be task_workspace, record_store, action_artifact, or external. Preserve a "
@@ -2818,6 +2859,11 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 "evidence_ledger": card_evidence_ledger,
                 "evidence_use_guard": evidence_use_guard,
                 "process_summary": process_summary,
+                "dependency_readback_frontier": (
+                    self._taskboard_dependency_readback_frontier(
+                        dependency_readbacks
+                    )
+                ),
             },
         )
 

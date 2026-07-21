@@ -215,9 +215,20 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         ).strip()
         if optional_selection == "none":
             intent_metadata["optional_selection"] = optional_selection
+        implicit_source_kinds = tuple(
+            binding.source_kind
+            for binding in self.task_context.snapshot().bindings
+            if str(binding.metadata.get("disclosure_mode") or "implicit").strip()
+            != "explicit_retrieval"
+        )
         package = await reader.async_read(
             ContextReadIntent(
                 query=str(intent or self.goal),
+                filters=(
+                    {"source_kinds": implicit_source_kinds}
+                    if implicit_source_kinds
+                    else {}
+                ),
                 metadata=intent_metadata,
             )
         )

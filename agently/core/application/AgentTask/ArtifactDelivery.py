@@ -1364,7 +1364,15 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             for item in ledger_items
             if isinstance(item, Mapping)
         }
-        for item in evidence_items:
+        # Allocate task-scoped identities only after the EvidenceEnvelope has
+        # normalized provider/action vocabulary (for example
+        # partial_success -> ok and complete -> full).  Allocating first and
+        # normalizing on a later ledger render makes the same canonical item
+        # appear to change immutable status/body-state fields across revisions.
+        normalized_items = evidence_envelope_from_value(
+            {"evidence_items": evidence_items}
+        ).evidence_items
+        for item in normalized_items:
             canonical_item = self._task_references().add_evidence(item)
             evidence_id = str(canonical_item.get("evidence_id") or canonical_item.get("id") or "").strip()
             if evidence_id and evidence_id in seen:

@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from typing import ContextManager
 
 from .TaskShared import *
@@ -148,6 +151,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         owner: str,
         locator: str,
         content_version: str,
+        include_task_progress: bool = True,
     ) -> int:
         raw_items = evidence_view.get("evidence_items")
         if not isinstance(raw_items, Sequence) or isinstance(
@@ -155,6 +159,22 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         ):
             raw_items = []
         ranges: list[Mapping[str, Any]] = []
+        if include_task_progress:
+            for progress in self._taskboard_read_progress_records(
+                owner=owner,
+                locator=locator,
+                content_version=content_version,
+            ):
+                progress_ranges = progress.get("ranges")
+                if isinstance(progress_ranges, Sequence) and not isinstance(
+                    progress_ranges,
+                    str | bytes | bytearray,
+                ):
+                    ranges.extend(
+                        item
+                        for item in progress_ranges
+                        if isinstance(item, Mapping)
+                    )
         for item in raw_items:
             if not isinstance(item, Mapping):
                 continue
@@ -236,6 +256,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             owner=owner,
             locator=locator,
             content_version=content_version,
+            # An explicit consumer range asks for body delivery into this
+            # consumer and therefore requires evidence in its current view.
+            # A range-less artifact target may use task-owned physical progress
+            # to avoid rereading bytes that are already completely materialized.
+            include_task_progress=not isinstance(ref.get("range"), Mapping),
         )
         return next_offset >= total_bytes
 
@@ -1146,6 +1171,42 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         refs = [
             ref for ref in candidate_refs if ref not in exhausted_refs
         ][:_TASKBOARD_DEPENDENCY_READBACK_MAX_REFS]
+        pending_ref_count = max(
+            0,
+            len(candidate_refs) - len(exhausted_refs) - len(refs),
+        )
+        frontier_projection = sorted(
+            [
+                {
+                    "owner": str(ref.get("owner") or "action_artifact"),
+                    "locator": str(
+                        ref.get("locator") or ref.get("selection_key") or ""
+                    ),
+                    "content_version": str(
+                        ref.get("content_version") or ref.get("sha256") or ""
+                    ),
+                    "total_bytes": self._coerce_non_negative_int(
+                        ref.get("total_bytes", ref.get("bytes"))
+                    ),
+                }
+                for ref in candidate_refs
+                if isinstance(ref, Mapping)
+            ],
+            key=lambda item: (
+                item["owner"],
+                item["locator"],
+                item["content_version"],
+                item["total_bytes"],
+            ),
+        )
+        frontier_digest = hashlib.sha256(
+            json.dumps(
+                frontier_projection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         hot_artifact_refs = self._compact_taskboard_artifact_refs_for_hot_payload(refs)
         payload: dict[str, Any] = {
             "schema_version": "agent_task_taskboard_dependency_readbacks/v1",
@@ -1166,6 +1227,21 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             "bounded": {
                 "preview_chars": _TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS,
                 "max_refs": _TASKBOARD_DEPENDENCY_READBACK_MAX_REFS,
+            },
+            "frontier": {
+                "kind": "action_artifact_readback",
+                "plan_digest": frontier_digest,
+                "candidate_ref_count": len(candidate_refs),
+                "attempted_ref_count": len(refs),
+                "exhausted_ref_count": len(exhausted_refs),
+                "pending_ref_count": pending_ref_count,
+                "success_count": 0,
+                "failed_count": 0,
+                "integrity_complete": bool(candidate_refs)
+                and not refs
+                and pending_ref_count == 0,
+                "exhausted": bool(candidate_refs)
+                and len(exhausted_refs) == len(candidate_refs),
             },
         }
         if not refs:
@@ -1313,6 +1389,23 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             )
             output["success_count"] = sum(1 for item in readbacks if item.get("ok"))
             failed_count = len(readbacks) - int(output["success_count"])
+            output["frontier"] = {
+                **dict(payload["frontier"]),
+                "success_count": int(output["success_count"]),
+                "failed_count": failed_count,
+                "integrity_complete": (
+                    bool(candidate_refs)
+                    and pending_ref_count == 0
+                    and failed_count == 0
+                ),
+                "exhausted": (
+                    bool(candidate_refs)
+                    and pending_ref_count == 0
+                    and failed_count == 0
+                    and len(exhausted_refs) + int(output["success_count"])
+                    == len(candidate_refs)
+                ),
+            }
             status = "completed" if int(output["success_count"]) > 0 else "failed"
             await self._emit(
                 f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.dependency_readback.completed",
@@ -1407,6 +1500,17 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         if not isinstance(raw_items, Sequence) or isinstance(raw_items, str | bytes | bytearray):
             return []
         return [dict(DataFormatter.sanitize(item)) for item in raw_items if isinstance(item, Mapping)]
+
+    @staticmethod
+    def _taskboard_dependency_readback_frontier(
+        dependency_readbacks: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(dependency_readbacks, Mapping):
+            return {}
+        frontier = dependency_readbacks.get("frontier")
+        if not isinstance(frontier, Mapping):
+            return {}
+        return dict(DataFormatter.sanitize(frontier))
 
     @classmethod
     def _taskboard_action_artifact_readback_evidence_items(
@@ -1606,6 +1710,22 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         *,
         max_chars: int,
     ) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    structured = json.loads(stripped)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    structured = None
+                if isinstance(structured, Mapping) or (
+                    isinstance(structured, Sequence)
+                    and not isinstance(structured, str | bytes | bytearray)
+                ):
+                    # Action artifact storage may return structured JSON as a
+                    # serialized string. Recover its structure before bounded
+                    # compaction so one very large leaf cannot hide sibling
+                    # records in a middle-truncated text preview.
+                    value = structured
         preview = cls._compact_verifier_prompt_value(value, max_chars=max_chars)
         return cls._compact_taskboard_framework_refs_in_hot_value(preview)
 

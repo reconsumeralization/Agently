@@ -495,6 +495,319 @@ def test_taskboard_live_readback_ref_survives_ref_only_flood_into_binding_guard(
     )
 
 
+def test_model_evidence_projection_preserves_complete_structured_action_siblings():
+    task = AgentTask(
+        _create_agent("taskboard-structured-action-evidence-projection"),
+        task_id="taskboard-structured-action-evidence-projection",
+        goal="Use the complete quote result for every requested ticker.",
+        success_criteria=["Every ticker uses the available quote fields."],
+        execution="taskboard",
+    )
+    companies = []
+    for ticker, price, net_change, percentage_change in (
+        ("NVDA", "$206.489", "-0.801", "-0.39%"),
+        ("AMD", "$544.21", "-0.22", "-0.04%"),
+        ("AVGO", "$385.28", "-1.22", "-0.32%"),
+    ):
+        companies.append(
+            {
+                "company_name": f"{ticker} Corporation Common Stock",
+                "exchange": "NASDAQ-GS",
+                "fallback_from": "stooq_csv",
+                "fallback_reason": (
+                    "CSV request failed for https://stooq.example/q/l/?s="
+                    f"{ticker.lower()}.us&f=sd2t2ohlcv&h=&e=csv: HTTP 404 Not Found"
+                ),
+                "last_sale_price": price,
+                "last_trade_timestamp": "Jul 21, 2026 6:25 PM ET",
+                "net_change": net_change,
+                "percentage_change": percentage_change,
+                "source": "nasdaq_quote_api",
+                "summary_data": {},
+                "ticker": ticker,
+            }
+        )
+    body = json.dumps(
+        {
+            "companies": companies,
+            "data_boundary": (
+                "Public quote data fetched from Stooq CSV when available, "
+                "with Nasdaq quote API fallback. Provider timestamps may be delayed."
+            ),
+            "retrieved_at_utc": "2026-07-21T22:24:50.074011+00:00",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert 1200 < len(body) < 2400
+    ledger = task._cumulative_evidence_ledger(
+        {
+            "status": "completed",
+            "logs": {},
+            "blocks": {
+                "evidence": {
+                    "evidence_items": [
+                        {
+                            "id": "market-quotes-readback",
+                            "kind": "taskboard_action_artifact.readback",
+                            "status": "ok",
+                            "body_state": "bounded",
+                            "owner": "action_artifact",
+                            "locator": "market-quotes",
+                            "content_version": "sha256:market-quotes",
+                            "body": body,
+                        }
+                    ]
+                }
+            },
+        },
+        required_evidence_ids={"market-quotes-readback"},
+    )
+
+    projection = task._model_evidence_ledger_projection(ledger, max_items=8)
+    body_preview = projection["items"][0]["body_preview"]
+
+    assert isinstance(body_preview, Mapping)
+    avgo = next(
+        item for item in body_preview["companies"] if item["ticker"] == "AVGO"
+    )
+    assert avgo["last_sale_price"] == "$385.28"
+    assert avgo["net_change"] == "-1.22"
+    assert avgo["percentage_change"] == "-0.32%"
+
+
+def test_cumulative_evidence_prefers_complete_prior_body_for_same_required_identity():
+    task = AgentTask(
+        _create_agent("taskboard-complete-cross-revision-evidence"),
+        task_id="taskboard-complete-cross-revision-evidence",
+        goal="Keep the complete canonical Action body across revisions.",
+        success_criteria=["Every ticker remains verifier-visible."],
+        execution="taskboard",
+    )
+    companies = [
+        {
+            "ticker": ticker,
+            "last_sale_price": price,
+            "net_change": change,
+            "percentage_change": percent,
+            "diagnostic": "bounded-fallback-detail-" * 12,
+        }
+        for ticker, price, change, percent in (
+            ("NVDA", "$206.42", "-0.87", "-0.42%"),
+            ("AMD", "$544.71", "+0.28", "+0.05%"),
+            ("AVGO", "$384.80", "-1.70", "-0.44%"),
+        )
+    ]
+    body = json.dumps({"companies": companies}, ensure_ascii=False)
+    assert len(body) > 1200
+    evidence_item = {
+        "id": "market-quotes-cross-revision",
+        "kind": "agent_task.action.result",
+        "status": "ok",
+        "body_state": "bounded",
+        "body": body,
+    }
+    canonical = task._task_references().add_evidence(evidence_item)
+    required_reference_id = str(canonical["reference_id"])
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "execution_meta": {
+                "status": "completed",
+                "logs": {},
+                "blocks": {"evidence": {"evidence_items": [evidence_item]}},
+            },
+        }
+    )
+    truncated = (
+        body[:430]
+        + "\n\n[...body truncated for evidence ledger view...]\n\n"
+        + body[-420:]
+    )
+    current_item = dict(evidence_item)
+    current_item["body"] = truncated
+    ledger = task._cumulative_evidence_ledger(
+        {
+            "status": "completed",
+            "logs": {},
+            "blocks": {"evidence": {"evidence_items": [current_item]}},
+        },
+        required_evidence_ids={required_reference_id},
+    )
+
+    projection = task._model_evidence_ledger_projection(ledger, max_items=8)
+    body_preview = projection["items"][0]["body_preview"]
+
+    assert isinstance(body_preview, Mapping)
+    avgo = next(
+        item for item in body_preview["companies"] if item["ticker"] == "AVGO"
+    )
+    assert avgo["last_sale_price"] == "$384.80"
+    assert avgo["net_change"] == "-1.70"
+    assert avgo["percentage_change"] == "-0.44%"
+
+
+def test_terminal_projection_rehydrates_lossy_structured_body_from_canonical_reference():
+    task = AgentTask(
+        _create_agent("terminal-canonical-structured-evidence"),
+        task_id="terminal-canonical-structured-evidence",
+        goal="Verify every structured Action result sibling.",
+        success_criteria=["All structured siblings remain visible."],
+        execution="taskboard",
+    )
+    body = json.dumps(
+        {
+            "companies": [
+                {
+                    "ticker": ticker,
+                    "last_sale_price": price,
+                    "net_change": change,
+                    "percentage_change": percent,
+                    "diagnostic": "provider-fallback-detail-" * 12,
+                }
+                for ticker, price, change, percent in (
+                    ("NVDA", "$206.375", "-0.915", "-0.44%"),
+                    ("AMD", "$544.37", "-0.06", "-0.01%"),
+                    ("AVGO", "$384.80", "-1.70", "-0.44%"),
+                )
+            ]
+        },
+        ensure_ascii=False,
+    )
+    canonical = task._task_references().add_evidence(
+        {
+            "id": "market-quotes-terminal",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "bounded",
+            "body": body,
+        }
+    )
+    lossy = task._stable_evidence_ledger_view(
+        {"evidence_items": [canonical]},
+        max_items=8,
+        body_chars=900,
+    )
+    assert lossy["items"][0]["body_truncated_for_view"] is True
+
+    hydrated = task._canonical_structured_evidence_ledger_for_verifier(lossy)
+    projection = task._model_evidence_ledger_projection(hydrated, max_items=8)
+    body_preview = projection["items"][0]["body_preview"]
+
+    assert isinstance(body_preview, Mapping)
+    avgo = next(
+        item for item in body_preview["companies"] if item["ticker"] == "AVGO"
+    )
+    assert avgo["last_sale_price"] == "$384.80"
+    assert avgo["net_change"] == "-1.70"
+    assert avgo["percentage_change"] == "-0.44%"
+
+
+def test_terminal_evidence_projection_for_observers_keeps_only_verifier_used_refs():
+    task = AgentTask(
+        _create_agent("terminal-observer-evidence"),
+        task_id="terminal-observer-evidence",
+        goal="Verify a source-grounded stock report.",
+        success_criteria=["Every material market and news claim is grounded."],
+        execution="taskboard",
+    )
+    model_ledger = {
+        "schema_version": "agent_task_model_evidence_ledger/v1",
+        "items": [
+            {
+                "reference_id": "ref_quotes",
+                "kind": "agent_task.action.result",
+                "status": "ok",
+                "body_state": "bounded",
+                "body_preview": {
+                    "companies": [{"ticker": "NVDA", "last_sale_price": "$206.40"}]
+                },
+            },
+            {
+                "reference_id": "ref_news",
+                "kind": "taskboard_action_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "body_preview": [
+                    {
+                        "title": "NVIDIA newsroom archive",
+                        "url": "https://nvidianews.nvidia.com/",
+                    }
+                ],
+            },
+            {
+                "reference_id": "ref_unused",
+                "kind": "task_context.content",
+                "status": "ok",
+                "body_state": "bounded",
+                "body_preview": "Unrelated source body.",
+            },
+        ],
+    }
+    verification = {
+        "is_complete": True,
+        "criterion_checks": [
+            {
+                "criterion_id": "criterion:1",
+                "satisfied": True,
+                "evidence_ids": ["ref_quotes", "ref_news"],
+            }
+        ],
+        "material_claim_checks": [
+            {
+                "claim_key": "claim_1",
+                "state": "supported",
+                "evidence_ids": ["ref_news"],
+            }
+        ],
+        "replan_signal": {"status": "continue", "evidence_refs": ["ref_quotes"]},
+    }
+
+    projection = task._terminal_evidence_projection_for_observers(
+        model_ledger,
+        verification,
+    )
+
+    assert projection["schema_version"] == "agent_task_terminal_evidence_projection/v1"
+    assert projection["verification_state"] == "accepted"
+    assert projection["reference_ids"] == ["ref_quotes", "ref_news"]
+    assert [item["reference_id"] for item in projection["items"]] == [
+        "ref_quotes",
+        "ref_news",
+    ]
+    assert projection["items"][1]["body_preview"][0]["title"] == (
+        "NVIDIA newsroom archive"
+    )
+    assert "ref_unused" not in json.dumps(projection, ensure_ascii=False)
+
+
+def test_terminal_evidence_projection_for_observers_rejects_incomplete_verification():
+    task = AgentTask(
+        _create_agent("terminal-observer-evidence-incomplete"),
+        task_id="terminal-observer-evidence-incomplete",
+        goal="Verify a report.",
+        success_criteria=["The report is grounded."],
+        execution="taskboard",
+    )
+
+    assert task._terminal_evidence_projection_for_observers(
+        {
+            "items": [
+                {
+                    "reference_id": "ref_unaccepted",
+                    "body_preview": "Body must not be published as accepted evidence.",
+                }
+            ]
+        },
+        {
+            "is_complete": False,
+            "criterion_checks": [
+                {"criterion_id": "criterion:1", "evidence_ids": ["ref_unaccepted"]}
+            ],
+        },
+    ) == {}
+
+
 def test_taskboard_revision_prompt_projection_omits_recursive_diagnostics_and_acceptance_metadata():
     huge = "revision-payload-" * 4000
     revision = TaskBoardRevision.from_value(
@@ -530,6 +843,70 @@ def test_taskboard_revision_prompt_projection_omits_recursive_diagnostics_and_ac
     assert "Grounding repair remains required." in compact_text
     assert "taskboard_acceptance_index" not in compact.get("metadata", {})
     assert huge not in compact_text
+
+
+def test_taskboard_control_projection_keeps_state_and_dependency_identity_without_body_duplication():
+    huge = "duplicated-evidence-body-" * 2000
+    dependency_results = {
+        f"dependency-{index}": {
+            "card_id": f"dependency-{index}",
+            "status": "completed",
+            "output_digest": f"sha256:{index}",
+            "preview": {
+                "status": "completed",
+                "summary": huge,
+                "answer": huge,
+                "evidence": [huge] * 4,
+            },
+            "artifact_refs": [
+                {"reference_id": f"ref_{index}", "path": f"working/{index}.md"}
+            ],
+            "diagnostics": [
+                {"code": "evidence.available", "message": huge, "evidence_summary": {"body": huge}}
+            ],
+            "metadata": {
+                "execution_kind": "model",
+                "next_board_action": "continue",
+                "evidence_ledger": {"items": [{"body": huge}]},
+            },
+        }
+        for index in range(8)
+    }
+    evidence_view = {
+        "schema_version": "taskboard_evidence/v1",
+        "revision_id": "rev-control",
+        "status_counts": {"completed": 8},
+        "cards": [
+            {
+                "card_id": f"dependency-{index}",
+                "status": "completed",
+                "output_digest": f"sha256:{index}",
+                "preview": {"answer": huge},
+            }
+            for index in range(8)
+        ],
+        "evidence_items": [{"reference_id": "ref_duplicate", "body": huge}],
+    }
+
+    compact_dependencies = AgentTask._compact_taskboard_dependency_results_for_control(
+        dependency_results
+    )
+    compact_state = AgentTask._compact_taskboard_evidence_state_for_control(evidence_view)
+    compact_text = json.dumps(
+        {"dependency_results": compact_dependencies, "taskboard_evidence_state": compact_state},
+        ensure_ascii=False,
+    )
+
+    assert len(compact_text) < 10000
+    assert "sha256:0" in compact_text
+    assert "working/0.md" in compact_text
+    assert "duplicated-evidence-body" not in compact_text
+    assert compact_state["revision_id"] == "rev-control"
+    assert compact_state["cards"][0] == {
+        "card_id": "dependency-0",
+        "status": "completed",
+        "output_digest": "sha256:0",
+    }
 
 
 def test_verifier_prompt_keeps_optional_risk_sections_optional():
@@ -1985,6 +2362,144 @@ def test_task_reference_identity_rejoins_compact_projection_but_changes_for_new_
     assert changed_snapshot["reference_id"] != full["reference_id"]
 
 
+def test_action_artifact_readback_is_distinct_stable_action_evidence():
+    task = AgentTask(
+        _create_agent("agent-task-action-readback-reference-role"),
+        task_id="agent-task-action-readback-reference-role",
+        goal="Read one bounded Action artifact as grounding evidence.",
+        success_criteria=["The Action result body remains bindable across revisions."],
+        execution="taskboard",
+    )
+    pointer = task._task_reference_catalog.add_evidence(
+        {
+            "id": "action-result-pointer:web-search",
+            "kind": "agent_task.action.result",
+            "status": "ok",
+            "body_state": "ref_only",
+            "action_id": "web_search",
+            "action_call_id": "call-web-search",
+            "selection_key": "selection:web-search",
+        }
+    )
+    readback_items = task._taskboard_action_artifact_readback_evidence_items(
+        [
+            {
+                "ok": True,
+                "status": "success",
+                "selection_key": "selection:web-search",
+                "owner": "action_artifact",
+                "locator": "selection:web-search",
+                "content_version": "sha256:web-search-v1",
+                "range": {"offset": 0, "end": 512},
+                "total_bytes": 512,
+                "ref": {
+                    "selection_key": "selection:web-search",
+                    "reference_id": pointer["reference_id"],
+                    "evidence_id": pointer["evidence_id"],
+                },
+                "value_preview": {
+                    "url": "https://example.test/stock-source",
+                    "title": "Observed stock source",
+                },
+                "value_preview_meta": {"truncated": False},
+            }
+        ],
+        source="taskboard_dependency_readback",
+        card_id="synthesis",
+    )
+
+    first = task._stable_evidence_ledger_view(
+        {"evidence_items": readback_items},
+        max_items=8,
+        body_chars=1800,
+    )
+    second = task._stable_evidence_ledger_view(
+        {"evidence_items": first["items"]},
+        max_items=8,
+        body_chars=1800,
+    )
+    first_item = first["items"][0]
+    second_item = second["items"][0]
+    resolved = task._task_reference_catalog.resolve(first_item["reference_id"])
+
+    assert first_item["reference_id"] != pointer["reference_id"]
+    assert first_item["evidence_id"] != pointer["evidence_id"]
+    assert second_item["reference_id"] == first_item["reference_id"]
+    assert second_item["evidence_id"] == first_item["evidence_id"]
+    assert resolved["source_role"] == "action"
+    assert resolved["target"]["provenance"]["selection_key"] == (
+        "selection:web-search"
+    )
+
+
+def test_execution_meta_evidence_is_normalized_before_reference_allocation():
+    task = AgentTask(
+        _create_agent("agent-task-execution-meta-reference-normalization"),
+        task_id="agent-task-execution-meta-reference-normalization",
+        goal="Keep Action evidence identity stable after envelope normalization.",
+        success_criteria=["A partial-success Action body remains bindable."],
+        execution="taskboard",
+    )
+    execution_meta: dict[str, Any] = {}
+    task._append_execution_meta_evidence_items(
+        execution_meta,
+        [
+            {
+                "id": "action-result:web-search:partial",
+                "kind": "agent_task.action.result",
+                "status": "partial_success",
+                "body_state": "complete",
+                "action_id": "web_search",
+                "action_call_id": "call-web-search-partial",
+                "body": {
+                    "results": [
+                        {
+                            "url": "https://example.test/partial-source",
+                            "title": "Partial source result",
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+    allocated = execution_meta["blocks"]["evidence"]["evidence_items"][0]
+    execution_ledger = task._evidence_ledger_from_execution_meta(execution_meta)
+    stable = task._stable_evidence_ledger_view(
+        {"evidence_items": execution_ledger["items"]},
+        max_items=16,
+        body_chars=1800,
+    )
+
+    assert allocated["status"] == "ok"
+    assert allocated["body_state"] == "full"
+    assert stable["items"][0]["evidence_id"] == allocated["evidence_id"]
+    assert stable["items"][0]["reference_id"] == allocated["reference_id"]
+
+
+def test_task_workspace_deliverable_readback_remains_transport_evidence():
+    task = AgentTask(
+        _create_agent("agent-task-deliverable-readback-reference-role"),
+        task_id="agent-task-deliverable-readback-reference-role",
+        goal="Verify a staged deliverable.",
+        success_criteria=["The deliverable is read back before promotion."],
+        execution="taskboard",
+    )
+    item = task._task_reference_catalog.add_evidence(
+        {
+            "id": "task_workspace_artifact_readback:working/final.md:v1",
+            "kind": "task_workspace_artifact.readback",
+            "status": "ok",
+            "body_state": "bounded",
+            "path": "working/final.md",
+            "body": "# Candidate report",
+        }
+    )
+
+    assert task._task_reference_catalog.resolve(item["reference_id"])[
+        "source_role"
+    ] == "transport"
+
+
 def test_request_local_cite_as_is_not_guessed_from_a_new_ledger_render():
     from agently.core.application.AgentTask.EvidenceLedger import validate_evidence_use
 
@@ -2051,8 +2566,9 @@ def test_task_reference_tokens_and_host_joins_fail_closed():
     offered = {str(action_offer["reference_id"]): action_offer}
     token = f"[[ref:{action_offer['reference_id']}]]"
     assert validate_reference_tokens(token, offered)["reference_ids"] == [action_offer["reference_id"]]
-    with pytest.raises(ValueError, match="duplicate"):
-        validate_reference_tokens(f"{token} {token}", offered)
+    assert validate_reference_tokens(f"{token} {token}", offered)["reference_ids"] == [
+        action_offer["reference_id"]
+    ]
     with pytest.raises(ValueError, match="offered"):
         validate_reference_tokens("[[ref:ref_unknown]]", offered)
     with pytest.raises(ValueError, match="malformed"):
@@ -2135,6 +2651,44 @@ def test_task_reference_catalog_snapshot_preserves_tokens_and_rejects_stale_targ
     damaged["references"][str(evidence["reference_id"])]["evidence_id"] = "evd_missing"
     with pytest.raises(ValueError, match="stale"):
         TaskReferenceCatalog.from_snapshot("agent_task_resume_refs", damaged)
+
+
+def test_task_reference_catalog_preserves_identity_across_lossy_view_projection():
+    from agently.core.application.AgentTask.TaskReferences import TaskReferenceCatalog
+
+    catalog = TaskReferenceCatalog("agent_task_lossy_projection")
+    evidence = catalog.add_evidence(
+        {
+            "id": "source.large",
+            "kind": "task_context.content",
+            "status": "ok",
+            "body_state": "full",
+            "body": "complete source body",
+            "source_id": "source:large",
+            "source_revision": "revision:one",
+            "source_ref": "large.txt",
+        }
+    )
+
+    projected = catalog.add_evidence(
+        {
+            **evidence,
+            "body_state": "truncated",
+            "body": "complete source...",
+            "body_truncated_for_view": True,
+        }
+    )
+
+    assert projected["evidence_id"] == evidence["evidence_id"]
+    assert projected["reference_id"] == evidence["reference_id"]
+    assert projected["body_state"] == "truncated"
+    with pytest.raises(ValueError, match="retargeted"):
+        catalog.add_evidence(
+            {
+                **evidence,
+                "status": "failed",
+            }
+        )
 
 
 def test_terminal_convergence_uses_stable_issue_keys_and_structured_state_digest():
@@ -14102,6 +14656,7 @@ def test_taskboard_material_claim_evidence_gap_replans_segment_before_carrier_pa
     assert evidence_card.evidence_contract["done_when"]
     assert evidence_card.evidence_contract["minimum_new_content_identity_count"] == 1
     assert evidence_card.evidence_contract["excluded_artifact_paths"] == []
+    assert "prior_material_claim_repair_contract" not in evidence_card.evidence_contract
     assert evidence_card.metadata["repair_source"] == (
         "verification_evidence_reacquisition"
     )
@@ -14644,6 +15199,104 @@ async def test_taskboard_no_delta_evidence_reacquisition_supersedes_exhausted_pl
         "evidence_reacquisition_dependency_exhausted"
     )
     assert schedule.runnable_card_ids == ()
+
+
+def test_taskboard_no_delta_exhausted_action_readback_supersedes_repair_without_replay(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-taskboard-exhausted-action-frontier").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="agent-taskboard-exhausted-action-frontier",
+        goal="Use all available Action evidence or stop the repair branch.",
+        success_criteria=["Every required market claim has direct source evidence."],
+        execution="taskboard",
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "final-verification-evidence",
+            "objective": "Acquire new body-bearing Action evidence.",
+            "required_outputs": ["New bounded Action evidence."],
+            "allowed_execution_shape": "control",
+            "failure_policy": "required",
+            "evidence_contract": {
+                "kind": "taskboard_final_verification_evidence_reacquisition",
+                "baseline_content_identities": [],
+                "minimum_new_content_identity_count": 1,
+                "eligible_source_roles": ["action"],
+            },
+            "metadata": {
+                "generated_by": (
+                    "agent_task.taskboard.final_verification_evidence_reacquisition"
+                )
+            },
+        }
+    )
+    revision = TaskBoardRevision.from_value(
+        {
+            "board_id": task.id,
+            "revision_id": "rev-exhausted-action-frontier",
+            "graph": {
+                "graph_id": f"{task.id}.graph",
+                "cards": [
+                    card.to_dict(),
+                    {
+                        "id": "final-verification-repair",
+                        "objective": "Repair final.md using newly acquired evidence.",
+                        "depends_on": [card.id],
+                        "required_outputs": ["Corrected final.md"],
+                        "failure_policy": "required",
+                        "metadata": {
+                            "generated_by": (
+                                "agent_task.taskboard.final_verification_repair"
+                            )
+                        },
+                    },
+                ],
+            },
+        }
+    )
+    context = SimpleNamespace(card=card, revision=revision)
+    result = task._enforce_taskboard_evidence_reacquisition_proof(
+        context,
+        TaskBoardCardResult(
+            card_id=card.id,
+            status="completed",
+            preview={"status": "completed", "remaining_work": []},
+            metadata={
+                "evidence_use_guard": {
+                    "blocking_count": 0,
+                    "normalized_evidence_use": [],
+                },
+                "dependency_readback_frontier": {
+                    "kind": "action_artifact_readback",
+                    "plan_digest": "action-frontier-digest",
+                    "candidate_ref_count": 4,
+                    "attempted_ref_count": 0,
+                    "exhausted_ref_count": 4,
+                    "pending_ref_count": 0,
+                    "failed_count": 0,
+                    "integrity_complete": True,
+                    "exhausted": True,
+                },
+            },
+        ),
+    )
+
+    assert result.status == "setback"
+    assert result.patch_proposal is not None
+    operations = result.patch_proposal["operations"]
+    updated_cards = {
+        operation["card"]["id"]: operation["card"]
+        for operation in operations
+        if operation.get("op") == "update_card"
+    }
+    assert updated_cards[card.id]["status"] == "skipped"
+    assert updated_cards[card.id]["metadata"]["superseded_reason"] == (
+        "evidence_reacquisition_plan_exhausted"
+    )
+    assert updated_cards["final-verification-repair"]["status"] == "skipped"
 
 
 @pytest.mark.asyncio
@@ -17705,7 +18358,7 @@ def test_terminal_verifier_actual_case_simulation_separates_markdown_structure_f
 
     assert "# Adoption review" not in by_text
     assert "| --- | --- |" not in by_text
-    assert by_text["| Surface | Observed state |"]["syntax_role"] == "markdown_table_row"
+    assert "| Surface | Observed state |" not in by_text
 
     verification = task._normalize_verification(
         {
@@ -17766,6 +18419,39 @@ def test_terminal_verifier_actual_case_simulation_separates_markdown_structure_f
     assert "# Adoption review" not in {
         item["artifact_quote"] for item in verification["material_claim_checks"]
     }
+
+
+def test_terminal_verifier_claim_candidates_exclude_table_header_but_keep_data_rows(
+    tmp_path,
+):
+    agent = _create_agent("agent-verifier-table-header").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    task = AgentTask(
+        agent,
+        task_id="verifier-table-header",
+        goal="Return a grounded ticker snapshot.",
+        success_criteria=["Ticker facts are grounded."],
+    )
+    candidate: dict[str, Any] = {
+        "carrier_id": "car_table_header",
+        "kind": "task_workspace_artifact",
+        "path": "final.md",
+        "text": (
+            "| Ticker | Visible last-sale fact | Evidence boundary |\n"
+            "| --- | ---: | --- |\n"
+            "| NVDA | $206.87 | Bounded quote result |"
+        ),
+        "content_version_id": "cv_table_header",
+    }
+    candidate["carriers"] = [dict(candidate)]
+
+    candidates = task._material_claim_candidates_for_verifier(candidate)
+
+    assert [item["text"] for item in candidates] == [
+        "| NVDA | $206.87 | Bounded quote result |"
+    ]
+    assert candidates[0]["syntax_role"] == "markdown_table_row"
 
 
 def test_terminal_verifier_claim_candidates_keep_adjacent_markdown_lines_separate(
@@ -18259,6 +18945,73 @@ def test_verification_required_material_claim_reacquires_evidence_instead_of_del
     assert "delete_only" not in json.dumps(requirement, ensure_ascii=False)
 
 
+def test_verification_authored_recommendation_boundary_needs_no_external_evidence(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("agent-authored-safety-boundary").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="authored-safety-boundary",
+        goal="Produce an informational market brief with a non-investment-advice boundary.",
+        success_criteria=["Include an explicit non-investment-advice boundary."],
+    )
+    carrier_id = "inline:" + "s" * 64
+    text = "This brief is informational and is not investment advice."
+    candidate = {
+        "carrier_id": carrier_id,
+        "text": text,
+        "content_version_id": carrier_id,
+        "carriers": [
+            {
+                "kind": "inline_final_result",
+                "carrier_id": carrier_id,
+                "text": text,
+                "content_version_id": carrier_id,
+            }
+        ],
+    }
+
+    verification = task._normalize_verification(
+        {
+            "is_complete": True,
+            "requires_block": False,
+            "reason": "The authored safety boundary is present.",
+            "missing_criteria": [],
+            "final_result_required": True,
+            "final_result": text,
+            "criterion_checks": [
+                {
+                    "criterion_id": "criterion:1",
+                    "satisfied": True,
+                    "summary": "The boundary is explicit.",
+                    "gaps": [],
+                    "evidence_ids": [],
+                }
+            ],
+            "material_claim_coverage_complete": True,
+            "material_claim_checks": [
+                {
+                    "claim_key": "claim_1",
+                    "claim_kind": "recommendation",
+                    "state": "supported",
+                    "evidence_ids": [],
+                    "required_for_criterion_ids": ["criterion:1"],
+                    "reason": "This is an authored scope and safety boundary, not an external fact.",
+                }
+            ],
+            "replan_signal": {"status": "continue", "evidence_refs": []},
+        },
+        execution_evidence_summary={},
+        candidate_final_result=text,
+        terminal_candidate=candidate,
+    )
+
+    assert verification["material_claim_audit"]["valid"] is True
+    assert "material_claim_repair_contract" not in verification
+    assert verification["replan_signal"]["status"] == "continue"
+
+
 @pytest.mark.asyncio
 async def test_required_material_claim_replan_schedules_evidence_before_carrier_repair(
     tmp_path,
@@ -18356,6 +19109,40 @@ async def test_required_material_claim_replan_schedules_evidence_before_carrier_
     assert "material_claim_patch_paths" not in repair_card.evidence_contract
     assert repair_card.evidence_contract["prior_material_claim_repair_contract"] == (
         repair_contract
+    )
+
+
+def test_blocked_terminal_verification_does_not_schedule_repair_revision(tmp_path):
+    task = AgentTask(
+        _create_agent("blocked-final-verification").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="blocked-final-verification",
+        goal="Produce a grounded report.",
+        success_criteria=["Use only verifier-visible source facts."],
+        execution="taskboard",
+        options={"required_deliverables": ["final.md"]},
+    )
+    revision = _completed_taskboard_revision_for_final_repair(task.id)
+
+    repaired = task._taskboard_final_verification_repair_revision(
+        revision,
+        final={"accepted": False, "final_result": ""},
+        final_verification={
+            "is_complete": False,
+            "requires_block": True,
+            "reason": "The current capability boundary cannot continue safely.",
+            "missing_criteria": ["A host capability fix is required."],
+            "replan_signal": {
+                "status": "blocked",
+                "reason": "No safe continuation exists in the current runtime.",
+            },
+        },
+    )
+
+    assert repaired is None
+    assert task.diagnostics["taskboard_final_repair_stopped"][-1]["status"] == (
+        "blocked"
     )
 
 
@@ -19690,7 +20477,7 @@ def test_taskboard_auto_readback_patch_stops_scheduling_the_superseded_card(
     assert patched_cards["collect"].status == "skipped"
     assert "collect" not in schedule.runnable_card_ids
     assert schedule.runnable_card_ids == ("collect.evidence",)
-    assert patched_cards["collect.evidence"].depends_on == ("collect",)
+    assert patched_cards["collect.evidence"].depends_on == ()
     assert patched_cards["collect.continue"].depends_on == (
         "collect",
         "collect.evidence",

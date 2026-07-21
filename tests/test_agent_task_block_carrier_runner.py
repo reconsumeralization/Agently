@@ -824,6 +824,80 @@ def test_real_sample_runner_exposes_structured_action_data_without_artifact_refs
     assert "last_sale_price" in json.dumps(action_items[0]["preview"], ensure_ascii=False)
 
 
+def test_real_sample_runner_reads_terminal_evidence_projection_from_close_snapshot():
+    runner = _load_real_samples_runner()
+    meta = {
+        "close_snapshot": {
+            "task": {
+                "diagnostics": {
+                    "terminal_evidence_projection": {
+                        "schema_version": "agent_task_terminal_evidence_projection/v1",
+                        "verification_state": "accepted",
+                        "reference_ids": ["ref_quotes", "ref_news"],
+                        "items": [
+                            {
+                                "reference_id": "ref_quotes",
+                                "kind": "agent_task.action.result",
+                                "action_id": "market_quotes",
+                                "status": "ok",
+                                "body_state": "bounded",
+                                "body_preview": {
+                                    "companies": [
+                                        {
+                                            "ticker": "AVGO",
+                                            "last_sale_price": "$384.885",
+                                        }
+                                    ]
+                                },
+                            },
+                            {
+                                "reference_id": "ref_news",
+                                "kind": "taskboard_action_artifact.readback",
+                                "action_id": "official_news_search",
+                                "status": "ok",
+                                "body_state": "bounded",
+                                "body_preview": [
+                                    {
+                                        "title": "Microsoft to Deploy Next-Gen AMD Instinct",
+                                        "url": "https://ir.amd.com/",
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+    }
+
+    readbacks = runner.collect_framework_action_readbacks(meta)
+
+    assert [item["reference_id"] for item in readbacks] == [
+        "ref_quotes",
+        "ref_news",
+    ]
+    assert readbacks[1]["kind"] == "taskboard_action_artifact.readback"
+    assert readbacks[1]["preview"][0]["title"].startswith("Microsoft to Deploy")
+
+    metrics = runner.Metrics(route="taskboard", case_id="stock_risk_outlook")
+    candidate = runner.framework_final_candidate(
+        {"final_result": {"answer": "final.md", "artifact_markdown": ""}},
+        {},
+        action_readbacks=readbacks,
+    )
+    normalized = runner.normalized_candidate_for_judge(candidate, metrics)
+    action_items = [
+        item
+        for item in normalized["evidence_items"]
+        if item.get("source") == "framework_action_result_preview"
+    ]
+    assert [item["reference_id"] for item in action_items] == [
+        "ref_quotes",
+        "ref_news",
+    ]
+    assert action_items[1]["kind"] == "taskboard_action_artifact.readback"
+
+
 def test_real_sample_runner_prioritizes_action_readbacks_before_ref_limit():
     runner = _load_real_samples_runner()
     old_limit = os.environ.get("REAL_SAMPLE_JUDGE_MAX_EVIDENCE_ITEMS")

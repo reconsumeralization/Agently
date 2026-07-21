@@ -150,6 +150,7 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         context: Any,
         *,
         plan_digest: str,
+        frontier_kind: str = "scoped_retrieval",
     ) -> dict[str, Any] | None:
         """Supersede one exhausted evidence plan and its stale generated repair."""
 
@@ -171,9 +172,12 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             {
                 "superseded_by": "taskboard_final_verification_replan",
                 "superseded_reason": "evidence_reacquisition_plan_exhausted",
-                "scoped_retrieval_plan_digest": plan_digest,
+                "evidence_reacquisition_plan_digest": plan_digest,
+                "evidence_reacquisition_frontier_kind": frontier_kind,
             }
         )
+        if frontier_kind == "scoped_retrieval":
+            current_metadata["scoped_retrieval_plan_digest"] = plan_digest
         current_card.update({"status": "skipped", "metadata": current_metadata})
         operations.append({"op": "update_card", "card": current_card})
 
@@ -200,9 +204,12 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                         "evidence_reacquisition_dependency_exhausted"
                     ),
                     "exhausted_evidence_card_id": current_id,
-                    "scoped_retrieval_plan_digest": plan_digest,
+                    "evidence_reacquisition_plan_digest": plan_digest,
+                    "evidence_reacquisition_frontier_kind": frontier_kind,
                 }
             )
+            if frontier_kind == "scoped_retrieval":
+                replacement_metadata["scoped_retrieval_plan_digest"] = plan_digest
             replacement.update(
                 {"status": "skipped", "metadata": replacement_metadata}
             )
@@ -216,9 +223,12 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 "content identity and superseded the exhausted plan before replanning."
             ),
             "card_id": current_id,
-            "scoped_retrieval_plan_digest": plan_digest,
+            "evidence_reacquisition_plan_digest": plan_digest,
+            "evidence_reacquisition_frontier_kind": frontier_kind,
             "superseded_repair_card_ids": superseded_repair_ids,
         }
+        if frontier_kind == "scoped_retrieval":
+            diagnostic["scoped_retrieval_plan_digest"] = plan_digest
         operations.extend(
             [
                 {"op": "append_diagnostic", "diagnostic": diagnostic},
@@ -1290,16 +1300,21 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         current_card.update(
             {
                 "failure_policy": "degradable",
+                # The result record preserves the observed setback.  Mark the
+                # graph card skipped so it cannot replay after the replacement
+                # branch is installed.  Replacement cards depend on its
+                # prerequisites, never on this superseded card itself.
                 "status": "skipped",
                 "metadata": current_metadata,
             }
         )
         dependencies = list(getattr(card, "depends_on", ()) or [])
         readback_dependencies = cls._taskboard_auto_readback_scope(card, graph)
-        evidence_dependencies = list(
-            dict.fromkeys([*readback_dependencies, current_id])
-        )
+        evidence_dependencies = list(dict.fromkeys(readback_dependencies))
         continuation_dependencies = list(
+            # The continuation consumes the prior card's retained result as
+            # well as the new support cards.  The support cards themselves do
+            # not depend on the superseded card, so they remain runnable.
             dict.fromkeys([current_id, *dependencies, *support_card_ids])
         )
         gaps = cls._normalize_string_list(card_output.get("gaps"))
@@ -1943,9 +1958,34 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
             if isinstance(raw_replan_signal, Mapping)
             else None
         )
+        replan_status = str(
+            replan_signal.get("status") if replan_signal is not None else ""
+        ).strip()
+        if replan_status in {"blocked", "clarify"}:
+            # A terminal verifier block is an explicit reachability boundary,
+            # not permission to manufacture another repair card.  Replaying
+            # the same carrier/contract/evidence frontier only spends model
+            # requests without creating a satisfiable state transition.
+            self.diagnostics.setdefault(
+                "taskboard_final_repair_stopped",
+                [],
+            ).append(
+                {
+                    "code": "taskboard.final_verification.repair_stopped",
+                    "status": replan_status,
+                    "reason": str(
+                        replan_signal.get("reason")
+                        if replan_signal is not None
+                        else final_verification.get("reason")
+                        or ""
+                    ),
+                    "revision_id": effective_revision.revision_id,
+                }
+            )
+            return None
         evidence_reacquisition = bool(
             replan_signal is not None
-            and str(replan_signal.get("status") or "").strip() == "replan_segment"
+            and replan_status == "replan_segment"
         )
         relevance_diagnostic: dict[str, Any] | None = None
         if evidence_reacquisition:
@@ -2412,10 +2452,6 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                     acceptance_evidence_contract.get("criterion_subjects")
                 ),
             }
-            if prior_grounding_repair_contract is not None:
-                evidence_card_contract["prior_material_claim_repair_contract"] = (
-                    prior_grounding_repair_contract
-                )
             evidence_card_metadata: dict[str, Any] = {
                 "generated_by": (
                     "agent_task.taskboard.final_verification_evidence_reacquisition"

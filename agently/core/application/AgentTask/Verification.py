@@ -1272,8 +1272,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         request = self.agent.create_temp_request()
         self._bind_task_context_attachments(request, context_package)
         self._apply_language_policy_to_request(request, language_policy)
+        canonical_verifier_ledger = (
+            self._canonical_structured_evidence_ledger_for_verifier(
+                evidence_ledger
+            )
+        )
         model_evidence_ledger = self._model_evidence_ledger_projection(
-            evidence_ledger,
+            canonical_verifier_ledger,
             max_items=_VERIFIER_LEDGER_MAX_ITEMS + 8,
             offered_reference_ids=set(
                 self._task_reference_catalog.offered_references()
@@ -1450,7 +1455,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "The exact carrier text is already host-validated by material_claim_candidates and does not need to appear in evidence_ledger "
             "to prove that the quote occurs in the final carrier. Use evidence_ledger only to judge whether an external or derived claim "
             "inside that carrier span is supported. syntax_role describes lexical Markdown framing only. Pure Markdown headings, "
-            "separators, and table separators are excluded from material_claim_candidates by the host because their document/criterion "
+            "separators, table headers, and table separators are excluded from material_claim_candidates by the host because their document/criterion "
             "role is checked through artifact readback and acceptance locators, not as standalone factual claims. "
             "Set material_claim_coverage_complete=true only after checking all material external facts and material "
             "evidence-derived conclusions in the offered material_claim_candidates. It is valid to return an empty check list "
@@ -1722,6 +1727,16 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             execution_evidence_summary=raw_cumulative_evidence_summary,
             verifier_called=True,
         )
+        terminal_evidence_projection = (
+            self._terminal_evidence_projection_for_observers(
+                model_evidence_ledger,
+                normalized,
+            )
+        )
+        if terminal_evidence_projection:
+            self.diagnostics["terminal_evidence_projection"] = (
+                terminal_evidence_projection
+            )
         await self._emit_process_progress_from_output(
             normalized,
             stage="verification",
@@ -2025,6 +2040,287 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             count = 0
         return count < 2
 
+    @staticmethod
+    def _evidence_body_prompt_value(value: Any) -> Any:
+        """Recover a complete structured Action body before hot projection.
+
+        Action artifacts cross the canonical evidence boundary as text so they
+        can also be indexed and read through TaskContext.  When that text is a
+        complete JSON container, treating it as undifferentiated prose makes a
+        character cut hide later sibling records even though the canonical
+        body is complete.  Recovering only valid JSON preserves structure for
+        the existing bounded projector; genuinely cut JSON remains text and
+        therefore retains its visible truncation boundary.
+        """
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped.startswith(("{", "[")):
+            return value
+        try:
+            structured = json.loads(stripped)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return value
+        if isinstance(structured, Mapping) or (
+            isinstance(structured, Sequence)
+            and not isinstance(structured, str | bytes | bytearray)
+        ):
+            return structured
+        return value
+
+    @classmethod
+    def _preserve_required_structured_evidence_bodies(
+        cls,
+        items: Sequence[Mapping[str, Any]],
+        *,
+        required_evidence_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """Keep complete JSON siblings for evidence the candidate actually used.
+
+        The cumulative verifier ledger deliberately keeps a small prose body
+        budget per item.  Applying that head/tail budget to a complete JSON
+        Action body can hide later sibling records before the model projection
+        has a chance to preserve their structure.  Only candidate-required
+        evidence receives this structured projection; unrelated ledger bodies
+        retain the ordinary bounded text budget.
+        """
+        projected: list[dict[str, Any]] = []
+        for raw_item in items:
+            item = dict(raw_item)
+            identities = {
+                str(item.get(field) or "").strip()
+                for field in (
+                    "id",
+                    "evidence_id",
+                    "reference_id",
+                    "locator_id",
+                )
+                if str(item.get(field) or "").strip()
+            }
+            aliases = item.get("aliases")
+            if isinstance(aliases, Sequence) and not isinstance(
+                aliases,
+                str | bytes | bytearray,
+            ):
+                identities.update(
+                    str(alias or "").strip()
+                    for alias in aliases
+                    if str(alias or "").strip()
+                )
+            if identities.isdisjoint(required_evidence_ids):
+                projected.append(item)
+                continue
+            body = item.get("body")
+            structured = cls._evidence_body_prompt_value(body)
+            if not isinstance(structured, Mapping) and not (
+                isinstance(structured, Sequence)
+                and not isinstance(structured, str | bytes | bytearray)
+            ):
+                projected.append(item)
+                continue
+            item.pop("body", None)
+            item["preview"] = DataFormatter.sanitize(structured)
+            projected.append(item)
+        return projected
+
+    @classmethod
+    def _evidence_item_projection_quality(
+        cls,
+        item: Mapping[str, Any],
+    ) -> tuple[int, int]:
+        """Rank duplicate projections of one immutable evidence identity."""
+        value = item.get("body")
+        if value in (None, "", [], {}):
+            value = item.get("preview")
+        structured = cls._evidence_body_prompt_value(value)
+        if isinstance(structured, Mapping) or (
+            isinstance(structured, Sequence)
+            and not isinstance(structured, str | bytes | bytearray)
+        ):
+            return (
+                3,
+                len(
+                    json.dumps(
+                        DataFormatter.sanitize(structured),
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                ),
+            )
+        if isinstance(value, str) and value:
+            if "[...body truncated for evidence ledger view...]" in value:
+                return (1, len(value))
+            return (2, len(value))
+        return (0, 0)
+
+    def _canonical_structured_evidence_ledger_for_verifier(
+        self,
+        evidence_ledger: Mapping[str, Any],
+        *,
+        max_hydrated_items: int = 8,
+    ) -> dict[str, Any]:
+        """Rejoin lossy JSON views to their task-canonical evidence target.
+
+        This is a verifier projection only. Canonical evidence stays owned by
+        TaskReferenceCatalog; the ledger receives a bounded structured view so
+        sibling fields are not lost to an earlier head/tail text cut.
+        """
+        hydrated = dict(DataFormatter.sanitize(evidence_ledger))
+        raw_items = hydrated.get("items")
+        if not isinstance(raw_items, Sequence) or isinstance(
+            raw_items,
+            str | bytes | bytearray,
+        ):
+            return hydrated
+        output_items: list[Any] = []
+        hydrated_count = 0
+        for raw_item in raw_items:
+            if not isinstance(raw_item, Mapping):
+                output_items.append(raw_item)
+                continue
+            item = dict(raw_item)
+            body = item.get("body")
+            lossy = item.get("body_truncated_for_view") is True or (
+                isinstance(body, str)
+                and "[...body truncated for evidence ledger view...]" in body
+            )
+            reference_id = str(item.get("reference_id") or "").strip()
+            if (
+                not lossy
+                or not reference_id
+                or hydrated_count >= max_hydrated_items
+            ):
+                output_items.append(item)
+                continue
+            try:
+                resolved = self._task_references().resolve(reference_id)
+            except (KeyError, ValueError):
+                output_items.append(item)
+                continue
+            target = resolved.get("target")
+            if not isinstance(target, Mapping):
+                output_items.append(item)
+                continue
+            canonical_body: Any = None
+            for field in ("body", "content", "text", "snippet", "preview"):
+                value = target.get(field)
+                if value not in (None, "", [], {}):
+                    canonical_body = value
+                    break
+            structured = self._evidence_body_prompt_value(canonical_body)
+            if not isinstance(structured, Mapping) and not (
+                isinstance(structured, Sequence)
+                and not isinstance(structured, str | bytes | bytearray)
+            ):
+                output_items.append(item)
+                continue
+            item.pop("body", None)
+            item.pop("body_truncated_for_view", None)
+            item.pop("body_chars", None)
+            item["preview"] = DataFormatter.sanitize(structured)
+            output_items.append(item)
+            hydrated_count += 1
+        hydrated["items"] = output_items
+        return hydrated
+
+    @classmethod
+    def _terminal_evidence_projection_for_observers(
+        cls,
+        model_evidence_ledger: Mapping[str, Any],
+        verification: Mapping[str, Any],
+        *,
+        max_items: int = 24,
+    ) -> dict[str, Any]:
+        """Publish the exact accepted evidence frontier for cold observers.
+
+        The terminal verifier already receives a bounded, identity-safe ledger.
+        Re-project only references that its accepted criterion/claim checks used;
+        this keeps complete structured Action siblings available to experiments
+        and DevTools without putting a second evidence owner in diagnostics.
+        """
+        if verification.get("is_complete") is not True:
+            return {}
+
+        used_reference_ids: list[str] = []
+
+        def collect(value: Any) -> None:
+            for reference_id in cls._normalize_string_list(value):
+                if reference_id not in used_reference_ids:
+                    used_reference_ids.append(reference_id)
+
+        for field in ("criterion_checks", "material_claim_checks"):
+            checks = verification.get(field)
+            if not isinstance(checks, Sequence) or isinstance(
+                checks,
+                str | bytes | bytearray,
+            ):
+                continue
+            for check in checks:
+                if isinstance(check, Mapping):
+                    collect(check.get("evidence_ids"))
+        replan_signal = verification.get("replan_signal")
+        if isinstance(replan_signal, Mapping):
+            collect(replan_signal.get("evidence_refs"))
+        if not used_reference_ids:
+            return {}
+
+        raw_items = model_evidence_ledger.get("items")
+        if not isinstance(raw_items, Sequence) or isinstance(
+            raw_items,
+            str | bytes | bytearray,
+        ):
+            return {}
+        items_by_reference = {
+            str(item.get("reference_id") or "").strip(): item
+            for item in raw_items
+            if isinstance(item, Mapping)
+            and str(item.get("reference_id") or "").strip()
+        }
+        retained_ids: list[str] = []
+        projected_items: list[dict[str, Any]] = []
+        for reference_id in used_reference_ids:
+            item = items_by_reference.get(reference_id)
+            if item is None:
+                continue
+            projected = {
+                key: DataFormatter.sanitize(item.get(key))
+                for key in (
+                    "reference_id",
+                    "kind",
+                    "status",
+                    "source_role",
+                    "action_id",
+                    "owner",
+                    "locator",
+                    "source_id",
+                    "source_revision",
+                    "source_ref",
+                    "content_version",
+                    "path",
+                    "body_state",
+                    "body_preview",
+                )
+                if item.get(key) not in (None, "", [], {})
+            }
+            retained_ids.append(reference_id)
+            projected_items.append(projected)
+            if len(projected_items) >= max(1, max_items):
+                break
+        if not projected_items:
+            return {}
+        return {
+            "schema_version": "agent_task_terminal_evidence_projection/v1",
+            "verification_state": "accepted",
+            "reference_ids": retained_ids,
+            "items": projected_items,
+            "item_count": len(projected_items),
+            "omitted_used_reference_ids": [
+                reference_id
+                for reference_id in used_reference_ids
+                if reference_id not in retained_ids
+            ],
+        }
+
     @classmethod
     def _evidence_binding_repair_candidate_refs(
         cls,
@@ -2150,7 +2446,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if body in (None, "", [], {}):
                 body = item.get("preview")
             if body not in (None, "", [], {}):
-                candidate["body_preview"] = cls._compact_verifier_prompt_value(body, max_chars=1200)
+                candidate["body_preview"] = cls._compact_verifier_prompt_value(
+                    cls._evidence_body_prompt_value(body),
+                    max_chars=1200,
+                )
             candidates.append(DataFormatter.sanitize(candidate))
             if len(candidates) >= max_items:
                 break
@@ -3594,7 +3893,24 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 for line in text.splitlines()
                 if line.strip()
             ]
+            line_syntax_roles = [
+                cls._material_claim_syntax_role(line)
+                for line in lines
+            ]
+            markdown_table_header_indexes = {
+                line_index
+                for line_index in range(len(lines) - 1)
+                if line_syntax_roles[line_index] == "markdown_table_row"
+                and line_syntax_roles[line_index + 1]
+                == "markdown_table_separator"
+            }
             for line_index, line in enumerate(lines):
+                if line_index in markdown_table_header_indexes:
+                    # A pipe row immediately followed by the Markdown table
+                    # separator is deterministic table scaffolding. Its labels
+                    # remain verifier-visible through artifact readback, while
+                    # factual body rows remain independently auditable below.
+                    continue
                 # Keep individual model-visible selections bounded while every
                 # non-empty physical line remains independently selectable and
                 # every long-line chunk is an exact carrier substring. This is
@@ -4105,7 +4421,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 check_errors.append(
                     "required_for_criterion_ids contains a criterion outside the offered set"
                 )
-            supported_without_evidence = state == "supported" and not evidence_ids
+            # An authored recommendation or safety/scope boundary is evaluated
+            # from the host-validated carrier text itself.  It is not an
+            # external fact and must not be forced to invent a source identity
+            # merely to state what the document does or does not recommend.
+            supported_without_evidence = (
+                state == "supported"
+                and not evidence_ids
+                and claim_kind != "recommendation"
+            )
             if supported_without_evidence:
                 check_errors.append("supported material claims require at least one offered evidence reference")
             invalid_reasonable_derived_fact = state == "reasonable_derived" and claim_kind not in {
@@ -5088,6 +5412,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         required_evidence_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
+        canonical_required_items: list[dict[str, Any]] = []
         expanded_required_ids = set(required_evidence_ids or set())
         for required_id in tuple(expanded_required_ids):
             try:
@@ -5103,6 +5428,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 target_id = str(target.get("id") or "").strip()
                 if target_id:
                     expanded_required_ids.add(target_id)
+                canonical_target = dict(DataFormatter.sanitize(target))
+                for field in ("evidence_id", "reference_id"):
+                    identity = str(resolved.get(field) or "").strip()
+                    if identity:
+                        canonical_target[field] = identity
+                canonical_required_items.append(canonical_target)
         pinned_evidence_ids = self._pinned_evidence_ids_from_execution_meta(current_execution_meta)
         pinned_evidence_ids.update(expanded_required_ids)
         current_ledger = self._evidence_ledger_from_execution_meta(
@@ -5126,16 +5457,34 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             for item in previous_ledger.get("items", []):
                 if isinstance(item, Mapping):
                     items.append(dict(item))
+        # Candidate-used references resolve through the canonical task identity
+        # owner.  Add that immutable target beside lossy cross-revision views so
+        # duplicate selection below can keep the richest representation of the
+        # same evidence rather than whichever revision happened to be visited
+        # first.
+        items.extend(canonical_required_items)
         deduped: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        evidence_indexes: dict[str, int] = {}
         for item in items:
             evidence_id = str(item.get("id") or "").strip()
-            if evidence_id and evidence_id in seen:
+            existing_index = evidence_indexes.get(evidence_id) if evidence_id else None
+            if existing_index is None:
+                if evidence_id:
+                    evidence_indexes[evidence_id] = len(deduped)
+                deduped.append(item)
                 continue
-            if evidence_id:
-                seen.add(evidence_id)
-            deduped.append(item)
-        hot_items = self._current_task_workspace_artifact_hot_items(deduped)
+            existing = deduped[existing_index]
+            if self._evidence_item_projection_quality(
+                item
+            ) > self._evidence_item_projection_quality(existing):
+                deduped[existing_index] = item
+        structured_required_items = self._preserve_required_structured_evidence_bodies(
+            deduped,
+            required_evidence_ids=expanded_required_ids,
+        )
+        hot_items = self._current_task_workspace_artifact_hot_items(
+            structured_required_items
+        )
         ledger = self._stable_evidence_ledger_view(
             {
                 "evidence_items": self._prioritized_verifier_evidence_items(
