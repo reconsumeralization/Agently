@@ -130,6 +130,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
                         "required": delivery_path in required_paths or not required_paths,
                         "text": text,
                         "path": path,
+                        "target_path": delivery_path,
                         "content_version_id": content_version_id,
                         "content_digest": digest,
                         "source_work_result_id": work_result_id,
@@ -153,7 +154,7 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
             or self._looks_like_task_workspace_artifact_placeholder(inline_text)
             or inline_text in candidate_paths
         )
-        if inline_text and not inline_is_pointer:
+        if inline_text and not inline_is_pointer and not (required_paths and raw_carriers):
             digest = hashlib.sha256(inline_text.encode("utf-8")).hexdigest()
             raw_carriers.append(
                 {
@@ -165,6 +166,16 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
                     "content_digest": digest,
                     "source_work_result_id": work_result_id,
                     "status": "materialized",
+                }
+            )
+        elif inline_text and not inline_is_pointer and required_paths and raw_carriers:
+            diagnostics.append(
+                {
+                    "code": "agent_task.terminal_carrier.inline_projection_not_a_deliverable",
+                    "message": (
+                        "The inline final projection is not a second terminal deliverable when "
+                        "the task declares a TaskWorkspace root target."
+                    ),
                 }
             )
 
@@ -276,39 +287,75 @@ class AgentTaskTerminalVerificationMixin(AgentTaskMixinBase):
         self,
         repair_contract: Mapping[str, Any],
     ) -> TerminalCarrier | None:
+        groups = self._terminal_repair_contract_groups(repair_contract)
+        if len(groups) != 1 or groups[0].get("patchable") is not True:
+            return None
+        raw_requirements = repair_contract.get("requirements")
+        requirement_count = (
+            sum(1 for item in raw_requirements if isinstance(item, Mapping))
+            if isinstance(raw_requirements, Sequence)
+            and not isinstance(raw_requirements, str | bytes | bytearray)
+            else 0
+        )
+        grouped_requirements = groups[0].get("contract", {}).get("requirements", [])
+        if requirement_count == 0 or len(grouped_requirements) != requirement_count:
+            return None
+        carrier_id = str(groups[0].get("carrier_id") or "")
+        return next(
+            (item for item in self._lifecycle_state.carrier_inventory.carriers if item.carrier_id == carrier_id),
+            None,
+        )
+
+    def _terminal_repair_contract_groups(
+        self,
+        repair_contract: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Partition one verifier response by canonical carrier without changing identity."""
+
         raw_requirements = repair_contract.get("requirements")
         requirements = (
-            [item for item in raw_requirements if isinstance(item, Mapping)]
+            [dict(item) for item in raw_requirements if isinstance(item, Mapping)]
             if isinstance(raw_requirements, Sequence)
             and not isinstance(raw_requirements, str | bytes | bytearray)
             else []
         )
-        carrier_ids = {
-            str(item.get("carrier_id") or "").strip()
-            for item in requirements
-            if str(item.get("carrier_id") or "").strip()
+        inventory_by_id = {
+            carrier.carrier_id: carrier
+            for carrier in self._lifecycle_state.carrier_inventory.carriers
         }
-        if len(carrier_ids) != 1:
-            return None
-        carrier_id = next(iter(carrier_ids))
-        carrier = next(
-            (
-                item
-                for item in self._lifecycle_state.carrier_inventory.carriers
-                if item.carrier_id == carrier_id
-            ),
-            None,
-        )
-        if carrier is None:
-            return None
-        versions = {
-            str(item.get("content_version_id") or "").strip()
-            for item in requirements
-            if str(item.get("content_version_id") or "").strip()
-        }
-        if versions and versions != {carrier.content_version_id}:
-            return None
-        return carrier
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        order: list[str] = []
+        for requirement in requirements:
+            carrier_id = str(requirement.get("carrier_id") or "").strip()
+            carrier = inventory_by_id.get(carrier_id)
+            if carrier is None:
+                continue
+            version = str(requirement.get("content_version_id") or "").strip()
+            if version and version != carrier.content_version_id:
+                continue
+            if carrier_id not in grouped:
+                order.append(carrier_id)
+                grouped[carrier_id] = []
+            grouped[carrier_id].append(requirement)
+
+        groups: list[dict[str, Any]] = []
+        for carrier_id in order:
+            carrier = inventory_by_id[carrier_id]
+            contract = dict(repair_contract)
+            contract["contract_subject"] = f"carrier:{carrier_id}"
+            contract["requirements"] = grouped[carrier_id]
+            groups.append(
+                {
+                    "carrier_id": carrier_id,
+                    "carrier_kind": carrier.kind,
+                    "path": carrier.path,
+                    "target_path": carrier.target_path,
+                    "content_version_id": carrier.content_version_id,
+                    "patchable": carrier.kind == "task_workspace_artifact" and bool(carrier.path),
+                    "contract": contract,
+                }
+            )
+        return groups
 
     async def _terminal_inventory_task_workspace_refs(self) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []

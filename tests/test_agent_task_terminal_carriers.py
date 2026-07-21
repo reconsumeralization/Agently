@@ -496,7 +496,7 @@ async def test_terminal_carriers_do_not_reintroduce_obsolete_cumulative_readback
     assert "obsolete body" not in candidate["text"]
 
 
-async def test_terminal_carriers_keep_task_workspace_and_inline_results_independent(tmp_path):
+async def test_declared_file_deliverable_keeps_inline_summary_outside_terminal_inventory(tmp_path):
     task = _task(tmp_path, "terminal-carrier-independent", required_deliverables=["final.md"])
     write_result = await task.task_workspace.write_file("final.md", "file result\n")
 
@@ -510,10 +510,12 @@ async def test_terminal_carriers_keep_task_workspace_and_inline_results_independ
 
     assert [carrier["kind"] for carrier in candidate["carriers"]] == [
         "task_workspace_artifact",
-        "inline_final_result",
     ]
-    assert len({carrier["carrier_id"] for carrier in candidate["carriers"]}) == 2
+    assert len({carrier["carrier_id"] for carrier in candidate["carriers"]}) == 1
     assert all(carrier["required"] is True for carrier in candidate["carriers"])
+    assert candidate["diagnostics"][0]["code"] == (
+        "agent_task.terminal_carrier.inline_projection_not_a_deliverable"
+    )
 
 
 async def test_terminal_carriers_exclude_task_workspace_pointer_from_inline_inventory(tmp_path):

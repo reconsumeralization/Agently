@@ -143,6 +143,11 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
         card_id = str(getattr(getattr(context, "card", None), "id", "") or "")
         grounding_repair_contract = self._taskboard_grounding_repair_contract(context)
         grounding_patch_paths = self._taskboard_grounding_patch_paths(context)
+        repair_carrier = (
+            self._terminal_carrier_for_repair_contract(grounding_repair_contract)
+            if grounding_repair_contract
+            else None
+        )
         if grounding_repair_contract:
             scoped, reason = self._taskboard_grounding_task_workspace_patch_scope(
                 raw_patch,
@@ -191,6 +196,28 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 source="agent_task.task_workspace_artifact.taskboard_patch",
             )
             delivery = {**delivery, "card_id": card_id}
+            if delivery.get("status") == "completed" and repair_carrier is not None:
+                next_content_version_id = str(delivery.get("content_version_id") or "").strip()
+                readback = delivery.get("readback")
+                next_digest = (
+                    str(readback.get("sha256") or "").strip()
+                    if isinstance(readback, Mapping)
+                    else ""
+                )
+                inventory = self._lifecycle_state.advance_terminal_carrier_version(
+                    carrier_id=repair_carrier.carrier_id,
+                    expected_content_version_id=repair_carrier.content_version_id,
+                    content_version_id=next_content_version_id,
+                    content_digest=next_digest,
+                    source_work_result_id=f"taskboard_patch:{card_id or 'repair'}",
+                    expected_version=self._lifecycle_state.state_version,
+                )
+                delivery = {
+                    **delivery,
+                    "terminal_carrier_id": repair_carrier.carrier_id,
+                    "terminal_inventory_version": inventory.inventory_version,
+                    "terminal_state_version": inventory.state_version,
+                }
         else:
             delivery = await self._apply_taskboard_task_workspace_patch(raw_patch, card_id=card_id)
         patched_output["task_workspace_patch_delivery"] = DataFormatter.sanitize(delivery)

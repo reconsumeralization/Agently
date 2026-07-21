@@ -168,21 +168,20 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             recorded_version = str(identity.get("content_version") or "")
             if content_version and recorded_version != content_version:
                 continue
+            if not self._taskboard_evidence_item_delivered_body(item):
+                continue
             read_range = identity.get("range")
             if not isinstance(read_range, Mapping):
                 continue
             ranges.append(read_range)
-        for record in self._taskboard_read_progress_records(
-            owner=owner,
-            locator=locator,
-            content_version=content_version,
-        ):
-            record_ranges = record.get("ranges")
-            if isinstance(record_ranges, Sequence) and not isinstance(
-                record_ranges, str | bytes | bytearray
-            ):
-                ranges.extend(item for item in record_ranges if isinstance(item, Mapping))
         return self._taskboard_contiguous_read_end(ranges)
+
+    @staticmethod
+    def _taskboard_evidence_item_delivered_body(item: Mapping[str, Any]) -> bool:
+        state = str(item.get("content_state") or item.get("body_state") or "").strip()
+        if state not in {"bounded", "full", "truncated"}:
+            return False
+        return any(item.get(key) not in (None, "", [], {}) for key in ("body", "content", "preview"))
 
     def _taskboard_read_target_exhausted(
         self,
@@ -224,19 +223,12 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 recorded_version = str(identity.get("content_version") or "")
                 if content_version and recorded_version != content_version:
                     continue
+                if not self._taskboard_evidence_item_delivered_body(item):
+                    continue
                 total_bytes = max(
                     total_bytes,
                     self._coerce_non_negative_int(item.get("total_bytes")),
                 )
-        for record in self._taskboard_read_progress_records(
-            owner=owner,
-            locator=locator,
-            content_version=content_version,
-        ):
-            total_bytes = max(
-                total_bytes,
-                self._coerce_non_negative_int(record.get("total_bytes")),
-            )
         if total_bytes <= 0:
             return False
         next_offset = self._taskboard_next_read_offset(

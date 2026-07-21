@@ -342,6 +342,55 @@ class TaskWorkspace:
             replacements=replacements,
         )
 
+    async def _atomic_replace_file_content(
+        self,
+        path: str | os.PathLike[str],
+        content: str,
+        *,
+        expected_sha256: str,
+        replacements: int = 0,
+    ) -> TaskWorkspaceFileWrite:
+        """Conditionally replace one text file with one atomic filesystem mutation."""
+
+        target = self.resolve_file_path(path)
+        self._assert_terminal_target_writable(target)
+        if self.mode != "read_write" and not (
+            target == self.fallback_root or self.fallback_root in target.parents
+        ):
+            raise TaskWorkspacePolicyError(
+                "External TaskWorkspace editing requires explicit write permission."
+            )
+        if not target.is_file():
+            raise FileNotFoundError(f"TaskWorkspace file not found: {path}")
+        expected_digest = str(expected_sha256 or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+            raise ValueError("expected_sha256 must be a SHA-256 digest.")
+        if await asyncio.to_thread(self._sha256, target) != expected_digest:
+            raise ValueError("TaskWorkspace file has changed since the expected sha256.")
+
+        data = str(content).encode("utf-8")
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            await asyncio.to_thread(temporary.write_bytes, data)
+            # Recheck immediately before replace so concurrent writers cannot be
+            # silently overwritten after the initial conditional read.
+            if await asyncio.to_thread(self._sha256, target) != expected_digest:
+                raise ValueError("TaskWorkspace file changed before atomic replacement.")
+            await asyncio.to_thread(os.replace, temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+        return TaskWorkspaceFileWrite(
+            path=self._relative(target),
+            requested_path=Path(path).as_posix(),
+            bytes=len(data),
+            sha256=await asyncio.to_thread(self._sha256, target),
+            fallback=self.fallback_root in target.parents,
+            task_workspace_id=self.task_workspace_id,
+            execution_id=self.execution_id,
+            replacements=max(0, int(replacements)),
+        )
+
     async def copy_from(
         self,
         source: str | os.PathLike[str],

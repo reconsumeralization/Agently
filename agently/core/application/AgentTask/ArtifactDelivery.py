@@ -268,24 +268,21 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 prepared.append((claim_key, old, new))
 
             expected_sha256 = str(current_ref.get("sha256") or "")
-            operation_records: list[dict[str, Any]] = []
-            for index, (claim_key, old, new) in enumerate(prepared):
-                write_result = await self.task_workspace.edit_file(
-                    path,
-                    old,
-                    new,
-                    replace_all=False,
-                    expected_sha256=expected_sha256,
-                )
-                expected_sha256 = str(write_result.get("sha256") or "")
-                operation_records.append(
-                    {
-                        "index": index,
-                        "type": "replace",
-                        "claim_key": claim_key,
-                        "replacement_count": int(write_result.get("replacements") or 0),
-                    }
-                )
+            await self.task_workspace._atomic_replace_file_content(
+                path,
+                simulated,
+                expected_sha256=expected_sha256,
+                replacements=len(prepared),
+            )
+            operation_records = [
+                {
+                    "index": index,
+                    "type": "replace",
+                    "claim_key": claim_key,
+                    "replacement_count": 1,
+                }
+                for index, (claim_key, _old, _new) in enumerate(prepared)
+            ]
 
             promoted = await self.task_workspace._promote_file_identity(path, role="grounding_candidate")
             final_size = int(promoted.get("bytes") or promoted.get("size") or 0)

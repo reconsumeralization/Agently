@@ -1100,10 +1100,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         context_pack: "TaskContextView",
     ) -> dict[str, Any]:
         language_policy = self._language_policy()
+        initial_evidence_use = collect_evidence_use(execution_result)
+        candidate_required_reference_ids = {
+            evidence_id
+            for use in initial_evidence_use
+            for evidence_id in self._normalize_string_list(use.get("evidence_ids"))
+        }
         raw_execution_evidence_summary = self._execution_log_summary(execution_meta)
         raw_cumulative_evidence_summary = self._cumulative_execution_evidence_summary(execution_meta)
-        evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
-        initial_evidence_use = collect_evidence_use(execution_result)
+        evidence_ledger = self._cumulative_evidence_ledger(
+            execution_meta,
+            required_evidence_ids=candidate_required_reference_ids,
+        )
         initial_guard = validate_evidence_use(initial_evidence_use, evidence_ledger)
         await self._ensure_task_workspace_artifact_targeted_readback_evidence(
             execution_meta,
@@ -1112,7 +1120,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         )
         raw_execution_evidence_summary = self._execution_log_summary(execution_meta)
         raw_cumulative_evidence_summary = self._cumulative_execution_evidence_summary(execution_meta)
-        evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
+        evidence_ledger = self._cumulative_evidence_ledger(
+            execution_meta,
+            required_evidence_ids=candidate_required_reference_ids,
+        )
         grounding_guard = validate_evidence_use(initial_evidence_use, evidence_ledger)
         binding_reference_ids = set(
             self._task_reference_catalog.offered_references()
@@ -1204,6 +1215,23 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 execution_meta.get("execution_id") or f"iteration:{iteration_index}"
             ),
         )
+        inventory = self._lifecycle_state.carrier_inventory
+        verification_phase = (
+            "pre_promotion_verifying"
+            if any(
+                carrier.kind == "task_workspace_artifact"
+                and carrier.path != carrier.target_path
+                for carrier in inventory.carriers
+            )
+            else "root_verifying"
+            if any(carrier.kind == "task_workspace_artifact" for carrier in inventory.carriers)
+            else "candidate_verifying"
+        )
+        self._lifecycle_state.advance(
+            verification_phase,
+            expected_version=self._lifecycle_state.state_version,
+            iteration=iteration_index,
+        )
         strict_candidate = await self._current_terminal_candidate()
         terminal_delivery_contract = self._terminal_delivery_contract_for_verifier(
             normalized_execution_result,
@@ -1250,6 +1278,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             offered_reference_ids=set(
                 self._task_reference_catalog.offered_references()
             ),
+            required_reference_ids=candidate_required_reference_ids,
         )
         offered_reference_snapshot = {
             str(item.get("reference_id") or "").strip()
@@ -4573,9 +4602,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         }
 
     @classmethod
-    def _evidence_ledger_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+    def _evidence_ledger_from_execution_meta(
+        cls,
+        execution_meta: Mapping[str, Any],
+        *,
+        required_evidence_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         evidence_items: list[dict[str, Any]] = []
         pinned_evidence_ids = cls._pinned_evidence_ids_from_execution_meta(execution_meta)
+        pinned_evidence_ids.update(required_evidence_ids or set())
         blocks = execution_meta.get("blocks")
         if isinstance(blocks, Mapping):
             evidence = blocks.get("evidence")
@@ -4748,8 +4783,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if not isinstance(item, Mapping):
                 continue
             sanitized = dict(DataFormatter.sanitize(item))
-            evidence_id = str(sanitized.get("id") or "").strip()
-            pin_priority = -1 if evidence_id and evidence_id in pinned else 0
+            identities = {
+                str(sanitized.get(field) or "").strip()
+                for field in ("id", "evidence_id", "reference_id", "cite_as")
+                if str(sanitized.get(field) or "").strip()
+            }
+            pin_priority = -1 if identities.intersection(pinned) else 0
             ordered.append((pin_priority, cls._verifier_evidence_item_priority(sanitized), index, sanitized))
         ordered.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
         return [item for _, _, _, item in ordered]
@@ -4985,10 +5024,34 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     add(ref.get(field))
         return aliases[:24]
 
-    def _cumulative_evidence_ledger(self, current_execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+    def _cumulative_evidence_ledger(
+        self,
+        current_execution_meta: Mapping[str, Any],
+        *,
+        required_evidence_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
+        expanded_required_ids = set(required_evidence_ids or set())
+        for required_id in tuple(expanded_required_ids):
+            try:
+                resolved = self._task_references().resolve(required_id)
+            except (KeyError, ValueError):
+                continue
+            for field in ("evidence_id", "reference_id"):
+                identity = str(resolved.get(field) or "").strip()
+                if identity:
+                    expanded_required_ids.add(identity)
+            target = resolved.get("target")
+            if isinstance(target, Mapping):
+                target_id = str(target.get("id") or "").strip()
+                if target_id:
+                    expanded_required_ids.add(target_id)
         pinned_evidence_ids = self._pinned_evidence_ids_from_execution_meta(current_execution_meta)
-        current_ledger = self._evidence_ledger_from_execution_meta(current_execution_meta)
+        pinned_evidence_ids.update(expanded_required_ids)
+        current_ledger = self._evidence_ledger_from_execution_meta(
+            current_execution_meta,
+            required_evidence_ids=expanded_required_ids,
+        )
         for item in current_ledger.get("items", []):
             if isinstance(item, Mapping):
                 items.append(dict(item))
@@ -4999,7 +5062,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if not isinstance(previous_meta, Mapping):
                 continue
             pinned_evidence_ids.update(self._pinned_evidence_ids_from_execution_meta(previous_meta))
-            previous_ledger = self._evidence_ledger_from_execution_meta(previous_meta)
+            previous_ledger = self._evidence_ledger_from_execution_meta(
+                previous_meta,
+                required_evidence_ids=expanded_required_ids,
+            )
             for item in previous_ledger.get("items", []):
                 if isinstance(item, Mapping):
                     items.append(dict(item))

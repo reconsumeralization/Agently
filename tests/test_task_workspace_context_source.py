@@ -31,6 +31,29 @@ async def test_task_workspace_edits_caller_directory_with_direct_root(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_task_workspace_atomic_content_replace_is_digest_conditional(tmp_path: Path) -> None:
+    workspace = TaskWorkspace(tmp_path, mode="read_write", execution_id="task-atomic-edit")
+    original = await workspace.write_file("candidate.md", "first\nsecond\n")
+
+    replaced = await workspace._atomic_replace_file_content(
+        "candidate.md",
+        "first\nrepaired\n",
+        expected_sha256=original.sha256,
+        replacements=1,
+    )
+
+    assert replaced.replacements == 1
+    assert (tmp_path / "candidate.md").read_text(encoding="utf-8") == "first\nrepaired\n"
+    with pytest.raises(ValueError, match="changed since"):
+        await workspace._atomic_replace_file_content(
+            "candidate.md",
+            "stale overwrite\n",
+            expected_sha256=original.sha256,
+        )
+    assert (tmp_path / "candidate.md").read_text(encoding="utf-8") == "first\nrepaired\n"
+
+
+@pytest.mark.asyncio
 async def test_terminal_target_write_guard_allows_only_digest_pinned_promotion(
     tmp_path: Path,
 ) -> None:

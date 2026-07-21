@@ -2995,10 +2995,12 @@ async def test_strict_grounding_prefers_required_task_workspace_deliverable_over
     assert str(candidate["content_version_id"]).startswith("cv_")
     assert [carrier["kind"] for carrier in candidate["carriers"]] == [
         "task_workspace_artifact",
-        "inline_final_result",
     ]
-    assert candidate["carriers"][1]["text"] == summary
-    assert str(candidate["carriers"][1]["content_version_id"]).startswith("inline:")
+    assert candidate["carriers"][0]["target_path"] == "final.md"
+    assert task._terminal_inline_values == {}
+    assert task._terminal_materialization_diagnostics[-1]["code"] == (
+        "agent_task.terminal_carrier.inline_projection_not_a_deliverable"
+    )
 
 
 @pytest.mark.asyncio
@@ -7332,12 +7334,11 @@ async def test_bounded_action_commands_project_cold_refs_across_taskboard_card_b
     finally:
         Agently.event_center.unregister_hook(hook_name)
 
-    assert repeated_artifact_reads == []
-    assert repeated_readback["ref_count"] == 0
-    assert repeated_readback["exhausted_ref_count"] >= 1
-    assert repeated_readback["diagnostics"][0]["code"] == (
-        "taskboard.dependency_readback.no_unread_ranges"
-    )
+    # The physical read performed for a different request is an audit fact,
+    # not proof that this consumer-visible evidence view received the body.
+    assert repeated_artifact_reads
+    assert repeated_readback["ref_count"] >= 1
+    assert repeated_readback["exhausted_ref_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -13389,6 +13390,67 @@ async def test_taskboard_grounding_repair_write_proof_tracks_existing_candidate_
     assert not (tmp_path / "task_workspace" / "final.md").exists()
 
 
+def test_taskboard_physical_read_progress_does_not_prove_consumer_body_delivery(tmp_path):
+    task = AgentTask(
+        _create_agent("taskboard-consumer-scoped-read-progress").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-consumer-scoped-read-progress",
+        goal="Read the exact candidate range into the current consumer.",
+        success_criteria=["The current consumer receives the requested body."],
+        execution="taskboard",
+    )
+    ref = {
+        "owner": "task_workspace",
+        "locator": "working/taskboard/report/terminal-candidates/final.md",
+        "path": "working/taskboard/report/terminal-candidates/final.md",
+        "content_version_id": "cv_candidate",
+        "bytes": 100,
+        "range": {"offset": 0, "max_bytes": 100},
+    }
+    task._record_taskboard_read_progress(
+        {
+            "ok": True,
+            "owner": "task_workspace",
+            "locator": ref["locator"],
+            "content_version": "cv_candidate",
+            "range": {"offset": 0, "end": 100},
+            "total_bytes": 100,
+        },
+        card_id="readback-before-continuation",
+    )
+
+    assert task._taskboard_requested_read_range(
+        ref,
+        {"evidence_items": []},
+        default_max_bytes=100,
+    ) == (0, 100)
+    assert task._taskboard_read_target_exhausted(
+        ref,
+        {"evidence_items": []},
+    ) is False
+
+    delivered_view = {
+        "evidence_items": [
+            {
+                "id": "readback-delivered",
+                "kind": "task_workspace_artifact.readback",
+                "status": "ok",
+                "body_state": "bounded",
+                "body": "x" * 100,
+                "total_bytes": 100,
+                "read_identity": {
+                    "owner": "task_workspace",
+                    "locator": ref["locator"],
+                    "content_version": "cv_candidate",
+                    "range": {"offset": 0, "end": 100},
+                },
+            }
+        ]
+    }
+    assert task._taskboard_read_target_exhausted(ref, delivered_view) is True
+
+
 def _completed_taskboard_revision_for_final_repair(board_id: str) -> TaskBoardRevision:
     card = TaskBoardCard.from_value(
         {
@@ -13622,6 +13684,176 @@ def test_taskboard_material_claim_repair_keeps_root_deliverable_separate_from_st
     )
     assert repair.metadata["final_task_workspace_deliverables"] == ["final.md"]
     assert repair.evidence_contract["material_claim_patch_paths"] == [candidate_path]
+
+
+def test_terminal_repair_contract_groups_requirements_by_canonical_carrier(tmp_path):
+    task = AgentTask(
+        _create_agent("terminal-repair-contract-groups").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="terminal-repair-contract-groups",
+        goal="Repair each terminal carrier through its own mechanism.",
+        success_criteria=["No repair transaction mixes carrier kinds."],
+        execution="taskboard",
+    )
+    task._lifecycle_state.replace_carriers(
+        [
+            {
+                "carrier_id": "car_file",
+                "kind": "task_workspace_artifact",
+                "required": True,
+                "path": "working/taskboard/report/terminal-candidates/final.md",
+                "target_path": "final.md",
+                "content_version_id": "cv_file",
+                "content_digest": "a" * 64,
+                "source_work_result_id": "work:file",
+                "status": "materialized",
+            },
+            {
+                "carrier_id": "car_inline",
+                "kind": "inline_final_result",
+                "required": False,
+                "path": "",
+                "target_path": "",
+                "content_version_id": "inline:" + "b" * 64,
+                "content_digest": "b" * 64,
+                "source_work_result_id": "work:inline",
+                "status": "materialized",
+            },
+        ],
+        expected_version=task._lifecycle_state.state_version,
+    )
+    contract = {
+        "gate_kind": "factual_integrity",
+        "issue_code": "unsupported_material_claim",
+        "contract_subject": "carriers:mixed",
+        "requirements": [
+            {
+                "claim_key": "claim:file",
+                "carrier_id": "car_file",
+                "path": "working/taskboard/report/terminal-candidates/final.md",
+                "content_version_id": "cv_file",
+                "artifact_quote": "Unsupported file claim.",
+            },
+            {
+                "claim_key": "claim:inline",
+                "carrier_id": "car_inline",
+                "path": "",
+                "content_version_id": "inline:" + "b" * 64,
+                "artifact_quote": "Unsupported process summary.",
+            },
+        ],
+    }
+
+    groups = task._terminal_repair_contract_groups(contract)
+
+    assert [group["carrier_id"] for group in groups] == ["car_file", "car_inline"]
+    assert groups[0]["carrier_kind"] == "task_workspace_artifact"
+    assert groups[0]["patchable"] is True
+    assert groups[0]["contract"]["contract_subject"] == "carrier:car_file"
+    assert [item["claim_key"] for item in groups[0]["contract"]["requirements"]] == [
+        "claim:file"
+    ]
+    assert groups[1]["carrier_kind"] == "inline_final_result"
+    assert groups[1]["patchable"] is False
+    assert [item["claim_key"] for item in groups[1]["contract"]["requirements"]] == [
+        "claim:inline"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_grounding_patch_advances_same_terminal_carrier_and_invalidates_old_contract(tmp_path):
+    task = AgentTask(
+        _create_agent("atomic-terminal-repair").use_task_workspace(
+            tmp_path / "task_workspace",
+            mode="read_write",
+        ),
+        task_id="atomic-terminal-repair",
+        goal="Repair the staged report and reverify the same logical carrier.",
+        success_criteria=["Only the rejected claim changes."],
+        execution="taskboard",
+        options={"required_task_workspace_deliverables": ["final.md"]},
+    )
+    candidate_path = "working/report/terminal-candidates/final.md"
+    await task.task_workspace.write_file(candidate_path, "# Report\n\nUnsupported certainty.\n")
+    identity = await task.task_workspace._promote_file_identity(
+        candidate_path,
+        role="terminal_carrier",
+    )
+    task._lifecycle_state.replace_carriers(
+        [
+            {
+                "carrier_id": "car_report",
+                "kind": "task_workspace_artifact",
+                "required": True,
+                "path": candidate_path,
+                "target_path": "final.md",
+                "content_version_id": identity["content_version_id"],
+                "content_digest": identity["sha256"],
+                "source_work_result_id": "work:draft",
+                "status": "materialized",
+            }
+        ],
+        expected_version=task._lifecycle_state.state_version,
+    )
+    contract = {
+        "gate_kind": "factual_grounding",
+        "issue_code": "unsupported_material_claim",
+        "contract_subject": "carrier:car_report",
+        "requirements": [
+            {
+                "claim_key": "claim:1",
+                "claim": "Unsupported certainty.",
+                "artifact_quote": "Unsupported certainty.",
+                "carrier_id": "car_report",
+                "content_version_id": identity["content_version_id"],
+                "state": "unsupported",
+            }
+        ],
+    }
+    task._lifecycle_state.record_terminal_transition(
+        "repair",
+        expected_version=task._lifecycle_state.state_version,
+        repair_contract=contract,
+    )
+    context = SimpleNamespace(
+        card=SimpleNamespace(
+            id="final-verification-repair",
+            evidence_contract={
+                "material_claim_repair_contract": contract,
+                "material_claim_patch_paths": [candidate_path],
+            },
+        )
+    )
+
+    output = await task._materialize_taskboard_task_workspace_patch(
+        context,
+        {
+            "status": "completed",
+            "patch_proposal": {
+                "path": candidate_path,
+                "operations": [
+                    {
+                        "claim_key": "claim:1",
+                        "op": "replace",
+                        "old_string": "Unsupported certainty.",
+                        "new_string": "Evidence remains limited.",
+                    }
+                ],
+            },
+        },
+    )
+
+    delivery = output["task_workspace_patch_delivery"]
+    repaired = task._lifecycle_state.carrier_inventory.carriers[0]
+    assert delivery["status"] == "completed"
+    assert delivery["terminal_carrier_id"] == "car_report"
+    assert task._lifecycle_state.phase == "post_patch_reverifying"
+    assert task._lifecycle_state.repair_contract == {}
+    assert repaired.carrier_id == "car_report"
+    assert repaired.content_version_id == delivery["content_version_id"]
+    assert repaired.content_version_id != identity["content_version_id"]
+    assert repaired.target_path == "final.md"
 
 
 def test_taskboard_material_claim_evidence_gap_replans_segment_before_carrier_patch(tmp_path):
@@ -21623,6 +21855,77 @@ def test_verifier_ledger_preserves_pinned_finalizer_action_result_after_block_co
 
     ids = [item.get("id") for item in ledger.get("items", [])]
     assert target_id in ids
+
+
+def test_cumulative_verifier_ledger_retains_candidate_used_identity_across_revisions(tmp_path):
+    task = AgentTask(
+        _create_agent("candidate-evidence-inheritance").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="candidate-evidence-inheritance",
+        goal="Verify a candidate against the exact evidence it used.",
+        success_criteria=["Candidate-used evidence survives later revisions."],
+        execution="taskboard",
+    )
+    target_id = "source:candidate-required"
+    task.iterations.append(
+        {
+            "iteration": 1,
+            "execution_meta": {
+                "status": "completed",
+                "logs": {},
+                "blocks": {
+                    "evidence": {
+                        "evidence_items": [
+                            *[
+                                {
+                                    "id": f"source:old-noise:{index}",
+                                    "kind": "evidence_snippet",
+                                    "status": "ok",
+                                    "body_state": "bounded",
+                                    "body": f"Old noise {index}",
+                                }
+                                for index in range(90)
+                            ],
+                            {
+                                "id": target_id,
+                                "kind": "evidence_snippet",
+                                "status": "ok",
+                                "body_state": "bounded",
+                                "body": "The exact parse/loss/trainer fact used by the candidate.",
+                            },
+                        ]
+                    }
+                },
+            },
+        }
+    )
+    current_meta = {
+        "status": "completed",
+        "logs": {},
+        "blocks": {
+            "evidence": {
+                "evidence_items": [
+                    {
+                        "id": f"task_workspace_artifact_readback:current:{index}",
+                        "kind": "task_workspace_artifact.readback",
+                        "status": "ok",
+                        "body_state": "bounded",
+                        "path": f"current-{index}.md",
+                        "body": f"Current artifact evidence {index}",
+                    }
+                    for index in range(80)
+                ]
+            }
+        },
+    }
+
+    ledger = task._cumulative_evidence_ledger(
+        current_meta,
+        required_evidence_ids={target_id},
+    )
+
+    assert target_id in {item.get("id") for item in ledger.get("items", [])}
 
 
 @pytest.mark.asyncio

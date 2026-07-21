@@ -1515,6 +1515,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                 final["missing_criteria"] = []
                 if staged_promotions:
                     try:
+                        self._lifecycle_state.advance(
+                            "promoting",
+                            expected_version=self._lifecycle_state.state_version,
+                        )
                         promoted_terminal_refs = (
                             await self._taskboard_promote_staged_deliverables(
                                 staged_promotions,
@@ -1539,6 +1543,10 @@ class AgentTaskTaskBoardFinalizationMixin(AgentTaskMixinBase):
                             carrier.carrier_id
                             for carrier in promoted_inventory.carriers
                         ]
+                        self._lifecycle_state.advance(
+                            "root_verifying",
+                            expected_version=self._lifecycle_state.state_version,
+                        )
                         decided_inventory = (
                             self._lifecycle_state.record_terminal_transition(
                                 "accepted",
