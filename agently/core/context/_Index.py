@@ -224,7 +224,11 @@ def _matches_structural_filters(
                 for item in _filter_values(expected, name="pattern")
                 if str(item).strip()
             )
-            if not patterns or not any(fnmatchcase(path, pattern) for pattern in patterns):
+            basename = path.rsplit("/", 1)[-1]
+            if not patterns or not any(
+                fnmatchcase(path, pattern) or fnmatchcase(basename, pattern)
+                for pattern in patterns
+            ):
                 return False
             continue
         if key == "include_hidden":

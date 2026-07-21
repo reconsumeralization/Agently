@@ -352,6 +352,40 @@ async def test_scoped_source_can_disclose_different_ranges_of_the_same_ref() -> 
 
 
 @pytest.mark.asyncio
+async def test_scoped_source_uses_single_content_locator_instead_of_semantic_query() -> None:
+    candidate = _candidate(
+        "src/router.py",
+        required=True,
+        summary="src/router.py\nclass DynamicRoutingLayer",
+        metadata={"path": "src/router.py"},
+    )
+    source = ScopedMemoryContextSource(
+        [candidate],
+        {
+            candidate.source_ref: _source_block(
+                candidate.source_ref,
+                content="class DynamicRoutingLayer:\n    pass\n",
+            )
+        },
+    )
+    context = TaskContext("scoped-content-locator")
+    context.attach(source)
+
+    package = await context.reader(consumer="worker").async_read(
+        ContextReadIntent(
+            "Explain routing weights and expert selection",
+            filters={
+                "path": "src/router.py",
+                "content_contains": ["class DynamicRoutingLayer"],
+            },
+        )
+    )
+
+    assert [block.source_ref for block in package.blocks] == ["src/router.py"]
+    assert source.scoped_queries == ["class DynamicRoutingLayer"]
+
+
+@pytest.mark.asyncio
 async def test_ref_only_read_returns_descriptor_identity_without_exact_read() -> None:
     candidate = _candidate("docs/large.md", estimated_chars=100_000)
     source = MemoryContextSource(

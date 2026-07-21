@@ -887,6 +887,26 @@ class ContextReader:
         candidate_path = str(candidate.metadata.get("path") or candidate.source_ref).strip()
         return path == candidate_path or path == candidate.source_ref
 
+    @staticmethod
+    def _scoped_source_read_query(intent: ContextReadIntent) -> str:
+        """Use one explicit content locator to position a source-local read."""
+
+        raw = intent.filters.get("content_contains")
+        if isinstance(raw, str):
+            locators = (raw.strip(),) if raw.strip() else ()
+        elif isinstance(raw, Sequence) and not isinstance(
+            raw,
+            str | bytes | bytearray,
+        ):
+            locators = tuple(
+                str(item).strip() for item in raw if str(item or "").strip()
+            )
+        else:
+            locators = ()
+        if len(locators) == 1:
+            return locators[0]
+        return intent.query
+
     async def _select_optional(
         self,
         intent: ContextReadIntent,
@@ -1146,6 +1166,7 @@ class ContextReader:
         ).strip()
         allow_lossy_required = required_overflow == "lossy_digest"
         delivery_mode = str(intent.metadata.get("delivery_mode") or "content").strip()
+        scoped_read_query = self._scoped_source_read_query(intent)
         if delivery_mode not in {"content", "refs_only"}:
             raise ValueError("Context delivery_mode must be content or refs_only.")
         required_remaining = sum(1 for item in items if item.offered.required)
@@ -1217,7 +1238,7 @@ class ContextReader:
                         item,
                         max_chars=1,
                         representation="image_attachment",
-                        query=intent.query,
+                        query=scoped_read_query,
                     )
                 except ContextStaleError:
                     raise
@@ -1327,7 +1348,7 @@ class ContextReader:
                             item,
                             max_chars=read_limit,
                             representation="lossy_digest",
-                            query=intent.query,
+                            query=scoped_read_query,
                         )
                     except ContextStaleError:
                         raise
@@ -1412,7 +1433,7 @@ class ContextReader:
                     representation=(
                         "parsed_text" if representation == "parsed_text" else None
                     ),
-                    query=intent.query,
+                    query=scoped_read_query,
                 )
             except ContextStaleError:
                 raise

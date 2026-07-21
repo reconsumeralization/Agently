@@ -339,6 +339,35 @@ async def test_structural_filters_are_applied_by_context_index_not_source() -> N
 
 
 @pytest.mark.asyncio
+async def test_file_name_pattern_matches_basename_inside_an_exact_path_scope() -> None:
+    source = CountingDescriptorSource(
+        [
+            descriptor(
+                "ultralytics/nn/modules/moe/routers.py",
+                required=True,
+                metadata={"path": "ultralytics/nn/modules/moe/routers.py"},
+            )
+        ]
+    )
+    context = TaskContext("basename-pattern")
+    context.attach(source)
+
+    package = await context.reader(consumer="worker").async_read(
+        ContextReadIntent(
+            "class DynamicRoutingLayer",
+            filters={
+                "path": "ultralytics/nn/modules/moe/routers.py",
+                "pattern": "routers.py",
+            },
+        )
+    )
+
+    assert [block.source_ref for block in package.blocks] == [
+        "ultralytics/nn/modules/moe/routers.py"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_context_index_rejects_caller_selected_retrieval_mechanism() -> None:
     source = CountingDescriptorSource([descriptor("known", required=True)])
     context = TaskContext("mechanism-filter")
