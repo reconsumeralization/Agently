@@ -455,6 +455,37 @@ async def test_hybrid_index_skips_query_embedding_when_filters_leave_one_candida
 
 
 @pytest.mark.asyncio
+async def test_hybrid_index_prioritizes_complete_literal_locator_over_term_frequency() -> None:
+    embedder = CountingEmbeddingProvider()
+    exact = replace(
+        descriptor("src/exact.py"),
+        index_text="class DynamicRoutingLayer",
+    )
+    distractor = replace(
+        descriptor("src/distractor.py"),
+        index_text=("class Other\n" * 12) + ("DynamicRoutingLayer import\n" * 12),
+    )
+    source = CountingDescriptorSource([distractor, exact])
+    context = TaskContext("hybrid-literal-locator")
+    context.configure_index(
+        embedding_provider=embedder,
+        strategy="hybrid",
+    )
+    context.attach(source)
+
+    package = await context.reader(
+        consumer="worker",
+        budget=ContextBudget(
+            max_chars=5_000,
+            max_blocks=1,
+            max_block_chars=5_000,
+        ),
+    ).async_read("class DynamicRoutingLayer")
+
+    assert [block.source_ref for block in package.blocks] == ["src/exact.py"]
+
+
+@pytest.mark.asyncio
 async def test_structural_index_preserves_wider_semantic_candidate_window() -> None:
     selector = RecordingSelector()
     source = CountingDescriptorSource(

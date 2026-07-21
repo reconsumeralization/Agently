@@ -96,6 +96,47 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 )
         return reference_ids
 
+    @staticmethod
+    def _taskboard_card_contract_evidence_reference_ids(card: Any) -> set[str]:
+        """Return exact evidence refs that the current card contract consumes."""
+
+        contract = getattr(card, "evidence_contract", None)
+        if not isinstance(contract, Mapping):
+            return set()
+        reference_ids: set[str] = set()
+
+        def visit(value: Any) -> None:
+            if isinstance(value, Mapping):
+                for raw_key, child in value.items():
+                    key = str(raw_key)
+                    if key in {"evidence_ids", "evidence_refs"}:
+                        if isinstance(child, str):
+                            candidates: Sequence[Any] = [child]
+                        elif isinstance(child, Sequence) and not isinstance(
+                            child,
+                            str | bytes | bytearray,
+                        ):
+                            candidates = child
+                        else:
+                            candidates = ()
+                        reference_ids.update(
+                            str(candidate).strip()
+                            for candidate in candidates
+                            if str(candidate or "").strip()
+                        )
+                        continue
+                    visit(child)
+                return
+            if isinstance(value, Sequence) and not isinstance(
+                value,
+                str | bytes | bytearray,
+            ):
+                for child in value:
+                    visit(child)
+
+        visit(contract)
+        return reference_ids
+
     def _taskboard_stage_terminal_action_commands(
         self,
         context: Any,
@@ -1326,10 +1367,14 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         dependency_reference_ids = self._taskboard_dependency_evidence_reference_ids(
             context.dependency_results
         )
+        contract_reference_ids = self._taskboard_card_contract_evidence_reference_ids(
+            context.card
+        )
         prompt_evidence_ledger = self._model_evidence_ledger_projection(
             evidence_ledger,
             max_items=64,
             preferred_reference_ids=dependency_reference_ids,
+            required_reference_ids=contract_reference_ids,
         )
         card_value = context.card.to_dict()
         done_when = self._taskboard_card_done_when(context.card)
@@ -2025,10 +2070,14 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
         dependency_reference_ids = self._taskboard_dependency_evidence_reference_ids(
             context.dependency_results
         )
+        contract_reference_ids = self._taskboard_card_contract_evidence_reference_ids(
+            context.card
+        )
         prompt_evidence_ledger = self._model_evidence_ledger_projection(
             evidence_ledger,
             max_items=64,
             preferred_reference_ids=dependency_reference_ids,
+            required_reference_ids=contract_reference_ids,
         )
         preflight_diagnostics = task_board_preflight_diagnostics(
             context.revision,
@@ -2369,6 +2418,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 card_request_evidence_ledger,
                 max_items=64,
                 preferred_reference_ids=dependency_reference_ids,
+                required_reference_ids=contract_reference_ids,
             )
             for item in request_prompt_evidence_ledger.get("items", []):
                 if not isinstance(item, dict) or str(

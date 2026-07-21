@@ -14243,7 +14243,7 @@ def test_taskboard_dependency_evidence_refs_are_prioritized_in_bounded_prompt_le
 
 
 @pytest.mark.asyncio
-async def test_taskboard_control_prompt_keeps_dependency_cited_ref_past_ledger_cap(
+async def test_taskboard_control_prompt_keeps_dependency_and_repair_contract_refs_past_ledger_cap(
     tmp_path,
     monkeypatch,
 ):
@@ -14269,6 +14269,7 @@ async def test_taskboard_control_prompt_keeps_dependency_cited_ref_past_ledger_c
         )
         for index in range(70)
     ]
+    prior_final_reference_id = evidence_items[-2]["reference_id"]
     target_reference_id = evidence_items[-1]["reference_id"]
     dependency_result = TaskBoardCardResult(
         card_id="evidence",
@@ -14314,6 +14315,16 @@ async def test_taskboard_control_prompt_keeps_dependency_cited_ref_past_ledger_c
             "objective": "Repair the final report from dependency evidence.",
             "depends_on": ["evidence"],
             "allowed_execution_shape": "control",
+            "evidence_contract": {
+                "kind": "taskboard_final_verification_repair",
+                "prior_final_evidence_use": [
+                    {
+                        "claim": "Preserve the already grounded architecture fact.",
+                        "evidence_ids": [prior_final_reference_id],
+                        "support_type": "content",
+                    }
+                ],
+            },
         }
     )
     revision = TaskBoardRevision.from_value(
@@ -14333,6 +14344,16 @@ async def test_taskboard_control_prompt_keeps_dependency_cited_ref_past_ledger_c
         dependency_results={"evidence": dependency_result},
         planning_policy=None,
     )
+    assert task._taskboard_card_contract_evidence_reference_ids(repair_card) == {
+        prior_final_reference_id
+    }
+    assert prior_final_reference_id in {
+        item["reference_id"]
+        for item in build_task_board_evidence_view(
+            revision,
+            card_ids=["evidence"],
+        ).to_dict()["evidence_items"]
+    }
     captured: dict[str, Any] = {}
 
     class FakeRequest:
@@ -14366,6 +14387,28 @@ async def test_taskboard_control_prompt_keeps_dependency_cited_ref_past_ledger_c
     async def noop(*_args, **_kwargs):
         return None
 
+    original_projection = task._model_evidence_ledger_projection
+
+    def capture_projection(evidence_ledger, **kwargs):
+        projection = original_projection(evidence_ledger, **kwargs)
+        captured.setdefault("projection_calls", []).append(
+            {
+                "input_reference_ids": {
+                    item["reference_id"]
+                    for key in ("items", "overflow_item_refs")
+                    for item in evidence_ledger.get(key, [])
+                    if isinstance(item, Mapping) and item.get("reference_id")
+                },
+                "required_reference_ids": set(
+                    kwargs.get("required_reference_ids") or ()
+                ),
+                "output_reference_ids": {
+                    item["reference_id"] for item in projection["items"]
+                },
+            }
+        )
+        return projection
+
     monkeypatch.setattr(task.agent, "create_temp_request", FakeRequest)
     monkeypatch.setattr(
         cast(Any, task),
@@ -14383,6 +14426,11 @@ async def test_taskboard_control_prompt_keeps_dependency_cited_ref_past_ledger_c
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(cast(Any, task), "_emit", noop)
+    monkeypatch.setattr(
+        cast(Any, task),
+        "_model_evidence_ledger_projection",
+        capture_projection,
+    )
 
     result = await task._run_taskboard_control_card(
         context,
@@ -14399,9 +14447,27 @@ async def test_taskboard_control_prompt_keeps_dependency_cited_ref_past_ledger_c
     )
 
     assert result.status == "setback"
+    relevant_projection_calls = [
+        call
+        for call in captured["projection_calls"]
+        if prior_final_reference_id in call["input_reference_ids"]
+    ]
+    assert len(relevant_projection_calls) == 2
+    assert all(
+        call["required_reference_ids"] == {prior_final_reference_id}
+        for call in relevant_projection_calls
+    )
+    assert all(
+        prior_final_reference_id in call["output_reference_ids"]
+        for call in relevant_projection_calls
+    )
     assert captured["input"]["evidence_ledger"]["items"][0]["reference_id"] == (
         target_reference_id
     )
+    assert prior_final_reference_id in {
+        item["reference_id"]
+        for item in captured["input"]["evidence_ledger"]["items"]
+    }
 
 
 def _revision_with_completed_evidence_reacquisition(

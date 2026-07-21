@@ -1995,6 +1995,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         max_items: int = 80,
         offered_reference_ids: set[str] | None = None,
         preferred_reference_ids: set[str] | None = None,
+        required_reference_ids: set[str] | None = None,
         include_host_identity: bool = False,
     ) -> list[dict[str, Any]]:
         """Project stable evidence choices with only facts needed for binding.
@@ -2011,7 +2012,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
                 raw_items.extend(value)
         preferred = preferred_reference_ids or set()
-        if preferred:
+        required = required_reference_ids or set()
+        if preferred or required:
             # A downstream card must retain the exact refs that its dependency
             # structurally cited even when the cumulative ledger is larger
             # than the model-visible identity budget.  This is a projection
@@ -2022,6 +2024,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     if isinstance(item, Mapping)
                     and str(item.get("reference_id") or "").strip() in preferred
                     else 1
+                    if isinstance(item, Mapping)
+                    and str(item.get("reference_id") or "").strip() in required
+                    else 2
                 )
             )
         candidates: list[dict[str, Any]] = []
@@ -2121,6 +2126,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         max_items: int = 80,
         offered_reference_ids: set[str] | None = None,
         preferred_reference_ids: set[str] | None = None,
+        required_reference_ids: set[str] | None = None,
         include_host_identity: bool = False,
     ) -> dict[str, Any]:
         """Expose one host-issued identity per model-visible evidence item."""
@@ -2129,6 +2135,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             max_items=max_items,
             offered_reference_ids=offered_reference_ids,
             preferred_reference_ids=preferred_reference_ids,
+            required_reference_ids=required_reference_ids,
             include_host_identity=include_host_identity,
         )
         eligible_reference_ids: set[str] = set()

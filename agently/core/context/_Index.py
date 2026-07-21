@@ -567,6 +567,20 @@ class _ContextIndex:
         return float(sum(text.count(term) for term in terms))
 
     @staticmethod
+    def _literal_query_match(
+        query: str,
+        descriptor: ContextSourceDescriptor,
+    ) -> bool:
+        literal = str(query or "").strip().casefold()
+        if not literal:
+            return False
+        text = (
+            descriptor.index_text
+            or f"{descriptor.title}\n{descriptor.summary}"
+        ).casefold()
+        return literal in text
+
+    @staticmethod
     def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
         if len(left) != len(right) or not left:
             return 0.0
@@ -600,11 +614,19 @@ class _ContextIndex:
             descriptor.descriptor_key: self._lexical_score(intent.query, descriptor)
             for descriptor in descriptors
         }
+        literal_matches = {
+            descriptor.descriptor_key: self._literal_query_match(
+                intent.query,
+                descriptor,
+            )
+            for descriptor in descriptors
+        }
         if requested == "lexical":
             ranked = tuple(
                 sorted(
                     descriptors,
                     key=lambda item: (
+                        -int(literal_matches[item.descriptor_key]),
                         -lexical_scores[item.descriptor_key],
                         -item.priority,
                         item.descriptor_key,
@@ -667,6 +689,7 @@ class _ContextIndex:
             sorted(
                 descriptors,
                 key=lambda item: (
+                    -int(literal_matches[item.descriptor_key]),
                     -(
                         self._cosine(query_vector, vector_by_key[item.descriptor_key])
                         + min(1.0, lexical_scores[item.descriptor_key])
