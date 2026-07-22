@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+import pytest
+
+from agently import Agently
+from agently.core.application.AgentTask import AgentTask
+from agently.core.application.AgentTask.LifecycleState import (
+    AgentTaskLifecycleState,
+    TerminalCarrier,
+)
+
+
+def _task_workspace_carrier(
+    carrier_id: str,
+    content_version_id: str,
+    *,
+    path: str = "final.md",
+    digest: str = "a" * 64,
+) -> dict[str, object]:
+    return {
+        "carrier_id": carrier_id,
+        "kind": "task_workspace_artifact",
+        "required": True,
+        "content_version_id": content_version_id,
+        "path": path,
+        "content_digest": digest,
+        "source_work_result_id": "work_A",
+        "status": "materialized",
+    }
+
+
+def test_lifecycle_state_versions_advance_and_reject_stale_consumers():
+    state = AgentTaskLifecycleState(
+        task_id="task_A",
+        requested_strategy="auto",
+        effective_strategy="flat",
+    )
+
+    assert state.state_version == 1
+    assert state.require_version(1) is state
+    state.advance("context.prepare", expected_version=1, iteration=1)
+
+    assert state.state_version == 2
+    assert state.phase == "context.prepare"
+    assert state.iteration == 1
+    with pytest.raises(ValueError, match="stale AgentTask lifecycle version"):
+        state.require_version(1)
+
+
+def test_lifecycle_state_replaces_carriers_atomically_and_rejects_duplicate_ids():
+    state = AgentTaskLifecycleState(
+        task_id="task_carriers",
+        requested_strategy="flat",
+        effective_strategy="flat",
+    )
+    state.advance("evidence.ingest", expected_version=1, iteration=1)
+
+    inventory = state.replace_carriers(
+        [_task_workspace_carrier("car_A", "cv_A")],
+        expected_version=2,
+    )
+
+    assert state.state_version == 3
+    assert state.phase == "candidate_ready"
+    assert inventory.inventory_version == 1
+    assert inventory.state_version == 3
+    assert inventory.carriers[0].state_version == 3
+    assert inventory.carriers[0].carrier_id == "car_A"
+    with pytest.raises(ValueError, match="duplicate terminal carrier_id"):
+        state.replace_carriers(
+            [
+                _task_workspace_carrier("car_B", "cv_B"),
+                _task_workspace_carrier("car_B", "cv_C"),
+            ],
+            expected_version=3,
+        )
+    assert state.state_version == 3
+    assert state.carrier_inventory == inventory
+
+
+def test_changed_task_workspace_content_replaces_current_carrier_without_reusing_identity():
+    state = AgentTaskLifecycleState(
+        task_id="task_changed_path",
+        requested_strategy="flat",
+        effective_strategy="flat",
+    )
+    first = state.replace_carriers(
+        [_task_workspace_carrier("car_A", "cv_A", digest="a" * 64)],
+        expected_version=1,
+    )
+    old_carrier = first.carriers[0]
+    second = state.replace_carriers(
+        [_task_workspace_carrier("car_B", "cv_B", digest="b" * 64)],
+        expected_version=2,
+    )
+
+    assert second.inventory_version == 2
+    assert [carrier.carrier_id for carrier in second.carriers] == ["car_B"]
+    assert old_carrier.carrier_id == "car_A"
+    assert old_carrier.content_version_id == "cv_A"
+    assert all(carrier.carrier_id != old_carrier.carrier_id for carrier in second.carriers)
+
+
+def test_lifecycle_state_serialization_round_trip_preserves_current_versions_only():
+    state = AgentTaskLifecycleState(
+        task_id="task_round_trip",
+        requested_strategy="taskboard",
+        effective_strategy="taskboard",
+    )
+    state.advance("work.execute", expected_version=1, iteration=4)
+    state.replace_carriers(
+        [
+            _task_workspace_carrier("car_file", "cv_file"),
+            {
+                "carrier_id": "car_inline",
+                "kind": "inline_final_result",
+                "required": True,
+                "content_version_id": "inline:" + "c" * 64,
+                "path": "",
+                "content_digest": "c" * 64,
+                "source_work_result_id": "work_B",
+                "status": "proposed",
+            },
+        ],
+        expected_version=2,
+    )
+
+    restored = AgentTaskLifecycleState.from_dict(state.to_dict())
+
+    assert restored.to_dict() == state.to_dict()
+    restored_inventory = restored.carrier_inventory
+    state_inventory = state.carrier_inventory
+    assert restored_inventory is not None
+    assert state_inventory is not None
+    assert restored_inventory.carriers == state_inventory.carriers
+    assert isinstance(restored_inventory.carriers[0], TerminalCarrier)
+
+
+def test_terminal_carrier_preserves_physical_staging_path_and_logical_root_target():
+    state = AgentTaskLifecycleState(
+        task_id="task_staged_target",
+        requested_strategy="taskboard",
+        effective_strategy="taskboard",
+    )
+    staging_path = "working/taskboard/synthesis/terminal-candidates/final.md"
+
+    inventory = state.replace_carriers(
+        [
+            {
+                **_task_workspace_carrier(
+                    "car_staged",
+                    "cv_staged",
+                    path=staging_path,
+                ),
+                "target_path": "final.md",
+            }
+        ],
+        expected_version=1,
+    )
+    restored = AgentTaskLifecycleState.from_dict(state.to_dict())
+
+    assert inventory.carriers[0].path == staging_path
+    assert inventory.carriers[0].target_path == "final.md"
+    assert restored.carrier_inventory is not None
+    assert restored.carrier_inventory.carriers[0].target_path == "final.md"
+
+
+def test_lifecycle_state_advances_repaired_carrier_version_atomically():
+    state = AgentTaskLifecycleState(
+        task_id="task_atomic_carrier_repair",
+        requested_strategy="taskboard",
+        effective_strategy="taskboard",
+    )
+    state.replace_carriers(
+        [
+            {
+                **_task_workspace_carrier(
+                    "car_report",
+                    "cv_1",
+                    path="working/taskboard/report/terminal-candidates/final.md",
+                    digest="a" * 64,
+                ),
+                "target_path": "final.md",
+            }
+        ],
+        expected_version=1,
+    )
+    state.record_terminal_transition(
+        "repair",
+        expected_version=2,
+        repair_contract={
+            "contract_subject": "carrier:car_report",
+            "requirements": [
+                {
+                    "carrier_id": "car_report",
+                    "content_version_id": "cv_1",
+                }
+            ],
+        },
+    )
+
+    inventory = state.advance_terminal_carrier_version(
+        carrier_id="car_report",
+        expected_content_version_id="cv_1",
+        content_version_id="cv_2",
+        content_digest="b" * 64,
+        source_work_result_id="work:repair:1",
+        expected_version=3,
+    )
+
+    assert state.phase == "post_patch_reverifying"
+    assert state.repair_contract == {}
+    assert state.terminal_decision == {
+        "transition": "verification_retry",
+        "carrier_id": "car_report",
+        "superseded_content_version_id": "cv_1",
+        "content_version_id": "cv_2",
+        "state_version": 4,
+    }
+    assert inventory.inventory_version == 3
+    assert inventory.carriers[0].carrier_id == "car_report"
+    assert inventory.carriers[0].content_version_id == "cv_2"
+    assert inventory.carriers[0].content_digest == "b" * 64
+    assert inventory.carriers[0].target_path == "final.md"
+
+    with pytest.raises(ValueError, match="stale terminal carrier content version"):
+        state.advance_terminal_carrier_version(
+            carrier_id="car_report",
+            expected_content_version_id="cv_1",
+            content_version_id="cv_3",
+            content_digest="c" * 64,
+            source_work_result_id="work:repair:stale",
+            expected_version=4,
+        )
+
+
+def test_semantic_acceptance_of_staging_carrier_waits_for_root_promotion():
+    state = AgentTaskLifecycleState(
+        task_id="task_staged_acceptance",
+        requested_strategy="taskboard",
+        effective_strategy="taskboard",
+    )
+    inventory = state.replace_carriers(
+        [
+            {
+                **_task_workspace_carrier("car_report", "cv_candidate"),
+                "path": "working/report/terminal-candidates/final.md",
+                "target_path": "final.md",
+            }
+        ],
+        expected_version=state.state_version,
+    )
+
+    accepted = state.record_terminal_transition(
+        "accepted",
+        expected_version=state.state_version,
+        accepted_carrier_ids=["car_report"],
+    )
+
+    assert accepted.inventory_version == inventory.inventory_version + 1
+    assert state.phase == "promotion_ready"
+    assert state.terminal_decision["transition"] == "promotion_ready"
+    assert state.terminal_decision["semantic_transition"] == "accepted"
+
+
+def test_lifecycle_state_preserves_skill_install_activation_and_context_facts():
+    state = AgentTaskLifecycleState(
+        task_id="task_skill_bindings",
+        requested_strategy="flat",
+        effective_strategy="flat",
+        skill_bindings={
+            "binding_A": {
+                "binding_id": "binding_A",
+                "canonical_skill_id": "agently-request",
+                "mode": "required",
+                "resolved_source": "https://example.com/skills.git",
+                "resolved_revision": "abc123",
+                "source_subpath": "skills/agently-request",
+            }
+        },
+    )
+
+    state.record_skill_context_binding(
+        request_id="request_A",
+        phase="work.plan",
+        bindings=[
+            {
+                "binding_id": "binding_A",
+                "canonical_skill_id": "agently-request",
+                "guidance_chars": 640,
+                "resource_chars": 320,
+                "selected_resource_keys": ["skill_1_resource_2"],
+                "truncated": True,
+            }
+        ],
+    )
+    restored = AgentTaskLifecycleState.from_dict(state.to_dict())
+
+    binding = restored.skill_bindings["binding_A"]
+    assert binding["install_status"] == "completed"
+    assert binding["activation_status"] == "bound"
+    assert binding["contexts"] == [
+        {
+            "request_id": "request_A",
+            "phase": "work.plan",
+            "guidance_chars": 640,
+            "resource_chars": 320,
+            "selected_resource_keys": ["skill_1_resource_2"],
+            "truncated": True,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="unknown AgentTask binding id"):
+        restored.record_skill_context_binding(
+            request_id="request_B",
+            phase="work.execute",
+            bindings=[
+                {
+                    "binding_id": "unknown",
+                    "canonical_skill_id": "agently-request",
+                    "guidance_chars": 1,
+                    "resource_chars": 0,
+                }
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_task_resume_restores_private_lifecycle_state(tmp_path):
+    agent = (
+        Agently.create_agent("lifecycle-state-resume")
+        .use_task_workspace(tmp_path / "task_workspace")
+        .use_record_store(tmp_path / "records", mode="read_write")
+    )
+    task = AgentTask(
+        agent,
+        task_id="lifecycle-state-resume",
+        goal="Produce final.md.",
+        success_criteria=["final.md exists."],
+        execution="flat",
+        options={"record_store_recovery": True},
+    )
+    task._lifecycle_state.advance("evidence.ingest", expected_version=1, iteration=1)
+    task._lifecycle_state.replace_carriers(
+        [_task_workspace_carrier("car_resume", "cv_resume")],
+        expected_version=2,
+    )
+    await task._write_resume_snapshot(
+        1,
+        {
+            "is_complete": False,
+            "requires_block": False,
+            "reason": "Continue after restart.",
+            "missing_criteria": ["One more step is required."],
+        },
+    )
+
+    resumed = await AgentTask.async_resume(
+        agent,
+        task.id,
+        task_workspace=tmp_path / "task_workspace",
+        record_store=agent.record_store,
+    )
+
+    assert resumed._lifecycle_state.to_dict() == task._lifecycle_state.to_dict()
+    resumed_inventory = resumed._lifecycle_state.carrier_inventory
+    assert resumed_inventory is not None
+    assert resumed_inventory.carriers[0].carrier_id == "car_resume"

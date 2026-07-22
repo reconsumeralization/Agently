@@ -26,7 +26,145 @@ if TYPE_CHECKING:
     from .execution import AgentExecution
 
 
+def _required_skill_block_reason(plan_summary: Mapping[str, Any]) -> str:
+    reasons: list[str] = []
+    for key in ("rejected_skills", "rejected_skills_packs"):
+        items = plan_summary.get(key)
+        if not isinstance(items, Sequence) or isinstance(items, str | bytes | bytearray):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            reason = str(item.get("reason") or "").strip()
+            if reason and reason not in reasons:
+                reasons.append(reason)
+    if not reasons:
+        diagnostics = plan_summary.get("diagnostics")
+        if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
+            for item in diagnostics:
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("level") or "").lower() not in {"warning", "error"}:
+                    continue
+                message = str(item.get("message") or "").strip()
+                if message and message not in reasons:
+                    reasons.append(message)
+    detail = "; ".join(reasons) if reasons else "required Skill resolution returned no usable installed Skill"
+    return f"Required Skill availability check failed: {detail}"
+
+
+async def _resolve_required_skill_availability(
+    execution: "AgentExecution",
+    *,
+    goal: str,
+) -> tuple[list[str], dict[str, Any] | None]:
+    del goal
+    bindings = [
+        binding
+        for binding in execution.skill_bindings
+        if str(getattr(binding, "mode", "")) == "required"
+    ]
+    configured_required_ids = execution.required_skill_ids()
+    selected_skill_ids: list[str] = []
+    selected_identity_keys: set[str] = set()
+    installations: list[dict[str, Any]] = []
+    library = execution.skill_library
+    if bindings and library is None:
+        plan_summary = {
+            "schema_version": "agently.skill_binding_plan.v2",
+            "mode": "required",
+            "status": "blocked",
+            "selected_skill_ids": [],
+            "binding_ids": [],
+            "installations": [],
+            "missing_skill_ids": configured_required_ids,
+            "diagnostics": [
+                {
+                    "code": "required_skill_library_unavailable",
+                    "level": "error",
+                    "message": "Required Skill bindings have no active SkillLibrary.",
+                }
+            ],
+        }
+        execution.logs["required_skills_plan"] = plan_summary
+        execution.diagnostics["required_skills_plan"] = plan_summary
+        return [], plan_summary
+    for binding in bindings:
+        package = cast(Any, library).resolve(binding.revision_ref)
+        selected_skill_ids.append(package.skill_id)
+        selected_identity_keys.update(
+            {
+                str(package.skill_id),
+                str(package.canonical_ref),
+                str(package.revision_ref),
+            }
+        )
+        installations.append(
+            {
+                "binding_id": binding.binding_id,
+                "canonical_skill_id": package.skill_id,
+                "canonical_ref": package.canonical_ref,
+                "revision": package.revision,
+                "revision_ref": package.revision_ref,
+                "mode": binding.mode,
+            }
+        )
+    selected_skill_ids = list(dict.fromkeys(selected_skill_ids))
+    missing = [
+        item for item in configured_required_ids if item not in selected_identity_keys
+    ]
+    plan_summary = DataFormatter.sanitize(
+        {
+            "schema_version": "agently.skill_binding_plan.v2",
+            "mode": "required",
+            "status": "blocked" if missing else "resolved",
+            "selected_skill_ids": selected_skill_ids,
+            "binding_ids": [item["binding_id"] for item in installations],
+            "installations": installations,
+            "missing_skill_ids": missing,
+            "diagnostics": (
+                [
+                    {
+                        "code": "required_skill_binding_missing",
+                        "missing_skill_ids": missing,
+                    }
+                ]
+                if missing
+                else []
+            ),
+        }
+    )
+    execution.logs["required_skills_plan"] = plan_summary
+    execution.diagnostics["required_skills_plan"] = plan_summary
+    status = "blocked" if missing else "completed"
+    await execution.emit_stream(
+        "skills.binding.ready",
+        {
+            "execution_id": execution.id,
+            "skill_ids": selected_skill_ids,
+            "revision_refs": [item["revision_ref"] for item in installations],
+            "binding_ids": [item["binding_id"] for item in installations],
+            "status": status,
+        },
+        route="agent_task",
+        source="skill_library",
+        meta={"status": status, "mode": "required"},
+    )
+    if missing:
+        return [], plan_summary
+    return selected_skill_ids, None
+
+
 async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str, Any]) -> Any:
+    """Run one ordinary AgentTask route with Skill bindings in TaskContext."""
+
+    return await _run_agent_task_route_impl(execution, route_meta)
+
+
+async def _run_agent_task_route_impl(
+    execution: "AgentExecution",
+    route_meta: dict[str, Any],
+) -> Any:
     from agently.core.application import AgentTask
 
     if execution.limits.get("allow_create_task") is False:
@@ -63,7 +201,8 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         task = await AgentTask.async_resume(
             execution.agent,
             str(resume_task_id),
-            workspace=cast(Any, task_options.get("workspace")),
+            task_workspace=cast(Any, task_options.get("task_workspace")),
+            record_store=execution.record_store,
         )
         execution.task_record = task
 
@@ -85,6 +224,42 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
                 source="agent_execution",
             )
 
+    resolved_required_skills, required_skill_failure = await _resolve_required_skill_availability(
+        execution,
+        goal=goal,
+    )
+    if required_skill_failure is not None:
+        reason = _required_skill_block_reason(required_skill_failure)
+        required_capabilities = {"skills_plan": required_skill_failure}
+        execution.status = "blocked"
+        execution.close_snapshot = {
+            "status": "blocked",
+            "route": "agent_task",
+            "reason": reason,
+            "required_capabilities": required_capabilities,
+        }
+        await execution.emit_stream(
+            "route.agent_task.blocked",
+            {
+                "reason": reason,
+                "required_capabilities": required_capabilities,
+            },
+            route="agent_task",
+            source="skill_library",
+            meta={"status": "blocked"},
+        )
+        return {
+            "status": "blocked",
+            "accepted": False,
+            "artifact_status": "blocked",
+            "reason": reason,
+            "final_response": (
+                "Task encountered a blocking condition. "
+                f"No complete final deliverable was accepted. Reason: {reason}"
+            ),
+            "required_capabilities": required_capabilities,
+        }
+
     effort_strategy = execution.effective_options.get("effort_strategy")
     effort_strategy = dict(effort_strategy) if isinstance(effort_strategy, dict) else {}
     max_iterations = task_options.get("max_iterations")
@@ -100,7 +275,7 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         if source is not None:
             agent_task_options["agent_task"]["execution_strategy_source"] = str(source)
     required_actions = execution.required_action_ids()
-    required_skills = execution.required_skill_ids()
+    required_skills = resolved_required_skills or execution.required_skill_ids()
     if required_actions or required_skills:
         constraints = dict(agent_task_options.get("capability_constraints") or {})
         if required_actions:
@@ -112,10 +287,29 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             if isinstance(constraints["skills"], dict):
                 constraints["skills"]["required"] = required_skills
         agent_task_options["capability_constraints"] = constraints
-
-    # Planner capability visibility (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
-    # adapt the route planner's action / skill / skill-pack
-    # candidates into one sanitized, inert capability snapshot and pass it into
+    if execution.skill_bindings:
+        library = execution.skill_library
+        if library is None:
+            raise RuntimeError("Selected Skill bindings require an active SkillLibrary.")
+        skill_bindings: list[dict[str, Any]] = []
+        for binding in execution.skill_bindings:
+            package = library.resolve(binding.revision_ref)
+            skill_bindings.append(
+                {
+                    "binding_id": binding.binding_id,
+                    "task_id": binding.task_id,
+                    "canonical_skill_id": package.skill_id,
+                    "canonical_ref": binding.canonical_ref,
+                    "revision": binding.revision,
+                    "revision_ref": binding.revision_ref,
+                    "resolved_revision": binding.revision_ref,
+                    "mode": binding.mode,
+                    "scope": binding.scope,
+                }
+            )
+        agent_task_options["skill_bindings"] = DataFormatter.sanitize(skill_bindings)
+    # Planner capability visibility: adapt executable Action candidates into one
+    # sanitized, inert capability snapshot and pass it into
     # AgentTask options. AgentTask reads only this snapshot; it never imports
     # HybridRoutePlanner or holds the execution draft. Computed once here, at task
     # construction, from the top-level routing execution. A caller-supplied
@@ -140,7 +334,12 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             goal=goal,
             success_criteria=success_criteria,
             execution=execution_strategy,
-            workspace=task_options.get("workspace"),
+            # AgentExecution owns the route and hands its exact scoped view to
+            # AgentTask. AgentTask derives a descendant instead of rebinding
+            # from the Agent-wide TaskWorkspace or inferring a filesystem path.
+            record_store=execution.record_store,
+            task_context=execution.task_context,
+            task_workspace=execution.task_workspace,
             max_iterations=AgentTask.normalize_max_iterations(max_iterations),
             verify=cast(Any, task_options.get("verify", "before_done")),
             context_profile=str(task_options.get("context_profile", "auto")),
@@ -149,6 +348,11 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
             options=cast(Any, agent_task_options),
             task_id=cast(Any, task_options.get("task_id") or execution.lineage.get("task_id")),
         )
+    # This is the exact host-owned transfer seam: a routed task keeps its
+    # agent_task Action artifact scope live until the parent AgentExecution has
+    # completed terminal selection/promotion and releases it. Standalone tasks
+    # never receive this transfer marker and clean up in AgentTask finalization.
+    task._action_artifact_scope_transferred_to_execution_id = execution.id
     # Advanced/test step-stage override channel. Callers may set an explicit
     # `execution._agent_task_step_overrides = {"_request_plan": ..., ...}` before
     # running to drive the plan/execute/verify stages deterministically. This is
@@ -162,6 +366,24 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
                 setattr(task, stage_name, handler)
     execution.task_record = task
     await drain_pending_guidance_to_task(execution, task)
+    required_skill_plan = execution.logs.get("required_skills_plan", {})
+    required_skill_plan = required_skill_plan if isinstance(required_skill_plan, Mapping) else {}
+    if resolved_required_skills:
+        await execution.emit_stream(
+            "skills.revisions.bound",
+            {
+                "execution_id": execution.id,
+                "task_id": task.id,
+                "binding_ids": list(required_skill_plan.get("binding_ids") or []),
+                "canonical_skill_ids": list(resolved_required_skills),
+                "mode": "required",
+                "policy_status": "resolved",
+            },
+            route="agent_task",
+            source="skill_library",
+            task_id=task.id,
+            meta={"status": "bound", "mode": "required"},
+        )
     execution.task_refs = {
         "task_id": task.id,
         "strategy": route_meta.get("strategy") or execution.strategy_name or "task",
@@ -185,16 +407,19 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
     )
 
     async for item in task.get_async_generator(type="instant"):
-        await execution.stream.bridge_agent_task_item(item, route="agent_task")
+        await execution.bridge_agent_task_stream_item(item, route="agent_task")
 
     task_meta = await task.async_meta()
+    execution._terminal_task_handoff_refs = [
+        dict(ref) for ref in list(getattr(task, "_terminal_deliverable_refs", []) or []) if isinstance(ref, Mapping)
+    ]
     execution.task_refs.update(
         {
             "status": task.status,
             "execution_strategy": task.execution_strategy,
             "effective_execution_strategy": task_meta.get("effective_execution_strategy"),
             "task_shape_analysis": task_meta.get("task_shape_analysis"),
-            "workspace_refs": task_meta.get("workspace_refs", {}),
+            "record_refs": task_meta.get("record_refs", {}),
         }
     )
     execution.logs["route_logs"] = {"agent_task": task_meta}
@@ -203,22 +428,16 @@ async def run_agent_task_route(execution: "AgentExecution", route_meta: dict[str
         "route": "agent_task",
         "task": task_meta,
     }
-    if isinstance(task_meta.get("workspace_refs"), dict):
-        execution.workspace_refs["agent_task"] = task_meta["workspace_refs"]
+    if isinstance(task_meta.get("record_refs"), dict):
+        execution.record_refs["agent_task"] = task_meta["record_refs"]
     execution.status = "success" if task.status == "completed" else str(task.status)
     return task.result
 
 
-def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, Any]]:
-    """Sanitized planner-facing capability snapshot (inert data only).
-
-    Adapts the route planner's action / skill / skill-pack
-    candidates into one list of `PlannerCapabilityCandidate` dicts. Each entry
-    carries inert data only (id + kind + route + guidance_access + description),
-    so AgentTask never reaches back into the route planner. Any per-source
-    failure degrades to skipping that source rather than raising, so planner
-    visibility never depends on a single producer's availability.
-    """
+def _planner_capability_snapshot(
+    execution: "AgentExecution",
+) -> list[dict[str, Any]]:
+    """Sanitized planner-facing executable Action snapshot (inert data only)."""
     capabilities: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
@@ -267,67 +486,4 @@ def _planner_capability_snapshot(execution: "AgentExecution") -> list[dict[str, 
     except Exception:
         pass
 
-    # AgentTask treats configured Skills as task context. The public execution
-    # entry still routes to AgentTask, while bounded work steps keep using the
-    # ordinary model_request/action path with Skill guidance bound into the
-    # prompt instead of asking the planner to pick a standalone Skills route.
-    try:
-        summary = execution.skill_candidate_summary()
-    except Exception:
-        summary = None
-    if isinstance(summary, dict):
-        descriptions = _installed_skill_descriptions(execution)
-        for mode in ("model_decision", "required"):
-            for selector in summary.get(f"{mode}_skills", []) or []:
-                skill_id = _capability_id_from_selector(selector)
-                add(
-                    skill_id,
-                    "skill",
-                    "model_request",
-                    "prompt_bound",
-                    mode=mode,
-                    description=descriptions.get(skill_id, ""),
-                )
-            for selector in summary.get(f"{mode}_skills_packs", []) or []:
-                pack_id = _capability_id_from_selector(selector)
-                add(
-                    pack_id,
-                    "skill_pack",
-                    "model_request",
-                    "prompt_bound",
-                    mode=mode,
-                    description=descriptions.get(pack_id, ""),
-                )
-
     return capabilities
-
-
-def _capability_id_from_selector(selector: Any) -> str:
-    if isinstance(selector, dict):
-        for key in ("id", "skill_id", "skills_pack_id", "name", "source"):
-            value = selector.get(key)
-            if value:
-                return str(value).strip()
-        return ""
-    return str(selector or "").strip()
-
-
-def _installed_skill_descriptions(execution: "AgentExecution") -> dict[str, str]:
-    skills_manager = getattr(getattr(execution, "agent", None), "skills_manager", None)
-    list_skills = getattr(skills_manager, "list_skills", None)
-    if not callable(list_skills):
-        return {}
-    try:
-        records = list_skills()
-    except Exception:
-        return {}
-    if not isinstance(records, Sequence):
-        return {}
-    descriptions: dict[str, str] = {}
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        skill_id = str(record.get("skill_id") or "").strip()
-        if skill_id:
-            descriptions[skill_id] = str(record.get("description") or "").strip()
-    return descriptions

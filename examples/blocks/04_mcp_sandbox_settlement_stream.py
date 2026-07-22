@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any, Mapping, cast
 import sys
@@ -31,7 +32,6 @@ from _business_ladder_runtime import (
 )
 from agently import Agently
 from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
-from agently.builtins.plugins.ActionExecutor.PythonSandboxActionExecutor import PythonSandboxActionExecutor
 
 
 async def mcp_add(context: Mapping[str, Any]) -> dict[str, Any]:
@@ -81,19 +81,26 @@ async def sandbox_risk_check(context: Mapping[str, Any]) -> dict[str, Any]:
             "    'requires_finance_review': total >= 50,",
             "    'risk_band': 'review' if total >= 50 else 'standard',",
             "}",
+            "import json",
+            "print(json.dumps(result))",
         ]
     )
-    sandbox_output = await PythonSandboxActionExecutor().execute(
-        spec={"action_id": "python_sandbox"},
-        action_call={"action_input": {"python_code": code}},
-        policy={},
-        settings=Agently.settings,
+    agent = Agently.create_agent()
+    agent.enable_python(
+        action_id="shape_settlement_risk",
+        expose_to_model=False,
+        sandbox="trusted_local",
     )
-    shaped = cast(dict[str, Any], sandbox_output).get("result")
+    sandbox_output = await agent.action.async_execute_action(
+        "shape_settlement_risk",
+        {"source_code": code},
+    )
+    output_data = cast(dict[str, Any], sandbox_output).get("data", {})
+    shaped = json.loads(str(output_data.get("stdout", "{}")))
     return {
-        "sandbox": "python_sandbox",
+        "sandbox": "workspace_code_execution",
         "result": shaped,
-        "action_evidence": [{"action_id": "python_sandbox", "status": "success", "result": shaped}],
+        "action_evidence": [{"action_id": "shape_settlement_risk", "status": "success", "result": shaped}],
     }
 
 

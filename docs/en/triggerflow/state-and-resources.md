@@ -40,6 +40,14 @@ API:
 
 Reading state is a local sync operation. Writes, appends, and deletes have async variants so async chunks can stay async-first.
 
+`set_state(...)` is replacement, including for lists, mappings, sets, and empty
+collections. Use `append_state(...)` only when list accumulation is intended.
+For a mapping transition, compute the complete next mapping and set it; stale
+keys are not merged into the new value. A single set mutation completes before
+its event notification is dispatched, but a multi-call read-modify-write
+sequence is not a compare-and-swap transaction and still needs host-owned
+coordination when writers race.
+
 Whatever you put in state at the time of `close()` shows up in the close snapshot.
 
 ## flow_data — risky shared scope
@@ -66,13 +74,16 @@ it is not an execution-local snapshot. Loading that snapshot clears and restores
 the owning flow object's shared `flow_data`. This can overwrite newer values or
 interfere with concurrent executions; save/load does not add isolation, CAS, or
 merge semantics. Do not use `flow_data` as a recovery boundary. Put per-run
-state in execution `state`, and put durable shared state in a host/Workspace
+state in execution `state`, and put durable shared state in a host/RecordStore
 provider with the required consistency policy.
 
 API (each emits the warning unless suppressed):
 
 - `flow.get_flow_data(key)` / `flow.set_flow_data(key, value)` / `flow.append_flow_data(...)` / `flow.del_flow_data(...)`
 - async equivalents prefixed with `async_`
+
+`set_flow_data(...)` also replaces the complete target value; append remains an
+explicit separate operation. This does not make the shared scope concurrency-safe.
 
 ## runtime_resources — live objects
 

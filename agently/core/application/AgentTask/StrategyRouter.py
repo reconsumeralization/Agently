@@ -84,9 +84,6 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
             "requested": self.execution_strategy,
             "effective": value,
             "source": source,
-            "task_shape_analysis_ref": (
-                self.workspace_refs.get("strategy", [])[-1:] if self.workspace_refs.get("strategy") else []
-            ),
         }
         self._sync_execution_strategy_context(source=source)
         return value
@@ -150,7 +147,7 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
                     True,
                 ),
                 "initial_taskboard_plan": (
-                    dict,
+                    task_board_planning_output_schema(),
                     "Optional TaskBoard planning result when recommended_shape is taskboard and the initial board is obvious.",
                     False,
                 ),
@@ -240,37 +237,10 @@ class AgentTaskStrategyRouterMixin(AgentTaskMixinBase):
     async def _record_task_shape_analysis(self) -> None:
         if not self.task_shape_analysis:
             return
-        try:
-            record_ref = await self.workspace.put(
-                content={
-                    "task_id": self.id,
-                    "execution_strategy": self.execution_strategy,
-                    "task_shape_analysis": DataFormatter.sanitize(self.task_shape_analysis),
-                    "process_summary": self._process_summary_from_value(
-                        self.task_shape_analysis,
-                        stage="task_shape_analysis",
-                    ),
-                    "completion_evidence": False,
-                },
-                collection="strategy",
-                kind="agent_task_shape_analysis",
-                summary=f"{self.id} task shape analysis",
-                scope={"task_id": self.id},
-                source={"type": "agent_task", "phase": "strategy"},
-                meta={"task_id": self.id, "completion_evidence": False},
-            )
-            self._append_workspace_ref("strategy", record_ref)
-            await self._emit_process_progress_from_output(
-                self.task_shape_analysis,
-                stage="task_shape_analysis",
-            )
-        except Exception as error:
-            self.diagnostics.setdefault("strategy_record_errors", []).append(
-                {
-                    "type": error.__class__.__name__,
-                    "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                }
-            )
+        await self._emit_process_progress_from_output(
+            self.task_shape_analysis,
+            stage="task_shape_analysis",
+        )
 
 
 __all__ = ["AgentTaskStrategyRouterMixin"]

@@ -22,11 +22,11 @@ def main():
     result = agent.action.execute_action(
         ACTION_ID,
         {
-            "js_code": [
+            "source_code": "\n".join([
                 "const numbers = [4, 8, 15, 16, 23, 42];",
                 "const sum = numbers.reduce((total, item) => total + item, 0);",
                 "console.log(JSON.stringify({ count: numbers.length, sum }));",
-            ]
+            ])
         },
     )
 
@@ -46,10 +46,10 @@ if __name__ == "__main__":
 # Action-call execution environment handles are released after the call.
 
 # How it works:
-# agent.enable_nodejs(..., sandbox="trusted_local") registers the trusted-local
-# Node.js action (direct execution only, no model planning).
-# The action accepts js_code as a list of JS lines, runs them in a Node.js subprocess,
-# and captures stdout.  The test asserts sum=108 for [4,8,15,16,23,42].
+# agent.enable_nodejs(..., sandbox="trusted_local") registers the canonical
+# Workspace-bound CodeExecution action with the explicitly unsafe local provider.
+# The action accepts source_code, runs the materialized bundle in a Node.js subprocess,
+# and captures stdout. The test asserts sum=108 for [4,8,15,16,23,42].
 # If node is not on PATH, the example prints [SKIP] and exits early.
 #
 # Flow:
@@ -57,7 +57,7 @@ if __name__ == "__main__":
 #   |
 #   v
 # agent.enable_nodejs(action_id=ACTION_ID, expose_to_model=False, sandbox="trusted_local")
-# execute_action(ACTION_ID, {"js_code": [...]})
+# execute_action(ACTION_ID, {"source_code": "..."})
 #   |
 #   v
 # Node.js subprocess -> stdout = '{"count":6,"sum":108}'

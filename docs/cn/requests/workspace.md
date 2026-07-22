@@ -1,672 +1,266 @@
 ---
-title: Workspace
-description: 用于多轮任务信息管理的持久 Workspace record。
-keywords: Agently, Workspace, records, artifacts, checkpoints, 多轮任务
+title: 任务上下文、文件与记录
+description: TaskContext、ContextReader、TaskWorkspace 与 RecordStore 的职责边界。
+keywords: Agently, TaskContext, ContextReader, TaskWorkspace, RecordStore, 渐进式披露
 ---
 
-# Workspace
+# 任务上下文、文件与记录
 
-Workspace 是多轮任务的持久信息边界。当任务信息需要跨 turn 保留，但不应该塞进
-prompt、Session 历史或紧凑 execution state 时，使用 Workspace。
+Agently 把过去混在 Workspace 里的职责拆成四个所有者。
 
-Workspace V1 是底层能力。它负责存储和索引 record；它不决定模型应该记住什么，
-也不决定下一步要执行什么。默认 Agent 和 TriggerFlow execution 都内置 lazy Workspace
-binding，因此标准 Agent facade 上始终可以访问 `agent.workspace`，默认
-`flow.create_execution()` 也可以通过 `data.require_resource("workspace")` 使用
-Workspace。默认 local backend 只会在代码第一次写入、读取、checkpoint、记录
-evidence 或暴露 Workspace 文件区时 materialize。
+| 所有者 | 负责 | 不负责 |
+|---|---|---|
+| `TaskContext` | 任务信息聚合、直接信息块、source binding 与一套内部派生索引生命周期 | 文件、持久化、语义执行路由 |
+| `ContextReader` | 绑定 consumer/phase 的检索与渐进式披露；返回 `ContextPackage` | source 存储、写入、副作用 |
+| `TaskWorkspace` | 明确的任务文件边界：路径约束、写入策略、格式化 readback、digest 与 file refs | records、memory、snapshot、Skill 选择 |
+| `RecordStore` | 持久 records、检索索引、links、checkpoints、TriggerFlow snapshots/events、memory 持久化 | 任务文件、prompt 组装、语义相关性判断 |
 
-默认 local Workspace 绑定到较长生命周期的信息域，而不是每次 execution 都创建一个
-物理 Workspace。有活动的 `runtime.session_id` 时，物理 root 是
-`.agently/workspaces/sessions/<session-id>`；没有 session 时，物理 root 是
-`.agently/workspaces/scripts/<script-scope>`。Agent、task 和 execution records 是这个
-共享 backend 内的逻辑分区，可编辑文件则放在 `files/` 下的作用域子目录里。
+`ContextSource` adapter 让不同来源的信息可被读取，但不会把 source truth
+搬进 `TaskContext`。source 通过 `async_enumerate_descriptors(...)` 暴露结构描述，
+通过 `async_read_exact(...)` 返回有界 canonical 内容；它不判断跨 source 相关性。
+内置 adapter 覆盖 SkillLibrary、TaskWorkspace、RecordStore 与 SessionMemory
+recall；应用也可以挂载自己的 source kind，例如经授权的固定仓库 adapter。
 
-local Workspace materialize 时，Agently 会在物理 root 和每个 scoped editable
-`files_root` 写入 `AGENTLY_WORKSPACE.md` 说明文件。root 说明会解释
-`workspace.db`、`workspace.meta.json`、`content/` 和 `files/` 的边界；scoped 文件区
-说明会解释当前 lineage，以及哪些目录可由外部 agent 或 Action 编辑。文件名刻意不叫
-`README.md`，避免和 clone 仓库、任务交付物自己的 README 语义冲突。
+source 还可以实现可选的 `ContextSourceScopedRead` protocol。ContextReader 只在
+canonical ref 已经选定并通过授权后使用它，在该 ref 内定位一个确定性的有界范围。
+这是 source mechanism，不是第二套 index 或语义相关性 owner；未实现时仍回退
+`async_read_exact(...)`。
 
-scoped `files_root` 的说明文件还会写清标准可编辑文件区：
-
-- `downloads/`：Browse、Action 或外部 provider 物化的远程文件，后续再交给
-  `read_file(...)` / `export_file(...)` 处理；
-- `artifacts/`：生成的支撑制品、结构化输出、证据包和非主交付物；
-- `reports/`：面向用户阅读的长篇、分章节或文件承载交付物。
-
-框架或应用代码需要这些目录下的受控路径时，使用
-`workspace.file_area_path(...)`：
+## 文件边界：TaskWorkspace
 
 ```python
-download_path = agent.workspace.file_area_path("downloads", "syllabus.pdf")
-report_path = agent.workspace.file_area_path("reports", "weekly.md", create=True)
+from agently import Agently, TaskWorkspace
+
+task_workspace = TaskWorkspace("./project", mode="read_only")
+agent = Agently.create_agent("repo-review").use_task_workspace(
+    "./project",
+    mode="read_only",
+)
 ```
 
-需要恢复或清理的临时工作应使用 `workspace.open_scratch(...)` 或
-`workspace.scratch_root()`，不要在 `files_root` 里另造 `scratch/` 文件夹。
+配置路径就是普通文件根目录。除非明确选择 `mode="read_write"`，现有外部
+文件保持只读。只读边界需要生成新制品时，Agently 使用
+`.agently/files/<execution-id>/` 下的 execution fallback，不覆盖现有外部
+文件。TaskWorkspace 的 locator 与 content-version 私有身份信息只保存在它
+自己的 `.agently` 区域。
+
+未显式指定路径的 Agent 使用
+`<入口目录>/.agently/task_workspaces/<agent-id>`，因此不同 Agent 默认不会
+悄悄共享任务文件边界。
+
+只有任务确实需要时，才把文件 Action 暴露给模型：
 
 ```python
-agent = Agently.create_agent("repo-worker")
+agent.enable_task_workspace_file_actions(
+    read=True,
+    write=True,
+    expose_to_model=True,
+)
+```
 
-ref = await agent.workspace.put(
-    content=pytest_output,
+文件格式扩展仍由同一个 owner 承担。把 `TaskWorkspaceFileIOHandler` 直接注册到
+已绑定的 `TaskWorkspace`；不存在另一套可能与实际文件边界发生 registry 漂移的
+Workspace manager 或 factory：
+
+```python
+task_workspace.register_file_io_handler(custom_file_handler)
+```
+
+TaskWorkspace 为宿主 readback 提供稳定的 locator 与 content-version facts。
+`[[ref:ref_1]]` 这类短引用只是请求内显示别名，不是持久身份；宿主必须校验
+它，再映射回 canonical reference 身份。
+
+AgentTask 的 required 最终交付会先写成暂存候选，并在 terminal verification
+前完成全文读回。只有 verifier 验收后，TaskWorkspace 才按 digest 对声明目标执行
+原子提升，并再次完整读取提升后的 bytes。verification 拒绝不会覆盖旧目标；提升
+或提升后读回失败会把任务转为 blocked，而不是声称已经交付。
+
+## 持久化边界：RecordStore
+
+```python
+from agently.core.storage import RecordStore
+
+record_store = RecordStore("./project-state", mode="read_write")
+agent.use_record_store(record_store)
+
+ref = await record_store.put(
+    {"status": "verified"},
     collection="observations",
-    kind="test_output",
-    summary="pytest failed in route fallback test",
-    scope={"task_id": "issue-123", "turn": 1},
-    source={"type": "command", "name": "pytest"},
-)
-
-records = await agent.workspace.grep(
-    "route fallback",
-    filters={"collection": "observations", "kind": "test_output"},
-)
-
-context_pack = await agent.workspace.build_context(
-    goal="Fix the route fallback failure.",
-    scope={"task_id": "issue-123"},
-    budget={"tokens": 12000},
-    profile="auto",
+    kind="review_result",
+    scope={"task_id": "review-42"},
 )
 ```
 
-`workspace.grep(...)` 是确定性 record 检索。它支持 `collection`、`kind`、
-record `id`、record `path`、`scope.<key>` 和 `meta.<key>` 这类结构化过滤。
-planner 或应用已经知道相关 collection、record、path 或 task scope 时，应把它们
-作为过滤条件交给检索层；这些过滤只收窄检索范围，不代表本地语义验收。
-`workspace.search(...)` 保持 record ref 的兼容返回形态，但当宽查询产生大量候选时，
-底层可以自动使用共享 retrieve 包装路径。调用方如果必须取得旧的确定性候选列表，
-应显式使用 `workspace.grep(...)`。
+本地 provider 把 records 写到
+`<root>/.agently/records/records.db`。绑定 RecordStore 不会创建或改变
+TaskWorkspace。`SessionMemory` 和 TriggerFlow durability 使用 RecordStore
+ports。
 
-确定性文件检索使用 `workspace.grep_files(...)`。兼容方法
-`workspace.search_files(...)` 仍返回文件检索 hit，但在大候选池下可以自动使用
-retrieve 包装进行预算裁剪。调用方如果必须取得旧的确定性行/文件搜索结果集，应显式使用
-`workspace.grep_files(...)`：
+TriggerFlow 可以用 `record_store=False` 关闭默认 RecordStore view，或绑定
+显式 store：
 
 ```python
-hits = await agent.workspace.grep_files(
-    "deadline",
-    path="notes",
-    pattern="*.md",
-    max_results=10,
+execution = flow.create_execution(
+    record_store=record_store,
+    runtime_resources={"runtime_event_store": record_store},
+    auto_close=False,
 )
 ```
 
-## 检索策略
+AgentTask 过程状态默认只保留在内存和运行日志中。只有需要重启恢复时才启用
+`record_store_recovery`。恢复引用属于 RecordStore；最终交付文件仍属于
+TaskWorkspace。
 
-调用方需要共享的智能检索策略时，使用 `workspace.retrieve(...)`：关键词/tag 候选、
-可选向量候选、结构 gate 控制的模型 rerank、丢弃候选后的 refill，以及预算打包都在这里完成。
+## 信息交付：TaskContext 与 ContextReader
 
 ```python
-results = await agent.workspace.retrieve(
-    query="What should this session remember?",
-    tags=["preference", "project"],
-    scope={"memory_scope": "SESSION_MEMORY"},
-    sources=["records", "files"],
-    budget={"chars": 12000},
-    selection="length",
+from agently.core.context import TaskContext
+from agently.core.storage import RecordStoreContextSource
+from agently.types.data import ContextBudget, ContextReadIntent
+
+task_context = TaskContext("review-42")
+task_context.put(
+    role="instruction",
+    content="审查期间不得修改源文件。",
+    required=True,
 )
-```
-
-默认行为保持保守：
-
-- 候选来源是 record keyword/FTS 检索加 tag 检索；
-- 默认按字符预算选择（`selection="length"`）；
-- 需要固定条数时可用 `selection="top_n"`；
-- 召回候选策略和 rerank 是两件事：`method="auto"` 只决定候选来源，
-  `rerank=None` 决定是否值得额外发起模型 rerank 请求；
-- `method="auto"` 是默认值。只有 backend 存在非 noop `vector_index`，并且
-  Workspace retrieval settings 表达了向量偏好时，才会解析为 hybrid，例如
-  `workspace.retrieval.candidate_strategy="hybrid"`、
-  `workspace.retrieval.vector_preferred=True`，或
-  `workspace.retrieval.embedding_model="<model-name>"`；
-- `method="keyword"`、`method="vector"`、`method="hybrid"` 仍然是调用方显式覆盖；
-- 默认 local backend 保持 `NoopVectorIndex`；具体 embedding provider client
-  属于业务或插件逻辑，应通过 backend `vector_index` 注入。如果调用方安装内置
-  `LocalVectorIndex(embedder)`，Workspace 默认使用 cosine 相似度，也支持
-  `similarity="dot"` 或 `similarity="l2"`；自定义 vector index 拥有自己的距离公式。
-  Chroma 集成默认 collection space 是 cosine，这是 adapter 级默认；
-- backend 只有 `NoopVectorIndex` 时，向量模式会降级到确定性候选并记录诊断；
-- `rerank=None` 使用结构化成本 gate：候选池聚焦时跳过 rerank，候选过多、
-  结构过滤较弱、跨来源或分散度高时才启用；
-- 宽候选池 rerank 会先看有上限的候选摘要窗口，再做最终打包，避免被 drop
-  的候选导致后续相关 record 或 file snippet 被噪声 refill 挤掉；
-- 被选中的 record payload 默认使用 `record_representation="auto"`：短结构化 record
-  会保留紧凑结构并省略冷字段，长文本或噪声结构才使用确定性的 model-hot projection；
-  每个 item 都带 `original_ref` 和 `projection` 元数据，原始 Workspace record 仍是
-  readback 的事实源；
-- 冷字段指 `audit`、`source_system`、`tags`、`noise` 等不应进入模型热路径的
-  record 机制字段；它们只从 model-hot 包里省略，不会从 Workspace 原始 record 中删除；
-- 调用方需要固定策略时，可以设置 `budget={"record_representation": "raw"}` 或
-  `budget={"record_representation": "projected"}`；
-- 调用方仍可用 `rerank=True` 强制启用，或用 `rerank=False` 关闭；
-- 模型 rerank 重试后仍失败时，会保留确定性候选并记录诊断。
-
-### 自然语言答案中的检索引用
-
-后续模型答案需要引用选中的检索结果时，完整 source record 应留在宿主代码中。每个
-source 只给模型一个短可信 `ref_id`，以及回答所需的 title/snippet；要求正文使用
-application-level token `[[ref:<ref_id>]]`，例如 `[[ref:r1]]`。AgentTask 场景可以
-直接把 evidence ledger 的 `cite_as`（例如 `e1`）作为 token id。
-
-不要使用裸 `${ref_id}`：`${...}` 已属于 Agently prompt 和 TaskDAG placeholder
-家族。`[[ref:...]]` 只是应用渲染约定，不是新的 Workspace 或 Agently public API。
-
-下面的模式会校验模型引用、把 token 转为 Markdown link、发送答案，再发送应用明确
-允许的完整 source-card 详情，供前端渲染 hover card、来源列表或回复后的附加结果卡。
-raw provider/Workspace record 继续留在宿主侧；发出 card 字段前应完成权限校验和脱敏：
-
-```python
-from __future__ import annotations
-
-import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any
-from urllib.parse import urlparse
-
-from agently import Agently
-
-
-REF_TOKEN = re.compile(r"\[\[ref:([A-Za-z0-9._:-]+)\]\]")
-
-
-def prepare_refs(
-    records: Sequence[Mapping[str, Any]],
-) -> tuple[list[dict[str, str]], dict[str, dict[str, Any]]]:
-    refs_by_id: dict[str, dict[str, Any]] = {}
-    model_refs: list[dict[str, str]] = []
-    for index, record in enumerate(records, start=1):
-        ref_id = f"r{index}"
-        full_record = {**dict(record), "ref_id": ref_id}
-        refs_by_id[ref_id] = full_record
-        model_refs.append({
-            "ref_id": ref_id,
-            "title": str(record.get("title", "")),
-            "snippet": str(record.get("snippet", "")),
-        })
-    return model_refs, refs_by_id
-
-
-def build_source_card(record: Mapping[str, Any]) -> dict[str, Any]:
-    # 按应用需要扩展这个显式前端契约；不要直接发送 raw record。
-    fields = ("ref_id", "title", "url", "snippet", "source_name", "published_at")
-    return {field: record[field] for field in fields if field in record}
-
-
-def trusted_http_url(value: Any) -> str:
-    url = str(value)
-    if urlparse(url).scheme not in {"http", "https"}:
-        raise ValueError(f"unsupported source URL: {url}")
-    return url
-
-
-def render_refs(
-    answer: str,
-    refs_by_id: Mapping[str, Mapping[str, Any]],
-) -> tuple[str, list[dict[str, Any]]]:
-    used_ids: list[str] = []
-
-    def replace(match: re.Match[str]) -> str:
-        ref_id = match.group(1)
-        record = refs_by_id.get(ref_id)
-        if record is None:
-            raise ValueError(f"unknown retrieval ref: {ref_id}")
-        used_ids.append(ref_id)
-        label = str(record.get("title") or ref_id).replace("\\", "\\\\").replace("]", "\\]")
-        return f"[{label}]({trusted_http_url(record.get('url'))})"
-
-    rendered = REF_TOKEN.sub(replace, answer)
-    unique_ids = list(dict.fromkeys(used_ids))
-    return rendered, [build_source_card(refs_by_id[ref_id]) for ref_id in unique_ids]
-
-
-async def answer_with_refs(
-    question: str,
-    retrieved_records: Sequence[Mapping[str, Any]],
-    emit: Callable[[dict[str, Any]], Awaitable[None]],
-) -> None:
-    model_refs, refs_by_id = prepare_refs(retrieved_records)
-
-    def validate_refs(data: dict[str, Any], _ctx: Any) -> bool | dict[str, Any]:
-        cited_ids = REF_TOKEN.findall(data.get("answer", ""))
-        if not cited_ids:
-            return {"ok": False, "reason": "answer must cite at least one offered ref"}
-        unknown = {
-            ref_id
-            for ref_id in cited_ids
-            if ref_id not in refs_by_id
-        }
-        if unknown:
-            return {"ok": False, "reason": f"unknown refs: {sorted(unknown)}"}
-        return True
-
-    result = (
-        Agently.create_request("retrieval-reference-answer")
-        .input({"question": question, "retrieval_results": model_refs})
-        .instruct([
-            "根据 retrieval_results 回答。",
-            "引用来源时写 [[ref:<ref_id>]]，且只能使用已提供的 ref_id。",
-            "不要把 source URL 或隐藏 metadata 抄进答案。",
-        ])
-        .output({
-            "answer": (
-                str,
-                "带内联 [[ref:<ref_id>]] 引用的自然语言答案",
-                True,
-            ),
-        })
-        .validate(validate_refs)
-        .get_result()
-    )
-
-    # 这里没有 progressive consumer，所以直接读取最终 data。
-    data = await result.async_get_data()
-    rendered_answer, source_cards = render_refs(data["answer"], refs_by_id)
-
-    await emit({"type": "answer", "text": rendered_answer})
-    await emit({"type": "retrieval_refs", "items": source_cards})
-```
-
-这个协议让引用选择保持 model-owned，同时让身份校验、链接拼装、已授权 source detail
-传输与前端渲染保持 deterministic、host-owned。
-
-`retrieve(...)` 是 Workspace 的检索策略，不是 Session memory 独占能力。Session
-memory、文本片段检索和文件检索都可以复用它。
-
-应用需要稳定显式 root、read-only mode 或已注册 backend provider 时，再使用
-`agent.use_workspace(...)`：
-
-```python
-agent.use_workspace("./.agently/runs/issue-123")
-```
-
-独立 Workspace 可以直接创建，也可以通过 Agently factory 创建：
-
-```python
-from agently import Agently, Workspace
-
-shared_workspace = Workspace("./.agently/projects/issue-123")
-factory_workspace = Agently.create_workspace("./.agently/projects/issue-124")
-```
-
-当多个 Agent、TriggerFlow execution 或 service worker 需要共享任务信息时，优先
-由应用显式创建并管理一个公共 Workspace，再把每个消费者绑定到这个 Workspace。
-这是推荐的信息共享形态：Workspace 保持为持久底座，而不是隐式全局单例。
-
-```python
-shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
-
-agent = Agently.create_agent("repo-worker").use_workspace(shared_workspace)
-execution = flow.create_execution(workspace=shared_workspace)
-```
-
-`flow.create_execution()` 默认绑定当前 session/script 的默认 Workspace，并给 execution
-分配
-`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`
-下的独立文件 root。传 `workspace=False` 可以显式关闭；传 Workspace 实例、路径或
-backend 时，execution 会使用显式选择的 Workspace。
-
-不要依赖多个显式隔离的 Workspace 之间自动通讯。如果 TriggerFlow execution 过程中需要在
-隔离 Workspace 之间移动信息，应在业务逻辑里显式完成：从源 Workspace grep/read，
-再写入目标 Workspace，并把生成的 refs link 起来。Workspace 本身不提供
-跨空间 messaging 或 replication 协议。
-
-## 存什么
-
-observations、decisions、artifacts 和紧凑 checkpoints 都可以作为 records。大型命令
-输出、生成报告、transcript 和 patch 应存为 Workspace 内容，runtime state 里只保留
-record refs。
-
-```python
-checkpoint_ref = await agent.workspace.checkpoint(
-    "issue-123",
-    {"phase": "debugging", "refs": [ref]},
-    step_id="run-tests",
+task_context.attach(
+    RecordStoreContextSource(record_store),
+    binding_id="review-records",
+    scope="task",
 )
 
-state = await agent.workspace.get_data(checkpoint_ref)
-latest = await agent.workspace.latest_checkpoint("issue-123")
-history = await agent.workspace.checkpoint_history("issue-123")
-```
-
-`get(...)` 按文本读取已存内容。record 中保存 dict、list 或 checkpoint state 等
-JSON-compatible 结构化数据时，使用 `get_data(...)` 取回结构化对象。
-
-## 持久 Provider 读取
-
-默认 local Workspace backend 也提供单节点开发和本地重启恢复所需的 durable-provider
-contract。runtime state 需要引用大型内容时，使用稳定 ref envelope，而不是复制全文。
-
-```python
-ref_envelope = await agent.workspace.ref_envelope(ref)
-segment = await agent.workspace.read_bounded(ref, offset=0, limit=4096)
-
-async for chunk in agent.workspace.stream_read(ref, chunk_size=8192):
-    process(chunk["content"])
-```
-
-`ref_envelope` 包含 Workspace id、record id、collection、content ref、digest、
-size、创建时间、policy labels 和 backend capability hints。`read_bounded(...)`
-与 `stream_read(...)` 支持按片段读取大型 record，因此 execution state 可以只保存
-refs，恢复逻辑只读取需要的部分。
-
-当 TriggerFlow 或应用 execution 需要重启诊断，而又不能把 DevTools 当作事实来源时，
-可以把 RuntimeEvent 存成持久 record：
-
-```python
-execution = flow.create_execution(workspace=agent.workspace)
-snapshot_ref = await execution.async_save(step_id="review")
-
-event_record = await agent.workspace.append_runtime_event(
-    "issue-123-execution",
-    {"event_type": "triggerflow.interrupt_raised", "payload": {"id": "approval"}},
-    idempotency_key="approval-request-1",
-    snapshot_ref=snapshot_ref,
-    artifact_refs=[ref],
+reader = task_context.reader(
+    consumer="review-planner",
+    phase="planning",
+    budget=ContextBudget(max_chars=6000, max_blocks=12),
 )
-
-events = await agent.workspace.query_runtime_events(
-    "issue-123-execution",
-    sequence_from=event_record["sequence"],
-)
-```
-
-RuntimeEvent 存储会保留每个 execution 内的 sequence、idempotency key、
-state version、parent event id、causation id、parent signal id、aggregation
-scope、operator id、interrupt id、resume request id、actor id、lease owner id、
-snapshot refs、artifact refs 和 exchange id。分布式 provider 需要 fail-closed
-append 顺序时使用 `expected_sequence=...`；callback 或 webhook 重试安全使用
-`idempotency_key=...`。Workspace 不决定 pause/resume、approval、retry 或 DAG
-readiness；这些语义仍由 TriggerFlow、PolicyApproval、ExecutionExchange 和
-AgentExecution 所有。
-
-Workspace-backed durable provider 也提供 TriggerFlow-facing snapshot CAS、lease
-和 artifact-ref helpers：
-
-```python
-snapshot_ref = await agent.workspace.put_snapshot(
-    execution.run_context.run_id,
-    execution.save(),
-    expected_state_version=previous_state_version,
-)
-
-lease = await agent.workspace.claim_lease(
-    execution.run_context.run_id,
-    "worker-1",
-    ttl=30.0,
-    expected_state_version=snapshot_state_version,
-)
-await agent.workspace.heartbeat_lease(
-    execution.run_context.run_id,
-    "worker-1",
-    lease["lease_token"],
-)
-
-artifact_ref = await agent.workspace.put_artifact_ref(
-    execution.run_context.run_id,
-    large_payload,
-    metadata={"kind": "snapshot_payload"},
-)
-```
-
-`expected_state_version=...` 会在最新 checkpoint state version 与调用方读到的
-cursor 不一致时 fail closed。Lease methods 在所选 provider 内检查 owner 和 token。
-local backend 提供这个单节点 durable-provider seam，用于开发和本地重启恢复；生产级
-跨 worker 保证仍属于所选 backend。
-
-## Links 与诊断
-
-Links 用来记录 records 之间的 typed relationship，并且可以通过公开 API 查询，
-不需要直接访问 backend 存储。
-
-```python
-decision_ref = await agent.workspace.put(
-    {"decision": "Patch route fallback"},
-    collection="decisions",
-    kind="loop_decision",
-    scope={"task_id": "issue-123"},
-)
-
-await agent.workspace.link(decision_ref, ref, relation="responds_to")
-links = await agent.workspace.links(source=decision_ref, relation="responds_to")
-
-capabilities = agent.workspace.capabilities()
-```
-
-`link_evidence(...)` 是 `link(...)` 上的一层便利封装，会把 execution id、
-operation id、RuntimeEvent id、checkpoint id、exchange id 和 artifact refs 记录到
-link metadata。Retention anchors 可在 compaction 后保留 lineage 与 summary refs：
-
-```python
-await agent.workspace.link_evidence(
-    request_ref,
-    result_ref,
-    relation="resulted_in",
-    execution_id="issue-123-execution",
-    runtime_event_id=event_record["event_id"],
-    checkpoint_id=checkpoint_ref["id"],
-    artifact_refs=[ref],
-)
-
-await agent.workspace.add_retention_anchor(
-    "issue-123-execution",
-    anchor_type="compaction",
-    record_ref=ref,
-    preserved_event_ids=[event_record["event_id"]],
-)
-```
-
-`capabilities()` 会报告当前 backend 的 content、metadata、checkpoint、
-RuntimeEvent storage、ref resolution、retention policy、text index、policy 和 vector
-index 组件。它也会报告 `supports_event_sequence`、`supports_range_read`、
-`supports_stream_read`、`supports_retention`、`supports_compaction_anchor`、
-`supports_cas`、`supports_lease`、`supports_artifact_refs` 和
-`supports_remote_backend` 等 capability flags。分布式恢复应在所选 provider
-缺少必要 flags 或对应 provider methods 时 fail closed。
-
-## Action 边界
-
-`agent.workspace.files_root` 是给 shell、Node.js 和文件 action 使用的普通可编辑作业区。
-在共享默认 Workspace 中，它是
-`files/lineage/<root-kind>/<root-id>/.../agent/<agent-scope>/files`、
-`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files` 或
-`files/lineage/<root-kind>/<root-id>/.../task/<task-id>/files` 这类带 lineage
-作用域的子目录。类文件系统的 Action helper 在没有显式 root 或 cwd 时会继承这个边界，
-包括 Agent 仍在使用 lazy default Workspace 时。`agent.workspace.content_root`
-仍然是 Workspace records 使用的共享受管内容存储。
-
-```python
-agent.enable_workspace_file_actions(write=True)
-agent.enable_coding_agent_actions()
-agent.enable_shell(commands=["pwd", "pytest"])
-agent.enable_nodejs()
-```
-
-`enable_workspace_file_actions(...)` 不创建第二个 Workspace；它只是把当前 Workspace
-文件作业区暴露成 list/search/read/write 文件 actions。需要把 `export_file` 也暴露给
-Agent 时，同时传 `write=True` 与 `export=True`。只有某个 action 必须使用独立目录时，
-才显式传入 `root=` 或 `cwd=`。
-
-`enable_coding_agent_actions(...)` 是 Workspace owner 暴露给 coding agent 的文件能力
-profile。它在同一个 file boundary 上暴露 `read_file`、`glob_files`、`grep_files`、
-`edit_file`、`apply_patch` 和带 guard 的 `write_file` actions。定点修改优先用
-`edit_file(...)` 或 `apply_patch(...)`；shell 只用于测试、构建、git status/diff/log
-inspection 和只读诊断。coding-agent mode 下，整文件 `write_file(...)` 默认要求已有
-prior read state 或 expected SHA，除非 host 显式关闭这个策略。
-
-## File IO Handlers
-
-Workspace 的文件读、写、导出通过已注册的 `WorkspaceFileIOHandler` 实现完成。
-Workspace 只负责路径围栏、确定性的 file info、handler dispatch、digest 和 file refs；
-格式解析、渲染、MCP、VLM 语义由 handler、Builtins Action、MCP adapter、
-ExecutionResource provider 或 ModelRequest 层承担。Workspace 不会变成 shell executor、
-MCP client、renderer lifecycle owner、OCR engine 或 model requester。
-
-```python
-await agent.workspace.write_file("notes/todo.txt", "ship docs")
-read_result = await agent.workspace.read_file("notes/todo.txt", max_bytes=4096)
-
-materialized = await agent.workspace.materialize_file(
-    "downloads/syllabus.pdf",
-    pdf_bytes,
-    source={"kind": "remote_download", "url": "https://example.com/syllabus.pdf"},
-    media_type="application/pdf",
-)
-
-export_result = await agent.workspace.export_file(
-    "report.md",
-    "report.pdf",
-    export_kind="markdown_pdf",
-)
-```
-
-默认 text handler 支持 UTF-8 / UTF-8-SIG 文本读取、纯文本写入，并返回有界 content、
-`bytes`、`sha256`、`offset`、`read_bytes`、`truncated`、diagnostics 和 file refs。
-未知 binary 文件会返回 `readable=False` 和结构化 diagnostics，不会用 replacement
-character 伪造文本。`search_files` 也只搜索通过同一 handler registry 判定为 readable
-text 的文件。搜索结果保留原有 `path`、`line`、`text` 字段，同时会带
-`role="evidence_snippet"`、有界片段计数、`truncated` 标记，以及嵌套的 `locator_ref`
-（`content_state="ref_only"`）。可见片段只能作为该片段范围内的证据；locator
-只表示后续可以用 `read_file(...)` 或 Blocks `workspace_operation` 做有界读回的目标。
-
-Blocks `workspace_operation` 也可以通过兼容的 `search` 操作名运行 scoped
-Workspace retrieval，并通过 `read_bounded` 操作返回 refs/paths 的有界读回。
-`search` 操作内部使用 `workspace.retrieve(...)` 作为 records/files 的共享召回策略，
-再返回 typed `locator_ref` 与 `evidence_snippet` 事实；它不判断命中是否语义有用，
-也不判断任务是否完成。Flat AgentTask step 中，planner 给出的
-`scoped_retrieval.query_groups` 会先降到这些 Blocks retrieval 事实，再交给有界
-`agent_step` 消费。query group 可以把 `search_surface` 设为 `workspace_index`、
-`workspace_files` 或 `workspace_index_and_files`，可以携带结构化过滤
-（`collection`、`kind`、`id`、`path`、`scope` 或 `meta`），也可以在任务明确需要时
-传入 `tags`、`method`、`rerank`、`selection`、`top_n`、`max_candidates` 等 retrieval
-选项，让大型 retained records 和文件在有界 retrieval/readback 真正需要前不进入热 prompt。对于 `workspace_index`，
-record collection 应放在 `filters.collection`；只有明确知道精确 record kind 时才使用
-`filters.kind`，不要把 collection 名写进 `path`。单元素 filter 列表会在执行前归一化为
-标量。对于 `workspace_files`，`query` 是要搜索的内容文本，`path` 是目录或文件 scope，
-`pattern` 是 `*.md`、`*` 或表示递归文件搜索的 `**` 这类文件 glob，不是另一个内容关键词。
-本地 Workspace 文件搜索在可用时使用 `rg` 作为 grep-style 搜索引擎，并在不可用时回退到有界
-文件扫描。Blocks 默认返回命中附近的小型有界上下文片段，让相邻事实可见，但不会读取整份文件。
-当 AgentTask 把 scoped retrieval 结果注入后续 Flat step 或 TaskBoard card 时，会使用
-紧凑的模型热视图：只保留有界片段、截断事实、行/范围事实和可执行 locator 句柄；
-`sha256`、字节数、handler/media 细节、backend/search-engine 事实、execution block id
-和完整 file ref 等可由程序回溯的 provenance 会留在原始 Workspace/Blocks 证据里，
-用于审计、manifest 和后续 readback。
-TaskBoard 的 readback continuation 也遵循同一拆分：HTTP/HTTPS 这类外部
-`target_refs` 会变成 Action evidence 工作；Workspace/content 路径和 retained-note
-ref 会变成有界 Workspace readback card。中间 readback preview 只把正文、path、
-范围和截断事实放进热输入，readback work unit 的热 payload 也使用紧凑 refs 而不是
-完整 provenance refs；SHA、字节数、media/handler 细节、backend 事实、
-execution block id 以及其他可由程序溯源的 provenance 留在冷侧 Workspace/Blocks
-证据、最终 artifact 审计 metadata、DevTools 或 runner 日志中。终局 verifier 的热
-输入使用 path/ref handle、有界内容或 preview、截断状态；为了判断任务充分性不需要
-单独读取 SHA。
-
-`materialize_file(...)` 用于框架或应用拥有的受控 bytes 物化，例如 Browse action
-把远程 PDF 下载到 Workspace 的 `downloads/` 后，再由后续 `read_file(...)` 通过
-handler registry 解析。它记录 `bytes`、`sha256`、`media_type`、diagnostics 和
-file refs，但它本身不解析 PDF/Office/Image 内容，也不改变 `write_file(...)` 的纯文本
-写入契约。
-
-内置可选 handler 覆盖：
-
-- 通过可选 `pypdf` 提取 PDF 文本；
-- 通过可选 Office 包提取 `.docx`、`.xlsx`、`.pptx`；
-- 把图片准备成 ModelRequest-compatible attachment，图片理解仍属于 `.image(...)` 或
-  其他 VLM-capable ModelRequest 路径；
-- 通过可选 renderer dependency 把 HTML/Markdown 导出为 PDF 或截图，默认不允许网络抓取。
-
-可选依赖缺失、不支持的文件类型、不支持的 export kind、扫描版/纯图片 PDF 都返回结构化
-diagnostics。越界路径、缺失路径和权限错误仍是执行错误。
-
-自定义 handler 可以注册到 Workspace manager：
-
-```python
-Agently.workspace.register_file_io_handler(custom_handler)
-Agently.workspace.register_file_io_handler(custom_handler, replace=True)
-Agently.workspace.unregister_file_io_handler("custom-handler")
-```
-
-相关示例：
-
-- `examples/workspace/workspace_file_io_handlers.py` 展示 text read/write、
-  不支持 binary diagnostics，以及确定性的可选 export 依赖缺失；
-- `examples/workspace/workspace_file_io_real_documents.py` 展示真实 text
-  read/write、PDF/Office 提取、HTML/Markdown 导出 E2E；
-- `examples/workspace/workspace_file_io_real_vlm.py` 展示真实 image attachment
-  preparation 加 VLM model request。VLM 示例默认使用 `qwen3-vl-plus`，需要真实
-  provider key，不会 mock 图片理解。key 不在默认 dotenv 路径时，可以用
-  `WORKSPACE_FILE_IO_VLM_ENV_FILE` 显式指定。
-
-文件边界 policy metadata 可以持久化用于审计，但 Workspace 不因此变成 cwd manager：
-
-```python
-await agent.workspace.record_file_policy(
-    allowed_roots=[str(agent.workspace.files_root)],
-    root_source="workspace",
-    policy_labels=["customer-data"],
-)
-```
-
-## 不是记忆策略
-
-Workspace V1 不暴露 `remember(...)`、`observe(...)`、`decide(...)` 这类可被模型调用
-的记忆动词。这些属于未来 Action、ContextBuilder 或 WorkLoop 层的高阶接口。V1 中，
-应用代码决定写入什么；`workspace.build_context(...)` 通过可插拔 planner、retriever
-和 packager profile 把已存 records 打包成 `ContextPackage`。
-
-## 插件边界
-
-Workspace 暴露 content、metadata、checkpoint、RuntimeEvent storage、ref
-resolution、retention、evidence links、text index、policy 和 vector index 等底层
-backend seam。默认本地 backend 是 filesystem content + SQLite metadata/FTS +
-`NoopVectorIndex`；具体 embedding provider client 属于业务代码、自定义 backend
-或插件提供的 `vector_index`。应用需要 provider-neutral 的本地向量打分时，可以安装内置
-`LocalVectorIndex(embedder)`；默认相似度是 cosine，dot product 和 L2 是显式选项。
-ContextBuilder 暴露 `ContextPlanner`、
-`WorkspaceContextRetriever` 和 `ContextPackager`；高级模型辅助规划、向量检索、
-rerank、compression 和 remote backends 预期作为插件叠加在这个底座上。
-
-只要实现 Workspace backend protocol，自定义 backend 可以直接传给
-`agent.use_workspace(...)`，也可以按名称注册：
-
-```python
-Agently.workspace.register_backend_provider("audit", build_audit_backend)
-
-agent = (
-    Agently.create_agent("repo-worker")
-    .use_workspace(
-        "tenant-a",
-        provider="audit",
-        provider_options={"tenant_id": "tenant-a"},
+package = await reader.async_read(
+    ContextReadIntent(
+        query="哪些证据与失败的审查相关？",
+        filters={"source_kinds": ["record_store"]},
     )
 )
 ```
 
-Provider factory 会收到 `root`、`create`、`mode` 和所有 `provider_options`，
-并返回一个 `WorkspaceBackend`。未注册的 provider name 会 fail fast，而不是回落到
-local backend。没有显式选择 provider 时，Agent 的 lazy default Workspace 会使用当前
-session 或 script 作用域的 local backend。测试套件已经包含一个
-协议级 remote audit provider proof，覆盖与本地 backend 相同的 checkpoint、RuntimeEvent、
-evidence link 和 capability 路径。这个 proof 不等于公开 Redis、Postgres 或
-object-storage adapter；生产 provider 仍必须报告真实能力，并在缺少分布式恢复要求时
-fail closed。
-TriggerFlow 测试也会通过 provider 读回 Workspace-backed execution snapshot，并由
-TriggerFlow 自己 load pause/continue、policy approval waits 与
-`when(..., mode="and")` join progress，因此 Workspace 仍是 storage，不是
-workflow control plane。
+`TaskContext` 是唯一的任务信息 aggregate。TaskContext 负责 source bindings 与
+一套内部 `ContextIndex`：构造、同步、失效并复用派生 source partition；它不是公开
+manager，也不是 canonical source truth。TaskContext 通过
+`task_context.reader(...)` 创建 reader，并通过
+`task_context.restore_reader(...)` 恢复已导出的 reader state；不支持脱离
+TaskContext 独立构造或恢复 `ContextReader`。reader 是公开的、绑定
+consumer/phase 的句柄，类似由 aggregate 持有的 execution handle；
+`ContextPackage` 是跨 ModelRequest、AgentTask、Blocks 或持久化边界传递的不可变值，
+不是另一个 context owner。
 
-`examples/workspace/workspace_loop_foundation.py` 展示了一个显式 TriggerFlow
-loop：写入结构化 observations，把 decisions link 到 evidence，checkpoint 紧凑状态，
-并通过 ContextBuilder 生成 ContextPackage。
+每个 reader 固定一份 TaskContext/source revision 快照；读取开始前已经过期时应显式
+refresh 或创建新 reader。如果列举候选本身推进了 source revision、但 TaskContext 结构
+未变化（例如 source 首次建立惰性读视图），ContextReader 会重新固定新 revision 并重取
+一次；持续或并发变化仍然 fail closed。required 和显式请求的信息块不能被静默丢弃。多个可选 prose
+candidate 需要相关性判断时，使用 Agently `ModelRequest` semantic selector；
+模型只返回宿主发放的 selection key，宿主校验后再重建 canonical record。
 
-`examples/workspace/workspace_shared_default_management.py` 展示默认 session 作用域的
-Workspace 行为：多个 Agent 和 TriggerFlow execution 共享一个物理 `workspace.db`，
-但 execution 文件 root 仍然彼此隔离。
+ContextIndex 把 source descriptor 枚举成以 revision/profile/provider 为 key 的
+partition，可使用 `structural`、`lexical` 或宿主配置的 `hybrid` 候选检索；精确 bytes
+仍由 source 的 `async_read_exact(...)` 返回，或在 ref 选定后由可选的确定性 scoped-read
+端口返回。可复用 partition 可以避免重复构建未变化
+的 embedding；只有 policy 允许时 vector failure 才降级，并写入 package diagnostic。
+ContextReader 负责 consumer-local offset、去重、可选 ModelRequest selection、精确
+readback 与 package budget。返回 package 暴露逐 binding 的 `source_coverage` 与 index
+diagnostic，不暴露内部 cache key 或 provider vector。
 
-`examples/workspace/workspace_with_action_output.py` 展示 Action 边界：file action
-写入 `workspace.files_root`，shell action 读取该文件，应用代码把 action output 显式
-写成 Workspace observation，再通过 ContextBuilder 打包成 ContextPackage。
+不可变 ContextPackage 保留完整 omission 与 diagnostic 事实用于审计。AgentTask 的
+model-hot view 会限制重复的可选 omission 明细并增加原因计数；required delivery 仍在
+该投影之前 fail closed。
 
-`workspace.ingest(...)` 仅作为旧代码兼容 alias 保留。新代码应使用
-`workspace.put(...)`；确实需要旧 profile 路径时，把 `profile=...` 传给 `put`。
+Context 交付会区分媒体类型。纯文本以及由来源解析出的文本可以进入 package；内置
+TaskWorkspace source 会先解析受支持的 PDF、DOCX、XLSX 与 PPTX 文件。若解析器或
+可选依赖不可用，该文档只交付引用。PDF 或 Office 的 descriptor 与 exact read 必须
+同时保持 `context_representation=parsed_text`，且精确读取结果必须是文本；调用方提供但
+没有解析来源证明的字符串不能进入上下文。已知的非文本 MIME 或文件后缀不能被冲突的
+`content_kind="text"` 声明覆盖；类型信号冲突时按非文本或 unknown 保守关闭。Python、
+Node.js、Go、C 与 C++ 的主流源码后缀按文本处理，包括空源码文件。
+
+图片、压缩包、可执行文件、音视频、未知格式和任意二进制字节都不会被强制转换为猜测
+文本；模型侧投影只包含规范文件名/引用。来源提供的摘要、OCR 文本和推测内容会被移除；
+MIME、摘要哈希和大小等事实只能在宿主侧作为审计元数据保留。
+
+图片只有在具体 consumer 显式声明支持图片附件时才会进入附件通道，否则只交付引用：
+
+```python
+from agently.types.data import ContextConsumer
+
+reader = task_context.reader(
+    consumer=ContextConsumer(
+        "visual-reviewer",
+        capabilities={"attachments": {"image": True}},
+    ),
+)
+```
+
+AgentTask 使用同一能力声明：
+
+```python
+execution = agent.goal("Review the attached chart").strategy(
+    "taskboard",
+    context_consumer_capabilities={"attachments": {"image": True}},
+)
+```
+
+Agently 不根据模型名推断视觉能力，通用的 `attachments=True` 也不代表支持图片理解。
+显式支持时，ContextReader 生成经过校验的图片附件块，AgentTask 通过 ModelRequest
+附件通道绑定；data URL 不会序列化进文本 context pack。没有该显式能力时，模型只会
+收到文件名/引用，不会收到生成的摘要或 OCR 替代内容。图片理解仍由模型负责。附件为空
+或格式非法时，本次读取失败，不会退化为根据文件名猜测内容。
+
+required 内容超出预算时默认仍然 fail closed。只有 Skill 或调用方显式接受有损投影
+时，才可设置 `metadata={"required_overflow": "lossy_digest"}`。此时 Skill source
+返回有界、`completeness="lossy"` 的结构化纲要，并保留不可变全文 ref、有序 section
+refs、原始长度与省略事实；不会把静默截断伪装成完整权威指令。可选 section 仍由语义
+selector 选择。只需要 required core、明确不做可选选择的 host preflight 还可以设置
+`optional_selection="none"`。
+
+AgentTask 通过同一份 context budget 传递该策略：
+
+```python
+execution = agent.goal(goal, success_criteria=criteria).strategy(
+    "taskboard",
+    context_budget={
+        "chars": 12_000,
+        "required_overflow": "lossy_digest",
+    },
+)
+```
+
+只有明确接受有损披露时才使用该设置；否则应换用更大/更聚焦的 consumer，或让
+required Skill 在业务执行前失败。
+
+`source_kinds` 是结构性来源过滤，不是语义路由，也不是封闭枚举。有效值来自当前
+TaskContext 实际挂载的 source kind；存在相应 adapter 时可以包括
+`task_workspace`、`record_store`、`skill_library`、`session_memory`、`pinned_repository` 等。
+未知 kind 会在 source 枚举前失败。
+
+AgentTask 为每个实际 planner、worker、control card 与 verifier 请求创建独立的
+reader/package。只有响应成功后才记录 `ContextConsumption`，其中保留精确的
+package、response/request id、phase 与 block ids；失败请求不记录 consumption，也
+不发出 `skills.context.bound`。AgentTask meta 通过 `context_packages` 与
+`context_consumptions` 暴露审计信息。
+
+## AgentExecution 所有权
+
+每个 AgentExecution 拥有一个 TaskContext，以及 Agent 的 TaskWorkspace 与
+RecordStore 的 execution-scoped view。AgentTask 复用 AgentExecution 交给它的
+同一个 TaskContext 和 TaskWorkspace view。Skills 以不可变 SkillLibrary
+revision 绑定为 Skill ContextSource，不会创建 Skills route 或执行引擎。
+
+启用 `record_store_recovery` 后，持久快照同时保留 TaskContext 直接条目、可重建的
+内建 source bindings、reader 披露历史、packages 与 consumptions。Skill source
+按不可变 `revision_ref` 精确重建；自定义 ContextSource 不会被自动重建，会在
+resume 时明确失败而不是静默消失。
+
+普通 AgentExecution 使用
+`execution.async_read_task_context(consumer_id=..., phase=..., intent=...)`
+构造信息包。`intent` 可传查询字符串或 `ContextReadIntent`；省略时使用
+AgentExecution 的 task target。
+Blocks 的只读 `context_read` block 接收调用方已经绑定好的
+`context_reader`。

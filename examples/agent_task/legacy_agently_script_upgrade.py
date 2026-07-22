@@ -65,7 +65,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--workspace",
         default=os.getenv("AGENT_TASK_WORKSPACE", ""),
-        help="Workspace directory. Defaults to .agently/tasks/legacy-script-upgrade-<run-id>.",
+        help="TaskWorkspace directory. Defaults to agent-task-workspaces/legacy-script-upgrade-<run-id>.",
     )
     parser.add_argument(
         "--max-iterations",
@@ -203,7 +203,9 @@ def _print_stream_item(item: Any) -> None:
 async def main(argv: list[str] | None = None):
     args = parse_args(argv)
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    workspace_dir = Path(args.workspace or f".agently/tasks/legacy-script-upgrade-{run_id}").resolve()
+    workspace_dir = Path(
+        args.workspace or f"agent-task-workspaces/legacy-script-upgrade-{run_id}"
+    ).resolve()
     workspace_dir.mkdir(parents=True, exist_ok=True)
     task_files_dir = workspace_dir / "files"
     task_files_dir.mkdir(parents=True, exist_ok=True)
@@ -215,13 +217,12 @@ async def main(argv: list[str] | None = None):
     initial_run = _run_script(script_path, env=run_env)
     initial_failure_recorded = initial_run.returncode != 0
 
-    agent = Agently.create_agent("agent-task-legacy-upgrade").use_workspace(workspace_dir)
+    agent = Agently.create_agent("agent-task-legacy-upgrade").use_task_workspace(workspace_dir).use_record_store(workspace_dir, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=0.0)
-    workspace = agent.workspace
-    if workspace is None:
-        raise RuntimeError("Workspace was not initialized.")
+    task_workspace = agent.task_workspace
+    record_store = agent.record_store
 
-    agent.enable_workspace_file_actions(read=True, write=True, expose_to_model=True)
+    agent.enable_task_workspace_file_actions(read=True, write=True, expose_to_model=True)
     agent.enable_shell(
         commands=["python legacy_script.py", f"{sys.executable} legacy_script.py"],
         action_id="run_task_command",
@@ -234,7 +235,7 @@ async def main(argv: list[str] | None = None):
         env=run_env,
     )
 
-    await workspace.put(
+    await record_store.put(
         content={
             "path": "legacy_script.py",
             "legacy_script_content": legacy_script,
@@ -252,12 +253,15 @@ async def main(argv: list[str] | None = None):
         collection="observations",
         kind="legacy_script_initial_failure",
         summary="legacy_script.py fails before migration because AgentFactory is not available",
-        scope={"task_id": "legacy_agently_script_upgrade"},
+        scope={
+            "task_id": "legacy_agently_script_upgrade",
+            "execution_id": "legacy_agently_script_upgrade",
+        },
         source={"type": "example_fixture", "phase": "initial_failure"},
     )
 
     print("[SETUP] Legacy script upgrade")
-    print(f"[SETUP] Workspace: {workspace_dir}")
+    print(f"[SETUP] TaskWorkspace: {workspace_dir}")
     print(f"[SETUP] Script: {script_path}")
     print(f"[SETUP] Provider: {provider}, model_key={TASK_MODEL_KEY}")
     print(f"[SETUP] Forced gap mode: {bool(args.forced_gap)}")
@@ -269,7 +273,7 @@ async def main(argv: list[str] | None = None):
         goal=(
             "Upgrade legacy_script.py from an incompatible legacy Agently API to a current 4.1.x-compatible "
             "script. First use the recorded failure, legacy_script_content, and current_api_guidance from "
-            "Workspace. Modify exactly the workspace-relative file path `legacy_script.py` through write_file. "
+            "TaskWorkspace. Modify exactly the workspace-relative file path `legacy_script.py` through write_file. "
             "Verify by calling run_task_command with cmd='python legacy_script.py' and no workdir. The fixed "
             "script must use `from agently import Agently`, call `Agently.create_agent(...)`, avoid model "
             "provider calls, and print strict JSON with api='4.1.x' and status='ok'. "
@@ -287,7 +291,7 @@ async def main(argv: list[str] | None = None):
             "Running python legacy_script.py succeeds.",
             "The final script stdout is strict JSON containing api='4.1.x' and status='ok'.",
         ],
-        workspace=workspace_dir,
+        task_workspace=workspace_dir,
         max_iterations=max(1, int(args.max_iterations)),
         limits={"max_model_requests": 14, "max_seconds": 240, "max_no_progress_seconds": 90},
         options={
@@ -329,7 +333,6 @@ async def main(argv: list[str] | None = None):
         and item.value["verification"].get("is_complete") is False
         for item in stream_items
     )
-    workspace_checkpoint_count = len(await workspace.checkpoint_history("legacy_agently_script_upgrade"))
     summary = {
         "provider": provider,
         "forced_gap": bool(args.forced_gap),
@@ -343,8 +346,8 @@ async def main(argv: list[str] | None = None):
         "replan_count": replan_count,
         "final_script_runs": validation["returncode"] == 0,
         "verification_passed": result["status"] == "completed",
-        "workspace_checkpoint_count": workspace_checkpoint_count,
-        "workspace_decision_count": len(meta["workspace_refs"]["decisions"]),
+        "record_store_recovery_ref_count": len(meta.get("record_refs", {}).get("checkpoints", [])),
+        "workspace_process_record_count": len(meta.get("record_refs", {}).get("decisions", [])),
         "stream_trace_file": str(stream_trace_path),
         "script_path": str(script_path),
         "validation": validation,
@@ -358,7 +361,7 @@ if __name__ == "__main__":
 
 # Expected key output from a real DeepSeek run on 2026-06-03:
 # command:
-#   AGENT_TASK_WORKSPACE=.agently/tasks/legacy-script-upgrade-cleanup-final python examples/agent_task/legacy_agently_script_upgrade.py
+#   AGENT_TASK_WORKSPACE=agent-task-workspaces/legacy-script-upgrade-cleanup-final python examples/agent_task/legacy_agently_script_upgrade.py
 # task_status="completed"
 # accepted=True
 # artifact_status="accepted"
@@ -367,13 +370,13 @@ if __name__ == "__main__":
 # replan_count=0
 # final_script_runs=True
 # verification_passed=True
-# workspace_checkpoint_count=1
+# record_store_recovery_ref_count=0 (recovery is opt-in)
 # validation.stdout_json.api="4.1.x"
 # validation.stdout_json.status="ok"
-# stream_trace_file points to a JSONL stream trace under the Workspace
+# stream_trace_file points to a JSONL stream trace under the TaskWorkspace
 #
 # Forced-gap validation command (requires a real DeepSeek or local Ollama run):
-#   AGENT_TASK_WORKSPACE=.agently/tasks/legacy-forced-gap \
+#   AGENT_TASK_WORKSPACE=agent-task-workspaces/legacy-forced-gap \
 #   AGENT_TASK_LEGACY_FORCED_GAP=1 \
 #   python examples/agent_task/legacy_agently_script_upgrade.py
 # The forced-gap run reports forced_gap=True, first_verification_failed, and

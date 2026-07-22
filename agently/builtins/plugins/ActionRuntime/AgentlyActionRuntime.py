@@ -250,6 +250,15 @@ class AgentlyActionRuntime:
             return value.strip()
         return None
 
+    @staticmethod
+    def _resolve_round_dispatch_policy(settings: Any) -> str | None:
+        value = settings.get("action.loop.round_dispatch_policy", None)
+        if value is None:
+            value = settings.get("tool.loop.round_dispatch_policy", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
     async def _default_structured_planning_handler(
         self,
         context: "ActionRunContext",
@@ -265,6 +274,22 @@ class AgentlyActionRuntime:
         last_round_records = context.get("last_round_records", [])
         round_index = context.get("round_index", 0)
         max_rounds = context.get("max_rounds", None)
+        round_dispatch_policy = self._resolve_round_dispatch_policy(settings)
+        planning_instructions = [
+            "Plan next actions to respond to {input.user_input} with {input.available_actions}.",
+            "Decide this round action first via 'next_action': 'execute' or 'response'.",
+            "If next_action is 'response', return empty 'execution_commands'.",
+            (
+                "If next_action is 'execute', return one or more 'execution_commands'; under "
+                "round_dispatch_policy='single_action_id_cohort', every command in this round "
+                "must use the same action_id. Wait for the next round and consume this round's "
+                "results before planning calls with a different action_id."
+                if round_dispatch_policy == "single_action_id_cohort"
+                else "If next_action is 'execute', return one or more 'execution_commands' for parallel execution."
+            ),
+            "Each command must include 'todo_suggestion' for next round decision making.",
+            "Use {info.done_plans}, {info.last_round_result}, {info.round_index}, and {info.max_rounds} for decision.",
+        ]
 
         parent_run_context = get_current_tool_phase_run_context()
         action_plan_request = ModelRequest(
@@ -285,17 +310,9 @@ class AgentlyActionRuntime:
                 "last_round_result": last_round_records,
                 "round_index": round_index,
                 "max_rounds": max_rounds,
+                "round_dispatch_policy": round_dispatch_policy,
             }
-        ).instruct(
-            [
-                "Plan next actions to respond to {input.user_input} with {input.available_actions}.",
-                "Decide this round action first via 'next_action': 'execute' or 'response'.",
-                "If next_action is 'response', return empty 'execution_commands'.",
-                "If next_action is 'execute', return one or more 'execution_commands' for parallel execution.",
-                "Each command must include 'todo_suggestion' for next round decision making.",
-                "Use {info.done_plans}, {info.last_round_result}, {info.round_index}, and {info.max_rounds} for decision.",
-            ]
-        ).output(
+        ).instruct(planning_instructions).output(
             {
                 "next_action": ("'execute' | 'response'", "This round action decision."),
                 "execution_commands": [
@@ -313,18 +330,6 @@ class AgentlyActionRuntime:
             action_plan_request,
             parent_run_context=parent_run_context,
         )
-        async for instant in action_plan_result.get_async_generator(type="instant"):
-            if not instant.is_complete:
-                continue
-            if not self.action._is_next_action_path(instant.path):
-                continue
-            if isinstance(instant.value, str) and instant.value.strip().lower() == "response":
-                await self.action._try_close_response_stream(action_plan_result)
-                return {
-                    "next_action": "response",
-                    "execution_commands": [],
-                }
-            break
         result_reader = getattr(action_plan_result, "result", action_plan_result)
         result = await result_reader.async_get_data()
         if not isinstance(result, dict):
@@ -346,6 +351,7 @@ class AgentlyActionRuntime:
         last_round_records = context.get("last_round_records", [])
         round_index = context.get("round_index", 0)
         max_rounds = context.get("max_rounds", None)
+        round_dispatch_policy = self._resolve_round_dispatch_policy(settings)
 
         parent_run_context = get_current_tool_phase_run_context()
         action_request = ModelRequest(
@@ -366,11 +372,18 @@ class AgentlyActionRuntime:
                 "last_round_result": last_round_records,
                 "round_index": round_index,
                 "max_rounds": max_rounds,
+                "round_dispatch_policy": round_dispatch_policy,
             }
         ).instruct(
             [
                 "Decide whether native tool calls are required to answer {input.user_input}.",
-                "If a tool is needed, emit native tool calls for one or more available actions.",
+                (
+                    "If a tool is needed, emit one or more native tool calls that all use the same "
+                    "action_id in this round. Wait for the next round's results before choosing a "
+                    "different action_id."
+                    if round_dispatch_policy == "single_action_id_cohort"
+                    else "If a tool is needed, emit native tool calls for one or more available actions."
+                ),
                 "If no tool is needed, answer directly without emitting tool calls.",
             ]
         )
@@ -443,6 +456,9 @@ class AgentlyActionRuntime:
         trusted_policy_overrides = request.get("trusted_policy_overrides", {})
         if not isinstance(trusted_policy_overrides, dict):
             trusted_policy_overrides = {}
+        artifact_scope = context.get("artifact_scope")
+        if not isinstance(artifact_scope, dict):
+            artifact_scope = None
         if len(action_calls) == 0:
             return []
         if self.action.async_execute_action is None:
@@ -494,6 +510,7 @@ class AgentlyActionRuntime:
                     source_protocol=str(action_call.get("source_protocol", "structured_plan")),
                     todo_suggestion=next_step,
                     next_value=next_step,
+                    artifact_scope=artifact_scope,
                 )
 
             try:
@@ -522,7 +539,7 @@ class AgentlyActionRuntime:
 
         flow = TriggerFlow(name="action-runtime-execute-actions")
         flow.for_each(concurrency=concurrency).to(run_one).end_for_each().to(collect_results)
-        execution = flow.create_execution(auto_close=False)
+        execution = flow.create_execution(auto_close=False, record_store=False)
         await execution.async_start(list(action_calls))
         close_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
         snapshot = await execution.async_close(timeout=close_timeout)

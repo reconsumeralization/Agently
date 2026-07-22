@@ -41,8 +41,8 @@ Expected key output from one real DeepSeek run on 2026-07-08:
     Auto-dispatched route: agent_task (selected by execution_strategy, strategy: task)
     Task status: completed
     GitHub fetch action called: yes
-    Workspace observations recorded: yes
-    Workspace artifact readback: yes
+    TaskWorkspace observations recorded: yes
+    TaskWorkspace artifact readback: yes
     Task refs include task id: yes
 """
 
@@ -310,17 +310,33 @@ def artifact_preview_from_task_envelope(data: Any) -> str:
 
 
 def task_artifact_text(data: dict[str, Any], runtime_root: Path, task_id: str, pointer: str) -> str:
+    _ = task_id
     preview = artifact_preview_from_task_envelope(data)
     if preview:
         return preview
     artifact_paths: list[str] = []
-    match = re.search(r"Workspace artifact delivered at ([^;]+)", pointer)
+
+    def collect_file_refs(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "file" and isinstance(value.get("path"), str):
+                artifact_paths.append(str(value["path"]))
+            for nested in value.values():
+                collect_file_refs(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect_file_refs(nested)
+
+    collect_file_refs(data.get("artifact_refs", []))
+    match = re.search(r"TaskWorkspace artifact delivered at ([^;]+)", pointer)
     if match:
         artifact_paths.append(match.group(1).strip())
     artifact_paths.append("final.md")
-    task_files_root = runtime_root / "files" / "lineage" / "tasks" / task_id / "files"
     for relative_path in artifact_paths:
-        candidate = task_files_root / relative_path
+        candidate = (runtime_root / relative_path).resolve()
+        try:
+            candidate.relative_to(runtime_root.resolve())
+        except ValueError:
+            continue
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8").strip()
     return ""
@@ -403,7 +419,7 @@ async def main() -> None:
     if RUNTIME_ROOT.exists():
         shutil.rmtree(RUNTIME_ROOT)
 
-    agent = Agently.create_agent("agent-execution-auto-dispatch").use_workspace(RUNTIME_ROOT)
+    agent = Agently.create_agent("agent-execution-auto-dispatch").use_task_workspace(RUNTIME_ROOT)
     agent.define(
         prompt={
             "rule": (
@@ -450,8 +466,8 @@ async def main() -> None:
     )
     print(f"Task status: {auto_full_data.get('status')}")
     print(f"GitHub fetch action called: {'yes' if fetch_called else 'no'}")
-    print(f"Workspace observations recorded: {'yes' if observations_recorded else 'no'}")
-    print(f"Workspace artifact readback: {'yes' if artifact_text else 'no'}")
+    print(f"TaskWorkspace observations recorded: {'yes' if observations_recorded else 'no'}")
+    print(f"TaskWorkspace artifact readback: {'yes' if artifact_text else 'no'}")
     print(f"Task refs include task id: {'yes' if refs_include_task_id else 'no'}")
 
 

@@ -8,7 +8,7 @@ keywords: Agently, 知识库, KB, retrieval, embeddings, Chroma
 
 > 语言：[English](../../en/knowledge/knowledge-base.md) · **中文**
 
-Agently 术语里知识库是：向量库 + 把文本变向量的 embedding agent + 返回相关 chunk 的查询路径。Agently 内置 Chroma 适配器作为参考实现；它的包路径仍是 `agently.integrations.chromadb`。
+Agently 术语里知识库是：向量库 provider + 把文本变向量的 embedding provider + 返回相关 chunk 的查询路径。Agently 内置 Chroma 适配器作为参考实现；它的包路径仍是 `agently.integrations.chromadb`。RecordStore retrieval 通过 `DBStoreProvider` 存储 records，也可以把 `EmbeddingProvider` 和可插拔 `VectorStoreProvider` 组合使用：本地默认用 `db_store_provider="sqlite"` 保存 records，向量库在 Chroma 可用时使用 Chroma，否则降级到 SQLite 向量存储。
 
 ## 何时用 KB
 

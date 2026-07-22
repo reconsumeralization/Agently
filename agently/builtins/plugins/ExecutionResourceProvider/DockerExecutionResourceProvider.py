@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
+import asyncio
+import hashlib
 import shlex
 import shutil
 import subprocess
@@ -21,129 +22,49 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
+from agently.builtins.actions.Cmd import normalize_command_argv
+from agently.types.data import (
+    CodeExecutionBundle,
+    TaskWorkspaceAccessGrant,
+    TaskWorkspaceExecutionManifest,
+    resolve_code_execution_workspace_uri,
+)
+from agently.types.data.code_execution import extract_code_toolchain_version
+
+from ._base import BuiltinExecutionResourceProvider
+from ._bounded_process import run_bounded_process
+
 if TYPE_CHECKING:
     from agently.types.data import (
         ExecutionResourceHandle,
         ExecutionResourcePolicy,
+        ExecutionResourceProviderProbe,
         ExecutionResourceRequirement,
         ExecutionResourceStatus,
     )
 
-CODE_RUNTIME_ALIASES: dict[str, str] = {
-    "py": "python",
-    "python3": "python",
-    "js": "nodejs",
-    "javascript": "nodejs",
-    "node": "nodejs",
-    "node.js": "nodejs",
-    "ts": "typescript",
-    "c++": "cpp",
-    "cxx": "cpp",
-    "cc": "cpp",
-    "cs": "csharp",
-    "c#": "csharp",
-    "dotnet": "csharp",
-    "net": "csharp",
-    "shell": "bash",
-    "sh": "bash",
-    "rscript": "r",
+DEFAULT_CODE_IMAGES: dict[str, str] = {
+    "python": "python:3.12-slim",
+    "nodejs": "node:22-slim",
+    "go": "golang:1",
+    "cpp": "gcc:14",
+    # Shell is not a CodeRuntimeAdapter language. It remains a separate broad
+    # Action and uses this provider-owned mechanism default only.
+    "shell": "python:3.12-slim",
 }
 
-CODE_RUNTIME_PROFILES: dict[str, dict[str, str]] = {
-    "python": {
-        "image": "python:3.12-slim",
-        "source_file": "main.py",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "nodejs": {
-        "image": "node:22-slim",
-        "source_file": "main.js",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "typescript": {
-        "image": "denoland/deno:alpine",
-        "source_file": "main.ts",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "c": {
-        "image": "gcc:14",
-        "source_file": "main.c",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "cpp": {
-        "image": "gcc:14",
-        "source_file": "main.cpp",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "go": {
-        "image": "golang:1",
-        "source_file": "main.go",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "rust": {
-        "image": "rust:1",
-        "source_file": "main.rs",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "java": {
-        "image": "maven:3-eclipse-temurin-21",
-        "source_file": "Main.java",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "csharp": {
-        "image": "mcr.microsoft.com/dotnet/sdk:8.0",
-        "source_file": "Program.cs",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "php": {
-        "image": "php:8.3-cli",
-        "source_file": "main.php",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "ruby": {
-        "image": "ruby:3.3",
-        "source_file": "main.rb",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "perl": {
-        "image": "perl:5.40",
-        "source_file": "main.pl",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "r": {
-        "image": "r-base:4.4",
-        "source_file": "main.R",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "lua": {
-        "image": "nickblah/lua:5.4",
-        "source_file": "main.lua",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
-    "bash": {
-        "image": "bash:5",
-        "source_file": "main.sh",
-        "entrypoint": "sh /sandbox/run.sh",
-    },
+CODE_TOOLCHAIN_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
+    "python": ("python", "--version"),
+    "node": ("node", "--version"),
+    "go": ("go", "version"),
+    "c++": ("c++", "--version"),
 }
 
 
-def normalize_code_runtime_language(language: str) -> str:
-    normalized = str(language or "").strip().lower().replace("-", "_")
-    normalized = CODE_RUNTIME_ALIASES.get(normalized, normalized)
-    if normalized not in CODE_RUNTIME_PROFILES:
-        supported = ", ".join(sorted(CODE_RUNTIME_PROFILES))
-        raise ValueError(f"Unsupported code runtime language '{ language }'. Supported languages: { supported }.")
-    return normalized
+def _canonical_code_language(language: str) -> str:
+    from agently.builtins.plugins.CodeRuntimeAdapter import get_code_runtime_adapter
 
-
-def get_code_runtime_profile(language: str, *, image: str | None = None) -> dict[str, str]:
-    canonical = normalize_code_runtime_language(language)
-    profile = dict(CODE_RUNTIME_PROFILES[canonical])
-    profile["language"] = canonical
-    if image:
-        profile["image"] = str(image)
-    return profile
+    return str(get_code_runtime_adapter(language).language_id)
 
 
 class DockerExecutionResource:
@@ -154,12 +75,209 @@ class DockerExecutionResource:
         timeout: int = 60,
         default_args: list[str] | None = None,
         runtime_profile: dict[str, Any] | None = None,
+        workspace_grant: TaskWorkspaceAccessGrant | None = None,
+        max_output_bytes: int = 20000,
     ):
         self.docker_binary = docker_binary
         self.timeout = timeout
         self.default_args = default_args or []
         self.runtime_profile = dict(runtime_profile or {})
+        self.workspace_grant = workspace_grant
+        self.max_output_bytes = max(1, int(max_output_bytes))
         self._prepared_images: dict[str, dict[str, Any]] = {}
+        self._active_containers: set[str] = set()
+        self._closed = False
+
+    async def _remove_container(self, name: str) -> None:
+        if not name:
+            return
+        process = await asyncio.create_subprocess_exec(
+            self.docker_binary,
+            "rm",
+            "-f",
+            name,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            returncode = await asyncio.wait_for(process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(
+                f"docker_runtime.container_cleanup_timeout:{name}"
+            )
+        if returncode != 0:
+            raise RuntimeError(
+                f"docker_runtime.container_cleanup_failed:{name}:returncode={returncode}"
+            )
+        self._active_containers.discard(name)
+
+    async def async_close(self) -> None:
+        self._closed = True
+        for name in tuple(self._active_containers):
+            await self._remove_container(name)
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+
+    def _validate_workspace_bundle(
+        self,
+        *,
+        bundle: CodeExecutionBundle,
+        manifest: TaskWorkspaceExecutionManifest,
+        grant: TaskWorkspaceAccessGrant,
+    ) -> Path:
+        if self.workspace_grant is None or grant != self.workspace_grant:
+            raise PermissionError("Docker code resource is bound to another Workspace grant.")
+        if (
+            manifest.grant_id != grant.grant_id
+            or manifest.bundle_id != bundle.bundle_id
+            or manifest.bundle_digest != bundle.bundle_digest
+        ):
+            raise PermissionError("Docker execution manifest does not match the bundle and grant.")
+        area = Path(grant.execution_area).resolve()
+        recorded = {Path(item.host_path).resolve(): item for item in manifest.files}
+        for item in bundle.files:
+            target = (area / "source" / Path(item.path)).resolve()
+            manifest_item = recorded.get(target)
+            if (
+                area not in target.parents
+                or target.is_symlink()
+                or not target.is_file()
+                or manifest_item is None
+                or manifest_item.sha256 != item.sha256
+                or self._sha256(target) != item.sha256
+            ):
+                raise PermissionError("Docker source file is not the exact materialized bundle byte set.")
+        return area
+
+    async def async_execute_code(
+        self,
+        *,
+        bundle: CodeExecutionBundle,
+        manifest: TaskWorkspaceExecutionManifest,
+        grant: TaskWorkspaceAccessGrant,
+        timeout: int,
+    ) -> dict[str, Any]:
+        area = self._validate_workspace_bundle(
+            bundle=bundle,
+            manifest=manifest,
+            grant=grant,
+        )
+        profile = self._profile(
+            {
+                "language": bundle.language,
+                "image": self.runtime_profile.get("image")
+                or self._default_image(bundle.language),
+            }
+        )
+        image = str(profile["image"])
+        mounts: list[str] = []
+        for root in grant.roots:
+            if root.role == "workspace":
+                container_path = "/task-workspace"
+            else:
+                container_path = f"/workspace/{root.role}"
+            mount_mode = "ro" if root.access_mode == "read_only" else "rw"
+            mounts.append(f"{root.host_path}:{container_path}:{mount_mode}")
+
+        final: dict[str, Any] = {
+            "ok": False,
+            "status": "error",
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "",
+        }
+        container_roots = {
+            "source": "/workspace/source",
+            "build": "/workspace/build",
+            "output": "/workspace/output",
+            "logs": "/workspace/logs",
+        }
+        log_refs: list[str] = []
+        for index, step in enumerate((*bundle.build_steps, bundle.run_step)):
+            result = await self._run_container(
+                image=image,
+                cmd=list(step.argv),
+                profile=profile,
+                workdir=f"/workspace/{step.cwd}",
+                env={
+                    key: resolve_code_execution_workspace_uri(
+                        value,
+                        roots=container_roots,
+                    )
+                    for key, value in step.env.items()
+                },
+                timeout=timeout,
+                extra_mounts=mounts,
+            )
+            stdout = str(result.get("stdout", ""))
+            stderr = str(result.get("stderr", ""))
+            stdout_path = area / "logs" / f"{index:02d}-{step.role}.stdout.log"
+            stderr_path = area / "logs" / f"{index:02d}-{step.role}.stderr.log"
+            stdout_path.write_text(stdout, encoding="utf-8")
+            stderr_path.write_text(stderr, encoding="utf-8")
+            log_refs.extend(
+                [f"logs/{stdout_path.name}", f"logs/{stderr_path.name}"]
+            )
+            final = dict(result)
+            final["stdout"] = stdout.encode("utf-8")[: self.max_output_bytes].decode(
+                "utf-8", errors="replace"
+            )
+            final["stderr"] = stderr.encode("utf-8")[: self.max_output_bytes].decode(
+                "utf-8", errors="replace"
+            )
+            final["stdout_truncated"] = bool(
+                result.get("stdout_truncated")
+            ) or len(stdout.encode("utf-8")) > self.max_output_bytes
+            final["stderr_truncated"] = bool(
+                result.get("stderr_truncated")
+            ) or len(stderr.encode("utf-8")) > self.max_output_bytes
+            if not result.get("ok"):
+                break
+        final["status"] = "success" if final.get("ok") else str(final.get("status") or "error")
+        final["outputs"] = [
+            path
+            for path in bundle.expected_outputs
+            if (area / Path(path)).is_file() and not (area / Path(path)).is_symlink()
+        ]
+        final["log_refs"] = log_refs
+        return final
+
+    async def inspect_toolchain(
+        self,
+        *,
+        image: str,
+        tool: str,
+        profile: dict[str, Any],
+        timeout: int = 10,
+    ) -> dict[str, Any]:
+        command = CODE_TOOLCHAIN_PROBE_COMMANDS.get(str(tool))
+        if command is None:
+            return {
+                "available": False,
+                "tool": str(tool),
+                "version": "",
+                "raw_version": "",
+                "reason": "unsupported toolchain probe",
+            }
+        result = await self._run_container(
+            image=image,
+            cmd=list(command),
+            profile=profile,
+            timeout=max(1, int(timeout)),
+        )
+        raw_version = str(result.get("stdout") or result.get("stderr") or "").strip()[:300]
+        return {
+            "available": bool(result.get("ok")),
+            "tool": str(tool),
+            "version": extract_code_toolchain_version(raw_version),
+            "raw_version": raw_version,
+            "reason": "observed in runtime image" if result.get("ok") else "toolchain probe failed",
+        }
 
     def is_binary_available(self):
         return shutil.which(self.docker_binary) is not None
@@ -273,11 +391,14 @@ class DockerExecutionResource:
 
     @staticmethod
     def _default_image(language: str) -> str:
-        if language == "nodejs":
-            return "node:22-slim"
-        if language in CODE_RUNTIME_PROFILES:
-            return CODE_RUNTIME_PROFILES[language]["image"]
-        return "python:3.12-slim"
+        canonical = "shell" if language == "shell" else _canonical_code_language(language)
+        try:
+            return DEFAULT_CODE_IMAGES[canonical]
+        except KeyError as error:
+            raise ValueError(
+                f"Docker provider has no default image for code language {canonical!r}; "
+                "configure runtime_profile.image explicitly."
+            ) from error
 
     @staticmethod
     def _safe_relative_path(relative_path: str) -> Path:
@@ -406,9 +527,7 @@ class DockerExecutionResource:
 
     @staticmethod
     def _normalize_cmd(cmd: str | Sequence[str]) -> list[str]:
-        if isinstance(cmd, str):
-            return shlex.split(cmd)
-        return [str(item) for item in cmd]
+        return normalize_command_argv(cmd)
 
     @staticmethod
     def _cmd_allowed(args: list[str], allowed_cmd_prefixes: Sequence[str] | None) -> bool:
@@ -440,7 +559,11 @@ class DockerExecutionResource:
     ) -> tuple[Path | None, Path | None, str | None]:
         roots = [Path(root).expanduser().resolve() for root in (allowed_workdir_roots or [])]
         if workdir is not None:
-            workdir_path = Path(workdir).expanduser().resolve()
+            requested_workdir = Path(workdir).expanduser()
+            if requested_workdir.is_absolute() or not roots:
+                workdir_path = requested_workdir.resolve()
+            else:
+                workdir_path = (roots[0] / requested_workdir).resolve()
         elif roots:
             workdir_path = roots[0]
         else:
@@ -462,7 +585,18 @@ class DockerExecutionResource:
         extra_mounts: list[str] | None = None,
         env: dict[str, str] | None = None,
     ) -> list[str]:
-        args = [self.docker_binary, "run", "--rm", *self.default_args]
+        args = [
+            self.docker_binary,
+            "run",
+            "--rm",
+            *self.default_args,
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "256",
+        ]
         network_mode = str(profile.get("network_mode", "disabled"))
         if network_mode == "disabled":
             args.extend(["--network", "none"])
@@ -494,12 +628,18 @@ class DockerExecutionResource:
         timeout: int | None = None,
         extra_mounts: list[str] | None = None,
     ) -> dict[str, Any]:
+        if self._closed:
+            return {"ok": False, "status": "error", "error": "Docker execution resource is closed."}
         if not image:
             return {"ok": False, "error": "Docker image is required."}
         if not self.is_binary_available():
             return {"ok": False, "error": f"Docker binary not found: { self.docker_binary }"}
         active_profile = self._profile(profile)
-        self.ensure_image_ready(image, profile=active_profile)
+        await asyncio.to_thread(
+            self.ensure_image_ready,
+            image,
+            profile=active_profile,
+        )
         dependency_policy = self._normalize_dependency_policy(active_profile.get("dependency_policy", "deny"))
         if dependency_policy.get("mode") == "request":
             return {
@@ -521,18 +661,37 @@ class DockerExecutionResource:
                 extra_mounts=mounts,
                 env=env,
             )
+            container_name = f"agently-code-{uuid.uuid4().hex[:20]}"
+            args.extend(["--name", container_name])
             args.append(image)
             args.extend(cmd)
+            self._active_containers.add(container_name)
+            completed = None
             try:
-                result = subprocess.run(
+                completed = await run_bounded_process(
                     args,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout or self.timeout,
+                    timeout=float(timeout or self.timeout),
+                    max_output_bytes=self.max_output_bytes,
+                    on_terminate=lambda: self._remove_container(container_name),
                 )
-            except subprocess.TimeoutExpired as error:
-                stdout = error.stdout.decode("utf-8", errors="replace") if isinstance(error.stdout, bytes) else str(error.stdout or "")
-                stderr = error.stderr.decode("utf-8", errors="replace") if isinstance(error.stderr, bytes) else str(error.stderr or "")
+            finally:
+                # A normally exited ``docker run --rm`` has already removed
+                # its container. Timeout/cancellation cleanup owns removal and
+                # must leave a failed target registered so ``async_close`` can
+                # retry instead of silently losing lifecycle ownership.
+                if completed is not None and not completed.timed_out:
+                    self._active_containers.discard(container_name)
+            if completed is None:
+                # ``run_bounded_process`` raises on every path that does not
+                # return a result. Keep the invariant explicit for static
+                # consumers and for any future runner implementation that
+                # might violate that contract.
+                raise RuntimeError(
+                    "docker_runtime.container_result_unavailable"
+                )
+            stdout = completed.stdout.decode("utf-8", errors="replace")
+            stderr = completed.stderr.decode("utf-8", errors="replace")
+            if completed.timed_out:
                 return {
                     "ok": False,
                     "status": "timed_out",
@@ -546,73 +705,18 @@ class DockerExecutionResource:
                             "timeout_seconds": timeout or self.timeout,
                         }
                     ],
+                    "stdout_truncated": completed.stdout_truncated,
+                    "stderr_truncated": completed.stderr_truncated,
                 }
         return {
-            "ok": result.returncode == 0,
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "ok": completed.returncode == 0,
+            "returncode": completed.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_truncated": completed.stdout_truncated,
+            "stderr_truncated": completed.stderr_truncated,
             "diagnostics": [],
         }
-
-    async def run_python_code(self, *, python_code: str, timeout: int | None = None) -> dict[str, Any]:
-        profile = self._profile({"language": "python"})
-        image = str(profile.get("image") or self._default_image("python"))
-        wrapper = (
-            "import json\n"
-            "import pathlib\n"
-            "import traceback\n"
-            "scope = {}\n"
-            "code = pathlib.Path('/sandbox/user_code.py').read_text(encoding='utf-8')\n"
-            "try:\n"
-            "    exec(compile(code, '/sandbox/user_code.py', 'exec'), scope, scope)\n"
-            "    if 'result' in scope:\n"
-            "        print('__AGENTLY_RESULT_JSON__' + json.dumps(scope['result'], ensure_ascii=False, default=str))\n"
-            "except Exception:\n"
-            "    traceback.print_exc()\n"
-            "    raise\n"
-        )
-        output = await self._run_container(
-            image=image,
-            cmd=["python", "/sandbox/main.py"],
-            files={"main.py": wrapper, "user_code.py": str(python_code)},
-            profile=profile,
-            timeout=timeout,
-        )
-        stdout = str(output.get("stdout", ""))
-        result_value = None
-        visible_lines: list[str] = []
-        for line in stdout.splitlines():
-            if line.startswith("__AGENTLY_RESULT_JSON__"):
-                try:
-                    result_value = json.loads(line.removeprefix("__AGENTLY_RESULT_JSON__"))
-                except json.JSONDecodeError:
-                    result_value = line.removeprefix("__AGENTLY_RESULT_JSON__")
-                continue
-            visible_lines.append(line)
-        output["stdout"] = "\n".join(visible_lines)
-        if stdout.endswith("\n") and output["stdout"]:
-            output["stdout"] = f"{ output['stdout'] }\n"
-        if result_value is not None:
-            output["result"] = result_value
-        return output
-
-    async def run_nodejs_code(
-        self,
-        *,
-        js_code: str,
-        args: list[str] | None = None,
-        timeout: int | None = None,
-    ) -> dict[str, Any]:
-        profile = self._profile({"language": "nodejs"})
-        image = str(profile.get("image") or self._default_image("nodejs"))
-        return await self._run_container(
-            image=image,
-            cmd=["node", "/sandbox/main.js", *[str(arg) for arg in (args or [])]],
-            files={"main.js": str(js_code)},
-            profile=profile,
-            timeout=timeout,
-        )
 
     async def run_shell_command(
         self,
@@ -632,8 +736,8 @@ class DockerExecutionResource:
                 "ok": False,
                 "status": "blocked",
                 "need_approval": True,
-                "reason": "workspace_boundary_required",
-                "diagnostics": [{"code": "shell.workspace_boundary_required"}],
+                "reason": "task_workspace_boundary_required",
+                "diagnostics": [{"code": "shell.task_workspace_boundary_required"}],
             }
         if root is None or container_workdir is None:
             return {
@@ -653,6 +757,52 @@ class DockerExecutionResource:
                 "cmd": args,
                 "diagnostics": [{"code": "shell.cmd_not_allowed", "cmd": args}],
             }
+        declared_mounts = profile.get("task_workspace_mounts")
+        extra_mounts: list[str] = []
+        if isinstance(declared_mounts, list) and declared_mounts:
+            mounted_workdirs: list[tuple[int, str]] = []
+            for item in declared_mounts:
+                if not isinstance(item, dict):
+                    raise ValueError("Docker TaskWorkspace mount entries must be mappings.")
+                host_path = Path(str(item.get("host_path") or "")).expanduser().resolve()
+                container_path = str(item.get("container_path") or "").strip()
+                mode = str(item.get("mode") or "ro").strip().lower()
+                if not container_path.startswith("/") or ":" in container_path:
+                    raise ValueError("Docker TaskWorkspace mount container_path must be an absolute container path.")
+                if mode not in {"ro", "rw"}:
+                    raise ValueError("Docker TaskWorkspace mount mode must be 'ro' or 'rw'.")
+                if mode == "rw":
+                    host_path.mkdir(parents=True, exist_ok=True)
+                elif not host_path.exists():
+                    raise FileNotFoundError(f"Read-only Docker TaskWorkspace mount does not exist: {host_path}")
+                extra_mounts.append(f"{host_path}:{container_path}:{mode}")
+                try:
+                    relative_workdir = workdir_path.relative_to(host_path)
+                except ValueError:
+                    continue
+                mounted_workdir = container_path.rstrip("/") or "/"
+                if str(relative_workdir) != ".":
+                    mounted_workdir = (
+                        f"{mounted_workdir.rstrip('/')}/{relative_workdir.as_posix()}"
+                    )
+                mounted_workdirs.append((len(host_path.parts), mounted_workdir))
+            if not mounted_workdirs:
+                return {
+                    "ok": False,
+                    "status": "blocked",
+                    "need_approval": True,
+                    "reason": "workdir_not_mounted",
+                    "workdir": str(workdir_path),
+                    "diagnostics": [
+                        {
+                            "code": "shell.workdir_not_mounted",
+                            "workdir": str(workdir_path),
+                        }
+                    ],
+                }
+            container_workdir = max(mounted_workdirs, key=lambda item: item[0])[1]
+        else:
+            extra_mounts = [f"{root}:/workspace:rw"]
         image = str(profile.get("image") or self._default_image("shell"))
         return await self._run_container(
             image=image,
@@ -660,155 +810,8 @@ class DockerExecutionResource:
             profile=profile,
             workdir=container_workdir,
             timeout=timeout,
-            extra_mounts=[f"{ root }:/workspace"],
+            extra_mounts=extra_mounts,
             env=profile.get("env") if isinstance(profile.get("env"), dict) else None,
-        )
-
-    @staticmethod
-    def _code_runtime_script(language: str) -> str:
-        scripts = {
-            "python": (
-                "set -e\n"
-                "if [ -f /sandbox/requirements.txt ] && [ \"${AGENTLY_DEPENDENCY_POLICY}\" = \"install\" ]; then\n"
-                "  python -m pip install --disable-pip-version-check --target /tmp/agently-python-packages -r /sandbox/requirements.txt\n"
-                "  export PYTHONPATH=\"/tmp/agently-python-packages${PYTHONPATH:+:$PYTHONPATH}\"\n"
-                "fi\n"
-                "exec python /sandbox/main.py \"$@\"\n"
-            ),
-            "nodejs": (
-                "set -e\n"
-                "if [ -f /sandbox/package.json ] && [ \"${AGENTLY_DEPENDENCY_POLICY}\" = \"install\" ]; then\n"
-                "  mkdir -p /tmp/agently-node\n"
-                "  cp /sandbox/package.json /tmp/agently-node/package.json\n"
-                "  if [ -f /sandbox/package-lock.json ]; then cp /sandbox/package-lock.json /tmp/agently-node/package-lock.json; fi\n"
-                "  cd /tmp/agently-node\n"
-                "  if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi\n"
-                "  export NODE_PATH=/tmp/agently-node/node_modules\n"
-                "fi\n"
-                "cd /sandbox\n"
-                "exec node /sandbox/main.js \"$@\"\n"
-            ),
-            "typescript": (
-                "set -e\n"
-                "export DENO_DIR=/tmp/agently-deno\n"
-                "exec deno run --quiet /sandbox/main.ts \"$@\"\n"
-            ),
-            "c": (
-                "set -e\n"
-                "cc /sandbox/main.c -o /tmp/agently-code-runtime-app\n"
-                "exec /tmp/agently-code-runtime-app \"$@\"\n"
-            ),
-            "cpp": (
-                "set -e\n"
-                "c++ /sandbox/main.cpp -o /tmp/agently-code-runtime-app\n"
-                "exec /tmp/agently-code-runtime-app \"$@\"\n"
-            ),
-            "go": (
-                "set -e\n"
-                "export GOCACHE=/tmp/go-build\n"
-                "export GOMODCACHE=/tmp/go-mod\n"
-                "cd /sandbox\n"
-                "if [ -f go.mod ]; then go mod download; fi\n"
-                "go build -o /tmp/agently-code-runtime-app ./main.go\n"
-                "exec /tmp/agently-code-runtime-app \"$@\"\n"
-            ),
-            "rust": (
-                "set -e\n"
-                "if [ -f /sandbox/Cargo.toml ]; then\n"
-                "  mkdir -p /tmp/agently-rust\n"
-                "  cp -R /sandbox/. /tmp/agently-rust/\n"
-                "  cd /tmp/agently-rust\n"
-                "  exec cargo run --quiet -- \"$@\"\n"
-                "fi\n"
-                "rustc /sandbox/main.rs -o /tmp/agently-code-runtime-app\n"
-                "exec /tmp/agently-code-runtime-app \"$@\"\n"
-            ),
-            "java": (
-                "set -e\n"
-                "mkdir -p /tmp/agently-java\n"
-                "javac -d /tmp/agently-java /sandbox/Main.java\n"
-                "exec java -cp /tmp/agently-java Main \"$@\"\n"
-            ),
-            "csharp": (
-                "set -e\n"
-                "mkdir -p /tmp/agently-dotnet\n"
-                "if find /sandbox -maxdepth 1 -name '*.csproj' | grep -q .; then\n"
-                "  cp -R /sandbox/. /tmp/agently-dotnet/\n"
-                "else\n"
-                "  dotnet new console --output /tmp/agently-dotnet --force >/dev/null\n"
-                "  cp /sandbox/Program.cs /tmp/agently-dotnet/Program.cs\n"
-                "fi\n"
-                "cd /tmp/agently-dotnet\n"
-                "exec dotnet run -- \"$@\"\n"
-            ),
-            "php": "set -e\nexec php /sandbox/main.php \"$@\"\n",
-            "ruby": (
-                "set -e\n"
-                "if [ -f /sandbox/Gemfile ] && [ \"${AGENTLY_DEPENDENCY_POLICY}\" = \"install\" ]; then\n"
-                "  mkdir -p /tmp/agently-ruby\n"
-                "  cp /sandbox/Gemfile /tmp/agently-ruby/Gemfile\n"
-                "  if [ -f /sandbox/Gemfile.lock ]; then cp /sandbox/Gemfile.lock /tmp/agently-ruby/Gemfile.lock; fi\n"
-                "  cd /tmp/agently-ruby\n"
-                "  bundle install --path vendor/bundle\n"
-                "  export BUNDLE_GEMFILE=/tmp/agently-ruby/Gemfile\n"
-                "fi\n"
-                "cd /sandbox\n"
-                "exec ruby /sandbox/main.rb \"$@\"\n"
-            ),
-            "perl": "set -e\nexec perl /sandbox/main.pl \"$@\"\n",
-            "r": "set -e\nexec Rscript /sandbox/main.R \"$@\"\n",
-            "lua": "set -e\nexec lua /sandbox/main.lua \"$@\"\n",
-            "bash": "set -e\nexec bash /sandbox/main.sh \"$@\"\n",
-        }
-        return scripts[language]
-
-    def _code_runtime_files(
-        self,
-        *,
-        language: str,
-        source_code: str,
-        files: dict[str, str] | None,
-        profile: dict[str, Any],
-    ) -> dict[str, str]:
-        runtime_files = {str(key): str(value) for key, value in (files or {}).items()}
-        source_file = str(profile.get("source_file") or get_code_runtime_profile(language)["source_file"])
-        if source_code or source_file not in runtime_files:
-            runtime_files[source_file] = str(source_code)
-        runtime_files["run.sh"] = self._code_runtime_script(language)
-        return runtime_files
-
-    async def run_code(
-        self,
-        *,
-        language: str,
-        source_code: str,
-        files: dict[str, str] | None = None,
-        args: list[str] | None = None,
-        timeout: int | None = None,
-    ) -> dict[str, Any]:
-        canonical_language = normalize_code_runtime_language(language)
-        catalog_profile = get_code_runtime_profile(canonical_language)
-        profile = self._profile({
-            "language": canonical_language,
-            "source_file": catalog_profile["source_file"],
-            "entrypoint": catalog_profile["entrypoint"],
-        })
-        image = str(profile.get("image") or catalog_profile["image"])
-        dependency_policy = self._normalize_dependency_policy(profile.get("dependency_policy", "deny"))
-        return await self._run_container(
-            image=image,
-            cmd=["sh", "/sandbox/run.sh", *[str(arg) for arg in (args or [])]],
-            files=self._code_runtime_files(
-                language=canonical_language,
-                source_code=source_code,
-                files=files,
-                profile=profile,
-            ),
-            profile=profile,
-            timeout=timeout,
-            env={
-                "AGENTLY_DEPENDENCY_POLICY": str(dependency_policy.get("mode", "deny")),
-            },
         )
 
     async def run(
@@ -835,7 +838,8 @@ class DockerExecutionResource:
             args.extend(shlex.split(cmd))
         else:
             args.extend([str(item) for item in cmd])
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             args,
             capture_output=True,
             text=True,
@@ -849,10 +853,182 @@ class DockerExecutionResource:
         }
 
 
-class DockerExecutionResourceProvider:
+class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
     name = "DockerExecutionResourceProvider"
     DEFAULT_SETTINGS = {}
     kind = "docker"
+
+    @property
+    def provider_id(self) -> str:
+        return "docker"
+
+    @property
+    def supported_kinds(self) -> tuple[str, ...]:
+        return ("docker", "code_execution")
+
+    def create_resource(
+        self,
+        *,
+        docker_binary: str,
+        timeout: int,
+        default_args: Sequence[str] = (),
+        runtime_profile: dict[str, Any] | None = None,
+        workspace_grant: TaskWorkspaceAccessGrant | None = None,
+        max_output_bytes: int = 20000,
+    ) -> DockerExecutionResource:
+        """Construct the provider-owned resource used by probe and ensure.
+
+        Container-runtime contributors can override this one factory and keep
+        Docker's grant, image, lifecycle, health and cleanup implementation.
+        Runtime-specific probing and command behavior remain owned by their
+        provider/resource subclass; the base does not learn a sandbox enum or
+        mechanism-specific command.
+        """
+
+        return DockerExecutionResource(
+            docker_binary=docker_binary,
+            timeout=timeout,
+            default_args=list(default_args),
+            runtime_profile=runtime_profile,
+            workspace_grant=workspace_grant,
+            max_output_bytes=max_output_bytes,
+        )
+
+    @staticmethod
+    def _isolation_capabilities(default_args: Sequence[str]) -> dict[str, Any]:
+        normalized = [str(item).strip().lower() for item in default_args]
+        unsafe_exact = {
+            "--privileged",
+            "--pid=host",
+            "--userns=host",
+            "--network=host",
+            "--net=host",
+        }
+        unsafe_prefixes = (
+            "--cap-add",
+            "--device",
+            "--mount",
+            "--volume",
+            "--security-opt=seccomp=unconfined",
+        )
+        unsafe_split_options = {
+            ("--pid", "host"),
+            ("--userns", "host"),
+            ("--network", "host"),
+            ("--net", "host"),
+            ("--security-opt", "seccomp=unconfined"),
+        }
+        privileged_override = any(
+            item == "--privileged"
+            or (
+                item.startswith("--privileged=")
+                and item.partition("=")[2] not in {"false", "0", "no"}
+            )
+            for item in normalized
+        )
+        split_overrides = {
+            (item, normalized[index + 1])
+            for index, item in enumerate(normalized[:-1])
+        }
+        has_unsafe_override = any(
+            item in unsafe_exact
+            or item in {"-v", "--volume", "--mount", "--device", "--cap-add"}
+            or item.startswith("-v=")
+            or item.startswith(unsafe_prefixes)
+            for item in normalized
+        ) or privileged_override or bool(
+            split_overrides.intersection(unsafe_split_options)
+        )
+        return {
+            "process_contained": not has_unsafe_override,
+            "host_filesystem_restricted": not has_unsafe_override,
+            "privilege_escalation_blocked": not has_unsafe_override,
+            "syscalls_restricted": not has_unsafe_override,
+            "mechanism": "container",
+            "container_rootfs_read_only": False,
+        }
+
+    async def async_probe(
+        self,
+        *,
+        requirement: "ExecutionResourceRequirement",
+        policy: "ExecutionResourcePolicy",
+    ) -> "ExecutionResourceProviderProbe":
+        config = requirement.get("config", {})
+        config = config if isinstance(config, dict) else {}
+        default_args = config.get("default_args", [])
+        default_args = default_args if isinstance(default_args, list) else []
+        runtime_profile = config.get("runtime_profile", {})
+        runtime_profile = runtime_profile if isinstance(runtime_profile, dict) else {}
+        resource = self.create_resource(
+            docker_binary=str(config.get("docker_binary", "docker")),
+            timeout=int(policy.get("timeout_seconds", config.get("timeout", 60))),
+            default_args=[str(item) for item in default_args],
+            runtime_profile=runtime_profile,
+        )
+        availability = await asyncio.to_thread(resource.inspect_availability)
+        available = bool(availability.get("available"))
+        reason = str(availability.get("reason", "unavailable"))
+        image_fact: dict[str, Any] = {}
+        toolchain_facts: dict[str, dict[str, Any]] = {}
+        if available and str(requirement.get("kind", "")) == "code_execution":
+            required = requirement.get("required_capabilities", {})
+            required = required if isinstance(required, dict) else {}
+            language = _canonical_code_language(
+                str(required.get("language") or runtime_profile.get("language") or "python")
+            )
+            profile = resource._profile(
+                {
+                    "language": language,
+                    "image": resource._default_image(language),
+                    **runtime_profile,
+                }
+            )
+            image = str(profile["image"])
+            inspected = await asyncio.to_thread(resource.inspect_image, image)
+            pull_policy = str(profile.get("image_pull_policy", "never"))
+            image_fact = {
+                "image": image,
+                "exists": bool(inspected.get("exists")),
+                "image_pull_policy": pull_policy,
+            }
+            if not inspected.get("exists") and pull_policy in {"never", "request"}:
+                available = False
+                reason = "required runtime image is not locally available"
+            required_toolchains = required.get("toolchains", {})
+            if available and isinstance(required_toolchains, dict):
+                for tool in required_toolchains:
+                    fact = await resource.inspect_toolchain(
+                        image=image,
+                        tool=str(tool),
+                        profile=profile,
+                        timeout=min(int(policy.get("timeout_seconds", 10)), 10),
+                    )
+                    toolchain_facts[str(tool)] = fact
+                    if not fact.get("available"):
+                        available = False
+                        reason = f"required toolchain is unavailable in runtime image: {tool}"
+        return {
+            "provider_id": self.provider_id,
+            "available": available,
+            "supported_kinds": list(self.supported_kinds),
+            "capabilities": {
+                "languages": ["python", "nodejs", "go", "cpp"],
+                "toolchains": toolchain_facts,
+                "isolation": {
+                    **self._isolation_capabilities(default_args),
+                    "network_mode": str(
+                        runtime_profile.get("network_mode", "disabled")
+                    ),
+                },
+                "workspace_access_modes": ["snapshot", "read_only", "read_write"],
+                "network": "configurable",
+                "safety_class": "isolated",
+                "container_runtime": "runc",
+            },
+            "reason": reason,
+            "meta": {"availability": availability, "runtime_image": image_fact},
+        }
 
     @staticmethod
     def _on_register():
@@ -877,18 +1053,44 @@ class DockerExecutionResourceProvider:
         runtime_profile = config.get("runtime_profile", {})
         if not isinstance(runtime_profile, dict):
             runtime_profile = {}
-        resource = DockerExecutionResource(
+        grant = requirement.get("task_workspace_access_grant")
+        if str(requirement.get("kind", "")) == "code_execution":
+            from agently.core import ExecutionResourceError
+
+            if not isinstance(grant, TaskWorkspaceAccessGrant):
+                raise ExecutionResourceError(
+                    "Docker code execution requires a TaskWorkspace access grant.",
+                    code="execution_resource.workspace_grant_required",
+                    payload={"provider_id": self.provider_id},
+                )
+            required = requirement.get("required_capabilities", {})
+            required = required if isinstance(required, dict) else {}
+            language = _canonical_code_language(
+                str(required.get("language") or runtime_profile.get("language") or "python")
+            )
+            runtime_profile = {
+                "language": language,
+                "image": DockerExecutionResource._default_image(language),
+                **runtime_profile,
+            }
+        resource = self.create_resource(
             docker_binary=str(config.get("docker_binary", "docker")),
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 60))),
             default_args=[str(item) for item in default_args],
             runtime_profile=runtime_profile,
+            workspace_grant=grant if isinstance(grant, TaskWorkspaceAccessGrant) else None,
+            max_output_bytes=int(policy.get("max_output_bytes", 20000)),
         )
-        availability = resource.ensure_available()
+        availability = await asyncio.to_thread(resource.ensure_available)
         active_profile = resource._profile()
         image_preparation: dict[str, Any] | None = None
         image = str(active_profile.get("image", ""))
         if image:
-            image_preparation = resource.ensure_image_ready(image, profile=active_profile)
+            image_preparation = await asyncio.to_thread(
+                resource.ensure_image_ready,
+                image,
+                profile=active_profile,
+            )
         return {
             "handle_id": f"docker:{ uuid.uuid4().hex }",
             "resource": resource,
@@ -905,8 +1107,12 @@ class DockerExecutionResourceProvider:
 
     async def async_health_check(self, handle: "ExecutionResourceHandle") -> "ExecutionResourceStatus":
         resource = handle.get("resource")
-        return "ready" if resource is not None and hasattr(resource, "run") else "unhealthy"
+        if not isinstance(resource, DockerExecutionResource):
+            return "unhealthy"
+        availability = await asyncio.to_thread(resource.inspect_availability)
+        return "ready" if availability.get("available") else "unhealthy"
 
     async def async_release(self, handle: "ExecutionResourceHandle") -> None:
-        _ = handle
-        return None
+        resource = handle.get("resource")
+        if isinstance(resource, DockerExecutionResource):
+            await resource.async_close()

@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Workspace and its ContextBuilder substrate now live in the Foundation package
-# `agently.core.workspace`. Session is a Workspace consumer, not the owner
-# namespace for the storage substrate, so it no longer re-exports those
-# surfaces. Import Workspace/ContextBuilder from `agently.core.workspace`.
+# Session owns conversational lifecycle only. Durable records are supplied by
+# RecordStore, while progressive disclosure is supplied independently by
+# TaskContext/ContextReader; neither capability is re-exported here.
 from .Session import Session
 
 __all__ = [

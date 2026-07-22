@@ -1,0 +1,223 @@
+---
+title: Agently 4.1.4.2 Release Notes
+description: Breaking TaskContext, TaskWorkspace, RecordStore, and SkillLibrary ownership convergence.
+keywords: Agently, 4.1.4.2, TaskContext, TaskWorkspace, RecordStore, SkillLibrary
+---
+
+# Agently 4.1.4.2 Release Notes
+
+4.1.4.2 is a breaking architecture release. The former
+combined Workspace and Skills execution ownership is replaced rather than
+deprecated through aliases.
+
+## Core changes
+
+| Area | What changed | Recommended usage | Compatibility / risk | Evidence |
+|---|---|---|---|---|
+| Task information | `TaskContext` owns sources and derived indexes; `ContextReader` owns consumer-bound progressive readback | Bind sources to TaskContext and read through a scoped ContextReader | Breaking owner split; no combined Workspace shim | Context, AgentTask, recovery, and typing suites |
+| Files and records | `TaskWorkspace` owns task files; `RecordStore` owns durable records, snapshots, events, and memory persistence | Bind each owner explicitly with `use_task_workspace(...)` and `use_record_store(...)` | Breaking replacement of the former combined Workspace surface | Workspace/code-runtime and RecordStore suites |
+| Skills | `SkillLibrary` owns immutable revisions; AgentExecution owns exact-revision selection and binding | Install with the management facade when needed, resolve through `Agently.skill_library`, and bind with `agent.require_skills(...)` | Removed Skills route/strategy and prompt-injection ownership | Companion validators and release-pinned Skill example |
+| AgentTask delivery | TaskBoard dependency Actions, control decisions, dedicated artifact drafting, terminal verification, and promotion now share one canonical evidence lineage | Declare the required artifact path and let AgentTask materialize, verify, and promote it | Runtime hardening; manifest-only finalization no longer stalls before body materialization | Warm full-flow preflight, real TaskBoard scenario, and AgentTask regressions |
+| TriggerFlow sub-flows | Active frames are visible while running and accept frame-scoped signal/cancel control | Use explicit executions plus `get_sub_flow_frames()`, `async_emit_to_sub_flow(...)`, and `async_cancel_sub_flow(...)` | Additive API; cancellation fences write-back and continuation | Issue [#320](https://github.com/AgentEra/Agently/issues/320) and dedicated regression suite |
+| Execution providers | Direct runtime provider/executor protocols no longer require PluginManager lifecycle hooks | Implement the runtime protocol; implement plugin lifecycle only when loading through PluginManager | Structural typing correction; runtime dispatch is unchanged | Full pyright gate and provider/action tests |
+
+## New owner boundaries
+
+- `TaskContext` owns the task information aggregate, source bindings, one
+  internal derived ContextIndex lifecycle, and its read handles.
+- `ContextReader` is a public consumer/phase-bound handle created or restored
+  only by TaskContext. It performs progressive retrieval into immutable
+  `ContextPackage` values; it is not a second aggregate owner.
+- `TaskWorkspace` owns task files, containment, mutation policy, readback,
+  digests, and file refs.
+- `RecordStore` owns records, retrieval indexes, links, checkpoints,
+  TriggerFlow snapshots/events, and SessionMemory persistence. The local store
+  materializes under `<root>/.agently/records/records.db`.
+- `SessionMemory` owns memory extraction/compression and accepted RecordStore
+  writes; active recall joins task information through a `session_memory`
+  ContextSource instead of a parallel prompt-injection pipeline.
+- `SkillLibrary` owns immutable installed Skill and Skill-pack revisions.
+- `AgentExecution` owns task-scoped Skill selection/binding and shares its
+  TaskContext with AgentTask.
+
+Removed public/development concepts include `Workspace`, `ContextBuilder`,
+`SkillsManager`, the SkillsExecutor plugin/strategy engine,
+`skill_activation`, `workspace_operation`, `create_workspace`, and
+`use_workspace`.
+
+## Skills application interface
+
+`agent.use_skills(...)`, `agent.require_skills(...)`, and
+`agent.use_skills_packs(...)` bind installed Skill revisions directly to an
+ordinary AgentExecution. There is no `skills` route.
+
+`Agently.skills_executor` remains a thin compatibility/management facade for
+install, configure, list, inspect, read, context-pack projection, and the
+TaskDAG helper. Authorized Git or local source snapshots are materialized by a
+`SkillSourceProvider` before immutable SkillLibrary installation. It does not
+infer capabilities, select routes, or execute Skill-local strategies.
+Remote compatibility installation defaults to `untrusted`, and selected
+Git/local subpaths reject symlink components that escape the materialized
+source root.
+
+An explicitly authorized script from a trusted exact Skill revision may be
+bound as an ordinary `code_execution` Action. The Skill layer supplies only
+revision/path/digest identity; ActionRuntime, TaskWorkspace, language adapters,
+and ExecutionResource retain execution ownership.
+
+`agent.run_skills_task(...)` is a result-shaped adapter over ordinary
+AgentExecution.
+
+Skill revision availability, concrete ModelRequest-bound context consumption,
+and Action execution evidence are separate facts. AgentTask does not expose
+Skills as planner capabilities or accept a `skills` execution shape.
+`skills.revisions.bound` reports revision binding without claiming activation;
+`skills.context.bound` reports actual response-bound context consumption.
+
+The release-pinned Skill check now follows that ownership literally. It uses
+the retained management facade only to configure/install/inspect the canonical
+`SkillLibrary`, resolves the immutable revision through `Agently.skill_library`,
+and binds that exact revision with `agent.require_skills(...)`. The former
+`resolve_skills_plan(...)` / `prompt_bindings` assertion was removed because it
+pinned the deleted SkillsExecutor planning and prompt-injection engine rather
+than supported 4.1.4.2 behavior.
+
+## AgentTask and durability
+
+AgentTask planning, observations, verification, and replan state stay in memory
+and runtime logs by default. Set
+`options={"agent_task": {"record_store_recovery": True}}` only when restart
+recovery is required. Final files and their trusted physical readbacks remain
+TaskWorkspace artifacts; recovery refs remain RecordStore refs.
+
+When recovery is enabled, AgentTask also snapshots TaskContext entries,
+reconstructible built-in sources, ContextReader disclosure state, exact
+ContextPackages, and ContextConsumptions. Skill Context resumes by immutable
+revision reference; unsupported custom ContextSources fail resume explicitly.
+ContextSources now expose structural descriptor enumeration and bounded exact
+readback. TaskContext's internal ContextIndex builds revision/profile/provider-
+keyed structural, lexical, or optional hybrid partitions; ContextReader owns
+consumer-local query offsets, exact source reads, semantic selection and
+ContextPackage construction. `source_kinds` is the open vocabulary of sources
+actually attached to the TaskContext, not a hard-coded framework list.
+
+ContextReader now applies a conservative media boundary. Text and successfully
+parsed PDF/DOCX/XLSX/PPTX content may enter a ContextPackage. Images are
+ref-only unless the exact consumer explicitly declares image attachment
+support; capable AgentTask requests bind validated image blocks through the
+ModelRequest attachment channel. Binary, unknown, unparsed, invalid, or empty
+media remains ref-only or fails the selected read, never filename-based guessed
+content.
+
+Action specs expose `required_input_keys`, derived from local function
+signatures or declared by executor/MCP adapters. Native tool schemas carry the
+same requirement, and model-authored calls missing required keys fail before
+dispatch. TaskBoard scoped retrieval remains a ContextReader path during both
+initial planning and repair; a retrieval-only support card is not relabeled as
+an Action card.
+
+`max_model_requests` is one atomically shared lineage budget. Descendant
+executions consume ancestor allowance instead of resetting it; child-local
+limits remain scoped to that child subtree.
+
+Required TaskWorkspace delivery paths are represented by digest-pinned staged
+candidates during terminal verification. Verifier rejection leaves the prior
+target unchanged. Acceptance triggers atomic target promotion and complete
+post-promotion readback; any promotion, digest, or readback failure changes the
+task to blocked. TaskWorkspace readback cannot satisfy a required Action or
+Skill binding.
+
+When strict verification reports missing material evidence,
+`replan_segment` now creates an evidence-reacquisition card followed by a
+dependent artifact-repair card. The host requires a new stable
+`(owner, locator, content_version, range)` source identity before the repair is
+scheduled. Re-reading the final artifact or the same unchanged source under a
+fresh call id is a setback, not evidence progress.
+After reacquisition, another repair is allowed only when a newly acquired
+reference is actually cited by the original failed criterion or material-claim
+check; unrelated new material cannot keep a replan loop alive.
+Dependency readback evidence is canonicalized before a TaskBoard card prompt is
+built. Prompt projection, host binding validation, acceptance indexing and
+result persistence now share that one live ledger identity domain, so a legal
+model-selected reference cannot change merely because the host later rebuilds
+an ordered evidence view. Material-claim targets use a host-owned stable exact
+claim identity rather than response-local `claim_N` positions.
+
+A control card that explicitly returns `sufficient=false` cannot become
+completed through `next_board_action=finalize`; it normalizes to a setback.
+When a sufficient completed control card instead returns an artifact manifest
+with a draftable outline but no final body, AgentTask runs its existing
+dedicated artifact-draft stage. That stage receives the same bounded canonical
+Action/readback evidence ledger used by control, and the resulting candidate
+still passes terminal verification, digest-pinned promotion, and complete
+post-promotion readback. Framework-owned materialization work is not treated as
+unfinished semantic card work, so this valid handoff cannot appear to stall.
+
+## Workspace-backed code execution
+
+`agent.enable_code_runtime(...)` supports Python 3.10+, Node.js 18+, Go 1.25+,
+and C++20 through provider-neutral adapters. Every run follows
+TaskWorkspace grant -> provider binding -> immutable bundle materialization ->
+argv execution -> output readback -> release/close. Docker is one provider;
+`trusted_local` is an explicit unsafe fallback and never satisfies a hard
+isolation requirement. Provider probes report observed toolchain versions and
+safety/isolation facts; minimum or exact adapter constraints participate in
+ordered selection, and the selected facts are preserved in Action result
+metadata.
+Isolation probes use concrete boolean capability axes rather than provider
+self-labels. Expected outputs are bounded normalized paths under `output/`;
+missing outputs, cleanup failure, timeout, and cancellation fail visibly, with
+owned processes or containers terminated.
+
+For a TaskWorkspace-bound `run_bash` Action, a relative `workdir` is resolved
+inside the injected root. The model may use `.` or a child path, and may also
+echo the logical TaskWorkspace locator `.agently/files/<execution-id>` (or one
+of its children) already shown in evidence; the host recognizes that locator
+as the current root instead of appending it a second time. Traversal outside
+the injected root remains rejected.
+
+External isolation providers use ordered candidate descriptors. Concrete
+gVisor and Seatbelt implementations remain contributor-owned in PR #325 and
+#327; this development branch provides their migration contract without
+copying either implementation.
+
+## TriggerFlow and Blocks
+
+TriggerFlow accepts `record_store=...`; `record_store=False` opts out. A
+RecordStore may also provide explicit snapshot, runtime-event, lease, and
+artifact-ref ports. TriggerFlow does not create a TaskWorkspace.
+
+Active children created by `to_sub_flow(...)` now register a `running` frame
+before child work starts. An explicit parent execution can inspect frames,
+forward a best-effort signal with `async_emit_to_sub_flow(...)`, or cancel and
+fence one child with `async_cancel_sub_flow(...)` without closing the parent.
+Cancellation records a `cancelled` frame and skips child write-back plus parent
+continuation. Live child tasks are process-local: loading a snapshot containing
+a `running` or `cancel_requested` frame fails closed, while projected `waiting`
+frames keep their existing save/load/resume contract.
+
+Blocks retains read-only `context_read` over a caller-bound ContextReader.
+Writes and other side effects stay with TaskWorkspace Actions, RecordStore,
+ActionRuntime, policy, or host code.
+
+## Migration
+
+```python
+agent = (
+    Agently.create_agent("review")
+    .use_task_workspace("./project", mode="read_only")
+    .use_record_store("./project-state", mode="read_write")
+)
+```
+
+This development-line change intentionally provides no shim for the removed
+combined owner. The rollback baseline for this refactor is recorded in the
+local development history and spec evidence.
+
+## Compatibility
+
+- Package version: `4.1.4.2`.
+- Release manifest: `compatibility/releases/4.1.4.2.json`.
+- Agently-Skills catalog generation `v2` is aligned with framework `4.1.4.2`.
+- Recommended DevTools version remains `agently-devtools >=0.1.10,<0.2.0`;
+  unknown `triggerflow.*` RuntimeEvents remain fail-open compatible.

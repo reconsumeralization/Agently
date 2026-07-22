@@ -30,7 +30,7 @@ agent = create_agent(
 )
 
 agent.enable_python(
-    desc="Calculate deterministic GitHub issue metrics from provided issue text and labels. Assign metrics to `result`.",
+    desc="Calculate deterministic GitHub issue metrics from provided issue text and labels. Print metrics as JSON.",
     expose_to_model=True,
 )
 
@@ -42,7 +42,7 @@ if __name__ == "__main__":
                 "Process this GitHub issue. First call the Python action to compute: "
                 "label_count, comment_count, whether TriggerFlow is involved, whether DevTools is involved, "
                 "and a severity score where bug=3, triggerflow=2, devtools=1. "
-                "The Python code must assign a dict to `result` with keys label_count, comment_count, "
+                "The Python code must print one JSON object with keys label_count, comment_count, "
                 "triggerflow_involved, devtools_involved, and severity_score. "
                 "Then reply with a triage summary, suggested owner, and next debugging step."
             ),
@@ -75,7 +75,7 @@ if __name__ == "__main__":
 # agent.enable_python(expose_to_model=True)
 #   |
 #   v
-# model plans: run_python(python_code="issue=...\nresult={label_count:3,...,severity_score:6}")
+# model plans: run_python(source_code="...print(json.dumps(result))")
 #   |
 #   v
 # Docker-backed Python profile -> {label_count:3, comment_count:3, triggerflow_involved:True,

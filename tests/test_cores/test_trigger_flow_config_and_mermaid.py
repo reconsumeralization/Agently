@@ -3,6 +3,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
+from agently.core.storage import RecordStore
 from agently.types.plugins import ExecutionSnapshotStore, RuntimeEventStore
 from agently.types.data.event import normalize_triggerflow_event_type
 
@@ -762,12 +763,10 @@ async def test_trigger_flow_chunk_runtime_events_include_input_output_and_origin
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_provider(tmp_path):
-    agent = Agently.create_agent("triggerflow-workspace-provider").use_workspace(tmp_path / "run")
-    workspace = agent.workspace
-    assert workspace is not None
+async def test_trigger_flow_persists_runtime_events_and_snapshots_to_record_store(tmp_path):
+    record_store = RecordStore(tmp_path / "run", mode="read_write")
 
-    flow = TriggerFlow(name="workspace-provider-flow")
+    flow = TriggerFlow(name="record-store-provider-flow")
 
     async def compute(data: TriggerFlowRuntimeData):
         await data.async_set_state("input", data.value)
@@ -776,8 +775,9 @@ async def test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_p
     flow.to(compute).end()
     execution = flow.create_execution(
         runtime_resources={
-            "snapshot_store": cast(ExecutionSnapshotStore, workspace),
-            "runtime_event_store": cast(RuntimeEventStore, workspace),
+            "record_store": record_store,
+            "snapshot_store": cast(ExecutionSnapshotStore, record_store),
+            "runtime_event_store": cast(RuntimeEventStore, record_store),
         }
     )
 
@@ -787,7 +787,7 @@ async def test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_p
         if event.meta.get("execution_id") == execution.id:
             captured.append(event)
 
-    hook_name = "test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_provider.capture"
+    hook_name = "test_trigger_flow_persists_runtime_events_and_snapshots_to_record_store.capture"
     Agently.event_center.register_hook(capture, hook_name=hook_name)
     try:
         result = await execution.async_start(7)
@@ -799,15 +799,28 @@ async def test_trigger_flow_persists_runtime_events_and_snapshots_to_workspace_p
     snapshot_ref = await execution.async_save(step_id="closed")
     assert snapshot_ref["collection"] == "checkpoints"
     assert snapshot_ref["scope"]["step_id"] == "closed"
-    snapshot_state = await workspace.get_data(snapshot_ref)
+    snapshot_state = await record_store.get_data(snapshot_ref)
     assert snapshot_state["execution_id"] == execution.id
 
-    records = await workspace.query_runtime_events(execution.id)
-    captured_event_ids = [event.event_id for event in captured]
+    records = await record_store.query_runtime_events(execution.id)
+    retention_diagnostics = [
+        event
+        for event in captured
+        if event.event_type.startswith("triggerflow.execution_retention_")
+    ]
+    captured_event_ids = [
+        event.event_id
+        for event in captured
+        if event not in retention_diagnostics
+    ]
     persisted_event_ids = [record["event_id"] for record in records]
 
     assert captured_event_ids
     assert captured_event_ids == persisted_event_ids
+    assert [event.event_type for event in retention_diagnostics] == [
+        "triggerflow.execution_retention_applied"
+    ]
+    assert retention_diagnostics[0].event_id not in persisted_event_ids
     assert any(record["event_type"] == "triggerflow.execution_started" for record in records)
     assert any(record["event_type"] == "triggerflow.execution_closed" for record in records)
 

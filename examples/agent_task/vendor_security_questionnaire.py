@@ -12,6 +12,7 @@ from _business_example_common import (
     default_workspace,
     judge_business_artifact,
     print_stream_item,
+    resolve_result_artifact_path,
     write_summary,
 )
 
@@ -68,13 +69,12 @@ JUDGE_RULES = [
 async def main() -> None:
     workspace_dir = default_workspace("vendor-security-questionnaire")
     workspace_dir.mkdir(parents=True, exist_ok=True)
-    agent = Agently.create_agent("agent-task-vendor-security-questionnaire").use_workspace(workspace_dir)
+    agent = Agently.create_agent("agent-task-vendor-security-questionnaire").use_task_workspace(workspace_dir).use_record_store(workspace_dir, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=0.0)
-    workspace = agent.workspace
-    if workspace is None:
-        raise RuntimeError("Workspace was not initialized.")
+    task_workspace = agent.task_workspace
+    record_store = agent.record_store
 
-    agent.enable_workspace_file_actions(read=True, write=True, expose_to_model=True)
+    agent.enable_task_workspace_file_actions(read=True, write=True, expose_to_model=True)
 
     @agent.action_func
     def fetch_security_context(request_id: str) -> dict[str, Any]:
@@ -83,34 +83,34 @@ async def main() -> None:
         return SECURITY_CONTEXT
 
     agent.use_actions(fetch_security_context)
-    await workspace.put(
+    await record_store.put(
         content=SECURITY_CONTEXT,
         collection="observations",
         kind="vendor_security_context",
         summary="Customer security questionnaire and internal security context for SECQ-77",
-        scope={"task_id": TASK_ID},
+        scope={"task_id": TASK_ID, "execution_id": TASK_ID},
         source={"type": "mock_business_system", "name": "security_context"},
     )
 
     print("[SETUP] Vendor security questionnaire")
-    print(f"[SETUP] Workspace: {workspace_dir}")
+    print(f"[SETUP] TaskWorkspace: {workspace_dir}")
     print(f"[SETUP] Provider: {provider}, model_key={TASK_MODEL_KEY}")
 
     execution = agent.create_task(
         task_id=TASK_ID,
         goal=(
             "Prepare a customer-facing answer for security questionnaire SECQ-77. Use fetch_security_context "
-            "and Workspace context as factual evidence, then write the final answer to "
+            "and TaskWorkspace context as factual evidence, then write the final answer to "
             f"{OUTPUT_FILE}. The mock security system provides source facts only; the model owns whether the answer is supportable."
         ),
         success_criteria=[
-            "The final Markdown answer exists in Workspace.",
+            "The final Markdown answer exists in TaskWorkspace.",
             "The answer responds to each customer question using the supplied security context.",
             "The answer distinguishes completed, scheduled, optional, and unknown security facts.",
             "The answer avoids unsupported security claims.",
             "The execution evidence includes reading back or checking the final answer content.",
         ],
-        workspace=workspace_dir,
+        task_workspace=workspace_dir,
         max_iterations=3,
         limits={"max_model_requests": 12, "max_seconds": 240, "max_no_progress_seconds": 90},
         options={
@@ -135,7 +135,7 @@ async def main() -> None:
 
     result = await execution.async_start()
     meta = await execution.async_get_meta()
-    output_path = workspace.files_root / OUTPUT_FILE
+    output_path = resolve_result_artifact_path(task_workspace, result, OUTPUT_FILE)
     artifact_text = output_path.read_text(encoding="utf-8") if output_path.is_file() else ""
     model_judge = await judge_business_artifact(
         agent,
@@ -161,8 +161,8 @@ async def main() -> None:
             and item.value["verification"].get("is_complete") is False
             for item in stream_items
         ),
-        "workspace_checkpoint_count": len(await workspace.checkpoint_history(TASK_ID)),
-        "workspace_decision_count": len(meta["workspace_refs"]["decisions"]),
+        "record_store_recovery_ref_count": len(meta.get("record_refs", {}).get("checkpoints", [])),
+        "workspace_process_record_count": len(meta.get("record_refs", {}).get("decisions", [])),
         "stream_trace_file": str(stream_trace_path),
         "output_file": str(output_path),
     }

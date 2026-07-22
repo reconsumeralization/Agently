@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import PurePosixPath
@@ -22,13 +23,23 @@ from pathlib import PurePosixPath
 from .TaskShared import *
 
 
+_VERIFIER_RESULT_EMBEDDED_EVIDENCE_KEYS = frozenset(
+    {
+        "evidence_ledger",
+        "evidence_use",
+        "taskboard_evidence_view",
+        "taskboard_scoped_evidence_view",
+    }
+)
+
+
 class AgentTaskVerificationMixin(AgentTaskMixinBase):
     def _iteration_prompt_summaries(self) -> list[dict[str, Any]]:
         """Bounded, low-noise iteration history for plan/verify prompts.
 
         Full iteration records (including execution_meta) stay in self.iterations
-        and the Workspace; prompts receive only step intent, the verification
-        outcome, and Workspace refs so context does not grow unboundedly with the
+        and the TaskWorkspace; prompts receive only step intent, the verification
+        outcome, and TaskWorkspace refs so context does not grow unboundedly with the
         full execution metadata of every prior step.
         """
         limit = self._iterations_prompt_limit()
@@ -47,6 +58,17 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 if isinstance(execution_meta, Mapping)
                 else {}
             )
+            material_claim_projection = {
+                "valid": (
+                    verification.get("material_claim_audit", {}).get("valid")
+                    if isinstance(verification.get("material_claim_audit"), Mapping)
+                    else None
+                ),
+                "repair_contract": DataFormatter.sanitize(
+                    verification.get("material_claim_repair_contract", {})
+                ),
+            }
+            terminal_convergence = verification.get("terminal_convergence")
             summaries.append(
                 {
                     "iteration": record.get("iteration"),
@@ -62,6 +84,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                         "replan_instruction": verification.get("replan_instruction", ""),
                         "repair_constraints": verification.get("repair_constraints", []),
                         "next_step_requirements": verification.get("next_step_requirements", []),
+                        "material_claim_audit": material_claim_projection,
+                        "terminal_convergence": (
+                            DataFormatter.sanitize(terminal_convergence)
+                            if isinstance(terminal_convergence, Mapping)
+                            else {}
+                        ),
                     },
                     "observation_ref": record.get("observation_ref"),
                     "verification_ref": record.get("verification_ref"),
@@ -95,6 +123,245 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             )
         return summaries
 
+    def _strict_terminal_relevant_state(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        execution_evidence_summary: Mapping[str, Any],
+        repair_contract: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        raw_carriers = candidate.get("carriers")
+        carriers = (
+            [item for item in raw_carriers if isinstance(item, Mapping)]
+            if isinstance(raw_carriers, Sequence)
+            and not isinstance(raw_carriers, str | bytes | bytearray)
+            else [candidate]
+        )
+        source_targets: list[dict[str, Any]] = []
+        for reference_id in self._task_reference_catalog.offered_references():
+            resolved = self._task_reference_catalog.resolve(reference_id)
+            target = resolved.get("target")
+            if not isinstance(target, Mapping):
+                continue
+            body = ""
+            for field in ("body", "content", "text", "snippet", "preview", "result", "output", "value"):
+                value = target.get(field)
+                if isinstance(value, str) and value:
+                    body = value
+                    break
+            source_targets.append(
+                {
+                    "reference_id": reference_id,
+                    "content_version_id": str(target.get("content_version_id") or ""),
+                    "action_call_id": str(target.get("action_call_id") or ""),
+                    "status": str(target.get("status") or resolved.get("status") or ""),
+                    "body_state": str(target.get("body_state") or resolved.get("body_state") or ""),
+                    "content_digest": hashlib.sha256(body.encode("utf-8")).hexdigest() if body else "",
+                }
+            )
+        capability_facts = {
+            "required_actions": self._normalize_string_list(execution_evidence_summary.get("required_actions")),
+            "required_skills": self._normalize_string_list(execution_evidence_summary.get("required_skills")),
+            "current_action_ids": self._normalize_string_list(execution_evidence_summary.get("action_ids")),
+            "current_consumed_skill_ids": self._normalize_string_list(
+                execution_evidence_summary.get("consumed_skill_ids")
+            ),
+            "current_capabilities_used": self._normalize_string_list(
+                execution_evidence_summary.get("capabilities_used")
+            ),
+            "current_capability_evidence": execution_evidence_summary.get("capability_evidence", {}),
+            "current_actions": execution_evidence_summary.get("actions", []),
+            "current_replan_signals": execution_evidence_summary.get(
+                "current_replan_signals",
+                execution_evidence_summary.get("replan_signals", []),
+            ),
+            "current_failed_actions": self._normalize_string_list(
+                execution_evidence_summary.get("failed_actions")
+            ),
+            "current_blocked_actions": self._normalize_string_list(
+                execution_evidence_summary.get("blocked_actions")
+            ),
+            "current_approval_required_actions": self._normalize_string_list(
+                execution_evidence_summary.get("approval_required_actions")
+            ),
+            "satisfied_required_actions": sorted(self._satisfied_required_actions),
+            "satisfied_required_skills": sorted(self._satisfied_required_skills),
+            "satisfied_capabilities": sorted(self._satisfied_capabilities),
+            "satisfied_succeeded_actions": sorted(self._satisfied_succeeded_actions),
+            "requirements": self._capability_evidence_requirements(execution_evidence_summary),
+        }
+        return {
+            "candidate_content_version_ids": [
+                str(item.get("content_version_id") or "")
+                for item in carriers
+                if str(item.get("content_version_id") or "")
+            ],
+            "source_reference_targets": source_targets,
+            "capability_facts": capability_facts,
+            "criterion_subjects": [
+                f"criterion:{index}" for index, _criterion in enumerate(self.success_criteria, start=1)
+            ],
+            "output_subjects": ["output:final_result"],
+            "repair_contract": dict(repair_contract),
+        }
+
+    def _terminal_convergence_preflight(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        execution_evidence_summary: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        for record in self._terminal_convergence_state.active_records():
+            repair_contract = record.get("repair_contract")
+            issue_value = record.get("issue")
+            if not isinstance(repair_contract, Mapping) or not isinstance(issue_value, Mapping):
+                continue
+            if (
+                str(issue_value.get("gate_kind") or "") == "output_contract"
+                and str(issue_value.get("issue_code") or "")
+                == "terminal_verifier_output_invalid"
+            ):
+                # The candidate state is intentionally unchanged for a verifier
+                # response-contract retry. Only another response can repair this
+                # host/model join, so do not suppress that request as redundant.
+                continue
+            state_digest = relevant_state_digest(
+                self._strict_terminal_relevant_state(
+                    candidate=candidate,
+                    execution_evidence_summary=execution_evidence_summary,
+                    repair_contract=repair_contract,
+                )
+            )
+            if state_digest != str(record.get("last_state_digest") or ""):
+                continue
+            issue = TerminalIssue(
+                str(issue_value.get("gate_kind") or ""),
+                str(issue_value.get("issue_code") or ""),
+                str(issue_value.get("contract_subject") or ""),
+            )
+            decision = self._terminal_convergence_state.record_detection(
+                issue,
+                state_digest,
+                repair_contract=repair_contract,
+                verifier_called=False,
+            )
+            return self._terminal_convergence_verification(
+                issue=issue,
+                repair_contract=repair_contract,
+                decision=decision,
+                verifier_called=False,
+                candidate_final_result=str(candidate.get("text") or ""),
+            )
+        return None
+
+    async def _terminal_capability_evidence_preflight(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        execution_evidence_summary: Mapping[str, Any],
+        candidate_final_result: str,
+    ) -> dict[str, Any] | None:
+        """Fail or repair deterministic capability gaps before semantic review.
+
+        A semantic verifier cannot create Action execution evidence. Running it
+        while an authored ``action_succeeded`` requirement is missing both
+        wastes a request and lets an output-contract problem mask the actionable
+        capability gap. The host therefore evaluates the structured evidence
+        contract first and sends any missing capability directly to the normal
+        terminal convergence/repair owner.
+        """
+
+        self._accumulate_capability_evidence(execution_evidence_summary)
+        missing, unenforced = self._evaluate_capability_evidence(
+            execution_evidence_summary
+        )
+        if unenforced:
+            self.diagnostics.setdefault(
+                "unenforced_evidence_requirements",
+                [],
+            ).extend(unenforced)
+        if not missing:
+            return None
+        missing_message = (
+            "Missing required capability evidence: " + ", ".join(missing)
+        )
+        preflight = {
+            "is_complete": False,
+            "requires_block": False,
+            "reason": missing_message,
+            "failure_analysis": missing_message,
+            "acceptance_delta": [missing_message],
+            "missing_criteria": [missing_message],
+            "replan_instruction": (
+                "Produce the authored structured capability evidence before semantic verification."
+            ),
+            "repair_constraints": [missing_message],
+            "next_step_requirements": [missing_message],
+            "final_result_required": bool(candidate_final_result.strip()),
+            "final_result": candidate_final_result,
+            "missing_required_capabilities": list(missing),
+            "missing_capability_evidence": list(missing),
+            "unenforced_evidence_requirements": DataFormatter.sanitize(
+                unenforced
+            ),
+            "guard_reasons": ["capability_evidence_missing"],
+        }
+        return await self._apply_strict_terminal_gates(
+            preflight,
+            candidate=candidate,
+            execution_evidence_summary=execution_evidence_summary,
+            verifier_called=False,
+        )
+
+    def _active_terminal_verification_protocol_repair(
+        self,
+        *,
+        current_offered_reference_ids: set[str],
+        current_offered_claim_keys: Sequence[str],
+    ) -> dict[str, Any]:
+        """Project the latest verifier response-contract failure into its retry.
+
+        The host forwards the structured repair contract verbatim; it does not
+        interpret verifier prose or alter business evidence. Current offered
+        identity sets are supplied separately so stale response-local ids can
+        never become authoritative on the retry.
+        """
+
+        records = list(self._terminal_convergence_state.active_records())
+        for record in reversed(records):
+            issue = record.get("issue")
+            repair_contract = record.get("repair_contract")
+            if not isinstance(issue, Mapping) or not isinstance(
+                repair_contract,
+                Mapping,
+            ):
+                continue
+            if (
+                str(issue.get("gate_kind") or "") != "output_contract"
+                or str(issue.get("issue_code") or "")
+                != "terminal_verifier_output_invalid"
+            ):
+                continue
+            try:
+                occurrence = int(record.get("occurrence") or 0)
+            except (TypeError, ValueError):
+                occurrence = 0
+            return DataFormatter.sanitize(
+                {
+                    "occurrence": occurrence,
+                    "repair_contract": dict(repair_contract),
+                    "current_offered_reference_ids": sorted(
+                        current_offered_reference_ids
+                    ),
+                    "current_offered_claim_keys": [
+                        str(value)
+                        for value in current_offered_claim_keys
+                        if str(value).strip()
+                    ],
+                }
+            )
+        return {}
+
     @classmethod
     def _planner_repair_context(cls, previous_iterations: list[dict[str, Any]]) -> dict[str, Any]:
         if not previous_iterations:
@@ -123,6 +390,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         next_step_requirements = normalize_list(verification.get("next_step_requirements"))
         replan_instruction = str(verification.get("replan_instruction") or "").strip()
         failure_analysis = str(verification.get("failure_analysis") or "").strip()
+        material_claim_repair_contract = verification.get("material_claim_repair_contract")
+        if not isinstance(material_claim_repair_contract, Mapping):
+            material_claim_repair_contract = {}
+        else:
+            material_claim_repair_contract = dict(
+                DataFormatter.sanitize(material_claim_repair_contract)
+            )
+        criterion_repair_contract = verification.get("criterion_repair_contract")
+        if not isinstance(criterion_repair_contract, Mapping):
+            criterion_repair_contract = {}
+        else:
+            criterion_repair_contract = dict(DataFormatter.sanitize(criterion_repair_contract))
+        terminal_convergence = verification.get("terminal_convergence")
         if not any(
             [
                 missing_criteria,
@@ -131,6 +411,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 next_step_requirements,
                 replan_instruction,
                 failure_analysis,
+                material_claim_repair_contract,
+                criterion_repair_contract,
             ]
         ):
             return {}
@@ -145,6 +427,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "advisory_next_step_requirements": next_step_requirements,
             "replan_instruction": replan_instruction,
         }
+        if material_claim_repair_contract:
+            repair_context["material_claim_repair_contract"] = material_claim_repair_contract
+        if criterion_repair_contract:
+            repair_context["criterion_repair_contract"] = criterion_repair_contract
+        if isinstance(terminal_convergence, Mapping):
+            repair_context["terminal_convergence"] = DataFormatter.sanitize(terminal_convergence)
         process_summary = latest.get("process_summary")
         if isinstance(process_summary, Mapping):
             compact_process = DataFormatter.sanitize(dict(process_summary))
@@ -346,7 +634,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     def _shape_for_route(route: str) -> str:
         return {
             "model_request": "direct",
-            "skills": "skills",
             "dynamic_task": "dynamic_task",
             "agent_task": "dynamic_task",
         }.get(str(route or "").strip(), "direct")
@@ -377,6 +664,432 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         }
         self.diagnostics.setdefault("route_shape_reconciliations", []).append(plan["route_shape_reconciled"])
 
+    def _terminal_issue_from_verification(
+        self,
+        verification: Mapping[str, Any],
+        *,
+        execution_evidence_summary: Mapping[str, Any],
+    ) -> tuple[TerminalIssue, dict[str, Any], bool] | None:
+        material_claim_audit = verification.get("material_claim_audit")
+        material_repair_contract = verification.get(
+            "material_claim_repair_contract"
+        )
+        criterion_audit = verification.get("criterion_audit")
+        criterion_repair_contract = verification.get(
+            "criterion_repair_contract"
+        )
+        protocol_contracts: list[tuple[str, Mapping[str, Any]]] = []
+        for section, audit, repair_contract in (
+            (
+                "criterion_checks",
+                criterion_audit,
+                criterion_repair_contract,
+            ),
+            (
+                "material_claim_checks",
+                material_claim_audit,
+                material_repair_contract,
+            ),
+        ):
+            if (
+                isinstance(audit, Mapping)
+                and audit.get("valid") is False
+                and isinstance(repair_contract, Mapping)
+                and str(repair_contract.get("gate_kind") or "")
+                == "output_contract"
+            ):
+                protocol_contracts.append((section, repair_contract))
+        if protocol_contracts:
+            merged_requirements: list[dict[str, Any]] = []
+            for section, repair_contract in protocol_contracts:
+                raw_requirements = repair_contract.get("requirements")
+                if not isinstance(raw_requirements, Sequence) or isinstance(
+                    raw_requirements,
+                    str | bytes | bytearray,
+                ):
+                    continue
+                for requirement in raw_requirements:
+                    if not isinstance(requirement, Mapping):
+                        continue
+                    merged_requirements.append(
+                        {
+                            **dict(DataFormatter.sanitize(requirement)),
+                            "protocol_section": section,
+                        }
+                    )
+            repair_contract = {
+                "gate_kind": "output_contract",
+                "issue_code": "terminal_verifier_output_invalid",
+                "contract_subject": "verification:response",
+                "protocol_sections": [
+                    section for section, _contract in protocol_contracts
+                ],
+                "requirements": merged_requirements,
+            }
+            return (
+                TerminalIssue(
+                    "output_contract",
+                    "terminal_verifier_output_invalid",
+                    "verification:response",
+                ),
+                repair_contract,
+                False,
+            )
+        if isinstance(material_claim_audit, Mapping) and material_claim_audit.get("valid") is False:
+            repair_contract = material_repair_contract
+            if isinstance(repair_contract, Mapping):
+                issue = TerminalIssue(
+                    str(repair_contract.get("gate_kind") or "factual_integrity"),
+                    str(repair_contract.get("issue_code") or "material_claim_audit_invalid"),
+                    str(repair_contract.get("contract_subject") or "artifact:factual_integrity"),
+                )
+                return issue, dict(DataFormatter.sanitize(repair_contract)), False
+        if isinstance(criterion_audit, Mapping) and criterion_audit.get("valid") is False:
+            repair_contract = criterion_repair_contract
+            if isinstance(repair_contract, Mapping):
+                issue = TerminalIssue(
+                    str(repair_contract.get("gate_kind") or "criterion"),
+                    str(repair_contract.get("issue_code") or "criterion_audit_invalid"),
+                    str(
+                        repair_contract.get("contract_subject")
+                        or "verification:criterion_checks"
+                    ),
+                )
+                return issue, dict(DataFormatter.sanitize(repair_contract)), False
+        missing_capability_ids = self._normalize_string_list(verification.get("missing_capability_evidence"))
+        missing_capability_ids = self._merge_string_lists(
+            missing_capability_ids,
+            verification.get("missing_required_capabilities"),
+        )
+        if missing_capability_ids:
+            capability_id = missing_capability_ids[0]
+            requirements = [
+                dict(requirement)
+                for requirement in self._capability_evidence_requirements(execution_evidence_summary)
+                if str(requirement.get("capability_id") or "") == capability_id
+            ]
+            requirement = requirements[0] if requirements else {}
+            capability_kind = str(requirement.get("capability_kind") or "capability")
+            evidence_kind = str(requirement.get("kind") or "capability_used")
+            issue_code = "action_succeeded_missing" if evidence_kind == "action_succeeded" else "capability_missing"
+            repair_contract = {
+                "gate_kind": "capability",
+                "issue_code": issue_code,
+                "contract_subject": f"{capability_kind}:{capability_id}",
+                "capability_id": capability_id,
+                "capability_kind": capability_kind,
+                "evidence_kind": evidence_kind,
+                "requirements": requirements,
+            }
+            available = {
+                str(capability.get("id") or "")
+                for capability in self._planner_capabilities()
+                if isinstance(capability, Mapping)
+                and str(capability.get("kind") or "") == "action"
+            }
+            unrecoverable = bool(
+                evidence_kind == "action_succeeded"
+                and capability_kind == "action"
+                and capability_id
+                and capability_id not in available
+            )
+            blocked = set(self._normalize_string_list(execution_evidence_summary.get("blocked_actions")))
+            denied = set(self._normalize_string_list(execution_evidence_summary.get("approval_required_actions")))
+            unrecoverable = unrecoverable or capability_id in blocked or capability_id in denied
+            return (
+                TerminalIssue("capability", issue_code, f"{capability_kind}:{capability_id}"),
+                repair_contract,
+                unrecoverable,
+            )
+
+        blocked_actions = self._normalize_string_list(execution_evidence_summary.get("blocked_actions"))
+        if blocked_actions:
+            action_id = blocked_actions[0]
+            repair_contract = {
+                "gate_kind": "lifecycle",
+                "issue_code": "action_policy_blocked",
+                "contract_subject": f"action:{action_id}",
+                "blocked_action_ids": blocked_actions,
+                "requirements": [],
+            }
+            return (
+                TerminalIssue("lifecycle", "action_policy_blocked", f"action:{action_id}"),
+                repair_contract,
+                True,
+            )
+
+        raw_signals = execution_evidence_summary.get(
+            "current_replan_signals",
+            execution_evidence_summary.get("replan_signals", []),
+        )
+        blocking_signals = [
+            signal
+            for signal in raw_signals
+            if isinstance(signal, Mapping) and str(signal.get("status") or "") == "blocked"
+        ] if isinstance(raw_signals, Sequence) and not isinstance(raw_signals, str | bytes | bytearray) else []
+        if blocking_signals:
+            repair_contract = {
+                "gate_kind": "lifecycle",
+                "issue_code": "structured_execution_blocked",
+                "contract_subject": "lifecycle:task",
+                "signals": blocking_signals,
+                "requirements": [],
+            }
+            return (
+                TerminalIssue("lifecycle", "structured_execution_blocked", "lifecycle:task"),
+                repair_contract,
+                True,
+            )
+
+        guard_reasons = self._normalize_string_list(verification.get("guard_reasons"))
+        if "final_result_output_parse_failed" in guard_reasons:
+            repair_contract = {
+                "gate_kind": "output_contract",
+                "issue_code": "final_result_output_parse_failed",
+                "contract_subject": "output:final_result",
+                "requirements": self._normalize_string_list(verification.get("missing_criteria")),
+            }
+            return (
+                TerminalIssue("output_contract", "final_result_output_parse_failed", "output:final_result"),
+                repair_contract,
+                False,
+            )
+
+        if verification.get("is_complete") is False:
+            issue_code = guard_reasons[0] if guard_reasons else "criterion_unsatisfied"
+            repair_contract = {
+                "gate_kind": "criterion",
+                "issue_code": issue_code,
+                "contract_subject": "criterion:task",
+                "requirements": self._normalize_string_list(verification.get("missing_criteria")),
+                "next_step_requirements": self._normalize_string_list(verification.get("next_step_requirements")),
+            }
+            return TerminalIssue("criterion", issue_code, "criterion:task"), repair_contract, False
+        return None
+
+    def _terminal_convergence_verification(
+        self,
+        *,
+        issue: TerminalIssue,
+        repair_contract: Mapping[str, Any],
+        decision: Mapping[str, Any],
+        verifier_called: bool,
+        candidate_final_result: str = "",
+    ) -> dict[str, Any]:
+        terminal = decision.get("terminal") is True
+        occurrence = int(decision.get("occurrence") or 1)
+        requirements = repair_contract.get("requirements")
+        missing: list[str] = []
+        if isinstance(requirements, Sequence) and not isinstance(requirements, str | bytes | bytearray):
+            for requirement in requirements:
+                if isinstance(requirement, Mapping):
+                    text = str(
+                        requirement.get("claim")
+                        or requirement.get("reason")
+                        or requirement.get("capability_id")
+                        or requirement.get("subject_key")
+                        or ""
+                    ).strip()
+                else:
+                    text = str(requirement or "").strip()
+                if text and text not in missing:
+                    missing.append(text)
+        if not missing:
+            missing = [f"Resolve {issue.issue_code} for {issue.contract_subject}."]
+        if terminal:
+            reason = (
+                f"Stopped after the same terminal issue '{issue.issue_code}' was detected three times; "
+                "two repairs did not change the terminal outcome."
+            )
+        else:
+            reason = (
+                f"The relevant task state is unchanged for terminal issue '{issue.issue_code}' "
+                f"(occurrence {occurrence}/3); skipped a redundant verifier request."
+            )
+        return {
+            "is_complete": False,
+            "requires_block": terminal,
+            "reason": reason,
+            "failure_analysis": reason,
+            "acceptance_delta": missing,
+            "missing_criteria": missing,
+            "replan_instruction": "" if terminal else "Apply the structured repair contract before verification.",
+            "repair_constraints": missing,
+            "next_step_requirements": [] if terminal else missing,
+            "final_result_required": bool(candidate_final_result),
+            "final_result": candidate_final_result,
+            "terminal_convergence": {
+                **dict(DataFormatter.sanitize(decision)),
+                "issue": {
+                    "gate_kind": issue.gate_kind,
+                    "issue_code": issue.issue_code,
+                    "contract_subject": issue.contract_subject,
+                },
+                "repair_contract": dict(DataFormatter.sanitize(repair_contract)),
+                "verifier_called": verifier_called,
+                "stopped_after_third_occurrence": terminal,
+            },
+            "guard_reasons": ["terminal_convergence_stopped" if terminal else "terminal_state_unchanged"],
+            "strict_terminal_gates_applied": True,
+        }
+
+    async def _apply_strict_terminal_gates(
+        self,
+        verification: dict[str, Any],
+        *,
+        candidate: Mapping[str, Any],
+        execution_evidence_summary: Mapping[str, Any],
+        verifier_called: bool,
+    ) -> dict[str, Any]:
+        normalized = dict(verification)
+        issue_data = self._terminal_issue_from_verification(
+            normalized,
+            execution_evidence_summary=execution_evidence_summary,
+        )
+        if issue_data is None:
+            self._terminal_convergence_state.mark_all_resolved()
+            self.diagnostics["terminal_convergence"] = (
+                self._terminal_convergence_state.snapshot()
+            )
+            normalized["terminal_convergence"] = {
+                "resolved": True,
+                "verifier_called": verifier_called,
+            }
+            normalized["strict_terminal_gates_applied"] = True
+            return normalized
+        issue, repair_contract, unrecoverable = issue_data
+        state_digest = relevant_state_digest(
+            self._strict_terminal_relevant_state(
+                candidate=candidate,
+                execution_evidence_summary=execution_evidence_summary,
+                repair_contract=repair_contract,
+            )
+        )
+        decision = self._terminal_convergence_state.record_detection(
+            issue,
+            state_digest,
+            repair_contract=repair_contract,
+            verifier_called=verifier_called,
+            unrecoverable=unrecoverable,
+        )
+        normalized["terminal_convergence"] = {
+            **dict(DataFormatter.sanitize(decision)),
+            "issue": {
+                "gate_kind": issue.gate_kind,
+                "issue_code": issue.issue_code,
+                "contract_subject": issue.contract_subject,
+            },
+            "repair_contract": repair_contract,
+            "relevant_state_digest": state_digest,
+            "stopped_after_third_occurrence": decision.get("terminal") is True,
+        }
+        self.diagnostics["terminal_convergence"] = self._terminal_convergence_state.snapshot()
+        if decision.get("terminal") is True:
+            stopped = self._terminal_convergence_verification(
+                issue=issue,
+                repair_contract=repair_contract,
+                decision=decision,
+                verifier_called=verifier_called,
+                candidate_final_result=str(candidate.get("text") or normalized.get("final_result") or ""),
+            )
+            stopped["guard_reasons"] = self._merge_string_lists(
+                normalized.get("guard_reasons"),
+                stopped.get("guard_reasons"),
+            )
+            for key in (
+                "missing_required_capabilities",
+                "missing_capability_evidence",
+                "unenforced_evidence_requirements",
+            ):
+                if key in normalized:
+                    stopped[key] = DataFormatter.sanitize(normalized[key])
+            return stopped
+        normalized["strict_terminal_gates_applied"] = True
+        return normalized
+
+    def _terminal_delivery_contract_for_verifier(
+        self,
+        execution_result: Any,
+        terminal_candidate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Project a verified staged-delivery phase without exposing promotion mechanics."""
+
+        if not isinstance(execution_result, Mapping):
+            return {}
+        raw_promotions = execution_result.get("staged_promotions")
+        if not isinstance(raw_promotions, Sequence) or isinstance(
+            raw_promotions,
+            str | bytes | bytearray,
+        ):
+            return {}
+        raw_carriers = terminal_candidate.get("carriers")
+        carriers = (
+            [item for item in raw_carriers if isinstance(item, Mapping)]
+            if isinstance(raw_carriers, Sequence)
+            and not isinstance(raw_carriers, str | bytes | bytearray)
+            else []
+        )
+        carrier_versions = {
+            (
+                self._task_workspace_artifact_display_path(carrier.get("path")),
+                str(carrier.get("content_version_id") or "").strip(),
+            )
+            for carrier in carriers
+            if str(carrier.get("kind") or "") == "task_workspace_artifact"
+            and str(carrier.get("status") or "") == "materialized"
+        }
+        required_targets = {
+            self._task_workspace_artifact_display_path(path)
+            for path in self._required_task_workspace_deliverables()
+            if self._task_workspace_artifact_display_path(path)
+        }
+        candidate_mappings: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_promotion in raw_promotions:
+            if not isinstance(raw_promotion, Mapping):
+                continue
+            candidate_path = self._task_workspace_artifact_display_path(
+                raw_promotion.get("source_path")
+            )
+            required_target_path = self._task_workspace_artifact_display_path(
+                raw_promotion.get("target_path")
+            )
+            content_version_id = str(
+                raw_promotion.get("source_content_version_id") or ""
+            ).strip()
+            mapping_key = (candidate_path, required_target_path)
+            if (
+                not candidate_path
+                or not required_target_path
+                or required_target_path not in required_targets
+                or (candidate_path, content_version_id) not in carrier_versions
+                or mapping_key in seen
+            ):
+                continue
+            seen.add(mapping_key)
+            candidate_mappings.append(
+                {
+                    "candidate_path": candidate_path,
+                    "required_target_path": required_target_path,
+                    "candidate_state": "complete_readback_verified",
+                    "target_state": "deferred_until_semantic_acceptance",
+                }
+            )
+        if not candidate_mappings:
+            return {}
+        return {
+            "phase": "pre_promotion_candidate_verification",
+            "candidate_mappings": candidate_mappings,
+            "semantic_acceptance_scope": (
+                "Judge the staged candidate bytes against every semantic success criterion."
+            ),
+            "post_acceptance_host_guards": [
+                "atomically promote the exact verifier-accepted candidate bytes",
+                "completely read back every required target",
+                "verify target digest and byte count before terminal completion",
+            ],
+        }
+
     async def _request_verification(
         self,
         iteration_index: int,
@@ -384,45 +1097,71 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         plan: dict[str, Any],
         execution_result: Any,
         execution_meta: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
     ) -> dict[str, Any]:
         language_policy = self._language_policy()
+        initial_evidence_use = collect_evidence_use(execution_result)
+        candidate_required_reference_ids = {
+            evidence_id
+            for use in initial_evidence_use
+            for evidence_id in self._normalize_string_list(use.get("evidence_ids"))
+        }
         raw_execution_evidence_summary = self._execution_log_summary(execution_meta)
         raw_cumulative_evidence_summary = self._cumulative_execution_evidence_summary(execution_meta)
-        current_evidence_ledger = self._evidence_ledger_from_execution_meta(execution_meta)
-        evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
-        initial_evidence_use = collect_evidence_use(execution_result)
+        evidence_ledger = self._cumulative_evidence_ledger(
+            execution_meta,
+            required_evidence_ids=candidate_required_reference_ids,
+        )
         initial_guard = validate_evidence_use(initial_evidence_use, evidence_ledger)
-        await self._ensure_workspace_artifact_targeted_readback_evidence(
+        await self._ensure_task_workspace_artifact_targeted_readback_evidence(
             execution_meta,
             evidence_ledger,
             evidence_use=initial_guard.get("normalized_evidence_use"),
         )
         raw_execution_evidence_summary = self._execution_log_summary(execution_meta)
         raw_cumulative_evidence_summary = self._cumulative_execution_evidence_summary(execution_meta)
-        current_evidence_ledger = self._evidence_ledger_from_execution_meta(execution_meta)
-        evidence_ledger = self._cumulative_evidence_ledger(execution_meta)
+        evidence_ledger = self._cumulative_evidence_ledger(
+            execution_meta,
+            required_evidence_ids=candidate_required_reference_ids,
+        )
         grounding_guard = validate_evidence_use(initial_evidence_use, evidence_ledger)
+        binding_reference_ids = set(
+            self._task_reference_catalog.offered_references()
+        )
         normalized_execution_result = value_with_normalized_evidence_use(
             execution_result,
             grounding_guard.get("normalized_evidence_use"),
         )
-        if self._should_attempt_evidence_binding_repair(grounding_guard):
-            repaired_evidence_use = self._deterministic_evidence_binding_repair(grounding_guard, evidence_ledger)
-            if repaired_evidence_use:
-                self.diagnostics.setdefault("evidence_binding_repair", []).append(
-                    DataFormatter.sanitize(
-                        {
-                            "source": "deterministic_alias_resolver",
-                            "repaired_count": len(repaired_evidence_use),
-                        }
-                    )
+        repaired_evidence_use: list[dict[str, Any]] = []
+        if grounding_guard.get("blocking_count"):
+            repaired_evidence_use = self._deterministic_evidence_binding_repair(
+                grounding_guard,
+                evidence_ledger,
+                offered_reference_ids=binding_reference_ids,
+            )
+        if repaired_evidence_use:
+            self.diagnostics.setdefault("evidence_binding_repair", []).append(
+                DataFormatter.sanitize(
+                    {
+                        "source": "deterministic_alias_resolver",
+                        "repaired_count": len(repaired_evidence_use),
+                    }
                 )
-            elif self._can_attempt_model_evidence_binding_repair():
+            )
+        elif self._should_attempt_evidence_binding_repair(grounding_guard):
+            if self._can_attempt_model_evidence_binding_repair():
+                try:
+                    binding_repair_count = int(
+                        self.diagnostics.get("evidence_binding_repair_attempt_count") or 0
+                    )
+                except (TypeError, ValueError):
+                    binding_repair_count = 0
+                self.diagnostics["evidence_binding_repair_attempt_count"] = binding_repair_count + 1
                 repaired_evidence_use = await self._request_evidence_binding_repair(
                     grounding_guard,
                     evidence_ledger,
                     language_policy=language_policy,
+                    offered_reference_ids=binding_reference_ids,
                 )
             else:
                 self.diagnostics.setdefault("evidence_binding_repair", []).append(
@@ -435,88 +1174,212 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                         }
                     )
                 )
-            if repaired_evidence_use:
-                merged_evidence_use = self._merge_repaired_evidence_use(
-                    grounding_guard.get("normalized_evidence_use"),
-                    repaired_evidence_use,
+        if repaired_evidence_use:
+            merged_evidence_use = self._merge_repaired_evidence_use(
+                grounding_guard.get("normalized_evidence_use"),
+                repaired_evidence_use,
+            )
+            candidate_execution_result = value_with_normalized_evidence_use(
+                normalized_execution_result,
+                merged_evidence_use,
+            )
+            candidate_guard = validate_evidence_use(collect_evidence_use(candidate_execution_result), evidence_ledger)
+            self.diagnostics.setdefault("evidence_binding_repair", []).append(
+                DataFormatter.sanitize(
+                    {
+                        "accepted": candidate_guard.get("valid") is True,
+                        "blocking_count": candidate_guard.get("blocking_count"),
+                        "diagnostics": candidate_guard.get("diagnostics", []),
+                    }
                 )
-                candidate_execution_result = value_with_normalized_evidence_use(
-                    normalized_execution_result,
-                    merged_evidence_use,
-                )
-                candidate_guard = validate_evidence_use(collect_evidence_use(candidate_execution_result), evidence_ledger)
-                self.diagnostics.setdefault("evidence_binding_repair", []).append(
-                    DataFormatter.sanitize(
-                        {
-                            "accepted": candidate_guard.get("valid") is True,
-                            "blocking_count": candidate_guard.get("blocking_count"),
-                            "diagnostics": candidate_guard.get("diagnostics", []),
-                        }
-                    )
-                )
-                if candidate_guard.get("valid") is True:
-                    normalized_execution_result = candidate_execution_result
-                    grounding_guard = candidate_guard
-        trusted_workspace_artifacts = workspace_artifacts_from_ledger(evidence_ledger)
-        evidence_summary = self._compact_verifier_evidence_summary(raw_execution_evidence_summary)
-        cumulative_evidence_summary = self._compact_verifier_evidence_summary(raw_cumulative_evidence_summary)
+            )
+            if candidate_guard.get("valid") is True:
+                normalized_execution_result = candidate_execution_result
+                grounding_guard = candidate_guard
+        trusted_task_workspace_artifacts = self._task_workspace_artifact_index_for_verifier(evidence_ledger)
+        evidence_summary = self._compact_verifier_evidence_summary(
+            raw_execution_evidence_summary,
+            include_body_previews=False,
+        )
+        cumulative_evidence_summary = self._compact_verifier_evidence_summary(
+            raw_cumulative_evidence_summary,
+            include_body_previews=False,
+        )
         capability_evidence_requirements = self._capability_evidence_requirements(raw_cumulative_evidence_summary)
-        verifier_execution_result = self._workspace_artifact_execution_result_for_verifier(normalized_execution_result)
+        verifier_execution_result = self._task_workspace_artifact_execution_result_for_verifier(normalized_execution_result)
         candidate_final_result = self._candidate_final_result_from_execution_result(normalized_execution_result)
+        await self._replace_terminal_carriers(
+            execution_result=normalized_execution_result,
+            execution_evidence_summary=raw_cumulative_evidence_summary,
+            source_work_result_id=str(
+                execution_meta.get("execution_id") or f"iteration:{iteration_index}"
+            ),
+        )
+        inventory = self._lifecycle_state.carrier_inventory
+        verification_phase = (
+            "pre_promotion_verifying"
+            if any(
+                carrier.kind == "task_workspace_artifact"
+                and carrier.path != carrier.target_path
+                for carrier in inventory.carriers
+            )
+            else "root_verifying"
+            if any(carrier.kind == "task_workspace_artifact" for carrier in inventory.carriers)
+            else "candidate_verifying"
+        )
+        self._lifecycle_state.advance(
+            verification_phase,
+            expected_version=self._lifecycle_state.state_version,
+            iteration=iteration_index,
+        )
+        strict_candidate = await self._current_terminal_candidate()
+        terminal_delivery_contract = self._terminal_delivery_contract_for_verifier(
+            normalized_execution_result,
+            strict_candidate,
+        )
+        capability_preflight = await self._terminal_capability_evidence_preflight(
+            candidate=strict_candidate,
+            execution_evidence_summary=raw_cumulative_evidence_summary,
+            candidate_final_result=candidate_final_result,
+        )
+        if capability_preflight is not None:
+            self.diagnostics["terminal_convergence"] = (
+                self._terminal_convergence_state.snapshot()
+            )
+            await self._emit_process_progress_from_output(
+                capability_preflight,
+                stage="verification",
+                iteration=iteration_index,
+            )
+            return capability_preflight
+        convergence_preflight = self._terminal_convergence_preflight(
+            candidate=strict_candidate,
+            execution_evidence_summary=raw_cumulative_evidence_summary,
+        )
+        if convergence_preflight is not None:
+            self.diagnostics["terminal_convergence"] = self._terminal_convergence_state.snapshot()
+            await self._emit_process_progress_from_output(
+                convergence_preflight,
+                stage="verification",
+                iteration=iteration_index,
+            )
+            return convergence_preflight
+        verification_context_pack, context_package = await self._read_task_context_view(
+            phase="verification",
+            consumer_id=f"agent_task:{self.id}:verifier:iteration:{iteration_index}",
+            intent=f"Verify iteration {iteration_index}: {self.goal}",
+        )
         request = self.agent.create_temp_request()
+        self._bind_task_context_attachments(request, context_package)
         self._apply_language_policy_to_request(request, language_policy)
-        request.input(
+        model_evidence_ledger = self._model_evidence_ledger_projection(
+            evidence_ledger,
+            max_items=_VERIFIER_LEDGER_MAX_ITEMS + 8,
+            offered_reference_ids=set(
+                self._task_reference_catalog.offered_references()
+            ),
+            required_reference_ids=candidate_required_reference_ids,
+        )
+        offered_reference_snapshot = {
+            str(item.get("reference_id") or "").strip()
+            for item in model_evidence_ledger.get("items", [])
+            if isinstance(item, Mapping)
+            and str(item.get("reference_id") or "").strip()
+        }
+        material_claim_candidates = (
+            self._material_claim_candidates_for_verifier(strict_candidate)
+        )
+        protocol_repair = self._active_terminal_verification_protocol_repair(
+            current_offered_reference_ids=offered_reference_snapshot,
+            current_offered_claim_keys=[
+                str(claim.get("claim_key") or "")
+                for claim in material_claim_candidates
+            ],
+        )
+        verifier_input = {
+            "task_id": self.id,
+            "goal": self.goal,
+            "success_criteria": [
+                {"criterion_id": f"criterion:{index}", "text": str(criterion)}
+                for index, criterion in enumerate(self.success_criteria, start=1)
+            ],
+            "material_claim_policy": {
+                "required": True,
+                "summary": (
+                    "The final deliverable must not add unsupported concrete facts or inflate certainty. "
+                    "Concrete dates, times, publication states, validation states, approvals, resolutions, "
+                    "numbers, source headings, and exact source facts must be visible in the goal, execution "
+                    "evidence, or artifact readback, or explicitly labeled as derived. The system/runtime/current "
+                    "date is execution context only; it is not evidence for a business, incident, deployment, "
+                    "publication, approval, or validation date unless the task evidence explicitly says so. Preserve pending, "
+                    "unknown, no-known-loss, not-published, needs-sign-off, and unresolved states exactly."
+                ),
+            },
+            "iteration": iteration_index,
+            "plan": self._compact_verifier_prompt_value(plan, max_chars=_VERIFIER_PROMPT_ITEM_CHARS),
+            "candidate_final_result": self._compact_verifier_prompt_value(
+                candidate_final_result,
+                max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
+            ),
+            "material_claim_candidates": material_claim_candidates,
+            "execution_result": self._compact_verifier_prompt_value(
+                verifier_execution_result,
+                max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
+            ),
+            "execution_meta": self._verification_execution_meta_summary(execution_meta),
+            "execution_evidence_summary": evidence_summary,
+            "cumulative_execution_evidence_summary": cumulative_evidence_summary,
+            "evidence_ledger": model_evidence_ledger,
+            "acceptance_locator_view": self._model_acceptance_locator_view(
+                evidence_ledger
+            ),
+            "grounding_guard": self._compact_grounding_guard_for_verifier(grounding_guard),
+            "trusted_task_workspace_artifacts": trusted_task_workspace_artifacts,
+            "terminal_delivery_contract": terminal_delivery_contract,
+            "capability_evidence_requirements": capability_evidence_requirements,
+            "context_pack": self._compact_context_pack_for_verifier(
+                cast("TaskContextView", verification_context_pack)
+            ),
+            "execution_prompt": self._execution_prompt_context(),
+            "previous_iterations": self._iteration_prompt_summaries(),
+            "reflection_summaries": self._reflection_prompt_summaries(),
+            "language_policy": language_policy,
+        }
+        if protocol_repair:
+            verifier_input["verification_protocol_repair"] = protocol_repair
+        serialized_input_characters = len(
+            json.dumps(
+                DataFormatter.sanitize(verifier_input),
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        self.diagnostics.setdefault("verifier_prompt_projection", []).append(
             {
-                "task_id": self.id,
-                "goal": self.goal,
-                "success_criteria": self.success_criteria,
-                "factual_integrity_requirements": {
-                    "required": True,
-                    "summary": (
-                        "The final deliverable must not add unsupported concrete facts or inflate certainty. "
-                        "Concrete dates, times, publication states, validation states, approvals, resolutions, "
-                        "numbers, source headings, and exact source facts must be visible in the goal, execution "
-                        "evidence, or artifact readback, or explicitly labeled as derived. The system/runtime/current "
-                        "date is execution context only; it is not evidence for a business, incident, deployment, "
-                        "publication, approval, or validation date unless the task evidence explicitly says so. Preserve pending, "
-                        "unknown, no-known-loss, not-published, needs-sign-off, and unresolved states exactly."
-                    ),
-                },
-                "iteration": iteration_index,
-                "plan": self._compact_verifier_prompt_value(plan, max_chars=_VERIFIER_PROMPT_ITEM_CHARS),
-                "candidate_final_result": self._compact_verifier_prompt_value(
-                    candidate_final_result,
-                    max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
-                ),
-                "execution_result": self._compact_verifier_prompt_value(
-                    verifier_execution_result,
-                    max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
-                ),
-                "execution_meta": self._verification_execution_meta_summary(execution_meta, evidence_summary),
-                "execution_evidence_summary": evidence_summary,
-                "cumulative_execution_evidence_summary": cumulative_evidence_summary,
-                "current_evidence_ledger": current_evidence_ledger,
-                "evidence_ledger": evidence_ledger,
-                "acceptance_locator_view": acceptance_locator_view_from_ledger(evidence_ledger),
-                "grounding_guard": self._compact_grounding_guard_for_verifier(grounding_guard),
-                "trusted_workspace_artifacts": trusted_workspace_artifacts,
-                "capability_evidence_requirements": capability_evidence_requirements,
-                "context_pack": self._compact_context_pack_for_verifier(context_pack),
-                "execution_prompt": self._execution_prompt_context(),
-                "previous_iterations": self._iteration_prompt_summaries(),
-                "reflection_summaries": self._reflection_prompt_summaries(),
-                "language_policy": language_policy,
+                "serialized_input_characters": serialized_input_characters,
+                "target_characters": _VERIFIER_PROMPT_TARGET_CHARS,
+                "over_target": serialized_input_characters > _VERIFIER_PROMPT_TARGET_CHARS,
             }
         )
+        request.input(verifier_input)
         request.instruct(
             "Verify the task against every success criterion. "
             "Also consider caller-provided execution_prompt constraints when they are present. "
+            "For criterion_checks, return each offered success_criteria[].criterion_id exactly once; do not copy "
+            "criterion text as identity and do not invent, omit, or duplicate criterion ids. "
+            "When verification_protocol_repair is present, the previous verifier response violated the declared "
+            "output contract. Correct every listed repair_contract requirement in this response, use only the "
+            "current offered criterion, claim, or evidence keys in that field, and do not rerun or rewrite business work merely "
+            "to repair the verifier response structure. "
             "Treat numeric criteria such as 'at least N' as exact counting rules and fail verification when the "
             "evidence does not meet the count. "
             "Require source/evidence references when the criteria ask for evidence. "
-            "Treat evidence_ledger as the authoritative grounding ledger and use its item ids when judging claims. "
-            "Use acceptance_locator_view as a verifier readback index for Workspace artifacts: locator items show "
-            "where to inspect an artifact, not whether the content is semantically correct. Prefer bounded readback "
+            "Treat evidence_ledger as the single authoritative model-visible grounding ledger. Each item exposes exactly "
+            "one host-issued reference_id; use only exact offered items[].reference_id values in criterion_checks.evidence_ids. "
+            "Canonical ids and aliases remain host-side. Other summaries and indexes are body-light projections. "
+            "Use acceptance_locator_view as a body-light verifier readback index for TaskWorkspace artifacts: locator items show "
+            "where to inspect an artifact, not whether the content is semantically correct. It deliberately exposes no "
+            "selection ids. Prefer bounded readback "
             "items produced from those locators when checking long artifact sections. A locator with "
             "requirement_level='required' comes from an output contract or success criterion; status=empty on that "
             "locator is a structural gap only when no equivalent localized/renamed section, targeted readback, or "
@@ -525,13 +1388,14 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "with requirement_level='advisory' comes from a model-suggested "
             "acceptance point; status=empty means that proposed anchor was not found, but it is not by itself proof that "
             "the deliverable lacks the required content when other required locators or targeted readbacks cover it. "
-            "current_evidence_ledger is the current step view; evidence_ledger includes prior iteration evidence that "
-            "is verifier-visible. Do not perform or assume extra readback outside this ledger. failed/empty ledger "
+            "evidence_ledger includes current and prior iteration evidence that is verifier-visible. Do not perform or "
+            "assume extra readback outside this ledger. failed/empty ledger "
             "items are facts of unavailability only; ref_only items prove only a URL/path/ref was found; bounded or "
             "truncated content supports only the visible body. overflow_item_refs are key evidence points whose body "
             "did not fit the view budget: an overflow item with status=ok and body_state full/bounded/truncated is a "
             "record that the readback HAPPENED — never conclude a source was unread or unviewed while such an item "
-            "exists for it. grounding_guard contains deterministic id/status/body "
+            "exists for it. When its content is material to the judgment, use its existing path/ref to request scoped "
+            "readback rather than treating the omitted body as visible. grounding_guard contains deterministic id/status/body "
             "state diagnostics that identify evidence-binding gaps. Treat blocking_count as a reason to request "
             "binding repair or additional scoped evidence when a required claim remains unsupported; do not reject a "
             "long artifact solely because an exact locator label missed while equivalent verifier-visible readback "
@@ -569,23 +1433,59 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "verifier-visible evidence explicitly confirms that stronger state. Preserve uncertainty, pending status, and evidence strength exactly. "
             "If bounded previews are enough to contradict the candidate, set is_complete=false. If the previews are "
             "too truncated to verify a material claim, set is_complete=false and ask for scoped evidence readback. "
+            "In the same response, complete material_claim_checks for material external facts, bounded derived analysis, "
+            "recommendations, and preserved uncertainty in material_claim_candidates. Each candidate is one exact "
+            "host-owned span selected only by claim_key. This is one semantic audit, not a demand "
+            "that every sentence reproduce source wording. Use state='reasonable_derived' when an analytical conclusion "
+            "is a proportionate inference from the offered evidence even though no source states the conclusion verbatim. "
+            "Classify any claim of non-existence, absence, not-found, missing, or no-public-artifact as "
+            "claim_kind='absence_claim', even when it is phrased as an analytical conclusion. Partial directory lists, "
+            "bounded searches, failed reads, empty previews, and evidence from a different subtree cannot establish global "
+            "absence; an absence claim is supported only by verifier-visible evidence whose scope exhaustively covers the "
+            "claim. Never use state='reasonable_derived' for external_fact, absence_claim, or uncertainty. "
+            "Use state='supported' for direct external facts and exhaustively evidenced absence claims, and "
+            "unsupported/contradicted/unverifiable only when the "
+            "offered evidence actually fails to support the material statement. Return only the exact offered claim_key "
+            "and exact offered evidence reference_id values; the host reconstructs carrier, path, version, and exact quote. "
+            "The exact carrier text is already host-validated by material_claim_candidates and does not need to appear in evidence_ledger "
+            "to prove that the quote occurs in the final carrier. Use evidence_ledger only to judge whether an external or derived claim "
+            "inside that carrier span is supported. syntax_role describes lexical Markdown framing only. Pure Markdown headings, "
+            "separators, table headers, and table separators are excluded from material_claim_candidates by the host because their document/criterion "
+            "role is checked through artifact readback and acceptance locators, not as standalone factual claims. "
+            "Set material_claim_coverage_complete=true only after checking all material external facts and material "
+            "evidence-derived conclusions in the offered material_claim_candidates. It is valid to return an empty check list "
+            "for ordinary transformation, formatting, code, or writing output that makes no material external factual claim. "
             "If execution metadata, action records, diagnostics, command output, or verifier-visible evidence shows "
             "a failed required action or failed validation command, do not mark complete. "
+            "For every material_claim_checks item, return required_for_criterion_ids as the exact offered criterion ids whose "
+            "satisfaction semantically requires that claim; return an empty list when the claim is optional or extraneous. "
+            "Do not invent, copy criterion text into, omit duplicates from, or duplicate ids in this relationship. A required "
+            "claim that lacks supporting evidence needs status='replan_segment', not a carrier-only repair or deletion. "
             "If a criterion requires a script, command, test, or external validation to pass, require explicit "
             "successful evidence for that validation before completion. "
             "Decide final_result_required from the goal and success criteria: set it true when the task demands a "
             "concrete final deliverable (answer, file, report, artifact, or similar) and false when the work is "
             "purely an action or side effect with no expected returned deliverable. "
-            "For non-file deliverables, final_result should contain the returned answer body. For trusted Workspace "
-            "artifact deliverables, the body remains in Workspace and trusted_workspace_artifacts plus file_refs/readback "
+            "For non-file deliverables, final_result should contain the returned answer body. For trusted TaskWorkspace "
+            "artifact deliverables, the body remains in TaskWorkspace and trusted_task_workspace_artifacts plus file_refs/readback "
             "are the completion evidence; final_result may be a concise path/ref summary and must not copy the full "
-            "artifact body only to satisfy a structured field. For source-grounded Workspace artifacts, verify the "
-            "artifact body in trusted_workspace_artifacts.readback.content and targeted readback evidence ledger items "
+            "artifact body only to satisfy a structured field. trusted_task_workspace_artifacts is a body-light TaskWorkspace "
+            "location/status index with no selection identity, and the index itself does not prove artifact content. "
+            "When terminal_delivery_contract.phase='pre_promotion_candidate_verification', each candidate_mappings item is a "
+            "host-validated complete readback of the exact bytes proposed for required_target_path. Judge those candidate bytes "
+            "against the semantic success criteria and treat them as the provisional carrier for that required target. The target "
+            "path is intentionally absent until semantic acceptance: the host will then atomically promote the accepted bytes, "
+            "completely read back the target, and verify its digest and byte count. Therefore criterion_checks and is_complete "
+            "must not reject the candidate merely because the target path is absent during "
+            "pre_promotion_candidate_verification. Reject it for content, evidence, or other semantic gaps when warranted; "
+            "post-acceptance promotion/readback failures remain host-owned terminal failures. "
+            "For source-grounded TaskWorkspace artifacts, verify the artifact "
+            "body in evidence_ledger readback and targeted-readback items "
             "against visible source_refs, Action evidence, "
             "URLs, paths, and refs; a final_result path pointer alone is not enough to satisfy citation or provenance "
-            "requirements. For long artifacts, also inspect workspace_artifact.targeted_readback ledger items for bounded "
+            "requirements. For long artifacts, also inspect task_workspace_artifact.targeted_readback ledger items for bounded "
             "section, tail, source-list, risk, reference, or coverage snippets before concluding a required section is "
-            "missing. Treat long Workspace artifact verification as an acceptance-point evidence review, not a "
+            "missing. Treat long TaskWorkspace artifact verification as an acceptance-point evidence review, not a "
             "whole-document editorial review: judge whether verifier-visible bounded snippets, required locators, "
             "targeted readbacks, and cited source/action evidence cover the required structure and material claims. "
             "Do not require risk, uncertainty, limitation, or caveat sections unless the user task, output contract, "
@@ -593,28 +1493,51 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "Do not require full-artifact reading merely to assert general overall quality unless the success criteria "
             "explicitly require whole-document proofreading, style review, or exhaustive line-by-line audit. If all "
             "required acceptance points and material claims are supported by verifier-visible evidence, accept without "
-            "requesting broader readback. Do not ask a later step to read a Workspace artifact solely to paste its full content into "
+            "requesting broader readback. Do not ask a later step to read a TaskWorkspace artifact solely to paste its full content into "
             "final_result. If trusted artifact refs or readback are missing or too scoped to verify a material claim, "
             "keep is_complete=false and ask for scoped artifact readback or repair. "
             "When candidate_final_result contains a complete answer/report/artifact body that satisfies the criteria, "
-            "use it as final_result. When the plan or success criteria require a Workspace artifact, accept only "
-            "trusted Workspace write/readback refs from execution evidence; model-declared file_refs are diagnostics. "
+            "use it as final_result. When the plan or success criteria require a TaskWorkspace artifact, accept only "
+            "trusted TaskWorkspace write/readback refs from execution evidence; model-declared file_refs are diagnostics. "
             "If evidence is incomplete, set is_complete=false and explain failure_analysis and acceptance_delta: "
             "why the task is not accepted, which acceptance facts are missing or weak, and what evidence boundary "
-            "blocked verification. The verifier does not choose tools, routes, execution shapes, or exact methods. "
+            "blocked verification. Return one structured replan_signal. Use status='continue' only when complete; "
+            "status='repair' when current verifier-visible evidence is sufficient and only the existing carrier or "
+            "binding must change; status='replan_segment' when additional scoped evidence, readback, capability work, "
+            "or a changed current-board path is required; status='replan_goal' only when the current whole-task path "
+            "cannot satisfy the goal; and blocked or clarify only when continuation needs new authority, input, "
+            "capability, or external state. The verifier does not choose tools, routes, execution shapes, or exact methods. "
             "repair_constraints and next_step_requirements are advisory compatibility fields only; keep them factual "
             "and do not turn them into a narrow tool script. Also include a short human-readable replan_instruction. "
             "After the judgment fields, include compact criterion_checks, verification_summary, and progress_message "
             "for downstream repair context and human progress. These fields are process summaries only; they are not "
             "completion evidence and must not contain raw chain-of-thought or long evidence bodies. "
-            "Always return factual_integrity_check as a separate structured check. Set satisfied=false when the "
-            "deliverable adds unsupported concrete facts or inflates certainty, even if every explicit success "
-            "criterion is otherwise satisfied. "
             "When returning a terminal judgment, also include final_response as a concise user-facing status or answer "
             "note based only on the same visible evidence and structured judgment. For file-backed deliverables, "
             "mention the artifact path/ref and any known limitation instead of copying the whole file body. "
             "final_response is display context only and must not be used as completion evidence. "
             "Set requires_block=true only when the task cannot continue."
+        )
+        literal_factory = cast(Any, Literal)
+        criterion_id_type = literal_factory.__getitem__(
+            tuple(
+                str(item["criterion_id"])
+                for item in verifier_input["success_criteria"]
+            )
+        )
+        claim_keys = tuple(
+            str(item.get("claim_key") or "")
+            for item in material_claim_candidates
+            if str(item.get("claim_key") or "")
+        )
+        claim_key_type = (
+            literal_factory.__getitem__(claim_keys) if claim_keys else str
+        )
+        evidence_reference_ids = tuple(sorted(offered_reference_snapshot))
+        evidence_reference_type = (
+            literal_factory.__getitem__(evidence_reference_ids)
+            if evidence_reference_ids
+            else str
         )
         request.output(
             {
@@ -641,6 +1564,30 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     [str],
                     "Advisory observable requirements for future evidence; not a hard method script",
                 ),
+                "replan_signal": (
+                    {
+                        "status": (
+                            Literal[
+                                "continue",
+                                "repair",
+                                "replan_segment",
+                                "replan_goal",
+                                "blocked",
+                                "clarify",
+                            ],
+                            "Semantic next transition. Use repair only when current evidence is sufficient; use replan_segment when additional evidence or a changed current-board path is required.",
+                            False,
+                        ),
+                        "reason": (str, "Concise evidence-based reason for the transition.", False),
+                        "evidence_refs": (
+                            [evidence_reference_type],
+                            "Only exact offered evidence reference ids relevant to this transition.",
+                            False,
+                        ),
+                    },
+                    "Structured ReplanSignal validated and consumed by AgentTask; omitted legacy/model responses normalize to repair.",
+                    False,
+                ),
                 "final_result_required": (bool, "True when the goal expects a concrete returned final deliverable"),
                 "final_result": (str, "Final business result when complete"),
                 "final_response": (
@@ -649,19 +1596,76 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     False,
                 ),
                 "criterion_checks": (
-                    [dict],
-                    "Compact per-criterion checks: [{criterion, satisfied: bool, status?, summary, evidence_ids?, gaps?}]. The satisfied boolean is required; status text is display-only.",
-                    False,
+                    [
+                        {
+                            "criterion_id": (
+                                criterion_id_type,
+                                "One exact offered success_criteria[].criterion_id.",
+                                True,
+                            ),
+                            "satisfied": (bool, "True only when this criterion is satisfied.", True),
+                            "summary": (str, "Concise criterion judgment.", True),
+                            "gaps": ([str], "Specific gaps for this criterion.", False),
+                            "evidence_ids": (
+                                [evidence_reference_type],
+                                "Only exact offered evidence_ledger.items[].reference_id values.",
+                                False,
+                            ),
+                        }
+                    ],
+                    "Exactly one compact structured check for every offered success criterion.",
+                    True,
                 ),
-                "factual_integrity_check": (
-                    {
-                        "satisfied": (bool, "True only when no unsupported concrete additions or certainty inflation are present.", False),
-                        "unsupported_additions": ([str], "Concrete unsupported additions found in the candidate.", False),
-                        "certainty_inflation": ([str], "Statements that overstate pending, unknown, partial, unresolved, unpublished, or unapproved facts.", False),
-                        "summary": (str, "Concise factual integrity judgment.", False),
-                    },
-                    "Required factual integrity check independent of ordinary criterion checks.",
-                    False,
+                "material_claim_coverage_complete": (
+                    bool,
+                    "True only after every material external fact or evidence-derived conclusion in material_claim_candidates was audited.",
+                    True,
+                ),
+                "material_claim_checks": (
+                    [
+                        {
+                            "claim_key": (
+                                claim_key_type,
+                                "One exact offered material_claim_candidates[].claim_key; the host reconstructs all canonical carrier and quote fields.",
+                                True,
+                            ),
+                            "claim_kind": (
+                                Literal[
+                                    "external_fact",
+                                    "absence_claim",
+                                    "derived_analysis",
+                                    "recommendation",
+                                    "uncertainty",
+                                ],
+                                "external_fact, absence_claim, derived_analysis, recommendation, or uncertainty.",
+                                True,
+                            ),
+                            "state": (
+                                Literal[
+                                    "supported",
+                                    "reasonable_derived",
+                                    "unsupported",
+                                    "contradicted",
+                                    "unverifiable",
+                                ],
+                                "supported, reasonable_derived, unsupported, contradicted, or unverifiable.",
+                                True,
+                            ),
+                            "evidence_ids": (
+                                [evidence_reference_type],
+                                "Only exact offered evidence_ledger.items[].reference_id values.",
+                                False,
+                            ),
+                            "required_for_criterion_ids": (
+                                [criterion_id_type],
+                                "Exact offered criterion ids whose satisfaction requires this claim; empty when optional.",
+                                True,
+                            ),
+                            "reason": (str, "Concise support or failure reason.", True),
+                        }
+                    ],
+                    "Material factual and derived-claim audit across all visible terminal carriers; empty when none exist.",
+                    True,
                 ),
                 "verification_summary": (
                     str,
@@ -676,9 +1680,22 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             },
             format="json",
         )
-        verification = await self._await_task_request(request.async_get_data(), stage="verify")
+        result_handle = request.get_result()
+        verification = await self._await_task_request(
+            result_handle.async_get_data(),
+            stage="verify",
+        )
+        self._record_task_context_consumption(
+            context_package,
+            request_id=result_handle.id,
+        )
+        await self._emit_required_skill_context_bound(
+            verification_context_pack,
+            request_id=result_handle.id,
+            phase="terminal.verify",
+        )
         if not isinstance(verification, dict):
-            return {
+            verification = {
                 "is_complete": False,
                 "requires_block": False,
                 "reason": str(verification),
@@ -696,7 +1713,25 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             execution_evidence_summary=raw_cumulative_evidence_summary,
             candidate_final_result=candidate_final_result,
             grounding_guard=grounding_guard,
+            terminal_candidate=strict_candidate,
+            offered_reference_ids=offered_reference_snapshot,
         )
+        normalized = await self._apply_strict_terminal_gates(
+            normalized,
+            candidate=strict_candidate,
+            execution_evidence_summary=raw_cumulative_evidence_summary,
+            verifier_called=True,
+        )
+        terminal_evidence_projection = (
+            self._terminal_evidence_projection_for_observers(
+                model_evidence_ledger,
+                normalized,
+            )
+        )
+        if terminal_evidence_projection:
+            self.diagnostics["terminal_evidence_projection"] = (
+                terminal_evidence_projection
+            )
         await self._emit_process_progress_from_output(
             normalized,
             stage="verification",
@@ -704,7 +1739,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         )
         return normalized
 
-    async def _ensure_workspace_artifact_targeted_readback_evidence(
+    async def _ensure_task_workspace_artifact_targeted_readback_evidence(
         self,
         execution_meta: Mapping[str, Any],
         evidence_ledger: Mapping[str, Any],
@@ -718,7 +1753,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         for item in evidence_ledger.get("items", []) if isinstance(evidence_ledger, Mapping) else []:
             if not isinstance(item, Mapping):
                 continue
-            if str(item.get("kind") or "") != "workspace_artifact.targeted_readback":
+            if str(item.get("kind") or "") != "task_workspace_artifact.targeted_readback":
                 continue
             path = str(item.get("path") or "").strip()
             provenance = item.get("provenance")
@@ -739,13 +1774,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 continue
             if str(locator.get("status") or "") != "ok":
                 continue
-            readback = await self._workspace_artifact_acceptance_locator_readback(locator)
+            readback = await self._task_workspace_artifact_acceptance_locator_readback(locator)
             if readback is not None:
-                evidence_items.append(self._workspace_artifact_targeted_readback_evidence_item(locator, readback))
+                evidence_items.append(self._task_workspace_artifact_targeted_readback_evidence_item(locator, readback))
                 existing_locator_readbacks.add(locator_id)
 
         claim_queries = self._evidence_use_verifier_target_queries(evidence_use)
-        for artifact in workspace_artifacts_from_ledger(evidence_ledger):
+        for artifact in task_workspace_artifacts_from_ledger(evidence_ledger):
             path = str(artifact.get("path") or "").strip()
             if not path or path in existing_generic_paths:
                 continue
@@ -754,13 +1789,13 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if str(artifact.get("body_state") or "") != "truncated":
                 continue
             try:
-                read_result = await self.workspace.read_file(
+                read_result = await self.task_workspace.read_file(
                     path,
-                    max_bytes=self._workspace_artifact_verifier_readback_bytes(artifact),
+                    max_bytes=self._task_workspace_artifact_verifier_readback_bytes(artifact),
                 )
             except Exception as error:
                 evidence_items.append(
-                    self._workspace_artifact_targeted_readback_evidence_item(
+                    self._task_workspace_artifact_targeted_readback_evidence_item(
                         artifact,
                         {
                             "kind": "verifier_readback",
@@ -774,16 +1809,16 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     )
                 )
                 continue
-            for readback in await self._trusted_workspace_artifact_targeted_readbacks(
+            for readback in await self._trusted_task_workspace_artifact_targeted_readbacks(
                 artifact,
                 read_result,
                 queries=claim_queries,
             ):
-                evidence_items.append(self._workspace_artifact_targeted_readback_evidence_item(artifact, readback))
+                evidence_items.append(self._task_workspace_artifact_targeted_readback_evidence_item(artifact, readback))
         self._append_execution_meta_evidence_items(execution_meta, evidence_items)
 
     @classmethod
-    def _workspace_artifact_targeted_readback_evidence_item(
+    def _task_workspace_artifact_targeted_readback_evidence_item(
         cls,
         artifact: Mapping[str, Any],
         readback: Mapping[str, Any],
@@ -795,27 +1830,36 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         content = str(readback.get("content") or "")
         query = str(readback.get("query") or readback.get("matched_query") or "")
         locator = query or str(readback.get("offset") or readback.get("line_start") or kind)
-        evidence_id = cls._workspace_artifact_evidence_id(
-            "workspace_artifact_targeted_readback",
+        snapshot_key = str(
+            readback.get("content_version_id")
+            or artifact.get("content_version_id")
+            or readback.get("snapshot_id")
+            or artifact.get("snapshot_id")
+            or readback.get("source_evidence_id")
+            or artifact.get("id")
+            or "unversioned"
+        ).strip()
+        evidence_id = cls._task_workspace_artifact_evidence_id(
+            "task_workspace_artifact_targeted_readback",
             path,
-            f"{kind}:{locator}",
+            f"{snapshot_key}:{kind}:{locator}",
         )
         item: dict[str, Any] = {
             "id": evidence_id,
-            "kind": "workspace_artifact.targeted_readback",
+            "kind": "task_workspace_artifact.targeted_readback",
             "status": status,
             "raw_status": raw_status,
             "body_state": "ref_only" if status == "failed" else ("truncated" if readback.get("truncated") else "bounded"),
             "path": path,
-            "aliases": cls._workspace_artifact_targeted_readback_aliases(
+            "aliases": cls._task_workspace_artifact_targeted_readback_aliases(
                 path=path,
                 query=query,
                 readback=readback,
                 artifact=artifact,
             ),
-            "source": "agent_task.workspace_artifact.targeted_readback",
+            "source": "agent_task.task_workspace_artifact.targeted_readback",
             "provenance": {
-                "source": "agent_task.workspace_artifact.targeted_readback",
+                "source": "agent_task.task_workspace_artifact.targeted_readback",
                 "source_evidence_id": readback.get("source_evidence_id") or artifact.get("id"),
                 "path": path,
                 "kind": kind,
@@ -831,6 +1875,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "ref_pointer": False,
             },
         }
+        for field in ("locator_id", "content_version_id", "snapshot_id", "sha256"):
+            value = readback.get(field) if readback.get(field) not in (None, "", [], {}) else artifact.get(field)
+            if value not in (None, "", [], {}):
+                item[field] = DataFormatter.sanitize(value)
+                item["provenance"][field] = DataFormatter.sanitize(value)
         for field in ("criterion_id", "heading", "anchor_text", "claim", "topic", "requirement_level", "point_source"):
             value = readback.get(field) if readback.get(field) not in (None, "", [], {}) else artifact.get(field)
             if value not in (None, "", [], {}):
@@ -840,15 +1889,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if status == "failed":
             item["diagnostics"] = [
                 {
-                    "code": "agent_task.workspace_artifact.targeted_readback_failed",
-                    "message": "Workspace artifact targeted readback failed before verifier request.",
+                    "code": "agent_task.task_workspace_artifact.targeted_readback_failed",
+                    "message": "TaskWorkspace artifact targeted readback failed before verifier request.",
                     "error": DataFormatter.sanitize(readback.get("error") or {}),
                 }
             ]
         return DataFormatter.sanitize(item)
 
     @classmethod
-    def _workspace_artifact_targeted_readback_aliases(
+    def _task_workspace_artifact_targeted_readback_aliases(
         cls,
         *,
         path: str,
@@ -862,7 +1911,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             text = str(value or "").strip()
             if text and text not in aliases:
                 aliases.append(text)
-            slug = cls._workspace_artifact_readback_alias_slug(text)
+            slug = cls._task_workspace_artifact_readback_alias_slug(text)
             if slug and slug not in aliases:
                 aliases.append(slug)
 
@@ -878,14 +1927,14 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return aliases[:24]
 
     @staticmethod
-    def _workspace_artifact_readback_alias_slug(value: str) -> str:
+    def _task_workspace_artifact_readback_alias_slug(value: str) -> str:
         text = str(value or "").strip().lower().replace("_", " ")
         if not text:
             return ""
         slug = "-".join(re.findall(r"[a-z0-9]+", text))
         return slug[:160]
 
-    async def _workspace_artifact_acceptance_locator_readback(
+    async def _task_workspace_artifact_acceptance_locator_readback(
         self,
         locator: Mapping[str, Any],
     ) -> dict[str, Any] | None:
@@ -900,7 +1949,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             max_bytes = min(max(byte_end - offset, 800), max_bytes)
         if offset > 0 or byte_end > 0:
             try:
-                read_result = await self.workspace.read_file(path, max_bytes=max_bytes, offset=offset)
+                read_result = await self.task_workspace.read_file(path, max_bytes=max_bytes, offset=offset)
             except Exception as error:
                 return {
                     "kind": "acceptance_locator_readback",
@@ -928,7 +1977,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "content": self._truncate_prompt_text(str(read_result.get("content") or ""), max_bytes),
             }
         for query in self._acceptance_locator_search_queries(locator):
-            match = await self._workspace_artifact_search_readback(
+            match = await self._task_workspace_artifact_search_readback(
                 path,
                 query,
                 max_file_bytes=5_000_000,
@@ -986,18 +2035,509 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             count = 0
         return count < 2
 
+    @staticmethod
+    def _evidence_body_prompt_value(value: Any) -> Any:
+        """Recover a complete structured Action body before hot projection.
+
+        Action artifacts cross the canonical evidence boundary as text so they
+        can also be indexed and read through TaskContext.  When that text is a
+        complete JSON container, treating it as undifferentiated prose makes a
+        character cut hide later sibling records even though the canonical
+        body is complete.  Recovering only valid JSON preserves structure for
+        the existing bounded projector; genuinely cut JSON remains text and
+        therefore retains its visible truncation boundary.
+        """
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped.startswith(("{", "[")):
+            return value
+        try:
+            structured = json.loads(stripped)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return value
+        if isinstance(structured, Mapping) or (
+            isinstance(structured, Sequence)
+            and not isinstance(structured, str | bytes | bytearray)
+        ):
+            return structured
+        return value
+
+    @classmethod
+    def _preserve_required_structured_evidence_bodies(
+        cls,
+        items: Sequence[Mapping[str, Any]],
+        *,
+        required_evidence_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """Keep complete JSON siblings for evidence the candidate actually used.
+
+        The cumulative verifier ledger deliberately keeps a small prose body
+        budget per item.  Applying that head/tail budget to a complete JSON
+        Action body can hide later sibling records before the model projection
+        has a chance to preserve their structure.  Only candidate-required
+        evidence receives this structured projection; unrelated ledger bodies
+        retain the ordinary bounded text budget.
+        """
+        projected: list[dict[str, Any]] = []
+        for raw_item in items:
+            item = dict(raw_item)
+            identities = {
+                str(item.get(field) or "").strip()
+                for field in (
+                    "id",
+                    "evidence_id",
+                    "reference_id",
+                    "locator_id",
+                )
+                if str(item.get(field) or "").strip()
+            }
+            aliases = item.get("aliases")
+            if isinstance(aliases, Sequence) and not isinstance(
+                aliases,
+                str | bytes | bytearray,
+            ):
+                identities.update(
+                    str(alias or "").strip()
+                    for alias in aliases
+                    if str(alias or "").strip()
+                )
+            if identities.isdisjoint(required_evidence_ids):
+                projected.append(item)
+                continue
+            body = item.get("body")
+            structured = cls._evidence_body_prompt_value(body)
+            if not isinstance(structured, Mapping) and not (
+                isinstance(structured, Sequence)
+                and not isinstance(structured, str | bytes | bytearray)
+            ):
+                projected.append(item)
+                continue
+            item.pop("body", None)
+            item["preview"] = DataFormatter.sanitize(structured)
+            projected.append(item)
+        return projected
+
+    @classmethod
+    def _evidence_item_projection_quality(
+        cls,
+        item: Mapping[str, Any],
+    ) -> tuple[int, int]:
+        """Rank duplicate projections of one immutable evidence identity."""
+        value = item.get("body")
+        if value in (None, "", [], {}):
+            value = item.get("preview")
+        structured = cls._evidence_body_prompt_value(value)
+        if isinstance(structured, Mapping) or (
+            isinstance(structured, Sequence)
+            and not isinstance(structured, str | bytes | bytearray)
+        ):
+            return (
+                3,
+                len(
+                    json.dumps(
+                        DataFormatter.sanitize(structured),
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                ),
+            )
+        if isinstance(value, str) and value:
+            if "[...body truncated for evidence ledger view...]" in value:
+                return (1, len(value))
+            return (2, len(value))
+        return (0, 0)
+
+    def _canonical_structured_evidence_ledger_for_model(
+        self,
+        evidence_ledger: Mapping[str, Any],
+        *,
+        max_hydrated_items: int = 8,
+    ) -> dict[str, Any]:
+        """Rejoin lossy JSON views to their task-canonical evidence target.
+
+        Canonical evidence stays owned by TaskReferenceCatalog; model-facing
+        ledgers receive a bounded structured view so sibling fields are not
+        lost to an earlier head/tail text cut. This applies equally to
+        TaskBoard card execution and terminal verification.
+        """
+        hydrated = dict(DataFormatter.sanitize(evidence_ledger))
+        raw_items = hydrated.get("items")
+        if not isinstance(raw_items, Sequence) or isinstance(
+            raw_items,
+            str | bytes | bytearray,
+        ):
+            return hydrated
+        output_items: list[Any] = []
+        hydrated_count = 0
+        for raw_item in raw_items:
+            if not isinstance(raw_item, Mapping):
+                output_items.append(raw_item)
+                continue
+            item = dict(raw_item)
+            body = item.get("body")
+            lossy = item.get("body_truncated_for_view") is True or (
+                isinstance(body, str)
+                and "[...body truncated for evidence ledger view...]" in body
+            )
+            reference_id = str(item.get("reference_id") or "").strip()
+            if (
+                not lossy
+                or not reference_id
+                or hydrated_count >= max_hydrated_items
+            ):
+                output_items.append(item)
+                continue
+            try:
+                resolved = self._task_references().resolve(reference_id)
+            except (KeyError, ValueError):
+                output_items.append(item)
+                continue
+            target = resolved.get("target")
+            if not isinstance(target, Mapping):
+                output_items.append(item)
+                continue
+            canonical_body: Any = None
+            for field in ("body", "content", "text", "snippet", "preview"):
+                value = target.get(field)
+                if value not in (None, "", [], {}):
+                    canonical_body = value
+                    break
+            structured = self._evidence_body_prompt_value(canonical_body)
+            if not isinstance(structured, Mapping) and not (
+                isinstance(structured, Sequence)
+                and not isinstance(structured, str | bytes | bytearray)
+            ):
+                output_items.append(item)
+                continue
+            item.pop("body", None)
+            item.pop("body_truncated_for_view", None)
+            item.pop("body_chars", None)
+            item["preview"] = DataFormatter.sanitize(structured)
+            output_items.append(item)
+            hydrated_count += 1
+        hydrated["items"] = output_items
+        return hydrated
+
+    @classmethod
+    def _terminal_evidence_projection_for_observers(
+        cls,
+        model_evidence_ledger: Mapping[str, Any],
+        verification: Mapping[str, Any],
+        *,
+        max_items: int = 24,
+    ) -> dict[str, Any]:
+        """Publish the exact accepted evidence frontier for cold observers.
+
+        The terminal verifier already receives a bounded, identity-safe ledger.
+        Re-project only references that its accepted criterion/claim checks used;
+        this keeps complete structured Action siblings available to experiments
+        and DevTools without putting a second evidence owner in diagnostics.
+        """
+        if verification.get("is_complete") is not True:
+            return {}
+
+        used_reference_ids: list[str] = []
+
+        def collect(value: Any) -> None:
+            for reference_id in cls._normalize_string_list(value):
+                if reference_id not in used_reference_ids:
+                    used_reference_ids.append(reference_id)
+
+        for field in ("criterion_checks", "material_claim_checks"):
+            checks = verification.get(field)
+            if not isinstance(checks, Sequence) or isinstance(
+                checks,
+                str | bytes | bytearray,
+            ):
+                continue
+            for check in checks:
+                if isinstance(check, Mapping):
+                    collect(check.get("evidence_ids"))
+        replan_signal = verification.get("replan_signal")
+        if isinstance(replan_signal, Mapping):
+            collect(replan_signal.get("evidence_refs"))
+        if not used_reference_ids:
+            return {}
+
+        raw_items = model_evidence_ledger.get("items")
+        if not isinstance(raw_items, Sequence) or isinstance(
+            raw_items,
+            str | bytes | bytearray,
+        ):
+            return {}
+        items_by_reference = {
+            str(item.get("reference_id") or "").strip(): item
+            for item in raw_items
+            if isinstance(item, Mapping)
+            and str(item.get("reference_id") or "").strip()
+        }
+        retained_ids: list[str] = []
+        projected_items: list[dict[str, Any]] = []
+        for reference_id in used_reference_ids:
+            item = items_by_reference.get(reference_id)
+            if item is None:
+                continue
+            projected = {
+                key: DataFormatter.sanitize(item.get(key))
+                for key in (
+                    "reference_id",
+                    "kind",
+                    "status",
+                    "source_role",
+                    "action_id",
+                    "owner",
+                    "locator",
+                    "source_id",
+                    "source_revision",
+                    "source_ref",
+                    "content_version",
+                    "path",
+                    "body_state",
+                    "body_preview",
+                )
+                if item.get(key) not in (None, "", [], {})
+            }
+            retained_ids.append(reference_id)
+            projected_items.append(projected)
+            if len(projected_items) >= max(1, max_items):
+                break
+        if not projected_items:
+            return {}
+        return {
+            "schema_version": "agent_task_terminal_evidence_projection/v1",
+            "verification_state": "accepted",
+            "reference_ids": retained_ids,
+            "items": projected_items,
+            "item_count": len(projected_items),
+            "omitted_used_reference_ids": [
+                reference_id
+                for reference_id in used_reference_ids
+                if reference_id not in retained_ids
+            ],
+        }
+
+    @classmethod
+    def _evidence_binding_repair_candidate_refs(
+        cls,
+        evidence_ledger: Mapping[str, Any],
+        *,
+        max_items: int = 80,
+        offered_reference_ids: set[str] | None = None,
+        preferred_reference_ids: set[str] | None = None,
+        required_reference_ids: set[str] | None = None,
+        include_host_identity: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Project stable evidence choices with only facts needed for binding.
+
+        The model selects one host-issued reference_id. Raw ledger ids, action-call
+        ids, request-local aliases, and full provenance remain host-side so the
+        model cannot be asked to reproduce several opaque identity fields.
+        """
+        if not isinstance(evidence_ledger, Mapping):
+            return []
+        raw_items: list[Any] = []
+        for key in ("items", "overflow_item_refs"):
+            value = evidence_ledger.get(key)
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+                raw_items.extend(value)
+        preferred = preferred_reference_ids or set()
+        required = required_reference_ids or set()
+        if preferred or required:
+            # A downstream card must retain the exact refs that its dependency
+            # structurally cited even when the cumulative ledger is larger
+            # than the model-visible identity budget.  This is a projection
+            # priority only; canonical identity and validation remain host-owned.
+            raw_items.sort(
+                key=lambda item: (
+                    0
+                    if isinstance(item, Mapping)
+                    and str(item.get("reference_id") or "").strip() in preferred
+                    else 1
+                    if isinstance(item, Mapping)
+                    and str(item.get("reference_id") or "").strip() in required
+                    else 2
+                )
+            )
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        expanded_bounded_readbacks = 0
+        for item in raw_items:
+            if not isinstance(item, Mapping):
+                continue
+            reference_id = str(item.get("reference_id") or "").strip()
+            if not reference_id or reference_id in seen:
+                continue
+            if (
+                offered_reference_ids is not None
+                and reference_id not in offered_reference_ids
+            ):
+                continue
+            seen.add(reference_id)
+            candidate: dict[str, Any] = {
+                "reference_id": reference_id,
+                "kind": str(item.get("kind") or ""),
+                "status": str(item.get("status") or ""),
+                "body_state": str(item.get("body_state") or ""),
+            }
+            for field in (
+                "action_id",
+                "path",
+                "url",
+                "source_ref",
+                "source_revision",
+                "query",
+                "range_start",
+                "query_match",
+                "criterion_id",
+                "claim",
+                "topic",
+                "heading",
+                "anchor_text",
+                "line_start",
+                "line_end",
+                "byte_offset",
+                "byte_end",
+            ):
+                value = item.get(field)
+                if value not in (None, "", [], {}):
+                    candidate[field] = DataFormatter.sanitize(value)
+            if include_host_identity:
+                for field in (
+                    "execution_block_id",
+                    "block_id",
+                    "source_id",
+                    "binding_id",
+                ):
+                    value = item.get(field)
+                    if value not in (None, "", [], {}):
+                        candidate[field] = DataFormatter.sanitize(value)
+            provenance = item.get("provenance")
+            if isinstance(provenance, Mapping):
+                for field in (
+                    "source_revision",
+                    "source_ref",
+                    "path",
+                ):
+                    if candidate.get(field) not in (None, "", [], {}):
+                        continue
+                    value = provenance.get(field)
+                    if value not in (None, "", [], {}):
+                        candidate[field] = DataFormatter.sanitize(value)
+                if include_host_identity:
+                    for field in (
+                        "execution_block_id",
+                        "block_id",
+                        "source_id",
+                        "binding_id",
+                    ):
+                        if candidate.get(field) not in (None, "", [], {}):
+                            continue
+                        value = provenance.get(field)
+                        if value not in (None, "", [], {}):
+                            candidate[field] = DataFormatter.sanitize(value)
+            input_preview = item.get("input_preview")
+            if input_preview not in (None, "", [], {}):
+                candidate["input_preview"] = cls._compact_verifier_prompt_value(input_preview, max_chars=600)
+            body = item.get("body")
+            if body in (None, "", [], {}):
+                body = item.get("preview")
+            if body not in (None, "", [], {}):
+                body_value = cls._evidence_body_prompt_value(body)
+                preserve_complete_readback = False
+                if (
+                    str(item.get("kind") or "")
+                    == "taskboard_action_artifact.readback"
+                    and str(item.get("body_state") or "")
+                    in {"full", "bounded", "truncated"}
+                    and expanded_bounded_readbacks
+                    < _TASKBOARD_DEPENDENCY_READBACK_MAX_REFS
+                    and isinstance(body_value, Mapping | Sequence)
+                    and not isinstance(body_value, str | bytes | bytearray)
+                ):
+                    serialized_body = json.dumps(
+                        DataFormatter.sanitize(body_value),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    preserve_complete_readback = (
+                        len(serialized_body)
+                        <= _TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS
+                    )
+                if preserve_complete_readback:
+                    candidate["body_preview"] = DataFormatter.sanitize(body_value)
+                    expanded_bounded_readbacks += 1
+                else:
+                    candidate["body_preview"] = cls._compact_verifier_prompt_value(
+                        body_value,
+                        max_chars=1200,
+                    )
+            candidates.append(DataFormatter.sanitize(candidate))
+            if len(candidates) >= max_items:
+                break
+        return candidates
+
+    def _model_evidence_ledger_projection(
+        self,
+        evidence_ledger: Mapping[str, Any],
+        *,
+        max_items: int = 80,
+        offered_reference_ids: set[str] | None = None,
+        preferred_reference_ids: set[str] | None = None,
+        required_reference_ids: set[str] | None = None,
+        include_host_identity: bool = False,
+    ) -> dict[str, Any]:
+        """Expose one host-issued identity per model-visible evidence item."""
+        canonical_evidence_ledger = self._canonical_structured_evidence_ledger_for_model(
+            evidence_ledger
+        )
+        candidates = self._evidence_binding_repair_candidate_refs(
+            canonical_evidence_ledger,
+            max_items=max_items,
+            offered_reference_ids=offered_reference_ids,
+            preferred_reference_ids=preferred_reference_ids,
+            required_reference_ids=required_reference_ids,
+            include_host_identity=include_host_identity,
+        )
+        eligible_reference_ids: set[str] = set()
+        for key in ("items", "overflow_item_refs"):
+            value = (
+                canonical_evidence_ledger.get(key)
+                if isinstance(canonical_evidence_ledger, Mapping)
+                else None
+            )
+            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+                for item in value:
+                    if not isinstance(item, Mapping):
+                        continue
+                    reference_id = str(item.get("reference_id") or "").strip()
+                    if not reference_id:
+                        continue
+                    if (
+                        offered_reference_ids is not None
+                        and reference_id not in offered_reference_ids
+                    ):
+                        continue
+                    eligible_reference_ids.add(reference_id)
+        return {
+            "items": candidates,
+            "item_count": len(candidates),
+            "omitted_count": max(len(eligible_reference_ids) - len(candidates), 0),
+            "selection_policy": (
+                "Use only an exact offered items[].reference_id in evidence_use.evidence_ids. "
+                "reference_id is the only model-selection identity; host-owned canonical ids and aliases are omitted."
+            ),
+        }
+
     async def _request_evidence_binding_repair(
         self,
         grounding_guard: Mapping[str, Any],
         evidence_ledger: Mapping[str, Any],
         *,
         language_policy: Mapping[str, Any],
+        offered_reference_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        try:
-            count = int(self.diagnostics.get("evidence_binding_repair_attempt_count") or 0)
-        except (TypeError, ValueError):
-            count = 0
-        self.diagnostics["evidence_binding_repair_attempt_count"] = count + 1
         request = self.agent.create_temp_request()
         self._apply_language_policy_to_request(request, language_policy)
         request.input(
@@ -1005,14 +2545,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "task_id": self.id,
                 "blocking_evidence_use_diagnostics": self._evidence_binding_repair_diagnostics(grounding_guard),
                 "current_evidence_use": grounding_guard.get("normalized_evidence_use", []),
-                "available_evidence_refs": grounding_guard.get("available_evidence_refs", []),
+                "available_evidence_refs": self._evidence_binding_repair_candidate_refs(
+                    evidence_ledger,
+                    offered_reference_ids=offered_reference_ids,
+                ),
                 "grounding_rules": evidence_ledger.get("grounding_rules", {}) if isinstance(evidence_ledger, Mapping) else {},
             }
         )
         request.instruct(
             "Repair only the structured evidence_use bindings that failed deterministic id binding. "
             "Do not rewrite, summarize, or regenerate the candidate final result. "
-            "Choose evidence_ids only from available_evidence_refs.id or available_evidence_refs.cite_as. "
+            "Choose evidence_ids only from available_evidence_refs.reference_id after matching each claim against the "
+            "candidate's bounded input_preview, body_preview, action_id, and locator facts. "
             "If no listed evidence item can support a claim under the rules, return that claim with an empty evidence_ids "
             "list so the host can block precisely. Preserve each claim text and support_type."
         )
@@ -1023,7 +2567,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                         {
                             "claim_index": (int, "Index of the claim in current_evidence_use when available", False),
                             "claim": (str, "Original claim text", True),
-                            "evidence_ids": ([str], "Corrected evidence ids or cite_as handles from available_evidence_refs", True),
+                            "evidence_ids": ([str], "Corrected stable reference_id values from available_evidence_refs", True),
                             "support_type": (
                                 str,
                                 "content, unavailability, or ref_pointer; keep the original type unless it was structurally wrong",
@@ -1064,6 +2608,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         cls,
         grounding_guard: Mapping[str, Any],
         evidence_ledger: Mapping[str, Any] | None = None,
+        *,
+        offered_reference_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         current = grounding_guard.get("normalized_evidence_use", [])
         if not isinstance(current, Sequence) or isinstance(current, str | bytes | bytearray):
@@ -1079,10 +2625,89 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 available_ref_records,
                 cls._evidence_binding_available_ref_records_from_ledger(evidence_ledger),
             )
+        if offered_reference_ids is not None:
+            available_ref_records = [
+                ref
+                for ref in available_ref_records
+                if str(ref.get("reference_id") or ref.get("id") or "").strip()
+                in offered_reference_ids
+            ]
         available_refs = cls._evidence_binding_available_ref_index(available_ref_records)
         diagnostics = cls._evidence_binding_repair_diagnostics(grounding_guard)
         repaired: list[dict[str, Any]] = []
         seen_indexes: set[int] = set()
+        raw_guard_diagnostics = [
+            dict(item)
+            for item in grounding_guard.get("diagnostics", [])
+            if isinstance(item, Mapping) and item.get("blocking") is True
+        ]
+        blocking_diagnostics_by_claim: dict[int, list[dict[str, Any]]] = {}
+        for diagnostic in raw_guard_diagnostics:
+            try:
+                diagnostic_index = int(diagnostic.get("index", -1))
+            except (TypeError, ValueError):
+                continue
+            if diagnostic_index >= 0:
+                blocking_diagnostics_by_claim.setdefault(
+                    diagnostic_index,
+                    [],
+                ).append(diagnostic)
+        support_incompatibility_codes = {
+            "evidence_ledger.unavailable_item_used_as_positive_support",
+            "evidence_ledger.ok_item_used_as_unavailability_support",
+            "evidence_ledger.ref_only_item_used_as_content_support",
+        }
+        binding_repair_codes = {
+            "evidence_ledger.invalid_evidence_id",
+            "evidence_ledger.ambiguous_evidence_alias",
+            "evidence_ledger.missing_evidence_id",
+            "evidence_ledger.ref_only_item_used_as_content_support",
+        }
+        if evidence_ledger is not None:
+            for claim_index, item in enumerate(current_items):
+                claim_blocking_diagnostics = blocking_diagnostics_by_claim.get(
+                    claim_index,
+                    [],
+                )
+                if not claim_blocking_diagnostics or any(
+                    str(diagnostic.get("code") or "")
+                    not in support_incompatibility_codes
+                    for diagnostic in claim_blocking_diagnostics
+                ):
+                    continue
+                current_ids = cls._normalize_string_list(item.get("evidence_ids"))
+                if not current_ids:
+                    continue
+                incompatible_ids: set[str] = set()
+                for diagnostic in claim_blocking_diagnostics:
+                    evidence_id = str(diagnostic.get("evidence_id") or "").strip()
+                    if evidence_id in current_ids:
+                        incompatible_ids.add(evidence_id)
+                    resolved_ids = cls._normalize_string_list(
+                        available_refs.get(evidence_id, [])
+                    )
+                    if len(resolved_ids) == 1:
+                        incompatible_ids.add(resolved_ids[0])
+                retained_ids = [
+                    evidence_id
+                    for evidence_id in current_ids
+                    if evidence_id not in incompatible_ids
+                ]
+                if not retained_ids or len(retained_ids) == len(current_ids):
+                    continue
+                candidate = DataFormatter.sanitize(
+                    {
+                        "claim_index": claim_index,
+                        "claim": item.get("claim", ""),
+                        "evidence_ids": retained_ids,
+                        "support_type": item.get("support_type", ""),
+                    }
+                )
+                candidate_guard = validate_evidence_use([candidate], evidence_ledger)
+                if candidate_guard.get("valid") is not True:
+                    continue
+                repaired.append(candidate)
+                seen_indexes.add(claim_index)
         for diagnostic in diagnostics:
             raw_index = diagnostic.get("claim_index")
             try:
@@ -1090,6 +2715,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             except (TypeError, ValueError):
                 claim_index = -1
             if claim_index < 0 or claim_index >= len(current_items) or claim_index in seen_indexes:
+                continue
+            claim_blocking_diagnostics = blocking_diagnostics_by_claim.get(
+                claim_index,
+                [],
+            )
+            if not claim_blocking_diagnostics or any(
+                str(item.get("code") or "") not in binding_repair_codes
+                for item in claim_blocking_diagnostics
+            ):
                 continue
             item = current_items[claim_index]
             candidate_ids = cls._deterministic_evidence_id_candidates(
@@ -1141,7 +2775,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         order: list[str] = []
 
         def merge(ref: Mapping[str, Any]) -> None:
-            evidence_id = str(ref.get("id") or "").strip()
+            evidence_id = str(ref.get("reference_id") or ref.get("id") or "").strip()
             if not evidence_id:
                 return
             if evidence_id not in merged_by_id:
@@ -1172,7 +2806,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         for ref in refs:
             if not isinstance(ref, Mapping):
                 continue
-            evidence_id = str(ref.get("id") or "").strip()
+            evidence_id = str(ref.get("reference_id") or ref.get("id") or "").strip()
             if not evidence_id:
                 continue
             aliases: set[str] = {evidence_id}
@@ -1211,9 +2845,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if support_type != "unavailability":
             return support_type
         refs_by_id = {
-            str(ref.get("id") or "").strip(): ref
+            str(ref.get("reference_id") or ref.get("id") or "").strip(): ref
             for ref in available_refs
-            if isinstance(ref, Mapping) and str(ref.get("id") or "").strip()
+            if isinstance(ref, Mapping) and str(ref.get("reference_id") or ref.get("id") or "").strip()
         }
         candidate_refs = [refs_by_id.get(str(candidate_id or "").strip()) for candidate_id in candidate_ids]
         if not candidate_refs or any(ref is None for ref in candidate_refs):
@@ -1329,7 +2963,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         for ref in available_refs:
             if not isinstance(ref, Mapping):
                 continue
-            evidence_id = str(ref.get("id") or "").strip()
+            evidence_id = str(ref.get("reference_id") or ref.get("id") or "").strip()
             if not evidence_id:
                 continue
             status = str(ref.get("status") or "").strip().lower()
@@ -1346,7 +2980,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         alias_matches: list[str] = []
         action_matches: list[str] = []
         for ref in action_refs:
-            evidence_id = str(ref.get("id") or "").strip()
+            evidence_id = str(ref.get("reference_id") or ref.get("id") or "").strip()
             aliases = {
                 evidence_id,
                 str(ref.get("cite_as") or "").strip(),
@@ -1397,10 +3031,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         for ref in available_refs:
             if not isinstance(ref, Mapping):
                 continue
-            evidence_id = str(ref.get("id") or "").strip()
+            evidence_id = str(ref.get("reference_id") or ref.get("id") or "").strip()
             if not evidence_id or (candidate_ids and evidence_id not in candidate_ids):
                 continue
-            if str(ref.get("kind") or "").strip().lower() != "workspace_artifact.acceptance_coverage":
+            if str(ref.get("kind") or "").strip().lower() != "task_workspace_artifact.acceptance_coverage":
                 continue
             if str(ref.get("status") or "").strip().lower() != "ok":
                 continue
@@ -1428,7 +3062,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             return []
         evidence_id_text = str(diagnostic.get("evidence_id") or "").strip()
         query_specs = [(query, False) for query in cls._evidence_binding_body_match_queries(evidence_id_text)]
-        if not evidence_id_text or cls._evidence_binding_id_looks_like_workspace_locator(evidence_id_text):
+        if not evidence_id_text or cls._evidence_binding_id_looks_like_task_workspace_locator(evidence_id_text):
             allow_partial_claim_match = not evidence_id_text
             query_specs.extend(
                 (query, allow_partial_claim_match)
@@ -1469,9 +3103,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         unique_matches = cls._unique_evidence_binding_ref_ids(matches)
         if len(unique_matches) <= 1:
             return unique_matches
-        coalesced_workspace_match = cls._coalesced_workspace_body_text_candidate(matches)
-        if coalesced_workspace_match:
-            return [coalesced_workspace_match]
+        coalesced_task_workspace_match = cls._coalesced_task_workspace_body_text_candidate(matches)
+        if coalesced_task_workspace_match:
+            return [coalesced_task_workspace_match]
         return unique_matches
 
     @staticmethod
@@ -1555,11 +3189,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return deduped
 
     @classmethod
-    def _evidence_binding_id_looks_like_workspace_locator(cls, evidence_id: str) -> bool:
+    def _evidence_binding_id_looks_like_task_workspace_locator(cls, evidence_id: str) -> bool:
         text = str(evidence_id or "").strip().lower()
         return (
             not text
-            or "workspace_artifact" in text
+            or "task_workspace_artifact" in text
             or "artifact_locator" in text
             or "acceptance_locator" in text
             or "readback" in text
@@ -1602,7 +3236,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "source",
             "targeted",
             "the",
-            "workspace",
+            "task_workspace",
         }
         seen: set[str] = set()
         result: list[str] = []
@@ -1653,9 +3287,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         unique_readable_matches = cls._unique_evidence_binding_ref_ids(readable_matches)
         if len(unique_readable_matches) == 1:
             return unique_readable_matches[0]
-        coalesced_workspace_match = cls._coalesced_workspace_body_text_candidate(readable_matches)
-        if coalesced_workspace_match:
-            return coalesced_workspace_match
+        coalesced_task_workspace_match = cls._coalesced_task_workspace_body_text_candidate(readable_matches)
+        if coalesced_task_workspace_match:
+            return coalesced_task_workspace_match
         return ""
 
     @classmethod
@@ -1681,7 +3315,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 if basename and basename not in aliases:
                     aliases.append(basename)
 
-        for key in ("id", "cite_as", "path", "artifact_id", "action_call_id"):
+        for key in ("reference_id", "id", "cite_as", "path", "selection_key", "artifact_id", "action_call_id"):
             add(ref.get(key))
         raw_aliases = ref.get("aliases")
         if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, str | bytes | bytearray):
@@ -1695,31 +3329,31 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         action_id = str(ref.get("action_id") or "").strip().lower()
         return (
             "readback" in kind
-            or kind == "workspace_artifact.readback"
-            or kind == "workspace_artifact.targeted_readback"
+            or kind == "task_workspace_artifact.readback"
+            or kind == "task_workspace_artifact.targeted_readback"
             or action_id in {"read_file", "grep_files", "search_files"}
         )
 
     @classmethod
-    def _coalesced_workspace_body_text_candidate(cls, refs: Sequence[Mapping[str, Any]]) -> str:
-        workspace_refs: list[Mapping[str, Any]] = []
+    def _coalesced_task_workspace_body_text_candidate(cls, refs: Sequence[Mapping[str, Any]]) -> str:
+        task_workspace_refs: list[Mapping[str, Any]] = []
         for ref in refs:
             kind = str(ref.get("kind") or "").strip().lower()
-            if kind not in {"workspace_artifact.readback", "workspace_artifact.targeted_readback"}:
+            if kind not in {"task_workspace_artifact.readback", "task_workspace_artifact.targeted_readback"}:
                 continue
             path = str(ref.get("path") or "").strip()
             evidence_id = str(ref.get("id") or "").strip()
             if path and evidence_id:
-                workspace_refs.append(ref)
-        if not workspace_refs:
+                task_workspace_refs.append(ref)
+        if not task_workspace_refs:
             return ""
-        paths = {str(ref.get("path") or "").strip() for ref in workspace_refs}
+        paths = {str(ref.get("path") or "").strip() for ref in task_workspace_refs}
         if len(paths) != 1:
             return ""
         targeted_refs = [
-            ref for ref in workspace_refs if str(ref.get("kind") or "").strip().lower() == "workspace_artifact.targeted_readback"
+            ref for ref in task_workspace_refs if str(ref.get("kind") or "").strip().lower() == "task_workspace_artifact.targeted_readback"
         ]
-        selected_pool = targeted_refs or workspace_refs
+        selected_pool = targeted_refs or task_workspace_refs
         return str(selected_pool[-1].get("id") or "").strip()
 
     @classmethod
@@ -1748,7 +3382,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 continue
             if (
                 "readback" not in kind
-                and "workspace_artifact" not in kind
+                and "task_workspace_artifact" not in kind
                 and kind != "agent_task.action.result"
             ):
                 continue
@@ -1855,19 +3489,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             merged.append(DataFormatter.sanitize(replacement if replacement is not None else item))
         return merged
 
-    async def _trusted_workspace_artifacts_for_verifier(
+    async def _trusted_task_workspace_artifacts_for_verifier(
         self,
         evidence_summary: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         artifacts: list[dict[str, Any]] = []
-        for ref in self._trusted_workspace_artifact_refs_from_summary(evidence_summary):
-            artifact = self._trusted_workspace_artifact_ref_summary(ref)
+        for ref in self._trusted_task_workspace_artifact_refs_from_summary(evidence_summary):
+            artifact = self._trusted_task_workspace_artifact_ref_summary(ref)
             path = str(ref.get("path") or "").strip()
             if path:
                 try:
-                    read_result = await self.workspace.read_file(
+                    read_result = await self.task_workspace.read_file(
                         path,
-                        max_bytes=self._workspace_artifact_verifier_readback_bytes(ref),
+                        max_bytes=self._task_workspace_artifact_verifier_readback_bytes(ref),
                     )
                 except Exception as error:
                     artifact["readback"] = {
@@ -1889,7 +3523,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                             else ""
                         ),
                     }
-                    targeted_readbacks = await self._trusted_workspace_artifact_targeted_readbacks(ref, read_result)
+                    targeted_readbacks = await self._trusted_task_workspace_artifact_targeted_readbacks(ref, read_result)
                     if targeted_readbacks:
                         artifact["targeted_readbacks"] = targeted_readbacks
             artifacts.append(artifact)
@@ -1897,7 +3531,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 break
         return DataFormatter.sanitize(artifacts)
 
-    async def _trusted_workspace_artifact_targeted_readbacks(
+    async def _trusted_task_workspace_artifact_targeted_readbacks(
         self,
         ref: Mapping[str, Any],
         read_result: Mapping[str, Any],
@@ -1918,7 +3552,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if byte_count > read_bytes > 0:
             offset = max(0, byte_count - max_snippet_bytes)
             try:
-                tail = await self.workspace.read_file(path, max_bytes=max_snippet_bytes, offset=offset)
+                tail = await self.task_workspace.read_file(path, max_bytes=max_snippet_bytes, offset=offset)
             except Exception as error:
                 readbacks.append(
                     {
@@ -1945,24 +3579,24 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 )
 
         max_file_bytes = max(byte_count, _VERIFIER_PROMPT_VALUE_CHARS)
-        for query in [*list(queries or ()), *self._workspace_artifact_verifier_target_queries()]:
+        for query in [*list(queries or ()), *self._task_workspace_artifact_verifier_target_queries()]:
             if len(readbacks) >= 8:
                 break
-            match = await self._workspace_artifact_search_readback(path, query, max_file_bytes=max_file_bytes)
+            match = await self._task_workspace_artifact_search_readback(path, query, max_file_bytes=max_file_bytes)
             if match is not None:
                 readbacks.append(match)
         return DataFormatter.sanitize(readbacks)
 
-    async def _workspace_artifact_search_readback(
+    async def _task_workspace_artifact_search_readback(
         self,
         path: str,
         query: str,
         *,
         max_file_bytes: int,
     ) -> dict[str, Any] | None:
-        for search_query in self._workspace_artifact_query_variants(query):
+        for search_query in self._task_workspace_artifact_query_variants(query):
             try:
-                matches = await self.workspace.search_files(
+                matches = await self.task_workspace.search_files(
                     search_query,
                     path=path,
                     max_results=1,
@@ -1987,7 +3621,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             }
         return None
 
-    def _workspace_artifact_verifier_target_queries(self) -> list[str]:
+    def _task_workspace_artifact_verifier_target_queries(self) -> list[str]:
         queries: list[str] = []
 
         def add(value: Any) -> None:
@@ -2067,7 +3701,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return queries[:12]
 
     @staticmethod
-    def _workspace_artifact_query_variants(query: str) -> list[str]:
+    def _task_workspace_artifact_query_variants(query: str) -> list[str]:
         variants: list[str] = []
         for value in (query, query.title(), query.lower(), query.upper()):
             text = str(value or "").strip()
@@ -2076,19 +3710,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return variants
 
     @classmethod
-    def _workspace_artifact_verifier_readback_bytes(cls, ref: Mapping[str, Any]) -> int:
+    def _task_workspace_artifact_verifier_readback_bytes(cls, ref: Mapping[str, Any]) -> int:
         declared_bytes = cls._coerce_non_negative_int(ref.get("bytes"))
         if declared_bytes > 0 and declared_bytes < _VERIFIER_PROMPT_VALUE_CHARS:
             return declared_bytes + 1
         return max(_WORKSPACE_ARTIFACT_PREVIEW_BYTES, _VERIFIER_PROMPT_VALUE_CHARS)
 
     @classmethod
-    def _trusted_workspace_artifact_refs_from_summary(cls, evidence_summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _trusted_task_workspace_artifact_refs_from_summary(cls, evidence_summary: Mapping[str, Any]) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []
 
         def collect(value: Any) -> None:
             if isinstance(value, Mapping):
-                if cls._is_trusted_workspace_artifact_ref(value) and str(value.get("path") or "").strip():
+                if cls._is_trusted_task_workspace_artifact_ref(value) and str(value.get("path") or "").strip():
                     refs.append(dict(value))
                 return
             if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
@@ -2096,9 +3730,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     collect(item)
 
         collect(evidence_summary.get("artifact_refs"))
-        workspace_refs = evidence_summary.get("workspace_refs")
-        if isinstance(workspace_refs, Mapping):
-            collect(workspace_refs)
+        task_workspace_refs = evidence_summary.get("task_workspace_refs")
+        if isinstance(task_workspace_refs, Mapping):
+            collect(task_workspace_refs)
 
         deduped: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
@@ -2111,7 +3745,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return deduped
 
     @classmethod
-    def _trusted_workspace_artifact_refs_have_readback(cls, refs: Sequence[Mapping[str, Any]]) -> bool:
+    def _trusted_task_workspace_artifact_refs_have_readback(cls, refs: Sequence[Mapping[str, Any]]) -> bool:
         for ref in refs:
             if not isinstance(ref, Mapping):
                 continue
@@ -2128,7 +3762,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 return True
             file_refs = ref.get("file_refs")
             if isinstance(file_refs, Sequence) and not isinstance(file_refs, str | bytes | bytearray):
-                if cls._trusted_workspace_artifact_refs_have_readback(
+                if cls._trusted_task_workspace_artifact_refs_have_readback(
                     [item for item in file_refs if isinstance(item, Mapping)]
                 ):
                     return True
@@ -2142,7 +3776,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         execution_evidence_summary: Mapping[str, Any],
         verification: Mapping[str, Any],
         normalized: Mapping[str, Any],
-        trusted_workspace_artifact_refs: Sequence[Mapping[str, Any]],
+        trusted_task_workspace_artifact_refs: Sequence[Mapping[str, Any]],
         grounding_guard: Mapping[str, Any] | None,
         final_result_required: bool,
         non_blocking_action_ids: Sequence[str] | None = None,
@@ -2171,9 +3805,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             diagnostic_code = str(error.get("code") or "").strip()
             return diagnostic_code == "action_loop.max_rounds_reached" and "action_loop" in non_blocking_actions
 
-        if not final_result_required or not trusted_workspace_artifact_refs:
+        if not final_result_required or not trusted_task_workspace_artifact_refs:
             return None
-        if not cls._trusted_workspace_artifact_refs_have_readback(trusted_workspace_artifact_refs):
+        if not cls._trusted_task_workspace_artifact_refs_have_readback(trusted_task_workspace_artifact_refs):
             return None
         if normalized.get("is_complete") is not True or normalized.get("requires_block") is True:
             return None
@@ -2258,18 +3892,799 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return checked
 
     @classmethod
-    def _verification_factual_integrity_is_satisfied(cls, check: Mapping[str, Any]) -> bool:
-        return check.get("satisfied") is True
+    def _material_claim_candidate_index(
+        cls,
+        candidate: Mapping[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        """Create request-local claim selections over exact carrier spans.
+
+        Segmentation is structural only. It does not decide whether a block is
+        factual or supported; the semantic verifier owns that judgment. The
+        host keeps carrier/version identity private and offers one short key per
+        exact text block so the response never has to transcribe canonical ids
+        or quotes.
+        """
+
+        raw_carriers = candidate.get("carriers")
+        carriers = (
+            [item for item in raw_carriers if isinstance(item, Mapping)]
+            if isinstance(raw_carriers, Sequence)
+            and not isinstance(raw_carriers, str | bytes | bytearray)
+            else [candidate]
+        )
+        segments: list[dict[str, Any]] = []
+        for carrier_index, carrier in enumerate(carriers[:8]):
+            text = str(carrier.get("text") or "")
+            if not text.strip():
+                continue
+            lines = [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip()
+            ]
+            line_syntax_roles = [
+                cls._material_claim_syntax_role(line)
+                for line in lines
+            ]
+            markdown_table_header_indexes = {
+                line_index
+                for line_index in range(len(lines) - 1)
+                if line_syntax_roles[line_index] == "markdown_table_row"
+                and line_syntax_roles[line_index + 1]
+                == "markdown_table_separator"
+            }
+            for line_index, line in enumerate(lines):
+                if line_index in markdown_table_header_indexes:
+                    # A pipe row immediately followed by the Markdown table
+                    # separator is deterministic table scaffolding. Its labels
+                    # remain verifier-visible through artifact readback, while
+                    # factual body rows remain independently auditable below.
+                    continue
+                # Keep individual model-visible selections bounded while every
+                # non-empty physical line remains independently selectable and
+                # every long-line chunk is an exact carrier substring. This is
+                # structural framing only; it performs no semantic sentence or
+                # claim classification.
+                for chunk_index, start in enumerate(range(0, len(line), 8_000)):
+                    exact_text = line[start : start + 8_000]
+                    if not exact_text:
+                        continue
+                    syntax_role = cls._material_claim_syntax_role(exact_text)
+                    if syntax_role in {
+                        "markdown_heading",
+                        "markdown_separator",
+                        "markdown_table_separator",
+                    }:
+                        # These spans are deterministic document scaffolding,
+                        # not independently selectable material-claim bodies.
+                        # Their document/criterion role remains visible through
+                        # artifact readback and acceptance locators.
+                        continue
+                    segments.append(
+                        {
+                            "_order": (
+                                carrier_index,
+                                line_index,
+                                chunk_index,
+                            ),
+                            "text": exact_text,
+                            "syntax_role": syntax_role,
+                            "delivery_kind": str(
+                                carrier.get("kind") or "terminal_candidate"
+                            ),
+                            "path": str(carrier.get("path") or ""),
+                            "carrier_id": str(
+                                carrier.get("carrier_id")
+                                or carrier.get("content_version_id")
+                                or ""
+                            ),
+                            "content_version_id": str(
+                                carrier.get("content_version_id") or ""
+                            ),
+                        }
+                    )
+
+        total = sum(len(item["text"]) for item in segments)
+        if total > 96_000:
+            selected_indexes: set[int] = set()
+            head_size = 0
+            for index, item in enumerate(segments):
+                if head_size and head_size + len(item["text"]) > 48_000:
+                    break
+                selected_indexes.add(index)
+                head_size += len(item["text"])
+            tail_size = 0
+            for index in range(len(segments) - 1, -1, -1):
+                if index in selected_indexes:
+                    break
+                item = segments[index]
+                if tail_size and tail_size + len(item["text"]) > 48_000:
+                    break
+                selected_indexes.add(index)
+                tail_size += len(item["text"])
+            segments = [
+                item
+                for index, item in enumerate(segments)
+                if index in selected_indexes
+            ]
+
+        indexed: dict[str, dict[str, Any]] = {}
+        for index, item in enumerate(segments, start=1):
+            claim_key = f"claim_{index}"
+            indexed[claim_key] = {
+                key: value
+                for key, value in item.items()
+                if key != "_order"
+            }
+        return indexed
+
+    @staticmethod
+    def _material_claim_syntax_role(text: str) -> str:
+        """Describe lexical Markdown framing without deciding claim semantics."""
+
+        value = str(text or "").strip()
+        if value.startswith("#") and value.lstrip("#").startswith(" "):
+            return "markdown_heading"
+        if len(value) >= 3 and not value.strip("-_* "):
+            return "markdown_separator"
+        if value.startswith("|") and value.endswith("|"):
+            cells = [cell.strip() for cell in value.strip("|").split("|")]
+            if cells and all(
+                cell and not cell.strip(":").replace("-", "")
+                for cell in cells
+            ):
+                return "markdown_table_separator"
+            return "markdown_table_row"
+        return "prose"
 
     @classmethod
-    def _verification_factual_integrity_messages(cls, check: Mapping[str, Any]) -> list[str]:
-        messages: list[str] = []
-        for key in ("unsupported_additions", "certainty_inflation"):
-            messages.extend(cls._normalize_string_list(check.get(key)))
-        summary = str(check.get("summary") or "").strip()
-        if summary and summary not in messages:
-            messages.append(summary)
-        return messages
+    def _material_claim_candidates_for_verifier(
+        cls,
+        candidate: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "claim_key": claim_key,
+                "text": item["text"],
+                "delivery_kind": item["delivery_kind"],
+                "syntax_role": item["syntax_role"],
+                **({"path": item["path"]} if item.get("path") else {}),
+            }
+            for claim_key, item in cls._material_claim_candidate_index(
+                candidate
+            ).items()
+        ]
+
+    @staticmethod
+    def _model_acceptance_locator_view(
+        evidence_ledger: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Project locator facts without creating another selection domain."""
+
+        view = acceptance_locator_view_from_ledger(evidence_ledger)
+        raw_items = view.get("items")
+        items = (
+            [item for item in raw_items if isinstance(item, Mapping)]
+            if isinstance(raw_items, Sequence)
+            and not isinstance(raw_items, str | bytes | bytearray)
+            else []
+        )
+        identity_fields = {
+            "reference_id",
+            "id",
+            "evidence_id",
+            "cite_as",
+            "criterion_id",
+            "content_fingerprint",
+            "source_evidence_ids",
+        }
+        projected_items = [
+            {
+                key: DataFormatter.sanitize(value)
+                for key, value in item.items()
+                if key not in identity_fields
+            }
+            for item in items
+        ]
+        return {
+            "schema_version": "acceptance_locator_view/v1",
+            "items": projected_items,
+            "item_count": len(projected_items),
+            "rules": DataFormatter.sanitize(view.get("rules", {})),
+        }
+
+    def _validate_criterion_audit(
+        self,
+        verification: Mapping[str, Any],
+        *,
+        offered_reference_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        offered = {
+            f"criterion:{index}": str(criterion)
+            for index, criterion in enumerate(self.success_criteria, start=1)
+        }
+        effective_offered_reference_ids = (
+            set(offered_reference_ids)
+            if offered_reference_ids is not None
+            else set(self._task_reference_catalog.offered_references())
+        )
+        raw_checks = verification.get("criterion_checks")
+        structural_errors: list[dict[str, Any]] = []
+        checks: list[dict[str, Any]] = []
+        failed_checks: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        if not isinstance(raw_checks, Sequence) or isinstance(
+            raw_checks,
+            str | bytes | bytearray,
+        ):
+            structural_errors.append(
+                {
+                    "code": "criterion_checks_invalid",
+                    "message": "criterion_checks must be a structured list.",
+                }
+            )
+            raw_checks = []
+        for index, raw_check in enumerate(raw_checks):
+            if not isinstance(raw_check, Mapping):
+                structural_errors.append(
+                    {
+                        "code": "criterion_check_invalid",
+                        "index": index,
+                        "message": "A criterion check is not an object.",
+                    }
+                )
+                continue
+            criterion_id = str(raw_check.get("criterion_id") or "").strip()
+            satisfied = raw_check.get("satisfied")
+            summary = str(raw_check.get("summary") or "").strip()
+            gaps = self._normalize_string_list(raw_check.get("gaps"))
+            raw_evidence_ids = raw_check.get("evidence_ids")
+            evidence_ids = (
+                [str(value or "").strip() for value in raw_evidence_ids]
+                if isinstance(raw_evidence_ids, Sequence)
+                and not isinstance(raw_evidence_ids, str | bytes | bytearray)
+                else []
+            )
+            if criterion_id not in offered:
+                structural_errors.append(
+                    {
+                        "code": "criterion_id_unknown",
+                        "index": index,
+                        "criterion_id": criterion_id,
+                        "message": "criterion_id is not one of the current offered success criteria.",
+                    }
+                )
+            elif criterion_id in seen_ids:
+                structural_errors.append(
+                    {
+                        "code": "criterion_id_duplicate",
+                        "index": index,
+                        "criterion_id": criterion_id,
+                        "message": "criterion_id was returned more than once.",
+                    }
+                )
+            else:
+                seen_ids.add(criterion_id)
+            if not isinstance(satisfied, bool):
+                structural_errors.append(
+                    {
+                        "code": "criterion_satisfied_invalid",
+                        "index": index,
+                        "criterion_id": criterion_id,
+                        "message": "satisfied must be a boolean.",
+                    }
+                )
+            if not summary:
+                structural_errors.append(
+                    {
+                        "code": "criterion_summary_missing",
+                        "index": index,
+                        "criterion_id": criterion_id,
+                        "message": "summary is required.",
+                    }
+                )
+            if len(evidence_ids) != len(set(evidence_ids)):
+                structural_errors.append(
+                    {
+                        "code": "criterion_evidence_duplicate",
+                        "index": index,
+                        "criterion_id": criterion_id,
+                        "message": "evidence_ids contains duplicates.",
+                    }
+                )
+            unknown_evidence_ids = [
+                evidence_id
+                for evidence_id in evidence_ids
+                if not evidence_id
+                or evidence_id not in effective_offered_reference_ids
+            ]
+            valid_evidence_ids = [
+                evidence_id
+                for evidence_id in evidence_ids
+                if evidence_id in effective_offered_reference_ids
+            ]
+            if unknown_evidence_ids:
+                # Reject every unknown join key before lookup, but do not turn a
+                # known criterion into a repeated response-shape loop. The
+                # criterion remains unproven and is repaired through the normal
+                # criterion path with only host-offered bindings retained.
+                satisfied = False
+                gaps.append(
+                    "Host validation discarded evidence_ids outside the offered set."
+                )
+            normalized_check = {
+                "criterion_id": criterion_id,
+                "criterion": offered.get(criterion_id, ""),
+                "satisfied": satisfied if isinstance(satisfied, bool) else False,
+                "summary": summary,
+                "gaps": gaps,
+                "evidence_ids": valid_evidence_ids,
+                **(
+                    {"discarded_evidence_ids": unknown_evidence_ids}
+                    if unknown_evidence_ids
+                    else {}
+                ),
+            }
+            checks.append(normalized_check)
+            if criterion_id in offered and normalized_check["satisfied"] is False:
+                failed_checks.append(normalized_check)
+        missing_ids = [criterion_id for criterion_id in offered if criterion_id not in seen_ids]
+        if missing_ids:
+            structural_errors.append(
+                {
+                    "code": "criterion_checks_missing",
+                    "criterion_ids": missing_ids,
+                    "message": "criterion_checks omitted one or more offered success criteria.",
+                }
+            )
+        valid = not structural_errors and not failed_checks
+        if structural_errors:
+            issue_code = "terminal_verifier_output_invalid"
+            contract_subject = "verification:response"
+        elif failed_checks:
+            issue_code = "criterion_unsatisfied"
+            failed_ids = [str(item.get("criterion_id") or "") for item in failed_checks]
+            contract_subject = (
+                failed_ids[0]
+                if len(failed_ids) == 1
+                else "criteria:"
+                + hashlib.sha256("\n".join(sorted(failed_ids)).encode("utf-8")).hexdigest()[:12]
+            )
+        else:
+            issue_code = ""
+            contract_subject = ""
+        requirements = [
+            {
+                "criterion_id": item.get("criterion_id"),
+                "criterion": item.get("criterion"),
+                "summary": item.get("summary"),
+                "gaps": item.get("gaps", []),
+                "evidence_ids": item.get("evidence_ids", []),
+                **(
+                    {
+                        "discarded_evidence_ids": item.get(
+                            "discarded_evidence_ids", []
+                        )
+                    }
+                    if item.get("discarded_evidence_ids")
+                    else {}
+                ),
+            }
+            for item in failed_checks
+        ]
+        requirements.extend(
+            {
+                "code": error.get("code"),
+                "reason": error.get("message"),
+                **(
+                    {"field": error.get("field")}
+                    if error.get("field")
+                    else {}
+                ),
+                **(
+                    {
+                        "invalid_reference_ids": error.get(
+                            "invalid_reference_ids"
+                        )
+                    }
+                    if error.get("invalid_reference_ids")
+                    else {}
+                ),
+                "offered_reference_ids": error.get(
+                    "offered_reference_ids", []
+                ),
+                "offered_reference_count": int(
+                    error.get("offered_reference_count") or 0
+                ),
+            }
+            for error in structural_errors
+        )
+        return {
+            "valid": valid,
+            "checks": DataFormatter.sanitize(checks),
+            "failed_checks": DataFormatter.sanitize(failed_checks),
+            "structural_errors": DataFormatter.sanitize(structural_errors),
+            "repair_contract": (
+                {
+                    "gate_kind": (
+                        "output_contract" if structural_errors else "criterion"
+                    ),
+                    "issue_code": issue_code,
+                    "contract_subject": contract_subject,
+                    **(
+                        {"protocol_section": "criterion_checks"}
+                        if structural_errors
+                        else {}
+                    ),
+                    "requirements": DataFormatter.sanitize(requirements),
+                }
+                if not valid
+                else {}
+            ),
+        }
+
+    def _validate_material_claim_audit(
+        self,
+        verification: Mapping[str, Any],
+        *,
+        terminal_candidate: Mapping[str, Any],
+        offered_reference_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        claim_candidates = self._material_claim_candidate_index(
+            terminal_candidate
+        )
+        effective_offered_reference_ids = (
+            set(offered_reference_ids)
+            if offered_reference_ids is not None
+            else set(self._task_reference_catalog.offered_references())
+        )
+        coverage_complete = verification.get("material_claim_coverage_complete") is True
+        raw_checks = verification.get("material_claim_checks")
+        structural_errors: list[dict[str, Any]] = []
+        checks: list[dict[str, Any]] = []
+        failed_checks: list[dict[str, Any]] = []
+        if not coverage_complete:
+            structural_errors.append(
+                {
+                    "code": "material_claim_coverage_incomplete",
+                    "message": "The semantic verifier did not confirm complete material-claim coverage.",
+                }
+            )
+        if not isinstance(raw_checks, Sequence) or isinstance(raw_checks, str | bytes | bytearray):
+            structural_errors.append(
+                {
+                    "code": "material_claim_checks_invalid",
+                    "message": "material_claim_checks must be a structured list.",
+                }
+            )
+            raw_checks = []
+        allowed_kinds = {
+            "external_fact",
+            "absence_claim",
+            "derived_analysis",
+            "recommendation",
+            "uncertainty",
+        }
+        allowed_states = {
+            "supported",
+            "reasonable_derived",
+            "unsupported",
+            "contradicted",
+            "unverifiable",
+        }
+        offered_criterion_ids = {
+            f"criterion:{index}"
+            for index, _criterion in enumerate(self.success_criteria, start=1)
+        }
+        seen_claim_keys: set[str] = set()
+        for index, raw_check in enumerate(raw_checks):
+            if not isinstance(raw_check, Mapping):
+                structural_errors.append(
+                    {
+                        "code": "material_claim_check_invalid",
+                        "index": index,
+                        "message": "A material claim check is not an object.",
+                    }
+                )
+                continue
+            claim_key = str(raw_check.get("claim_key") or "").strip()
+            claim_kind = str(raw_check.get("claim_kind") or "").strip()
+            state = str(raw_check.get("state") or "").strip()
+            reason = str(raw_check.get("reason") or "").strip()
+            raw_evidence_ids = raw_check.get("evidence_ids")
+            evidence_ids = (
+                [str(value or "").strip() for value in raw_evidence_ids]
+                if isinstance(raw_evidence_ids, Sequence)
+                and not isinstance(raw_evidence_ids, str | bytes | bytearray)
+                else []
+            )
+            raw_required_criterion_ids = raw_check.get(
+                "required_for_criterion_ids"
+            )
+            required_for_criterion_ids = (
+                [str(value or "").strip() for value in raw_required_criterion_ids]
+                if isinstance(raw_required_criterion_ids, Sequence)
+                and not isinstance(
+                    raw_required_criterion_ids,
+                    str | bytes | bytearray,
+                )
+                else []
+            )
+            check_errors: list[str] = []
+            claim_candidate = claim_candidates.get(claim_key)
+            if claim_candidate is None:
+                check_errors.append(
+                    "claim_key is not one of the current offered material claim candidates"
+                )
+            if claim_key in seen_claim_keys:
+                check_errors.append("claim_key is duplicated")
+            elif claim_key:
+                seen_claim_keys.add(claim_key)
+            if claim_kind not in allowed_kinds:
+                check_errors.append("claim_kind is invalid")
+            if state not in allowed_states:
+                check_errors.append("state is invalid")
+            if not reason:
+                check_errors.append("reason is required")
+            if len(evidence_ids) != len(set(evidence_ids)):
+                check_errors.append("evidence_ids contains duplicates")
+            unknown_evidence_ids = [
+                evidence_id
+                for evidence_id in evidence_ids
+                if not evidence_id or evidence_id not in effective_offered_reference_ids
+            ]
+            if unknown_evidence_ids:
+                check_errors.append("evidence_ids contains a reference outside the offered set")
+            if "required_for_criterion_ids" not in raw_check:
+                check_errors.append("required_for_criterion_ids is required")
+            if len(required_for_criterion_ids) != len(
+                set(required_for_criterion_ids)
+            ):
+                check_errors.append("required_for_criterion_ids contains duplicates")
+            unknown_required_criterion_ids = [
+                criterion_id
+                for criterion_id in required_for_criterion_ids
+                if not criterion_id or criterion_id not in offered_criterion_ids
+            ]
+            if unknown_required_criterion_ids:
+                check_errors.append(
+                    "required_for_criterion_ids contains a criterion outside the offered set"
+                )
+            # An authored recommendation or safety/scope boundary is evaluated
+            # from the host-validated carrier text itself.  It is not an
+            # external fact and must not be forced to invent a source identity
+            # merely to state what the document does or does not recommend.
+            supported_without_evidence = (
+                state == "supported"
+                and not evidence_ids
+                and claim_kind != "recommendation"
+            )
+            if supported_without_evidence:
+                check_errors.append("supported material claims require at least one offered evidence reference")
+            invalid_reasonable_derived_fact = state == "reasonable_derived" and claim_kind not in {
+                "derived_analysis",
+                "recommendation",
+            }
+            if invalid_reasonable_derived_fact:
+                check_errors.append("reasonable_derived is valid only for derived analysis or recommendation")
+            normalized_check = {
+                "claim_key": claim_key,
+                "carrier_id": (
+                    str(claim_candidate.get("carrier_id") or "")
+                    if claim_candidate is not None
+                    else ""
+                ),
+                "path": (
+                    str(claim_candidate.get("path") or "")
+                    if claim_candidate is not None
+                    else ""
+                ),
+                "content_version_id": (
+                    str(claim_candidate.get("content_version_id") or "")
+                    if claim_candidate is not None
+                    else ""
+                ),
+                "artifact_quote": (
+                    str(claim_candidate.get("text") or "")
+                    if claim_candidate is not None
+                    else ""
+                ),
+                "claim_kind": claim_kind,
+                "state": state,
+                "evidence_ids": evidence_ids,
+                "required_for_criterion_ids": required_for_criterion_ids,
+                "reason": reason,
+            }
+            checks.append(normalized_check)
+            targetable_support_failure = ""
+            targetable_state = ""
+            if supported_without_evidence:
+                targetable_support_failure = (
+                    "supported material claims require at least one offered evidence reference"
+                )
+                targetable_state = "unsupported"
+            elif invalid_reasonable_derived_fact:
+                targetable_support_failure = (
+                    "reasonable_derived is valid only for derived analysis or recommendation"
+                )
+                targetable_state = "unverifiable"
+            if (
+                targetable_support_failure
+                and claim_candidate is not None
+                and check_errors == [targetable_support_failure]
+            ):
+                # A known material claim with a semantically insufficient
+                # support state is a factual-integrity failure, not merely a
+                # response-shape retry. Conservatively retain the host-owned
+                # artifact target and require deletion rather than retrying an
+                # unchanged verifier protocol indefinitely.
+                normalized_check["reported_state"] = state
+                normalized_check["state"] = targetable_state
+                normalized_check["reason"] = (
+                    f"{reason} Host validation: {targetable_support_failure}"
+                )
+                normalized_check["repair_policy"] = (
+                    "evidence_reacquisition_required"
+                    if required_for_criterion_ids
+                    else "delete_only"
+                )
+                failed_checks.append(normalized_check)
+            elif check_errors:
+                structural_errors.append(
+                    {
+                        "code": "material_claim_check_untrusted",
+                        "index": index,
+                        "claim_key": claim_key,
+                        "carrier_id": normalized_check["carrier_id"],
+                        "path": normalized_check["path"],
+                        "content_version_id": normalized_check[
+                            "content_version_id"
+                        ],
+                        "artifact_quote": normalized_check["artifact_quote"],
+                        "claim_kind": normalized_check["claim_kind"],
+                        "state": normalized_check["state"],
+                        "evidence_ids": normalized_check["evidence_ids"],
+                        "reason": normalized_check["reason"],
+                        "field": (
+                            "material_claim_checks.evidence_ids"
+                            if unknown_evidence_ids
+                            else "material_claim_checks.claim_key"
+                        ),
+                        "invalid_reference_ids": unknown_evidence_ids,
+                        "offered_reference_ids": sorted(
+                            effective_offered_reference_ids
+                        )[:24],
+                        "offered_reference_count": len(
+                            effective_offered_reference_ids
+                        ),
+                        "messages": check_errors,
+                    }
+                )
+            elif state in {"unsupported", "contradicted", "unverifiable"}:
+                normalized_check["repair_policy"] = (
+                    "evidence_reacquisition_required"
+                    if required_for_criterion_ids
+                    else "delete_only"
+                )
+                failed_checks.append(normalized_check)
+        issue_code = ""
+        if structural_errors:
+            issue_code = "terminal_verifier_output_invalid"
+        elif any(
+            item.get("repair_policy") == "evidence_reacquisition_required"
+            for item in failed_checks
+        ):
+            issue_code = "required_material_claim_evidence_missing"
+        elif any(item.get("state") == "contradicted" for item in failed_checks):
+            issue_code = "contradicted_material_claim"
+        elif failed_checks:
+            issue_code = "unsupported_material_claim"
+        valid = coverage_complete and not structural_errors and not failed_checks
+        failed_carrier_ids = list(
+            dict.fromkeys(
+                str(item.get("carrier_id") or "")
+                for item in failed_checks
+                if str(item.get("carrier_id") or "")
+            )
+        )
+        requirements = [
+            {
+                "claim_key": item.get("claim_key"),
+                "carrier_id": item.get("carrier_id"),
+                "path": item.get("path"),
+                "content_version_id": item.get("content_version_id"),
+                "artifact_quote": item.get("artifact_quote"),
+                "claim_kind": item.get("claim_kind"),
+                "state": item.get("state"),
+                "evidence_ids": item.get("evidence_ids", []),
+                "required_for_criterion_ids": item.get(
+                    "required_for_criterion_ids", []
+                ),
+                "reason": item.get("reason"),
+                "repair_policy": item.get("repair_policy", "delete_only"),
+                **(
+                    {"reported_state": item.get("reported_state")}
+                    if item.get("reported_state")
+                    else {}
+                ),
+            }
+            for item in failed_checks
+        ]
+        requirements.extend(
+            {
+                "claim_key": error.get("claim_key"),
+                "carrier_id": error.get("carrier_id"),
+                "path": error.get("path"),
+                "content_version_id": error.get("content_version_id"),
+                "artifact_quote": error.get("artifact_quote"),
+                "claim_kind": error.get("claim_kind"),
+                "state": error.get("state"),
+                "evidence_ids": error.get("evidence_ids", []),
+                "reason": str(error.get("message") or "; ".join(error.get("messages") or [])),
+                "code": error.get("code"),
+                **(
+                    {"field": error.get("field")}
+                    if error.get("field")
+                    else {}
+                ),
+                **(
+                    {
+                        "invalid_reference_ids": error.get(
+                            "invalid_reference_ids"
+                        )
+                    }
+                    if error.get("invalid_reference_ids")
+                    else {}
+                ),
+                "offered_reference_ids": error.get(
+                    "offered_reference_ids", []
+                ),
+                "offered_reference_count": int(
+                    error.get("offered_reference_count") or 0
+                ),
+            }
+            for error in structural_errors
+        )
+        if len(failed_carrier_ids) == 1:
+            contract_subject = f"carrier:{failed_carrier_ids[0]}"
+        elif failed_carrier_ids:
+            carrier_set_digest = hashlib.sha256(
+                "\n".join(sorted(failed_carrier_ids)).encode("utf-8")
+            ).hexdigest()[:12]
+            contract_subject = f"carriers:{carrier_set_digest}"
+        else:
+            contract_subject = (
+                "verification:response"
+                if structural_errors
+                else "verification:material_claim_audit"
+            )
+        return {
+            "valid": valid,
+            "coverage_complete": coverage_complete,
+            "checks": DataFormatter.sanitize(checks),
+            "failed_checks": DataFormatter.sanitize(failed_checks),
+            "failed_carrier_ids": failed_carrier_ids,
+            "structural_errors": DataFormatter.sanitize(structural_errors),
+            "repair_contract": (
+                {
+                    "gate_kind": (
+                        "output_contract"
+                        if structural_errors
+                        else "factual_integrity"
+                    ),
+                    "issue_code": issue_code,
+                    "contract_subject": contract_subject,
+                    **(
+                        {"protocol_section": "material_claim_checks"}
+                        if structural_errors
+                        else {}
+                    ),
+                    "requirements": DataFormatter.sanitize(requirements),
+                }
+                if not valid
+                else {}
+            ),
+        }
 
     @classmethod
     def _is_liveness_stall_error(cls, error: Mapping[str, Any]) -> bool:
@@ -2310,7 +4725,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         normalized["next_step_requirements"] = [normalized["replan_instruction"]]
 
     @classmethod
-    def _trusted_workspace_artifact_ref_summary(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
+    def _trusted_task_workspace_artifact_ref_summary(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
         summary = {
             "path": str(ref.get("path") or ""),
             "role": str(ref.get("role") or ""),
@@ -2330,57 +4745,121 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize(summary)
 
     @classmethod
-    def _workspace_artifact_execution_result_for_verifier(cls, execution_result: Any) -> Any:
+    def _task_workspace_artifact_execution_result_for_verifier(cls, execution_result: Any) -> Any:
         if not isinstance(execution_result, Mapping):
             return execution_result
-        if not (
-            isinstance(execution_result.get("artifact_manifest"), Mapping)
-            or isinstance(execution_result.get("workspace_artifact_delivery"), Mapping)
-            or (
-                isinstance(execution_result.get("file_refs"), Sequence)
-                and not isinstance(execution_result.get("file_refs"), str | bytes | bytearray)
-            )
-        ):
-            return execution_result
-        return cls._workspace_artifact_hot_value(execution_result)
+        return cls._task_workspace_artifact_hot_value(
+            execution_result,
+            omit_embedded_evidence=True,
+        )
 
     @classmethod
-    def _workspace_artifact_hot_value(cls, value: Any, *, key_context: str = "") -> Any:
+    def _task_workspace_artifact_hot_value(
+        cls,
+        value: Any,
+        *,
+        key_context: str = "",
+        omit_embedded_evidence: bool = False,
+    ) -> Any:
         if isinstance(value, Mapping):
             if key_context in {"file_refs", "artifact_refs"}:
                 return cls._compact_artifact_ref_for_verifier(value)
             compact: dict[str, Any] = {}
             for key, item in value.items():
                 key_text = str(key)
+                if omit_embedded_evidence and key_text in _VERIFIER_RESULT_EMBEDDED_EVIDENCE_KEYS:
+                    continue
                 if key_text in {"sha256", "bytes", "read_bytes", "size", "media_type", "content_kind", "handler_id"}:
                     continue
                 if key_text == "artifact_manifest" and isinstance(item, Mapping):
-                    compact[key_text] = cls._workspace_artifact_manifest_for_verifier(item)
+                    compact[key_text] = cls._task_workspace_artifact_manifest_for_verifier(
+                        item,
+                        omit_embedded_evidence=omit_embedded_evidence,
+                    )
                     continue
-                if key_text == "workspace_artifact_delivery" and isinstance(item, Mapping):
-                    compact[key_text] = cls._workspace_artifact_delivery_for_verifier(item)
+                if key_text == "task_workspace_artifact_delivery" and isinstance(item, Mapping):
+                    compact[key_text] = cls._task_workspace_artifact_delivery_for_verifier(
+                        item,
+                        omit_embedded_evidence=omit_embedded_evidence,
+                    )
                     continue
-                compact[key_text] = cls._workspace_artifact_hot_value(item, key_context=key_text)
+                compact[key_text] = cls._task_workspace_artifact_hot_value(
+                    item,
+                    key_context=key_text,
+                    omit_embedded_evidence=omit_embedded_evidence,
+                )
             return compact
         if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-            return [cls._workspace_artifact_hot_value(item, key_context=key_context) for item in value]
+            return [
+                cls._task_workspace_artifact_hot_value(
+                    item,
+                    key_context=key_context,
+                    omit_embedded_evidence=omit_embedded_evidence,
+                )
+                for item in value
+            ]
         return value
 
     @classmethod
-    def _workspace_artifact_manifest_for_verifier(cls, manifest: Mapping[str, Any]) -> dict[str, Any]:
+    def _task_workspace_artifact_index_for_verifier(
+        cls,
+        evidence_ledger: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        index: list[dict[str, Any]] = []
+        for artifact in task_workspace_artifacts_from_ledger(evidence_ledger):
+            if not isinstance(artifact, Mapping):
+                continue
+            item: dict[str, Any] = {
+                key: artifact.get(key)
+                for key in ("path", "status", "body_state")
+                if key in artifact
+            }
+            readback = artifact.get("readback")
+            if isinstance(readback, Mapping):
+                item["readback"] = {
+                    key: readback.get(key)
+                    for key in ("status", "path", "truncated")
+                    if key in readback
+                }
+                item["readback"]["available"] = str(readback.get("status") or "") == "ok"
+            index.append(DataFormatter.sanitize(item))
+        return index
+
+    @classmethod
+    def _task_workspace_artifact_manifest_for_verifier(
+        cls,
+        manifest: Mapping[str, Any],
+        *,
+        omit_embedded_evidence: bool = False,
+    ) -> dict[str, Any]:
         compact: dict[str, Any] = {}
         for key, item in manifest.items():
             key_text = str(key)
+            if omit_embedded_evidence and key_text in _VERIFIER_RESULT_EMBEDDED_EVIDENCE_KEYS:
+                continue
             if key_text in {"sha256", "bytes", "read_bytes", "size", "media_type", "content_kind", "handler_id"}:
                 continue
             if key_text == "file_refs":
-                compact[key_text] = cls._workspace_artifact_hot_value(item, key_context=key_text)
+                compact[key_text] = cls._task_workspace_artifact_hot_value(
+                    item,
+                    key_context=key_text,
+                    omit_embedded_evidence=omit_embedded_evidence,
+                )
                 continue
-            compact[key_text] = cls._workspace_artifact_hot_value(item, key_context=key_text)
+            compact[key_text] = cls._task_workspace_artifact_hot_value(
+                item,
+                key_context=key_text,
+                omit_embedded_evidence=omit_embedded_evidence,
+            )
         return compact
 
     @classmethod
-    def _workspace_artifact_delivery_for_verifier(cls, delivery: Mapping[str, Any]) -> dict[str, Any]:
+    def _task_workspace_artifact_delivery_for_verifier(
+        cls,
+        delivery: Mapping[str, Any],
+        *,
+        omit_embedded_evidence: bool = False,
+    ) -> dict[str, Any]:
         compact: dict[str, Any] = {}
         for key in ("source", "path", "status", "mode", "content_key"):
             if key in delivery:
@@ -2403,7 +4882,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 compact["file_refs"].append({"omitted": len(file_refs) - 8, "reason": "prompt_budget"})
         diagnostics = delivery.get("diagnostics")
         if diagnostics:
-            compact["diagnostics"] = cls._workspace_artifact_hot_value(diagnostics, key_context="diagnostics")
+            compact["diagnostics"] = cls._task_workspace_artifact_hot_value(
+                diagnostics,
+                key_context="diagnostics",
+                omit_embedded_evidence=omit_embedded_evidence,
+            )
         draft_meta = delivery.get("draft_meta")
         if isinstance(draft_meta, Mapping):
             compact["draft_meta"] = {
@@ -2414,20 +4897,34 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return compact
 
     @classmethod
-    def _workspace_artifact_final_result_from_refs(cls, refs: Sequence[Mapping[str, Any]]) -> str:
-        paths = [str(ref.get("path") or "").strip() for ref in refs if str(ref.get("path") or "").strip()]
+    def _task_workspace_artifact_display_path(cls, path: Any) -> str:
+        """Project a private fallback carrier back to its requested logical path."""
+
+        normalized = str(path or "").strip()
+        parts = PurePosixPath(normalized).parts
+        if len(parts) >= 4 and parts[:2] == (".agently", "files"):
+            return PurePosixPath(*parts[3:]).as_posix()
+        return normalized
+
+    @classmethod
+    def _task_workspace_artifact_final_result_from_refs(cls, refs: Sequence[Mapping[str, Any]]) -> str:
+        paths = [
+            cls._task_workspace_artifact_display_path(ref.get("path"))
+            for ref in refs
+            if str(ref.get("path") or "").strip()
+        ]
         if not paths:
             return ""
         if len(paths) == 1:
-            return f"Workspace artifact delivered at {paths[0]}; full content is available through file_refs/readback."
+            return f"TaskWorkspace artifact delivered at {paths[0]}; full content is available through file_refs/readback."
         return (
-            "Workspace artifacts delivered at "
+            "TaskWorkspace artifacts delivered at "
             + ", ".join(paths)
             + "; full content is available through file_refs/readback."
         )
 
     @classmethod
-    def _final_result_is_workspace_artifact_pointer(
+    def _final_result_is_task_workspace_artifact_pointer(
         cls,
         final_result: str,
         refs: Sequence[Mapping[str, Any]],
@@ -2435,7 +4932,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         text = str(final_result or "").strip()
         if not text:
             return False
-        if cls._looks_like_workspace_artifact_placeholder(text):
+        if cls._looks_like_task_workspace_artifact_placeholder(text):
             return True
         for ref in refs:
             path = str(ref.get("path") or "").strip()
@@ -2458,7 +4955,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     candidates.append(value.strip())
             manifest = execution_result.get("artifact_manifest")
             if isinstance(manifest, Mapping):
-                manifest_content = cls._workspace_artifact_manifest_content(manifest)
+                manifest_content = cls._task_workspace_artifact_manifest_content(manifest)
                 if manifest_content.strip():
                     candidates.append(manifest_content.strip())
             keys: tuple[str, ...] = ("artifact_markdown", "artifact_html")
@@ -2505,7 +5002,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     def _verification_execution_meta_summary(
         cls,
         execution_meta: Mapping[str, Any],
-        evidence_summary: Mapping[str, Any],
     ) -> dict[str, Any]:
         route = execution_meta.get("route")
         diagnostics = execution_meta.get("diagnostics")
@@ -2513,13 +5009,18 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "status": str(execution_meta.get("status") or ""),
             "route": cls._compact_verifier_prompt_value(route, max_chars=1200),
             "diagnostics": cls._compact_verifier_prompt_value(diagnostics, max_chars=1200),
-            "evidence_summary": dict(evidence_summary),
         }
 
     @classmethod
-    def _evidence_ledger_from_execution_meta(cls, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+    def _evidence_ledger_from_execution_meta(
+        cls,
+        execution_meta: Mapping[str, Any],
+        *,
+        required_evidence_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         evidence_items: list[dict[str, Any]] = []
         pinned_evidence_ids = cls._pinned_evidence_ids_from_execution_meta(execution_meta)
+        pinned_evidence_ids.update(required_evidence_ids or set())
         blocks = execution_meta.get("blocks")
         if isinstance(blocks, Mapping):
             evidence = blocks.get("evidence")
@@ -2579,6 +5080,106 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 collect(evidence.get("pinned_evidence_ids"))
         return pinned
 
+    @staticmethod
+    def _task_workspace_artifact_hot_path(item: Mapping[str, Any]) -> str:
+        path = str(item.get("path") or "").strip().replace("\\", "/")
+        return PurePosixPath(path).as_posix() if path else ""
+
+    @staticmethod
+    def _task_workspace_artifact_hot_source(item: Mapping[str, Any]) -> str:
+        provenance = item.get("provenance")
+        if isinstance(provenance, Mapping):
+            source = str(provenance.get("source") or "").strip()
+            if source:
+                return source
+        return str(item.get("source") or "").strip()
+
+    @classmethod
+    def _is_task_workspace_artifact_hot_item(cls, item: Mapping[str, Any]) -> bool:
+        kind = str(item.get("kind") or "").strip()
+        if kind.startswith("task_workspace_artifact."):
+            return True
+        if kind != "artifact_ref":
+            return False
+        role = str(item.get("role") or "").strip()
+        source = cls._task_workspace_artifact_hot_source(item)
+        return role == "task_workspace_artifact" or source.startswith("agent_task.")
+
+    @staticmethod
+    def _task_workspace_artifact_hot_identity(item: Mapping[str, Any]) -> tuple[str, str]:
+        provenance = item.get("provenance")
+
+        def value(field: str) -> str:
+            direct = str(item.get(field) or "").strip()
+            if direct:
+                return direct
+            if isinstance(provenance, Mapping):
+                return str(provenance.get(field) or "").strip()
+            return ""
+
+        version = value("content_version_id") or value("snapshot_id")
+        return version, value("sha256")
+
+    def _current_task_workspace_artifact_hot_items(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Keep historical artifact snapshots cold while projecting one current file state."""
+
+        current_by_path: dict[str, tuple[str, str]] = {}
+        for item in items:
+            if not self._is_task_workspace_artifact_hot_item(item):
+                continue
+            kind = str(item.get("kind") or "").strip()
+            if kind not in {"artifact_ref", "task_workspace_artifact.readback"}:
+                continue
+            path = self._task_workspace_artifact_hot_path(item)
+            version, digest = self._task_workspace_artifact_hot_identity(item)
+            if path and (version or digest) and path not in current_by_path:
+                current_by_path[path] = (version, digest)
+
+        projected: list[dict[str, Any]] = []
+        filtered: list[dict[str, Any]] = []
+        for item in items:
+            candidate = dict(item)
+            if not self._is_task_workspace_artifact_hot_item(candidate):
+                projected.append(candidate)
+                continue
+            path = self._task_workspace_artifact_hot_path(candidate)
+            current = current_by_path.get(path)
+            if current is None:
+                projected.append(candidate)
+                continue
+            version, digest = self._task_workspace_artifact_hot_identity(candidate)
+            current_version, current_digest = current
+            matches = bool(
+                (version and current_version and version == current_version)
+                or (digest and current_digest and digest == current_digest)
+            )
+            if matches:
+                projected.append(candidate)
+            else:
+                filtered.append(
+                    {
+                        "id": candidate.get("id"),
+                        "kind": candidate.get("kind"),
+                        "path": path,
+                        "content_version_id": version,
+                        "sha256": digest,
+                        "current_content_version_id": current_version,
+                        "current_sha256": current_digest,
+                    }
+                )
+        self.diagnostics["verifier_task_workspace_artifact_projection"] = {
+            "current": {
+                path: {"content_version_id": identity[0], "sha256": identity[1]}
+                for path, identity in current_by_path.items()
+            },
+            "filtered_stale_count": len(filtered),
+            "filtered_stale": DataFormatter.sanitize(filtered[:32]),
+        }
+        return projected
+
     @classmethod
     def _prioritized_verifier_evidence_items(
         cls,
@@ -2592,8 +5193,12 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if not isinstance(item, Mapping):
                 continue
             sanitized = dict(DataFormatter.sanitize(item))
-            evidence_id = str(sanitized.get("id") or "").strip()
-            pin_priority = -1 if evidence_id and evidence_id in pinned else 0
+            identities = {
+                str(sanitized.get(field) or "").strip()
+                for field in ("id", "evidence_id", "reference_id", "cite_as")
+                if str(sanitized.get(field) or "").strip()
+            }
+            pin_priority = -1 if identities.intersection(pinned) else 0
             ordered.append((pin_priority, cls._verifier_evidence_item_priority(sanitized), index, sanitized))
         ordered.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
         return [item for _, _, _, item in ordered]
@@ -2601,15 +5206,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     @staticmethod
     def _verifier_evidence_item_priority(item: Mapping[str, Any]) -> int:
         kind = str(item.get("kind") or "").strip().lower()
-        if kind == "workspace_artifact.targeted_readback":
+        if kind == "task_workspace_artifact.targeted_readback":
             return 0
-        if kind == "workspace_artifact.acceptance_coverage":
+        if kind == "task_workspace_artifact.acceptance_coverage":
             return 0
-        if kind == "workspace_artifact.readback":
+        if kind == "task_workspace_artifact.readback":
             return 1
-        if kind == "workspace_artifact.acceptance_locator":
+        if kind == "task_workspace_artifact.acceptance_locator":
             return 2
-        if kind.startswith("workspace_artifact."):
+        if kind.startswith("task_workspace_artifact."):
             return 3
         return 10
 
@@ -2627,7 +5232,27 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 continue
             result_preview = record.get("result_preview")
             error = record.get("error")
-            body_value = result_preview if result_preview not in (None, "", [], {}) else error
+            progressive_transfer = (
+                result_preview
+                if (
+                    isinstance(result_preview, Mapping)
+                    and str(result_preview.get("owner") or "").strip()
+                    and str(result_preview.get("locator") or "").strip()
+                    and str(result_preview.get("content_version") or "").strip()
+                    and "value" in result_preview
+                )
+                else None
+            )
+            # Progressive-disclosure metadata is typed evidence identity, not
+            # part of the source body.  Keeping it beside the body avoids
+            # spending the verifier's bounded content window on wrappers while
+            # preserving the exact owner/version/range needed for no-progress
+            # and provenance checks.
+            body_value = (
+                progressive_transfer.get("value")
+                if isinstance(progressive_transfer, Mapping)
+                else result_preview if result_preview not in (None, "", [], {}) else error
+            )
             body = cls._action_result_evidence_body(body_value)
             access_blocked = cls._action_result_preview_access_blocked(body)
             status = cls._action_result_evidence_status(record, body=body)
@@ -2662,6 +5287,24 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             input_preview = record.get("input_preview")
             if input_preview not in (None, "", [], {}):
                 item["input_preview"] = DataFormatter.sanitize(input_preview)
+            if isinstance(progressive_transfer, Mapping):
+                for key in (
+                    "owner",
+                    "locator",
+                    "content_version",
+                    "range",
+                    "total_bytes",
+                    "next_offset",
+                    "serialized_media_type",
+                ):
+                    value = progressive_transfer.get(key)
+                    if value not in (None, "", [], {}):
+                        item[key] = DataFormatter.sanitize(value)
+                item["provenance"]["owner"] = str(progressive_transfer.get("owner") or "")
+                item["provenance"]["locator"] = str(progressive_transfer.get("locator") or "")
+                item["provenance"]["content_version"] = str(
+                    progressive_transfer.get("content_version") or ""
+                )
             if body:
                 item["body"] = body
             if access_blocked:
@@ -2791,9 +5434,41 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                     add(ref.get(field))
         return aliases[:24]
 
-    def _cumulative_evidence_ledger(self, current_execution_meta: Mapping[str, Any]) -> dict[str, Any]:
+    def _cumulative_evidence_ledger(
+        self,
+        current_execution_meta: Mapping[str, Any],
+        *,
+        required_evidence_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
-        current_ledger = self._evidence_ledger_from_execution_meta(current_execution_meta)
+        canonical_required_items: list[dict[str, Any]] = []
+        expanded_required_ids = set(required_evidence_ids or set())
+        for required_id in tuple(expanded_required_ids):
+            try:
+                resolved = self._task_references().resolve(required_id)
+            except (KeyError, ValueError):
+                continue
+            for field in ("evidence_id", "reference_id"):
+                identity = str(resolved.get(field) or "").strip()
+                if identity:
+                    expanded_required_ids.add(identity)
+            target = resolved.get("target")
+            if isinstance(target, Mapping):
+                target_id = str(target.get("id") or "").strip()
+                if target_id:
+                    expanded_required_ids.add(target_id)
+                canonical_target = dict(DataFormatter.sanitize(target))
+                for field in ("evidence_id", "reference_id"):
+                    identity = str(resolved.get(field) or "").strip()
+                    if identity:
+                        canonical_target[field] = identity
+                canonical_required_items.append(canonical_target)
+        pinned_evidence_ids = self._pinned_evidence_ids_from_execution_meta(current_execution_meta)
+        pinned_evidence_ids.update(expanded_required_ids)
+        current_ledger = self._evidence_ledger_from_execution_meta(
+            current_execution_meta,
+            required_evidence_ids=expanded_required_ids,
+        )
         for item in current_ledger.get("items", []):
             if isinstance(item, Mapping):
                 items.append(dict(item))
@@ -2803,20 +5478,58 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             previous_meta = iteration.get("execution_meta")
             if not isinstance(previous_meta, Mapping):
                 continue
-            previous_ledger = self._evidence_ledger_from_execution_meta(previous_meta)
+            pinned_evidence_ids.update(self._pinned_evidence_ids_from_execution_meta(previous_meta))
+            previous_ledger = self._evidence_ledger_from_execution_meta(
+                previous_meta,
+                required_evidence_ids=expanded_required_ids,
+            )
             for item in previous_ledger.get("items", []):
                 if isinstance(item, Mapping):
                     items.append(dict(item))
+        # Candidate-used references resolve through the canonical task identity
+        # owner.  Add that immutable target beside lossy cross-revision views so
+        # duplicate selection below can keep the richest representation of the
+        # same evidence rather than whichever revision happened to be visited
+        # first.
+        items.extend(canonical_required_items)
         deduped: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        evidence_indexes: dict[str, int] = {}
         for item in items:
             evidence_id = str(item.get("id") or "").strip()
-            if evidence_id and evidence_id in seen:
+            existing_index = evidence_indexes.get(evidence_id) if evidence_id else None
+            if existing_index is None:
+                if evidence_id:
+                    evidence_indexes[evidence_id] = len(deduped)
+                deduped.append(item)
                 continue
-            if evidence_id:
-                seen.add(evidence_id)
-            deduped.append(item)
-        return evidence_ledger_view({"evidence_items": deduped}, max_items=120, body_chars=2400)
+            existing = deduped[existing_index]
+            if self._evidence_item_projection_quality(
+                item
+            ) > self._evidence_item_projection_quality(existing):
+                deduped[existing_index] = item
+        structured_required_items = self._preserve_required_structured_evidence_bodies(
+            deduped,
+            required_evidence_ids=expanded_required_ids,
+        )
+        hot_items = self._current_task_workspace_artifact_hot_items(
+            structured_required_items
+        )
+        ledger = self._stable_evidence_ledger_view(
+            {
+                "evidence_items": self._prioritized_verifier_evidence_items(
+                    hot_items,
+                    pinned_evidence_ids=pinned_evidence_ids,
+                )
+            },
+            max_items=_VERIFIER_LEDGER_MAX_ITEMS,
+            body_chars=_VERIFIER_LEDGER_BODY_CHARS,
+            max_overflow_refs=_VERIFIER_LEDGER_MAX_OVERFLOW_REFS,
+        )
+        # acceptance_locator_view is projected once beside the ledger in the
+        # verifier request. Keeping another copy nested here duplicates its
+        # locator metadata without adding evidence.
+        ledger.pop("acceptance_locator_view", None)
+        return ledger
 
     def _cumulative_execution_evidence_summary(self, current_execution_meta: Mapping[str, Any]) -> dict[str, Any]:
         summaries: list[dict[str, Any]] = []
@@ -2842,9 +5555,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "required_actions": [],
             "capability_evidence_requirements": [],
             "missing_required_actions": [],
-            "selected_skill_ids": [],
+            "consumed_skill_ids": [],
             "required_skills": [],
-            "missing_required_skills": [],
+            "missing_required_skill_context": [],
             "capabilities_used": [],
             "capability_evidence": {
                 "actions": {"succeeded": [], "failed": []},
@@ -2853,7 +5566,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "validations": {"passed": [], "failed": []},
             },
             "artifact_refs": [],
-            "workspace_refs": {},
+            "task_workspace_refs": {},
             "errors": [],
             "replan_signals": [],
             "current_replan_signals": [],
@@ -2877,9 +5590,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             replan_signals = summary.get("replan_signals")
             if isinstance(replan_signals, list):
                 combined["replan_signals"].extend(replan_signals)
-            workspace_refs = summary.get("workspace_refs")
-            if isinstance(workspace_refs, Mapping):
-                self._merge_workspace_ref_summary(combined["workspace_refs"], workspace_refs)
+            task_workspace_refs = summary.get("task_workspace_refs")
+            if isinstance(task_workspace_refs, Mapping):
+                self._merge_task_workspace_ref_summary(combined["task_workspace_refs"], task_workspace_refs)
             for key in (
                 "action_ids",
                 "failed_actions",
@@ -2888,9 +5601,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 "required_actions",
                 "capability_evidence_requirements",
                 "missing_required_actions",
-                "selected_skill_ids",
+                "consumed_skill_ids",
                 "required_skills",
-                "missing_required_skills",
+                "missing_required_skill_context",
                 "capabilities_used",
             ):
                 if key == "capability_evidence_requirements":
@@ -2924,16 +5637,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             final_action_statuses,
             {"approval_required"},
         )
-        final_succeeded_actions = self._action_ids_by_final_status(
-            final_action_statuses,
-            {"success", "succeeded", "partial_success"},
-        )
         capability_evidence_summary = combined.get("capability_evidence")
         capability_actions = (
             capability_evidence_summary.get("actions") if isinstance(capability_evidence_summary, dict) else None
         )
         if isinstance(capability_actions, dict):
-            capability_actions["succeeded"] = final_succeeded_actions
             capability_actions["failed"] = combined["failed_actions"]
         combined["artifact_refs"] = self._dedupe_ref_records(combined["artifact_refs"])
         combined["errors"] = self._dedupe_jsonable_records(combined["errors"])
@@ -2944,7 +5652,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize(combined)
 
     @staticmethod
-    def _merge_workspace_ref_summary(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    def _merge_task_workspace_ref_summary(target: dict[str, Any], source: Mapping[str, Any]) -> None:
         for key, value in source.items():
             key_text = str(key)
             if isinstance(value, list):
@@ -2969,7 +5677,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 bucket[str(field)] = cls._merge_string_lists(bucket.get(str(field)), items)
 
     @classmethod
-    def _compact_context_pack_for_verifier(cls, context_pack: "WorkspaceContextPackage") -> dict[str, Any]:
+    def _compact_context_pack_for_verifier(cls, context_pack: "TaskContextView") -> dict[str, Any]:
         compact = cls._compact_verifier_prompt_value(
             cls._context_pack_for_verifier_hot_path(context_pack),
             max_chars=_VERIFIER_PROMPT_VALUE_CHARS,
@@ -3000,22 +5708,50 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return value
 
     @classmethod
-    def _compact_verifier_evidence_summary(cls, summary: Mapping[str, Any]) -> dict[str, Any]:
+    def _compact_verifier_evidence_summary(
+        cls,
+        summary: Mapping[str, Any],
+        *,
+        include_body_previews: bool = False,
+    ) -> dict[str, Any]:
         compact: dict[str, Any] = {}
         for key, value in summary.items():
             if key == "actions" and isinstance(value, list):
-                compact[key] = [cls._compact_action_record_for_verifier(ref) for ref in value[:16]]
+                if include_body_previews:
+                    compact[key] = [cls._compact_action_record_for_verifier(ref) for ref in value[:16]]
+                else:
+                    compact[key] = [
+                        {
+                            "id": str(ref.get("id") or ref.get("name") or ""),
+                            "action_call_id": str(ref.get("action_call_id") or ""),
+                            "status": str(ref.get("status") or ""),
+                        }
+                        for ref in value[:16]
+                        if isinstance(ref, Mapping)
+                    ]
                 if len(value) > 16:
                     compact[key].append({"omitted": len(value) - 16, "reason": "prompt_budget"})
+                continue
+            if key == "source_refs" and isinstance(value, list):
+                compact[key] = [
+                    cls._verifier_inspection_value_without_selection_ids(item)
+                    for item in value[:24]
+                ]
+                if len(value) > 24:
+                    compact[key].append(
+                        {"omitted": len(value) - 24, "reason": "prompt_budget"}
+                    )
+                continue
+            if not include_body_previews and key in {"artifact_refs", "task_workspace_refs"}:
                 continue
             if key == "artifact_refs" and isinstance(value, list):
                 compact[key] = [cls._compact_artifact_ref_for_verifier(ref) for ref in value[:24]]
                 if len(value) > 24:
                     compact[key].append({"omitted": len(value) - 24, "reason": "prompt_budget"})
                 continue
-            if key == "workspace_refs" and isinstance(value, Mapping):
+            if key == "task_workspace_refs" and isinstance(value, Mapping):
                 compact[key] = cls._compact_verifier_prompt_value(
-                    cls._workspace_artifact_hot_value(value),
+                    cls._task_workspace_artifact_hot_value(value),
                     max_chars=2400,
                 )
                 continue
@@ -3023,13 +5759,53 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         return compact
 
     @classmethod
+    def _verifier_inspection_value_without_selection_ids(cls, value: Any) -> Any:
+        """Keep inspection facts while removing competing model selection ids."""
+
+        identity_fields = {
+            "id",
+            "reference_id",
+            "evidence_id",
+            "cite_as",
+            "selection_key",
+            "criterion_id",
+            "carrier_id",
+            "content_version_id",
+            "locator_id",
+            "source_evidence_ids",
+            "aliases",
+            "artifact_id",
+            "binding_id",
+            "snapshot_id",
+            "resource_id",
+        }
+        if isinstance(value, Mapping):
+            return {
+                str(key): cls._verifier_inspection_value_without_selection_ids(item)
+                for key, item in value.items()
+                if str(key) not in identity_fields
+            }
+        if isinstance(value, Sequence) and not isinstance(
+            value,
+            str | bytes | bytearray,
+        ):
+            return [
+                cls._verifier_inspection_value_without_selection_ids(item)
+                for item in value
+            ]
+        return cls._compact_verifier_prompt_value(
+            value,
+            max_chars=_VERIFIER_PROMPT_ITEM_CHARS,
+        )
+
+    @classmethod
     def _compact_artifact_ref_for_verifier(cls, ref: Any) -> Any:
         if not isinstance(ref, Mapping):
             return cls._compact_verifier_prompt_value(ref, max_chars=600)
         keep_keys = (
-            "artifact_id",
-            "action_call_id",
+            "selection_key",
             "path",
+            "requested_path",
             "role",
             "label",
             "artifact_type",
@@ -3049,6 +5825,15 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "available",
         )
         compact = {key: ref.get(key) for key in keep_keys if key in ref}
+        if (
+            str(ref.get("requested_path") or "").strip()
+            and str(ref.get("task_workspace_id") or "").strip()
+        ):
+            compact["path"] = ref.get("requested_path")
+        if not ref.get("selection_key"):
+            for key in ("artifact_id", "action_call_id"):
+                if key in ref:
+                    compact[key] = ref.get(key)
         if "preview" in ref:
             compact["preview"] = cls._compact_verifier_prompt_value(ref.get("preview"), max_chars=600)
         if "content_preview" in ref:
@@ -3069,7 +5854,21 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         diagnostics = grounding_guard.get("diagnostics")
         if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
             compact["diagnostics"] = [
-                cls._compact_verifier_prompt_value(item, max_chars=800)
+                {
+                    key: cls._compact_verifier_prompt_value(
+                        item.get(key),
+                        max_chars=800,
+                    )
+                    for key in (
+                        "code",
+                        "message",
+                        "blocking",
+                        "field",
+                        "status",
+                        "support_type",
+                    )
+                    if key in item
+                }
                 for item in list(diagnostics)[:12]
                 if isinstance(item, Mapping)
             ]
@@ -3078,54 +5877,6 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         available_ids = grounding_guard.get("available_evidence_ids")
         if isinstance(available_ids, Sequence) and not isinstance(available_ids, str | bytes | bytearray):
             compact["available_evidence_count"] = len(available_ids)
-            compact["available_evidence_id_sample"] = [str(item) for item in list(available_ids)[:16]]
-        normalized = grounding_guard.get("normalized_evidence_use")
-        if isinstance(normalized, Sequence) and not isinstance(normalized, str | bytes | bytearray):
-            compact["normalized_evidence_use"] = [
-                cls._compact_verifier_prompt_value(item, max_chars=900)
-                for item in list(normalized)[:16]
-                if isinstance(item, Mapping)
-            ]
-            if len(normalized) > 16:
-                compact["normalized_evidence_use"].append({"omitted": len(normalized) - 16, "reason": "prompt_budget"})
-        refs = grounding_guard.get("available_evidence_refs")
-        if (
-            isinstance(refs, Sequence)
-            and not isinstance(refs, str | bytes | bytearray)
-            and (grounding_guard.get("valid") is False or int(grounding_guard.get("blocking_count") or 0) > 0)
-        ):
-            compact["available_evidence_refs"] = [
-                cls._compact_grounding_guard_ref_for_verifier(ref)
-                for ref in list(refs)[:24]
-                if isinstance(ref, Mapping)
-            ]
-            if len(refs) > 24:
-                compact["available_evidence_refs"].append({"omitted": len(refs) - 24, "reason": "prompt_budget"})
-        return DataFormatter.sanitize(compact)
-
-    @classmethod
-    def _compact_grounding_guard_ref_for_verifier(cls, ref: Mapping[str, Any]) -> dict[str, Any]:
-        keep_keys = (
-            "id",
-            "cite_as",
-            "kind",
-            "status",
-            "body_state",
-            "path",
-            "url",
-            "criterion_id",
-            "claim",
-            "heading",
-            "anchor_text",
-            "line_start",
-            "line_end",
-        )
-        compact: dict[str, Any] = {key: ref.get(key) for key in keep_keys if key in ref}
-        aliases = ref.get("aliases")
-        if isinstance(aliases, Sequence) and not isinstance(aliases, str | bytes | bytearray):
-            compact["aliases"] = [str(item) for item in list(aliases)[:6]]
-            if len(aliases) > 6:
-                compact["aliases"].append(f"... omitted {len(aliases) - 6} aliases")
         return DataFormatter.sanitize(compact)
 
     @classmethod
@@ -3194,11 +5945,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             ] + ([{"omitted": len(value) - limit, "reason": "prompt_budget"}] if len(value) > limit else [])
         if isinstance(value, dict):
             compacted: dict[str, Any] = {}
+            logical_task_workspace_path = (
+                value.get("requested_path")
+                if str(value.get("requested_path") or "").strip()
+                and str(value.get("task_workspace_id") or "").strip()
+                else None
+            )
             for index, (key, item) in enumerate(value.items()):
                 if index >= 36:
                     compacted["omitted"] = {"count": len(value) - 36, "reason": "prompt_budget"}
                     break
                 key_text = str(key)
+                if key_text == "path" and logical_task_workspace_path is not None:
+                    item = logical_task_workspace_path
                 item_chars = max_chars
                 if key_text in {"content", "raw", "text", "output", "result", "data", "body", "preview"}:
                     item_chars = max(1600, max_chars)
@@ -3285,6 +6044,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         execution_evidence_summary: dict[str, Any],
         candidate_final_result: str = "",
         grounding_guard: Mapping[str, Any] | None = None,
+        terminal_candidate: Mapping[str, Any] | None = None,
+        offered_reference_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         normalized: dict[str, Any] = {
             "is_complete": self._normalize_bool(verification.get("is_complete"), default=False),
@@ -3325,27 +6086,96 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if normalized["missing_criteria"]:
             normalized["is_complete"] = False
             guard_reasons.append("missing_criteria_present")
-        factual_integrity_check = verification.get("factual_integrity_check")
-        if isinstance(factual_integrity_check, Mapping):
-            normalized["factual_integrity_check"] = DataFormatter.sanitize(dict(factual_integrity_check))
-            if not self._verification_factual_integrity_is_satisfied(factual_integrity_check):
+        if isinstance(terminal_candidate, Mapping):
+            criterion_audit = self._validate_criterion_audit(
+                verification,
+                offered_reference_ids=offered_reference_ids,
+            )
+            normalized["criterion_audit"] = criterion_audit
+            normalized["criterion_checks"] = criterion_audit.get("checks", [])
+            if criterion_audit.get("valid") is not True:
                 normalized["is_complete"] = False
-                guard_reasons.append("factual_integrity_failed")
-                factual_messages = self._verification_factual_integrity_messages(factual_integrity_check)
-                if not factual_messages:
-                    factual_messages = [
-                        "Factual integrity check did not confirm that the deliverable avoids unsupported concrete facts and certainty inflation."
-                    ]
+                criterion_repair_contract = criterion_audit.get("repair_contract")
+                normalized["criterion_repair_contract"] = DataFormatter.sanitize(
+                    criterion_repair_contract
+                    if isinstance(criterion_repair_contract, Mapping)
+                    else {}
+                )
+                criterion_guard = (
+                    "criterion_audit_invalid"
+                    if criterion_audit.get("structural_errors")
+                    else "criterion_unsatisfied"
+                )
+                guard_reasons.append(criterion_guard)
+                criterion_messages = [
+                    str(
+                        item.get("summary")
+                        or "; ".join(self._normalize_string_list(item.get("gaps")))
+                        or item.get("criterion")
+                        or ""
+                    ).strip()
+                    for item in criterion_audit.get("failed_checks", [])
+                    if isinstance(item, Mapping)
+                ]
+                criterion_messages.extend(
+                    str(error.get("message") or "").strip()
+                    for error in criterion_audit.get("structural_errors", [])
+                    if isinstance(error, Mapping)
+                )
+                criterion_messages = [message for message in criterion_messages if message]
                 normalized["missing_criteria"] = self._merge_string_lists(
                     normalized.get("missing_criteria"),
-                    factual_messages,
+                    criterion_messages,
                 )
                 normalized["acceptance_delta"] = self._merge_string_lists(
                     normalized.get("acceptance_delta"),
-                    factual_messages,
+                    criterion_messages,
+                )
+            material_claim_audit = self._validate_material_claim_audit(
+                verification,
+                terminal_candidate=terminal_candidate,
+                offered_reference_ids=offered_reference_ids,
+            )
+            normalized["material_claim_audit"] = material_claim_audit
+            normalized["material_claim_coverage_complete"] = material_claim_audit.get(
+                "coverage_complete"
+            )
+            normalized["material_claim_checks"] = material_claim_audit.get("checks", [])
+            if material_claim_audit.get("valid") is not True:
+                normalized["is_complete"] = False
+                repair_contract = material_claim_audit.get("repair_contract")
+                normalized["material_claim_repair_contract"] = DataFormatter.sanitize(
+                    repair_contract if isinstance(repair_contract, Mapping) else {}
+                )
+                audit_guard = (
+                    "material_claim_audit_invalid"
+                    if material_claim_audit.get("structural_errors")
+                    else "material_claim_audit_failed"
+                )
+                guard_reasons.append(audit_guard)
+                messages = [
+                    str(item.get("artifact_quote") or item.get("reason") or "").strip()
+                    for item in material_claim_audit.get("failed_checks", [])
+                    if isinstance(item, Mapping)
+                ]
+                messages.extend(
+                    str(error.get("message") or "; ".join(error.get("messages") or [])).strip()
+                    for error in material_claim_audit.get("structural_errors", [])
+                    if isinstance(error, Mapping)
+                )
+                messages = [message for message in messages if message]
+                if not messages:
+                    messages = ["Material factual claims did not pass the terminal semantic audit."]
+                normalized["missing_criteria"] = self._merge_string_lists(
+                    normalized.get("missing_criteria"),
+                    messages,
+                )
+                normalized["acceptance_delta"] = self._merge_string_lists(
+                    normalized.get("acceptance_delta"),
+                    messages,
                 )
         final_result_required = self._normalize_bool(verification.get("final_result_required"), default=False)
-        trusted_workspace_artifact_refs = self._trusted_workspace_artifact_refs_from_summary(execution_evidence_summary)
+        trusted_task_workspace_artifact_refs = self._trusted_task_workspace_artifact_refs_from_summary(execution_evidence_summary)
         risky_actions, non_blocking_failed_actions = self._execution_risk_actions(execution_evidence_summary)
         if non_blocking_failed_actions:
             normalized["non_blocking_failed_actions"] = non_blocking_failed_actions
@@ -3365,7 +6195,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 execution_evidence_summary=execution_evidence_summary,
                 verification=verification,
                 normalized=normalized,
-                trusted_workspace_artifact_refs=trusted_workspace_artifact_refs,
+                trusted_task_workspace_artifact_refs=trusted_task_workspace_artifact_refs,
                 grounding_guard=grounding_guard,
                 final_result_required=final_result_required,
                 non_blocking_action_ids=non_blocking_failed_actions,
@@ -3439,22 +6269,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 normalized.get("acceptance_delta"),
                 [f"Unresolved execution risk actions: {', '.join(risky_actions)}"],
             )
-        # Accumulate satisfied required capabilities across iterations, then guard
-        # on what is still missing for the whole task rather than per-step.
-        self._satisfied_required_actions.update(
-            self._normalize_string_list(execution_evidence_summary.get("action_ids"))
-        )
-        self._satisfied_required_skills.update(
-            self._normalize_string_list(execution_evidence_summary.get("selected_skill_ids"))
-        )
-        self._satisfied_capabilities.update(
-            self._normalize_string_list(execution_evidence_summary.get("capabilities_used"))
-        )
-        capability_evidence = execution_evidence_summary.get("capability_evidence")
-        if isinstance(capability_evidence, dict) and isinstance(capability_evidence.get("actions"), dict):
-            self._satisfied_succeeded_actions.update(
-                self._normalize_string_list(capability_evidence["actions"].get("succeeded"))
-            )
+        # Accumulate satisfied capabilities before evaluating the whole-task
+        # evidence contract. Terminal preflight uses this same structural owner.
+        self._accumulate_capability_evidence(execution_evidence_summary)
         required_actions = self._normalize_string_list(execution_evidence_summary.get("required_actions"))
         required_skills = self._normalize_string_list(execution_evidence_summary.get("required_skills"))
         missing_required = [
@@ -3508,11 +6325,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         if normalized["is_complete"] and final_result_required and not normalized["final_result"].strip():
             if candidate_final_result.strip():
                 normalized["final_result"] = candidate_final_result.strip()
-            elif trusted_workspace_artifact_refs:
-                normalized["final_result"] = self._workspace_artifact_final_result_from_refs(
-                    trusted_workspace_artifact_refs
+            elif trusted_task_workspace_artifact_refs:
+                normalized["final_result"] = self._task_workspace_artifact_final_result_from_refs(
+                    trusted_task_workspace_artifact_refs
                 )
-                normalized["final_result_via_workspace_artifact"] = True
+                normalized["final_result_via_task_workspace_artifact"] = True
             else:
                 normalized["is_complete"] = False
                 guard_reasons.append("final_result_missing")
@@ -3526,9 +6343,9 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                 )
         if normalized["is_complete"]:
             final_result_text = normalized["final_result"].strip()
-            final_result_is_artifact_pointer = self._final_result_is_workspace_artifact_pointer(
+            final_result_is_artifact_pointer = self._final_result_is_task_workspace_artifact_pointer(
                 final_result_text,
-                trusted_workspace_artifact_refs,
+                trusted_task_workspace_artifact_refs,
             )
             if final_result_text and not final_result_is_artifact_pointer:
                 output_contract = self._parse_final_result_output_contract(final_result_text)
@@ -3575,8 +6392,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
                             "fallback": output_contract.get("fallback"),
                         }
                     )
-            elif final_result_is_artifact_pointer and trusted_workspace_artifact_refs:
-                normalized["final_result_via_workspace_artifact"] = True
+            elif final_result_is_artifact_pointer and trusted_task_workspace_artifact_refs:
+                normalized["final_result_via_task_workspace_artifact"] = True
         continuation = self._untried_read_action_continuation(execution_evidence_summary)
         if normalized["requires_block"] and continuation:
             normalized["requires_block"] = False
@@ -3631,6 +6448,73 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             normalized.get("acceptance_delta"),
             normalized.get("missing_criteria"),
         )
+        raw_replan_signal = verification.get("replan_signal")
+        default_replan_status = (
+            "continue"
+            if normalized.get("is_complete") is True
+            else ("blocked" if normalized.get("requires_block") is True else "repair")
+        )
+        signal_value: dict[str, Any]
+        if isinstance(raw_replan_signal, Mapping):
+            signal_value = dict(DataFormatter.sanitize(raw_replan_signal))
+        else:
+            signal_value = {
+                "status": default_replan_status,
+                "reason": str(normalized.get("reason") or ""),
+            }
+        raw_status = str(signal_value.get("status") or "").strip()
+        material_claim_repair_contract = normalized.get(
+            "material_claim_repair_contract"
+        )
+        raw_material_requirements = (
+            material_claim_repair_contract.get("requirements")
+            if isinstance(material_claim_repair_contract, Mapping)
+            else None
+        )
+        required_claim_evidence_reacquisition = bool(
+            isinstance(raw_material_requirements, Sequence)
+            and not isinstance(
+                raw_material_requirements,
+                str | bytes | bytearray,
+            )
+            and any(
+                isinstance(requirement, Mapping)
+                and str(requirement.get("repair_policy") or "").strip()
+                == "evidence_reacquisition_required"
+                for requirement in raw_material_requirements
+            )
+        )
+        if required_claim_evidence_reacquisition:
+            normalized["required_claim_evidence_reacquisition"] = True
+            if raw_status in {"", "continue", "repair"}:
+                signal_value["status"] = "replan_segment"
+                signal_value["reason"] = (
+                    "A success-criterion-required material claim lacks bindable "
+                    "evidence and cannot be repaired by deleting the claim."
+                )
+                raw_status = "replan_segment"
+        if normalized.get("is_complete") is True:
+            signal_value["status"] = "continue"
+        elif normalized.get("requires_block") is True:
+            if raw_status not in {"blocked", "clarify"}:
+                signal_value["status"] = "blocked"
+        elif raw_status in {"", "continue", "blocked", "clarify"}:
+            signal_value["status"] = "repair"
+        try:
+            replan_signal = ReplanSignal.from_value(signal_value)
+        except (TypeError, ValueError):
+            replan_signal = ReplanSignal(
+                status=cast(Any, default_replan_status),
+                reason=str(normalized.get("reason") or "") or None,
+            )
+        normalized_replan_signal = replan_signal.to_dict()
+        if offered_reference_ids is not None:
+            normalized_replan_signal["evidence_refs"] = [
+                ref
+                for ref in normalized_replan_signal.get("evidence_refs", [])
+                if str(ref) in offered_reference_ids
+            ]
+        normalized["replan_signal"] = normalized_replan_signal
         for key, value in verification.items():
             normalized.setdefault(key, DataFormatter.sanitize(value))
         return normalized

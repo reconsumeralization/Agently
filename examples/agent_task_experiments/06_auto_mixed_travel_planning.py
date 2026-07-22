@@ -53,7 +53,6 @@ async def main() -> None:
 
     options = stream_options()
     options["capability_evidence_requirements"] = [
-        {"capability_id": skill_id, "capability_kind": "skill", "kind": "capability_used"},
         {"capability_id": "get_travel_policy", "capability_kind": "action", "kind": "action_succeeded"},
         {"capability_id": "maps_geo", "capability_kind": "action", "kind": "action_succeeded"},
         {"capability_id": "write_file", "capability_kind": "action", "kind": "action_succeeded"},
@@ -67,7 +66,7 @@ async def main() -> None:
                 "Create a concise Hangzhou business travel plan for the traveler. "
                 "Use the host travel policy action, the installed travel-planner Skill guidance, "
                 "and the real AMap MCP tools for city, weather, POI, geocode, or route facts. "
-                "Write the operator-ready plan to final.md in the Workspace. "
+                "Write the operator-ready plan to final.md in the TaskWorkspace. "
                 "The final answer should summarize the chosen plan and point to final.md.",
                 success_criteria=[
                     "The plan uses get_travel_policy evidence for objective, timing, and policy constraints.",
@@ -77,9 +76,13 @@ async def main() -> None:
                     "The final report is written to final.md and does not claim live booking availability.",
                 ],
             )
-            .create_execution(options=options)
+            .strategy("auto", options=options)
         )
-        await async_run_and_print(execution, provider=provider, workspace=workspace)
+        await async_run_and_print(
+            execution,
+            provider=provider,
+            task_workspace=workspace,
+        )
 
 
 if __name__ == "__main__":

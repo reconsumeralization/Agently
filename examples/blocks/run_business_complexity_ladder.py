@@ -12,12 +12,8 @@ Run all cases:
     python examples/blocks/run_business_complexity_ladder.py
 
 Run selected case ids:
-    BLOCKS_COMPLEXITY_CASES=03_tool_mcp_sandbox,06_real_complex_bundle \
+    BLOCKS_COMPLEXITY_CASES=01_single_tool,03_tool_mcp_sandbox \
         python examples/blocks/run_business_complexity_ladder.py
-
-The full suite includes 06_real_complex_bundle, which requires network access,
-AMAP_API_KEY, built-in Search, remote AMap MCP, and runtime installation of the
-public CocoonAI architecture-diagram Skill.
 """
 
 from __future__ import annotations
@@ -35,9 +31,6 @@ CASE_FILES = [
     "02_single_tool_support_ticket_stream.py",
     "03_tool_composition_refund_review_stream.py",
     "04_mcp_sandbox_settlement_stream.py",
-    "05_single_skill_support_reply_stream.py",
-    "06_multi_skills_travel_memo_stream.py",
-    "07_real_complex_bundle_stream.py",
 ]
 
 

@@ -19,6 +19,8 @@ from typing import Any, TYPE_CHECKING
 from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, RuntimeStageStallError
 from agently.utils import DataFormatter
 
+from .bridges import normalize_action_log
+
 if TYPE_CHECKING:
     from .execution import AgentExecution
 
@@ -35,7 +37,7 @@ def initial_diagnostics() -> dict[str, Any]:
     }
 
 
-def initial_workspace_refs() -> dict[str, Any]:
+def initial_record_refs() -> dict[str, Any]:
     return {
         "observations": [],
         "artifacts": [],
@@ -58,21 +60,72 @@ def refresh_diagnostics(owner: "AgentExecution"):
         owner.diagnostics[key] = value or {}
 
 
-def record_error_diagnostic(owner: "AgentExecution", error: BaseException):
+def record_error_diagnostic(owner: "AgentExecution", error: BaseException) -> dict[str, Any]:
     _merge_context_action_records(owner)
+    item = bounded_error_projection(error)
+    owner._terminal_error_projection = item
     errors = owner.diagnostics.setdefault("errors", [])
     if isinstance(errors, list):
-        item = (
-            error.to_diagnostic()
-            if isinstance(error, (AgentExecutionLimitExceeded, RuntimeStageStallError))
-            else {"type": error.__class__.__name__, "message": str(error)}
-        )
         errors.append(item)
         if isinstance(error, RuntimeStageStallError):
             target_key = "timeouts" if error.status == "timed_out" else "stalls"
             target = owner.diagnostics.setdefault(target_key, [])
             if isinstance(target, list):
                 target.append(item)
+    return item
+
+
+def bounded_error_projection(
+    error: BaseException,
+    *,
+    message: str | None = None,
+) -> dict[str, Any]:
+    """Build the one bounded error carrier shared by every consumer surface."""
+
+    source = (
+        error.to_diagnostic()
+        if isinstance(error, (AgentExecutionLimitExceeded, RuntimeStageStallError))
+        else {"type": error.__class__.__name__}
+    )
+
+    def bounded_text(value: Any, limit: int) -> str:
+        text = str(value or "")
+        raw = text.encode("utf-8")
+        if len(raw) <= limit:
+            return text
+        suffix = " [truncated]"
+        budget = limit - len(suffix.encode("utf-8"))
+        return raw[:budget].decode("utf-8", errors="ignore").rstrip() + suffix
+
+    projection: dict[str, Any] = {}
+    type_key = "error_type" if "error_type" in source else "type"
+    projection[type_key] = bounded_text(source.get(type_key) or error.__class__.__name__, 160)
+    projection["message"] = bounded_text(
+        message if message is not None else (str(error).strip() or error.__class__.__name__),
+        1600,
+    )
+    for key in (
+        "limit_name",
+        "limit_value",
+        "used",
+        "stage",
+        "status",
+        "response_id",
+        "run_id",
+        "agent_name",
+        "elapsed_seconds",
+        "idle_seconds",
+        "timeout_seconds",
+        "last_progress_event",
+        "provider",
+        "model",
+        "planning_protocol",
+    ):
+        value = source.get(key)
+        if value is None:
+            continue
+        projection[key] = bounded_text(value, 160) if isinstance(value, str) else DataFormatter.sanitize(value)
+    return projection
 
 
 def _merge_context_action_records(owner: "AgentExecution") -> None:
@@ -101,30 +154,10 @@ def _merge_context_action_records(owner: "AgentExecution") -> None:
 
 
 def _normalize_context_action_record(record: dict[str, Any]) -> dict[str, Any]:
-    raw_model_digest = record.get("model_digest")
-    model_digest: dict[str, Any] = raw_model_digest if isinstance(raw_model_digest, dict) else {}
-    action_id = str(record.get("action_id") or record.get("tool_name") or model_digest.get("action_id") or "action")
-    action_call_id = record.get("action_call_id") or model_digest.get("action_call_id")
-    status = str(record.get("status") or model_digest.get("status") or "")
-    artifact_refs = record.get("artifact_refs") or model_digest.get("artifact_refs") or []
-    if not isinstance(artifact_refs, list):
-        artifact_refs = []
-    data = record.get("data")
-    if data is None:
-        data = record.get("result")
-    return DataFormatter.sanitize(
-        {
-            "action_call_id": action_call_id,
-            "action_id": action_id,
-            "status": status,
-            "success": record.get("success") if "success" in record else model_digest.get("success"),
-            "source": record.get("source", "ActionFlow"),
-            "route": record.get("route", "model_request"),
-            "data": data if isinstance(data, dict) else {},
-            "model_digest": model_digest,
-            "artifact_refs": artifact_refs,
-            "raw": record,
-        }
+    return normalize_action_log(
+        record,
+        source=str(record.get("source") or "ActionFlow"),
+        route=str(record.get("route") or "model_request"),
     )
 
 
@@ -134,6 +167,10 @@ def _action_log_key(log: dict[str, Any]) -> str:
         return str(action_call_id)
     action_id = str(log.get("action_id") or "action")
     status = str(log.get("status") or "")
+    command_index = log.get("command_index")
+    round_index = log.get("round_index")
+    if isinstance(command_index, int) and not isinstance(command_index, bool):
+        return f"position:{ round_index }:{ command_index }:{ action_id }:{ status }"
     digest = str(DataFormatter.sanitize(log.get("data") if log.get("data") is not None else log.get("result")))
     return f"{ action_id }:{ status }:{ hash(digest) }"
 
@@ -157,6 +194,6 @@ def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
         "close_snapshot": DataFormatter.sanitize(owner.close_snapshot),
         "logs": DataFormatter.sanitize(owner.logs),
         "diagnostics": DataFormatter.sanitize(owner.diagnostics),
-        "workspace_refs": DataFormatter.sanitize(owner.workspace_refs),
+        "record_refs": DataFormatter.sanitize(owner.record_refs),
         "guidance_items": DataFormatter.sanitize(getattr(owner, "guidance_items", [])),
     }

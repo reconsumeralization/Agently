@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import sys
 import warnings
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 import yaml
-from agently import Agent, Agently, TriggerFlow, Workspace
+from agently import Agent, Agently, TaskWorkspace, TriggerFlow
 from agently.compatibility import (
     get_current_release_manifest,
     get_devtools_compatibility_manifest,
@@ -39,31 +41,35 @@ _RUNTIME_LOG_KEYS = (
 
 def test_public_core_instance_creation_styles(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys.modules["__main__"],
+        "__file__",
+        str(tmp_path / "main.py"),
+        raising=False,
+    )
     anonymous_agent = Agent()
     direct_agent = Agent("direct-agent")
     factory_agent = Agently.create_agent("factory-agent")
     direct_flow = TriggerFlow(name="direct-flow")
     factory_flow = Agently.create_trigger_flow("factory-flow")
-    workspace = Agently.create_workspace(tmp_path / "public-workspace")
-    direct_workspace = Workspace(tmp_path / "direct-public-workspace")
-    default_workspace = Workspace()
-    factory_default_workspace = Agently.create_workspace()
-    direct_flow_execution = direct_flow.create_execution(workspace=False)
+    direct_task_workspace = TaskWorkspace(tmp_path / "direct-task-workspace")
+    direct_flow_execution = direct_flow.create_execution(record_store=False)
 
     assert isinstance(anonymous_agent.name, str)
     assert anonymous_agent.name
     assert direct_agent.name == "direct-agent"
     assert factory_agent.name == "factory-agent"
-    assert getattr(anonymous_agent.workspace, "is_materialized") is False
-    assert getattr(direct_agent.workspace, "is_materialized") is False
-    assert getattr(factory_agent.workspace, "is_materialized") is False
+    assert anonymous_agent.record_store._backend is None
+    assert direct_agent.record_store._backend is None
+    assert factory_agent.record_store._backend is None
+    for agent in (anonymous_agent, direct_agent, factory_agent):
+        assert agent.task_workspace.root == (
+            tmp_path / ".agently" / "task_workspaces" / agent.id
+        ).resolve()
     assert direct_flow.name == "direct-flow"
     assert factory_flow.name == "factory-flow"
-    assert workspace.root == (tmp_path / "public-workspace").resolve()
-    assert direct_workspace.root == (tmp_path / "direct-public-workspace").resolve()
-    assert default_workspace.root == (tmp_path / ".agently" / "workspaces" / "default").resolve()
-    assert factory_default_workspace.root == default_workspace.root
-    assert "workspace" not in direct_flow_execution.get_runtime_resources()
+    assert direct_task_workspace.root == (tmp_path / "direct-task-workspace").resolve()
+    assert "record_store" not in direct_flow_execution.get_runtime_resources()
 
 
 def _snapshot_runtime_log_settings():
@@ -119,7 +125,7 @@ def test_action_executor_plugins_registered():
     plugin_list = Agently.plugin_manager.get_plugin_list("ActionExecutor")
     assert "LocalFunctionActionExecutor" in plugin_list
     assert "MCPActionExecutor" in plugin_list
-    assert "PythonSandboxActionExecutor" in plugin_list
+    assert "CodeExecutionActionExecutor" in plugin_list
     assert "BashSandboxActionExecutor" in plugin_list
 
 
@@ -215,62 +221,6 @@ def test_response_parser_records_complete_streaming_snapshot_fields():
     assert parser.full_result_data["extra"]["parse_success"] is True
 
 
-def test_structured_route_completion_uses_ensure_policies_over_streaming_snapshot():
-    from agently.builtins.plugins.AgentOrchestrator.AgentlyAgentOrchestrator.modules.routes import (
-        _structured_stream_completion_policies,
-        _structured_stream_snapshot_satisfies_policies,
-    )
-
-    class FakeDataFlow:
-        def get_auto_ensure_policies(self, *, key_style="dot"):
-            return {
-                "step_result": "not_null",
-                "artifact_manifest.path": "not_null",
-            }
-
-    class FakeResult:
-        _data_flow = FakeDataFlow()
-
-        class prompt:
-            @staticmethod
-            def to_prompt_object():
-                class PromptObject:
-                    output = {
-                        "step_result": (str, "status", True),
-                        "artifact_manifest": (dict, "manifest", False),
-                        "evidence": ([str], "notes", False),
-                    }
-
-                return PromptObject()
-
-    policies = _structured_stream_completion_policies(
-        FakeResult(),
-        ensure_keys=None,
-        key_style="dot",
-    )
-
-    assert policies == {
-        "step_result": "not_null",
-        "artifact_manifest.path": "not_null",
-        "artifact_manifest": "presence",
-    }
-    assert _structured_stream_snapshot_satisfies_policies(
-        {"parsed_result": {"step_result": "done", "artifact_manifest": {"path": "final.md"}}},
-        policies,
-        key_style="dot",
-    )
-    assert not _structured_stream_snapshot_satisfies_policies(
-        {"parsed_result": {"step_result": "done", "artifact_manifest": {}}},
-        policies,
-        key_style="dot",
-    )
-    assert not _structured_stream_snapshot_satisfies_policies(
-        {"parsed_result": {"step_result": "   ", "artifact_manifest": {"path": "final.md"}}},
-        policies,
-        key_style="dot",
-    )
-
-
 def test_model_response_direct_construction_warns_but_get_result_does_not():
     from agently.core import ModelRequest
     from agently.utils import DeprecationWarnings
@@ -296,12 +246,19 @@ def test_model_response_direct_construction_warns_but_get_result_does_not():
     assert not any("ModelResponse is deprecated" in str(item.message) for item in caught)
 
 
-def test_skills_executor_plugin_has_no_stage_action_resolution_defaults():
-    assert Agently.settings.get("plugins.SkillsExecutor.AgentlySkillsExecutor.action_resolution") is None
-    framework_default = Agently.settings.get("skills.action_resolution")
-    assert isinstance(framework_default, dict)
-    aliases = cast(list[Any], framework_default.get("bash_action_aliases", []))
-    assert "bash" in aliases
+def test_skills_executor_is_a_thin_application_facade_not_a_plugin():
+    assert "SkillsExecutor" not in Agently.plugin_manager.get_plugin_list()
+    assert not hasattr(Agently.skills_executor, "execute")
+    assert not hasattr(Agently.skills_executor, "resolve_strategy")
+    assert hasattr(Agently.skills_executor, "install_skills")
+    assert hasattr(Agently.skills_executor, "build_context_pack")
+
+
+def test_skills_facade_and_agents_share_the_canonical_skill_library():
+    agent = Agently.create_agent("canonical-skill-library-agent")
+
+    assert Agently.skills_executor.library is Agently.skill_library
+    assert agent.skill_library is Agently.skill_library
 
 
 def test_agent_can_create_dynamic_task():
@@ -494,6 +451,81 @@ async def test_openai_compatible_first_event_timeout_is_typed_stall():
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_first_event_timeout_ignores_empty_sse_heartbeats():
+    async def heartbeat_generator():
+        while True:
+            await asyncio.sleep(0.005)
+            yield SimpleNamespace(event="message", data="  \n")
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    requester.plugin_settings = SettingsNamespace(
+        Settings({"plugins": {"ModelRequester": {"OpenAICompatible": {"model": "deepseek-chat"}}}}),
+        "plugins.ModelRequester.OpenAICompatible",
+    )
+
+    async def consume():
+        async for _ in requester._aiter_with_first_token_timeout(
+            heartbeat_generator(),
+            timeout_seconds=0.05,
+        ):
+            pass
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        await asyncio.wait_for(consume(), timeout=0.5)
+
+    assert raised.value.stage == "response_first_event"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_first_event_timeout_does_not_wait_for_slow_cancellation_cleanup():
+    async def cancellation_resistant_generator():
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)
+            raise
+        yield SimpleNamespace(event="message", data="late")
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    requester.plugin_settings = SettingsNamespace(
+        Settings({"plugins": {"ModelRequester": {"OpenAICompatible": {"model": "deepseek-chat"}}}}),
+        "plugins.ModelRequester.OpenAICompatible",
+    )
+    started_at = asyncio.get_running_loop().time()
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        async for _ in requester._aiter_with_first_token_timeout(
+            cancellation_resistant_generator(),
+            timeout_seconds=0.05,
+        ):
+            pass
+
+    elapsed_seconds = asyncio.get_running_loop().time() - started_at
+    assert elapsed_seconds < 0.15
+    assert raised.value.stage == "response_first_event"
+    await asyncio.sleep(0.2)
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_first_event_timeout_yields_first_meaningful_sse_frame():
+    async def heartbeat_then_data_generator():
+        yield SimpleNamespace(event="message", data="")
+        await asyncio.sleep(0.005)
+        yield SimpleNamespace(event="message", data='{"choices": [{"delta": {"content": "ready"}}]}')
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    items = [
+        item
+        async for item in requester._aiter_with_first_token_timeout(
+            heartbeat_then_data_generator(),
+            timeout_seconds=0.05,
+        )
+    ]
+
+    assert [item.data for item in items] == ['{"choices": [{"delta": {"content": "ready"}}]}']
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_stream_idle_timeout_is_typed_stall():
     async def idle_generator():
         yield {"delta": "first"}
@@ -513,6 +545,36 @@ async def test_openai_compatible_stream_idle_timeout_is_typed_stall():
     assert raised.value.stage == "response_stream"
     assert raised.value.status == "stalled"
     assert raised.value.provider == "OpenAICompatible"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_stream_idle_timeout_ignores_empty_sse_heartbeats():
+    async def heartbeat_generator():
+        yield SimpleNamespace(event="message", data='{"choices": [{"delta": {"content": "ready"}}]}')
+        while True:
+            await asyncio.sleep(0.005)
+            yield SimpleNamespace(event="message", data="\t")
+
+    requester = OpenAICompatible.__new__(OpenAICompatible)
+    requester.plugin_settings = SettingsNamespace(
+        Settings({"plugins": {"ModelRequester": {"OpenAICompatible": {"model": "deepseek-chat"}}}}),
+        "plugins.ModelRequester.OpenAICompatible",
+    )
+
+    yielded = []
+
+    async def consume():
+        async for item in requester._aiter_with_stream_idle_timeout(
+            heartbeat_generator(),
+            timeout_seconds=0.05,
+        ):
+            yielded.append(item.data)
+
+    with pytest.raises(RuntimeStageStallError) as raised:
+        await asyncio.wait_for(consume(), timeout=0.5)
+
+    assert yielded == ['{"choices": [{"delta": {"content": "ready"}}]}']
+    assert raised.value.stage == "response_stream"
 
 
 @pytest.mark.asyncio
@@ -574,9 +636,17 @@ async def test_action_runtime_structured_planning_timeout_is_typed_stage_stall()
 
 
 @pytest.mark.asyncio
-async def test_action_runtime_action_completion_refreshes_execution_progress():
+async def test_action_runtime_action_completion_refreshes_execution_progress(monkeypatch):
     agent = Agently.create_agent("action-runtime-action-progress-agent")
     runtime = agent.action.action_runtime
+    execution_record_store_args = []
+    original_create_execution = TriggerFlow.create_execution
+
+    def capture_internal_execution_record_store(flow, *args, **kwargs):
+        execution_record_store_args.append(kwargs.get("record_store"))
+        return original_create_execution(flow, *args, **kwargs)
+
+    monkeypatch.setattr(TriggerFlow, "create_execution", capture_internal_execution_record_store)
 
     @agent.action_func
     async def slow_first_action():
@@ -618,6 +688,7 @@ async def test_action_runtime_action_completion_refreshes_execution_progress():
         "slow_first_action",
         "slow_second_action",
     ]
+    assert execution_record_store_args == [False]
 
 
 @pytest.mark.asyncio
@@ -844,7 +915,7 @@ async def test_model_response_materialization_refreshes_progress_clock_without_n
 
 
 @pytest.mark.asyncio
-async def test_hybrid_route_planner_uses_model_when_optional_candidates_are_ambiguous():
+async def test_hybrid_route_planner_treats_optional_skills_as_model_request_context():
     class FakeRequest:
         def __init__(self):
             self.payload: dict[str, Any] = {}
@@ -859,9 +930,7 @@ async def test_hybrid_route_planner_uses_model_when_optional_candidates_are_ambi
             return self
 
         async def async_start(self, **_kwargs):
-            assert len(self.payload["route_candidates"]) == 2
-            assert self.output_format == "json"
-            return {"selected_route": "skills", "reason": "installed Skill is more specific"}
+            raise AssertionError("Skill context must not create a second route-selection request")
 
     class FakeAction:
         def get_action_list(self, tags=None):
@@ -889,9 +958,9 @@ async def test_hybrid_route_planner_uses_model_when_optional_candidates_are_ambi
 
     route, meta = await HybridRoutePlanner(cast(Any, FakeAgent())).select_route()
 
-    assert route == "skills"
-    assert meta["mode"] == "model_decision"
-    assert meta["selected_by"] == "model"
+    assert route == "model_request"
+    assert meta["skill_context"] is True
+    assert meta["with_actions"] is True
 
 
 @pytest.mark.asyncio
@@ -938,7 +1007,7 @@ async def test_hybrid_route_planner_respects_allowed_routes_policy():
 
 
 @pytest.mark.asyncio
-async def test_hybrid_route_planner_keeps_required_routes_deterministic():
+async def test_hybrid_route_planner_keeps_required_skills_on_model_request_route():
     class FakePrompt:
         def get(self, _key, default=None):
             return "prepare release notes"
@@ -958,9 +1027,8 @@ async def test_hybrid_route_planner_keeps_required_routes_deterministic():
 
     route, meta = await HybridRoutePlanner(cast(Any, FakeAgent())).select_route()
 
-    assert route == "skills"
-    assert meta["mode"] == "required"
-    assert meta["selected_by"] == "deterministic"
+    assert route == "model_request"
+    assert meta["skill_context"] is True
 
 
 @pytest.mark.asyncio

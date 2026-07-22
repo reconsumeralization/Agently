@@ -14,11 +14,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any, Literal, TYPE_CHECKING, cast
+from typing import Any, Literal, TYPE_CHECKING
 
-from agently.core.model.ModelRequestResultDataFlow import ModelRequestResultDataFlow
-from agently.utils import DataFormatter, DataLocator
+from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
@@ -37,30 +35,44 @@ async def run_model_request_route(
     raise_ensure_failure: bool,
 ) -> Any:
     agent_execution_run_context = await execution._async_emit_agent_execution_started_once()
-    prompt_bound_required_skills: list[dict[str, Any]] = []
-    collect_prompt_bound_skills = getattr(execution.agent, "_prompt_bound_required_skill_records", None)
-    if callable(collect_prompt_bound_skills):
-        try:
-            raw_prompt_bound_skills = collect_prompt_bound_skills()
-            if isinstance(raw_prompt_bound_skills, list):
-                prompt_bound_required_skills = [
-                    DataFormatter.sanitize(item)
-                    for item in raw_prompt_bound_skills
-                    if isinstance(item, Mapping)
-                ]
-        except Exception:
-            prompt_bound_required_skills = []
-    if prompt_bound_required_skills:
-        route_logs = execution.logs.setdefault("route_logs", {})
-        if isinstance(route_logs, dict):
-            route_logs["prompt_bound_skills"] = prompt_bound_required_skills
-        await execution.emit_stream(
-            "skills.prompt_bound",
-            {"selected_skills": prompt_bound_required_skills},
-            route="model_request",
-            source="skills_manager",
-            meta={"binding": "prompt_guidance"},
-        )
+    context_package = await execution.async_read_task_context(
+        consumer_id=f"model_request:{execution.id}",
+        phase="direct",
+    )
+    context_lanes: dict[str, list[dict[str, Any]]] = {
+        "instruct": [],
+        "info": [],
+        "examples": [],
+    }
+    for block in context_package.blocks:
+        item = {
+            "content": DataFormatter.sanitize(block.content),
+            "role": block.role,
+            "ref": block.source_ref,
+            "completeness": block.completeness,
+        }
+        if block.role == "instruction":
+            context_lanes["instruct"].append(item)
+        elif block.role == "example":
+            context_lanes["examples"].append(item)
+        else:
+            context_lanes["info"].append(item)
+    for lane, items in context_lanes.items():
+        if items:
+            execution.request.prompt.append(
+                lane,
+                {"task_context_blocks": items},
+            )
+    await execution.emit_stream(
+        "context.package",
+        {
+            "package_id": context_package.package_id,
+            "block_count": len(context_package.blocks),
+            "used_chars": context_package.used_chars,
+        },
+        route="model_request",
+        source="task_context",
+    )
     if ensure_all_keys is not None:
         execution.request.prompt.set("ensure_all_keys", ensure_all_keys)
     result = execution.request.get_result(parent_run_context=agent_execution_run_context)
@@ -74,24 +86,12 @@ async def run_model_request_route(
     }
     has_structured_stream = bool(execution.prompt_snapshot.get("output"))
     if has_structured_stream:
-        structured_completion_policies = _structured_stream_completion_policies(
-            result,
-            ensure_keys=ensure_keys,
-            key_style=key_style,
-        )
         async for item in result.get_async_generator(type="instant"):
             await execution.bridge_model_stream_item(
                 item,
                 route="model_request",
                 meta=stream_meta,
             )
-            if _structured_stream_snapshot_satisfies_policies(
-                result.full_result_data,
-                structured_completion_policies,
-                key_style=key_style,
-            ):
-                await _close_structured_response_stream(result)
-                break
     else:
         async for event, data in result.get_async_generator(type="all"):
             if event in {"action", "tool"}:
@@ -162,6 +162,10 @@ async def run_model_request_route(
         max_retries=max_retries,
         raise_ensure_failure=raise_ensure_failure,
     )
+    execution.record_context_consumption(
+        context_package,
+        request_id=str(result.response_id or result.id),
+    )
     full_result_data = result.full_result_data
     extra = full_result_data.get("extra", {}) if isinstance(full_result_data, dict) else {}
     if isinstance(extra, dict):
@@ -204,91 +208,6 @@ async def run_model_request_route(
     return data
 
 
-def _structured_stream_completion_policies(
-    result: Any,
-    *,
-    ensure_keys: list[str] | None,
-    key_style: Literal["dot", "slash"],
-) -> dict[str, Literal["presence", "not_null"]]:
-    data_flow = getattr(result, "_data_flow", None)
-    auto_policies: dict[str, Literal["presence", "not_null"]] = {}
-    get_auto_policies = getattr(data_flow, "get_auto_ensure_policies", None)
-    if callable(get_auto_policies):
-        try:
-            raw_auto_policies = get_auto_policies(key_style=key_style)
-            if isinstance(raw_auto_policies, Mapping):
-                auto_policies = {
-                    str(key): cast(Literal["presence", "not_null"], value)
-                    for key, value in raw_auto_policies.items()
-                    if value in {"presence", "not_null"}
-                }
-        except Exception:
-            auto_policies = {}
-    if ensure_keys is None:
-        active_keys = list(auto_policies)
-    elif len(ensure_keys) == 0:
-        active_keys = []
-    else:
-        active_keys = ModelRequestResultDataFlow.merge_ensure_keys(list(auto_policies), ensure_keys)
-    if not active_keys:
-        return {}
-    policies = ModelRequestResultDataFlow.resolve_ensure_policies(active_keys, auto_policies)
-    policies.update(_structured_stream_preferred_mapping_policies(result, key_style=key_style))
-    return policies
-
-
-def _structured_stream_preferred_mapping_policies(
-    result: Any,
-    *,
-    key_style: Literal["dot", "slash"],
-) -> dict[str, Literal["presence"]]:
-    try:
-        prompt_output = result.prompt.to_prompt_object().output
-    except Exception:
-        return {}
-    if not isinstance(prompt_output, Mapping):
-        return {}
-    policies: dict[str, Literal["presence"]] = {}
-    for key, value in prompt_output.items():
-        if not key:
-            continue
-        field_shape = value[0] if isinstance(value, tuple) and value else value
-        if field_shape is dict or isinstance(field_shape, Mapping):
-            path = str(key) if key_style == "dot" else f"/{ key }"
-            policies[path] = "presence"
-    return policies
-
-
-def _structured_stream_snapshot_satisfies_policies(
-    full_result_data: Any,
-    policies: Mapping[str, Literal["presence", "not_null"]],
-    *,
-    key_style: Literal["dot", "slash"],
-) -> bool:
-    if not policies:
-        return False
-    if not isinstance(full_result_data, Mapping):
-        return False
-    snapshot = full_result_data.get("parsed_result")
-    if not isinstance(snapshot, (Mapping, Sequence)) or isinstance(snapshot, str | bytes | bytearray):
-        return False
-    empty = object()
-    for path, policy in policies.items():
-        located_value = DataLocator.locate_path_in_dict(snapshot, path, key_style, default=empty)
-        if located_value is empty:
-            return False
-        if policy == "not_null" and not ModelRequestResultDataFlow.ensure_value_is_present(located_value):
-            return False
-    return True
-
-
-async def _close_structured_response_stream(result: Any) -> None:
-    response_parser = getattr(result, "_response_parser", None)
-    close = getattr(response_parser, "async_close", None)
-    if callable(close):
-        await cast(Callable[[], Awaitable[Any]], close)()
-
-
 async def _required_action_failure(execution: "AgentExecution", *, route: str) -> dict[str, Any] | None:
     required_actions = execution.required_action_ids()
     if not required_actions:
@@ -326,105 +245,3 @@ async def _required_action_failure(execution: "AgentExecution", *, route: str) -
         "action_statuses": statuses,
         "reason": "; ".join(reason_bits),
     }
-
-
-async def run_skills_route(execution: "AgentExecution", route_meta: dict[str, Any]) -> Any:
-    mode = cast(Any, route_meta.get("mode", "model_decision"))
-    task = execution.task_target()
-    agent = cast(Any, execution.agent)
-    execution_access_policy = execution.effective_options.get("access_control_policy", {})
-    settings_overrides = (
-        {"access_control_policy": dict(execution_access_policy)}
-        if isinstance(execution_access_policy, Mapping)
-        else {}
-    )
-    output = execution.prompt_snapshot.get("output")
-    route_options = execution.route_options("skills")
-    route_output_format = route_options.get("output_format")
-    output_format = (
-        str(route_output_format)
-        if route_output_format is not None
-        else execution.prompt_snapshot.get("output_format")
-    )
-    if route_output_format is not None:
-        execution.record_consumed_option("routes.skills.output_format", output_format, owner="AgentlySkillsManager")
-    effort = route_options.get("effort")
-    if effort is not None:
-        effort = str(effort)
-        execution.record_consumed_option("routes.skills.effort", effort, owner="AgentlySkillsManager")
-    plan = await agent.async_resolve_skills_plan(
-        task,
-        skills=route_meta.get("skills"),
-        skills_packs=route_meta.get("skills_packs"),
-        mode=mode,
-        output=output,
-        output_format=output_format,
-        _settings_overrides=settings_overrides,
-    )
-    await execution.emit_stream(
-        "route.skills.plan",
-        plan,
-        route="skills",
-        source="skills_manager",
-        meta={"status": plan.get("status")},
-    )
-    if not plan.get("selected_skills"):
-        if mode == "required" or plan.get("status") in {"blocked", "rejected"}:
-            async def bridge_runtime_stream(item: dict[str, Any]):
-                await execution.bridge_task_dag_stream_item(item, route="skills")
-
-            skills_execution = await agent.async_execute_skills_plan(
-                task,
-                plan=plan,
-                output_format=output_format,
-                stream_handler=bridge_runtime_stream,
-                effort=effort,
-                _settings_overrides=settings_overrides,
-            )
-            execution.raise_if_limit_exceeded()
-            execution.close_snapshot = skills_execution.close_snapshot
-            execution.logs["route_logs"] = dict(skills_execution.to_dict())
-            execution.status = skills_execution.status
-            return skills_execution.output
-        await execution.emit_stream(
-            "route.fallback",
-            {"from": "skills", "to": "model_request", "reason": "no_matching_skill"},
-            route="model_request",
-        )
-        return await run_model_request_route(
-            execution,
-            type="parsed",
-            ensure_keys=None,
-            ensure_all_keys=None,
-            validate_handler=None,
-            key_style="dot",
-            max_retries=3,
-            raise_ensure_failure=True,
-        )
-
-    async def bridge_runtime_stream(item: dict[str, Any]):
-        await execution.bridge_task_dag_stream_item(item, route="skills")
-
-    skills_execution = await agent.async_execute_skills_plan(
-        task,
-        plan=plan,
-        output_format=output_format,
-        stream_handler=bridge_runtime_stream,
-        effort=effort,
-        _settings_overrides=settings_overrides,
-    )
-    execution.raise_if_limit_exceeded()
-    for log in skills_execution.skill_logs:
-        await execution.emit_stream(
-            f"skills.{ log.get('skill_id', 'skill') }",
-            log,
-            route="skills",
-            source="skills_manager",
-            stage_id=None,
-        )
-    for log in skills_execution.action_logs:
-        await execution.record_action_log(log, route="skills", source="action")
-    execution.close_snapshot = skills_execution.close_snapshot
-    execution.logs["route_logs"] = dict(skills_execution.to_dict())
-    execution.status = skills_execution.status
-    return skills_execution.output

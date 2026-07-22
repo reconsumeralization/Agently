@@ -23,14 +23,20 @@ from agently.types.data import (
     AgentExecutionLimits,
     AgentExecutionMeta,
     AgentExecutionStreamData,
-    AgentExecutionWorkspaceRecord,
+    AgentExecutionRecordPurpose,
+    AgentExecutionRecordWrite,
+    ContextBudget,
+    ContextPackage,
+    ContextReadIntent,
     OutputValidateHandler,
     RunContext,
+    SkillMode,
 )
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
+    from agently.core.context import TaskContext
     from agently.core.application.AgentExecution import AgentExecutionResult
 
 
@@ -50,7 +56,9 @@ class AgentExecution(Protocol):
     prompt: Any
     stream: Any
     execution_context: Any
-    workspace: Any
+    task_context: Any
+    task_workspace: Any
+    record_store: Any
     task_refs: dict[str, Any]
     task_record: Any
 
@@ -81,6 +89,39 @@ class AgentExecution(Protocol):
     def validate(self, handler: OutputValidateHandler) -> "AgentExecution": ...
 
     def create_dynamic_task(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def use_skills(
+        self,
+        skills: Any,
+        *,
+        mode: SkillMode = "model_decision",
+        auto_allow: bool = False,
+    ) -> "AgentExecution": ...
+
+    def require_skills(
+        self,
+        skills: Any,
+        *,
+        auto_allow: bool = False,
+    ) -> "AgentExecution": ...
+
+    def use_skills_packs(
+        self,
+        skills_packs: Any,
+        *,
+        mode: SkillMode = "model_decision",
+    ) -> "AgentExecution": ...
+
+    async def async_prepare_task_context(self) -> "TaskContext": ...
+
+    async def async_read_task_context(
+        self,
+        *,
+        consumer_id: str,
+        phase: str,
+        intent: str | ContextReadIntent | None = None,
+        budget: ContextBudget | None = None,
+    ) -> ContextPackage: ...
 
     def run_skills_task(self, *args: Any, **kwargs: Any) -> Any: ...
 
@@ -139,9 +180,10 @@ class AgentExecution(Protocol):
 
     async def async_streaming_print(self) -> None: ...
 
-    async def async_record_workspace(
+    async def async_record_data(
         self,
         *,
+        purpose: AgentExecutionRecordPurpose = "process",
         collection: str = "observations",
         kind: str | None = "agent_execution_observation",
         content: Any = None,
@@ -153,7 +195,7 @@ class AgentExecution(Protocol):
         checkpoint_state: dict[str, Any] | None = None,
         checkpoint_step_id: str | None = None,
         profile: str = "fast",
-    ) -> AgentExecutionWorkspaceRecord: ...
+    ) -> AgentExecutionRecordWrite: ...
 
     @overload
     def get_async_generator(
@@ -251,7 +293,7 @@ class AgentExecution(Protocol):
 
     def streaming_print(self) -> None: ...
 
-    def record_workspace(self, **kwargs: Any) -> AgentExecutionWorkspaceRecord: ...
+    def record_data(self, **kwargs: Any) -> AgentExecutionRecordWrite: ...
 
     @overload
     def get_generator(

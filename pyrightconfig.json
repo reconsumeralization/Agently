@@ -17,6 +17,7 @@
     ".example_runtime_outputs",
     ".example_runtime_skills",
     ".local_backups",
+    "examples/archived",
     "demo_experiment",
     "docs",
     "spec"

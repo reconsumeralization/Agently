@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -57,6 +58,7 @@ from agently.utils.LanguagePolicy import (
 
 from .BlockCarrier import (
     CarrierOutputPolicy,
+    SCOPED_RETRIEVAL_RESULT_CAPACITY,
     WorkUnitIntent,
     WorkUnitResult,
     scoped_retrieval_policy,
@@ -72,16 +74,27 @@ from .EvidenceLedger import (
     source_refs_from_ledger,
     validate_evidence_use,
     value_with_normalized_evidence_use,
-    workspace_artifacts_from_ledger,
+    task_workspace_artifacts_from_ledger,
+)
+from .TaskReferences import (
+    TaskReferenceCatalog,
+    parse_reference_tokens,
+    validate_reference_tokens,
+)
+from .TerminalConvergence import (
+    TerminalConvergenceState,
+    TerminalIssue,
+    relevant_state_digest,
 )
 
 if TYPE_CHECKING:
     from agently.core.Agent import BaseAgent
-    from agently.types.data import WorkspaceContextPackage, WorkspaceRecordRef
+    from agently.types.data import RecordRef
 else:
     BaseAgent = Any
-    WorkspaceContextPackage = dict[str, Any]
-    WorkspaceRecordRef = dict[str, Any]
+    RecordRef = dict[str, Any]
+
+TaskContextView = dict[str, Any]
 
 
 AgentTaskStatus = Literal[
@@ -92,6 +105,7 @@ AgentTaskStatus = Literal[
     "max_iterations",
     "timed_out",
     "capability_unavailable",
+    "cancelled",
     "error",
 ]
 AgentTaskExecutionStrategy = Literal["auto", "flat", "taskboard"]
@@ -113,7 +127,6 @@ _AGENT_TASK_EXECUTION_STRATEGY_ALIASES = {
 _STEP_EXECUTION_SHAPES = {
     "direct",
     "actions",
-    "skills",
     "dynamic_task",
     "execution_dag",
 }
@@ -163,6 +176,13 @@ _WORKSPACE_ARTIFACT_RESULT_BODY_KEYS = (
 _STREAM_REPLAY_LIMIT = 5000
 _VERIFIER_PROMPT_VALUE_CHARS = 12000
 _VERIFIER_PROMPT_ITEM_CHARS = 2400
+# The verifier receives one bounded, body-bearing evidence projection. Other
+# indexes and summaries stay body-light so the same readback is not multiplied
+# across the prompt as task history grows.
+_VERIFIER_PROMPT_TARGET_CHARS = 160_000
+_VERIFIER_LEDGER_MAX_ITEMS = 72
+_VERIFIER_LEDGER_BODY_CHARS = 900
+_VERIFIER_LEDGER_MAX_OVERFLOW_REFS = 80
 _AGENT_TASK_ERROR_MESSAGE_CHARS = 2000
 _AGENT_TASK_ERROR_PAYLOAD_MARKERS = (
     "\nrequest data:",
@@ -241,6 +261,222 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
+
+    def _task_context_retrieval_policy(self) -> dict[str, Any]:
+        task_context = getattr(self, "task_context", None)
+        catalog = (
+            task_context.source_catalog()
+            if task_context is not None
+            and callable(getattr(task_context, "source_catalog", None))
+            else {}
+        )
+        return scoped_retrieval_policy(catalog)
+
+    def _task_references(self) -> TaskReferenceCatalog:
+        catalog = cast(TaskReferenceCatalog | None, getattr(self, "_task_reference_catalog", None))
+        if catalog is None:
+            catalog = TaskReferenceCatalog(str(getattr(self, "id", "")))
+            setattr(self, "_task_reference_catalog", catalog)
+        return catalog
+
+    def _stable_evidence_ledger_view(self, value: Any, **kwargs: Any) -> dict[str, Any]:
+        return evidence_ledger_view(value, task_references=self._task_references(), **kwargs)
+
+    @staticmethod
+    def _taskboard_normalized_evidence_path(value: Any) -> str:
+        path = str(value or "").strip().replace("\\", "/")
+        while path.startswith("./"):
+            path = path[2:]
+        return path.strip("/")
+
+    @classmethod
+    def _taskboard_grounding_evidence_identity(
+        cls,
+        resolved: Mapping[str, Any],
+        *,
+        excluded_paths: set[str],
+    ) -> dict[str, Any] | None:
+        target = resolved.get("target")
+        if not isinstance(target, Mapping):
+            return None
+        status = str(resolved.get("status") or target.get("status") or "").strip().lower()
+        body_state = str(
+            resolved.get("body_state") or target.get("body_state") or ""
+        ).strip().lower()
+        if status != "ok" or body_state not in {"full", "bounded", "truncated"}:
+            return None
+
+        body: Any = None
+        for field in ("body", "content", "text", "snippet", "preview"):
+            candidate = target.get(field)
+            if candidate not in (None, "", [], {}):
+                body = candidate
+                break
+        if body in (None, "", [], {}):
+            return None
+        body_value = DataFormatter.sanitize(body)
+        body_text = (
+            body_value
+            if isinstance(body_value, str)
+            else json.dumps(
+                body_value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        )
+        if not str(body_text).strip():
+            return None
+
+        provenance = target.get("provenance")
+        provenance_map = provenance if isinstance(provenance, Mapping) else {}
+        input_preview = target.get("input_preview")
+        input_map = input_preview if isinstance(input_preview, Mapping) else {}
+
+        path = ""
+        for source in (target, input_map, provenance_map):
+            for field in ("path", "file_path", "output_path"):
+                path = cls._taskboard_normalized_evidence_path(source.get(field))
+                if path:
+                    break
+            if path:
+                break
+        if path and path in excluded_paths:
+            return None
+
+        owner = str(
+            target.get("owner")
+            or provenance_map.get("owner")
+            or resolved.get("source_role")
+            or "source"
+        ).strip()
+        locator = str(target.get("locator") or provenance_map.get("locator") or path).strip()
+        if not locator:
+            for source in (target, input_map, provenance_map):
+                for field in (
+                    "source_url",
+                    "canonical_url",
+                    "url",
+                    "record_id",
+                    "selection_key",
+                    "query",
+                ):
+                    locator = str(source.get(field) or "").strip()
+                    if locator:
+                        break
+                if locator:
+                    break
+        if not locator:
+            locator = str(target.get("action_id") or target.get("kind") or "source").strip()
+
+        content_version = str(
+            target.get("content_version")
+            or target.get("content_version_id")
+            or target.get("sha256")
+            or provenance_map.get("content_version")
+            or provenance_map.get("content_version_id")
+            or provenance_map.get("sha256")
+            or hashlib.sha256(str(body_text).encode("utf-8")).hexdigest()
+        ).strip()
+        read_range: dict[str, Any] = {}
+        raw_range = target.get("range")
+        if isinstance(raw_range, Mapping):
+            read_range.update(
+                {
+                    str(key): DataFormatter.sanitize(value)
+                    for key, value in raw_range.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+        for field in ("offset", "max_bytes", "start_line", "end_line"):
+            if field not in read_range and input_map.get(field) not in (None, "", [], {}):
+                read_range[field] = DataFormatter.sanitize(input_map.get(field))
+
+        identity_payload = {
+            "owner": owner,
+            "locator": locator,
+            "content_version": content_version,
+            "range": read_range,
+        }
+        identity = hashlib.sha256(
+            json.dumps(
+                identity_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "identity": f"evidence:{identity}",
+            "reference_id": str(resolved.get("reference_id") or ""),
+            "source_role": str(resolved.get("source_role") or ""),
+            "owner": owner,
+            "locator": locator,
+            "content_version": content_version,
+            "range": read_range,
+            "path": path,
+        }
+
+    def _taskboard_grounding_evidence_snapshot(
+        self,
+        *,
+        eligible_source_roles: Sequence[str] = (
+            "action",
+            "source",
+            "task_workspace_readback",
+        ),
+        excluded_artifact_paths: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        roles = tuple(
+            str(role).strip()
+            for role in eligible_source_roles
+            if str(role or "").strip()
+        )
+        excluded_paths = {
+            path
+            for path in (
+                self._taskboard_normalized_evidence_path(value)
+                for value in excluded_artifact_paths
+            )
+            if path
+        }
+        offered = self._task_references().offered_references(
+            eligible_roles=roles,
+        )
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for reference_id in offered:
+            try:
+                resolved = self._task_references().resolve(reference_id)
+            except ValueError:
+                continue
+            item = self._taskboard_grounding_evidence_identity(
+                resolved,
+                excluded_paths=excluded_paths,
+            )
+            if item is None:
+                continue
+            identity = str(item.get("identity") or "")
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            items.append(item)
+        items.sort(key=lambda item: str(item.get("identity") or ""))
+        return DataFormatter.sanitize(
+            {
+                "content_identities": [
+                    str(item.get("identity") or "") for item in items
+                ],
+                "reference_ids": [
+                    str(item.get("reference_id") or "") for item in items
+                ],
+                "items": items,
+                "eligible_source_roles": list(roles),
+                "excluded_artifact_paths": sorted(excluded_paths),
+            }
+        )
 
     @classmethod
     def _process_summary_from_value(
@@ -364,6 +600,14 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
         board_status: str = "",
         disclosure: str = "",
     ) -> str:
+        def bounded(text: str) -> str:
+            raw = text.encode("utf-8")
+            if len(raw) <= 4096:
+                return text
+            suffix = " [truncated]"
+            budget = 4096 - len(suffix.encode("utf-8"))
+            return raw[:budget].decode("utf-8", errors="ignore").rstrip() + suffix
+
         final_map = final if isinstance(final, Mapping) else {}
         provided = str(final_map.get("final_response") or "").strip()
         disclosure = str(disclosure or "").strip()
@@ -400,7 +644,9 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
         if not degradation_reason and (degraded or normalized_artifact_status == "degraded"):
             degradation_reason = reason_text
 
-        if provided and accepted:
+        # A canonical file ref is the terminal deliverable. Model-provided text
+        # may be the file body and must never become a second terminal carrier.
+        if provided and accepted and not ref_paths:
             additions: list[str] = []
             provided_lower = provided.casefold()
             if (normalized_artifact_status == "degraded" or degraded) and degradation_reason:
@@ -416,8 +662,8 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
                 if not disclosure_seen:
                     additions.append(disclosure)
             if additions:
-                return f"{provided.rstrip()} {' '.join(additions)}".strip()
-            return provided
+                return bounded(f"{provided.rstrip()} {' '.join(additions)}".strip())
+            return bounded(provided)
 
         if accepted:
             if normalized_artifact_status == "degraded" or degraded:
@@ -442,7 +688,7 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
             response += " Unmet requirements: " + "; ".join(normalized_missing[:5]) + "."
         if disclosure:
             response += " " + disclosure
-        return response.strip()
+        return bounded(response.strip())
 
     @staticmethod
     def _agent_task_final_result_text(value: Any) -> str:
@@ -568,12 +814,12 @@ class AgentTaskMixinBase(metaclass=_AgentTaskMixinMeta):
                     "search_note",
                     "generated_code",
                     "large_extraction",
-                    "workspace_note",
+                    "task_workspace_note",
                 ],
                 "default_state": "ref_only",
                 "hot_path": (
                     "Pass compact refs and bounded previews through prompts. Keep large intermediate resources in "
-                    "Workspace or Action artifacts until a later block explicitly needs scoped content."
+                    "TaskWorkspace or Action artifacts until a later block explicitly needs scoped content."
                 ),
                 "readback": (
                     "Use bounded readback with concrete refs, max_bytes, offsets, or scoped snippets when content is "
@@ -812,6 +1058,7 @@ __all__ = [
     "AgentTaskStatus",
     "BaseAgent",
     "CarrierOutputPolicy",
+    "SCOPED_RETRIEVAL_RESULT_CAPACITY",
     "DataFormatter",
     "FunctionShifter",
     "ReplanSignal",
@@ -820,8 +1067,8 @@ __all__ = [
     "TaskBoardRevision",
     "TriggerFlow",
     "TriggerFlowRuntimeData",
-    "WorkspaceContextPackage",
-    "WorkspaceRecordRef",
+    "TaskContextView",
+    "RecordRef",
     "WorkUnitIntent",
     "WorkUnitResult",
     "_AGENT_TASK_EXECUTION_STRATEGY_ALIASES",
@@ -841,7 +1088,11 @@ __all__ = [
     "_TASKBOARD_RECOVERABLE_CARD_STATUSES",
     "_TASKBOARD_SOURCE_REFS_MAX",
     "_TASKBOARD_STREAM_SUMMARY_CHARS",
+    "_VERIFIER_LEDGER_BODY_CHARS",
+    "_VERIFIER_LEDGER_MAX_ITEMS",
+    "_VERIFIER_LEDGER_MAX_OVERFLOW_REFS",
     "_VERIFIER_PROMPT_ITEM_CHARS",
+    "_VERIFIER_PROMPT_TARGET_CHARS",
     "_VERIFIER_PROMPT_VALUE_CHARS",
     "_WORKSPACE_ARTIFACT_CONTENT_KEYS",
     "_WORKSPACE_ARTIFACT_PREVIEW_BYTES",
@@ -879,5 +1130,11 @@ __all__ = [
     "task_board_preflight_diagnostics",
     "validate_evidence_use",
     "value_with_normalized_evidence_use",
-    "workspace_artifacts_from_ledger",
+    "task_workspace_artifacts_from_ledger",
+    "TaskReferenceCatalog",
+    "parse_reference_tokens",
+    "validate_reference_tokens",
+    "TerminalConvergenceState",
+    "TerminalIssue",
+    "relevant_state_digest",
 ]

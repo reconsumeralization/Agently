@@ -14,12 +14,12 @@ model-callable Actions with sensible defaults.
 | `01_action_python_resource_local.py` | App developers, no model required | Enable a trusted-local Python action with `agent.enable_python(..., sandbox="trusted_local")` and call it directly for a deterministic local check. |
 | `02_agent_python_resource_ollama.py` | App developers with local Ollama | Let a model decide to call the enabled Python action before replying. |
 | `03_agent_issue_processor_deepseek.py` | App developers with DeepSeek | A realistic issue-triage task where the model uses Python for deterministic metrics and then writes the summary. |
-| `04_triggerflow_python_resource_local.py` | Workflow/framework developers | Inject a managed Python sandbox into TriggerFlow `runtime_resources`. |
-| `05_action_nodejs_resource_local.py` | App developers, no model required | Enable a trusted-local Node.js action and execute JavaScript through the Node provider. |
+| `04_triggerflow_python_resource_local.py` | Workflow/framework developers | Let a TriggerFlow chunk invoke the canonical Workspace-bound Python CodeExecution Action. |
+| `05_action_nodejs_resource_local.py` | App developers, no model required | Enable a Node.js CodeExecution action and execute it through the explicit trusted-local provider. |
 | `06_action_sqlite_resource_local.py` | App developers, no model required | Enable a managed SQLite query action against a local database file. |
 | `07_browser_resource_browse_local.py` | Action/plugin developers | Browse a local page through Browser Execution Resource. |
 | `08_health_check_reuse_local.py` | Provider/plugin developers | Show V2 health-check-before-reuse behavior with a custom provider. |
-| `09_action_common_code_runtime_local.py` | App developers, no model required | Run a Docker-backed `enable_code_runtime(...)` action and print the built-in common-language profile catalog. |
+| `09_action_common_code_runtime_local.py` | App developers, no model required | Run a Workspace-backed `enable_code_runtime(...)` Action with ordered providers and an explicit unsafe fallback. |
 
 ## Copy-Paste Shape
 
@@ -27,7 +27,7 @@ For application developers, the shape is intentionally small:
 
 ```python
 agent = Agently.create_agent()
-agent.enable_python(desc="Use for exact calculations. Assign the final answer to `result`.")
+agent.enable_python(desc="Use for exact calculations. Print the final result as JSON.")
 
 turn = agent.input("Use Python to calculate the average of [15, 23, 42, 8, 12].")
 records = agent.get_action_result(prompt=turn.prompt)
@@ -53,8 +53,8 @@ action is called.
   - Shows that execution is real: model planning calls the Docker-backed Python action, the sandbox computes metrics, and the final reply uses those action results.
 - `04_triggerflow_python_resource_local.py`
   - Runs without any model API key.
-  - Injects a managed Python sandbox into TriggerFlow `runtime_resources`.
-  - This is intentionally lower-level than the first three examples.
+  - Keeps TriggerFlow responsible for orchestration and invokes a CodeExecution Action from one chunk.
+  - Shows the Workspace materialization and action-call resource boundary without a model API key.
 - `05_action_nodejs_resource_local.py`
   - Runs without any model API key.
   - Requires `node` on `PATH`; otherwise it prints a skip message.
@@ -71,8 +71,8 @@ action is called.
   - Creates a local manager and provider to show that unhealthy ready handles are released and replaced before reuse.
 - `09_action_common_code_runtime_local.py`
   - Runs without any model API key.
-  - Requires a local Docker service; with `provisioning_profile="developer"`, a missing Python runtime image may be pulled automatically.
-  - Demonstrates `agent.enable_code_runtime(...)` and the built-in common-language Docker profile catalog.
+  - Tries an eligible local Docker provider first, then uses the explicitly authorized unsafe local fallback when Python is installed.
+  - Demonstrates Workspace grant, ordered provider selection, and the Python/Node.js/Go/C++ adapter catalog.
 
 Before running the Ollama example, make sure Ollama is running and the model is
 available:
@@ -84,8 +84,9 @@ ollama pull qwen2.5:7b
 The Ollama and DeepSeek Python-action examples use the default Docker-backed
 runtime profile. Make sure the local Docker CLI and daemon are available, or
 pass `sandbox="trusted_local"` only in trusted compatibility examples.
-The common-language code runtime example uses `provisioning_profile="developer"`,
-so a missing Python runtime image may be pulled automatically.
+The common-language code runtime example uses `isolation="preferred"` and
+`unsafe_fallback=True` deliberately. Production code that requires isolation
+should keep the default `isolation="required"` and omit the unsafe fallback.
 
 Optional Ollama environment variables:
 
@@ -115,10 +116,10 @@ python examples/execution_resource/09_action_common_code_runtime_local.py
 Notes:
 
 - Execution Resource declarations are lazy; a declaration does not start a sandbox or transport.
-- Business examples should prefer `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_workspace_file_actions(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and `agent.enable_sqlite(...)` over direct manager/provider APIs. Python, shell, Node.js, and common-language code runtime helpers default to Docker-backed runtime profiles; use `sandbox="trusted_local"` only for trusted local compatibility.
-- Built-in providers currently cover MCP, Bash, Python, Node, Docker, Browser, and SQLite. Search is intentionally not an Execution Resource provider; configure proxy, timeout, backend, and region on `agently.builtins.actions.Search(...)`.
+- Business examples should prefer `agent.enable_python(...)`, `agent.enable_shell(...)`, `agent.enable_task_workspace_file_actions(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and `agent.enable_sqlite(...)` over direct manager/provider APIs. `enable_code_runtime(...)` is provider-neutral; unsafe local execution requires explicit fallback and isolation configuration.
+- Built-in providers currently cover MCP, Bash, Docker, provider-neutral code execution, Browser, and SQLite. Python, Node.js, Go, and C++ share the `code_execution` kind and differ only through language adapters. Search is intentionally not an Execution Resource provider; configure proxy, timeout, backend, and region on `agently.builtins.actions.Search(...)`.
 - Ready handles are health-checked before reuse. Unhealthy handles emit `execution_resource.unhealthy`, are released, and are replaced with fresh handles.
 - `enable_*` helpers provide default action descriptions, so `desc=` is optional. By default `desc=` appends extra guidance; `desc_mode="override"` replaces the default description only when you need full control.
 - Action dispatch ensures required environments immediately before executor calls.
 - `action_call` scoped handles are released after the action call.
-- TriggerFlow still exposes live resources through `runtime_resources`; managed resources are injected by Execution Resource and released when the execution closes.
+- TriggerFlow still exposes non-code live resources through `runtime_resources`; Workspace-bound code should run through CodeExecution Actions so grants, bundles, provider selection, evidence, and release stay on one path.

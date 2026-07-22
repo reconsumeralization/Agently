@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -7,6 +8,17 @@ import sys
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_runner_sys_path():
+    original = list(sys.path)
+    try:
+        yield
+    finally:
+        sys.path[:] = original
 
 
 def _load_block_carrier_runner() -> ModuleType:
@@ -42,6 +54,32 @@ def _load_real_samples_runner() -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_framework_real_sample_runner_uses_public_task_workspace_keyword():
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / "spec"
+        / "experiments"
+        / "flat-react-taskboard-real-samples"
+        / "flat_react_taskboard_real_samples.py"
+    )
+    tree = ast.parse(runner_path.read_text(encoding="utf-8"))
+    create_task_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_task"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "agent"
+    ]
+
+    assert create_task_calls
+    for call in create_task_calls:
+        keywords = {keyword.arg for keyword in call.keywords}
+        assert "workspace" not in keywords
+        assert "task_workspace" in keywords
 
 
 def test_block_carrier_summary_records_graph_facts_without_runner_verdict(tmp_path):
@@ -784,6 +822,233 @@ def test_real_sample_runner_exposes_structured_action_data_without_artifact_refs
     assert action_items[0]["action_id"] == "market_quotes"
     assert "sha256" not in action_items[0]
     assert "last_sale_price" in json.dumps(action_items[0]["preview"], ensure_ascii=False)
+
+
+def test_real_sample_runner_reads_terminal_evidence_projection_from_close_snapshot():
+    runner = _load_real_samples_runner()
+    synthetic_quote = {
+        "ticker": "AVGO",
+        "last_sale_price": "SYNTHETIC_AVGO_PRICE",
+        "net_change": "SYNTHETIC_AVGO_NET_CHANGE",
+        "percentage_change": "SYNTHETIC_AVGO_PERCENTAGE_CHANGE",
+        "last_trade_timestamp": "SYNTHETIC_AVGO_TIMESTAMP",
+        "source": "synthetic_quote_source",
+    }
+    meta = {
+        "close_snapshot": {
+            "task": {
+                "diagnostics": {
+                    "terminal_evidence_projection": {
+                        "schema_version": "agent_task_terminal_evidence_projection/v1",
+                        "verification_state": "accepted",
+                        "reference_ids": ["ref_quotes", "ref_news"],
+                        "items": [
+                            {
+                                "reference_id": "ref_quotes",
+                                "kind": "agent_task.action.result",
+                                "action_id": "market_quotes",
+                                "status": "ok",
+                                "body_state": "bounded",
+                                "body_preview": {
+                                    "companies": [synthetic_quote]
+                                },
+                            },
+                            {
+                                "reference_id": "ref_news",
+                                "kind": "taskboard_action_artifact.readback",
+                                "action_id": "official_news_search",
+                                "status": "ok",
+                                "body_state": "bounded",
+                                "body_preview": [
+                                    {
+                                        "title": "Microsoft to Deploy Next-Gen AMD Instinct",
+                                        "url": "https://ir.amd.com/",
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+    }
+
+    readbacks = runner.collect_framework_action_readbacks(meta)
+
+    assert [item["reference_id"] for item in readbacks] == [
+        "ref_quotes",
+        "ref_news",
+    ]
+    assert readbacks[1]["kind"] == "taskboard_action_artifact.readback"
+    assert readbacks[1]["preview"][0]["title"].startswith("Microsoft to Deploy")
+    assert readbacks[0]["preview"]["companies"][0] == synthetic_quote
+
+    metrics = runner.Metrics(route="taskboard", case_id="stock_risk_outlook")
+    candidate = runner.framework_final_candidate(
+        {"final_result": {"answer": "final.md", "artifact_markdown": ""}},
+        {},
+        action_readbacks=readbacks,
+    )
+    normalized = runner.normalized_candidate_for_judge(candidate, metrics)
+    action_items = [
+        item
+        for item in normalized["evidence_items"]
+        if item.get("source") == "framework_action_result_preview"
+    ]
+    assert [item["reference_id"] for item in action_items] == [
+        "ref_quotes",
+        "ref_news",
+    ]
+    assert action_items[1]["kind"] == "taskboard_action_artifact.readback"
+
+
+def test_framework_action_event_count_includes_nested_agent_task_actions():
+    runner = _load_real_samples_runner()
+    stream_summary = {
+        "path_counts": {
+            "agent_task.action.started": 16,
+            "agent_task.action.completed": 16,
+            "runtime.progress.actions.market_quotes.started": 1,
+        }
+    }
+
+    assert runner.count_framework_action_events(stream_summary) == 16
+
+
+def test_block_carrier_stock_audit_joins_same_run_dynamic_quote_across_projection_chain():
+    runner = _load_block_carrier_runner()
+    dynamic_avgo = {
+        "ticker": "AVGO",
+        "last_sale_price": "SYNTHETIC_LIVE_PRICE",
+        "net_change": "SYNTHETIC_LIVE_NET_CHANGE",
+        "percentage_change": "SYNTHETIC_LIVE_PERCENTAGE_CHANGE",
+        "last_trade_timestamp": "SYNTHETIC_LIVE_TIMESTAMP",
+        "source": "synthetic_live_source",
+        "provider_specific_sibling": {"preserved": True},
+    }
+    quote_payload = {"companies": [{"ticker": "NVDA"}, dynamic_avgo]}
+    record = {
+        "case_id": "stock_risk_outlook",
+        "framework_meta": {
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "market_quotes",
+                        "action_call_id": "call-current-run",
+                        "data": quote_payload,
+                    }
+                ]
+            },
+            "close_snapshot": {
+                "task": {
+                    "diagnostics": {
+                        "terminal_evidence_projection": {
+                            "items": [
+                                {
+                                    "reference_id": "ref-current-run",
+                                    "action_id": "market_quotes",
+                                    "body_preview": quote_payload,
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        },
+        "candidate": {
+            "framework_evidence": {
+                "action_readbacks": [
+                    {
+                        "reference_id": "ref-current-run",
+                        "action_id": "market_quotes",
+                        "preview": json.dumps(quote_payload),
+                    }
+                ]
+            }
+        },
+    }
+
+    facts = runner._dynamic_quote_projection_facts(record)
+
+    assert facts["baseline"] == "same_run_action_result"
+    assert facts["uses_static_market_oracle"] is False
+    assert facts["observed_fields"] == {
+        key: dynamic_avgo[key]
+        for key in (
+            "last_sale_price",
+            "net_change",
+            "percentage_change",
+            "last_trade_timestamp",
+            "source",
+        )
+    }
+    assert facts["required_fields_present"] is True
+    assert facts["complete_object_equal_across_chain"] is True
+
+
+def test_block_carrier_stock_audit_rejects_partial_observer_object_even_when_ticker_exists():
+    runner = _load_block_carrier_runner()
+    action_avgo = {
+        "ticker": "AVGO",
+        "last_sale_price": "SYNTHETIC_CURRENT_PRICE",
+        "net_change": "SYNTHETIC_CURRENT_NET_CHANGE",
+        "percentage_change": "SYNTHETIC_CURRENT_PERCENTAGE_CHANGE",
+        "last_trade_timestamp": "SYNTHETIC_CURRENT_TIMESTAMP",
+        "source": "synthetic_current_source",
+        "provider_specific_sibling": {"must_survive": True},
+    }
+    observer_avgo = dict(action_avgo)
+    observer_avgo.pop("provider_specific_sibling")
+    quote_payload = {"companies": [action_avgo]}
+    record = {
+        "case_id": "stock_risk_outlook",
+        "framework_meta": {
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "market_quotes",
+                        "action_call_id": "call-current-run",
+                        "data": quote_payload,
+                    }
+                ]
+            },
+            "close_snapshot": {
+                "task": {
+                    "diagnostics": {
+                        "terminal_evidence_projection": {
+                            "items": [
+                                {
+                                    "reference_id": "ref-current-run",
+                                    "action_id": "market_quotes",
+                                    "body_preview": {"companies": [observer_avgo]},
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        },
+        "candidate": {
+            "framework_evidence": {
+                "action_readbacks": [
+                    {
+                        "reference_id": "ref-current-run",
+                        "action_id": "market_quotes",
+                        "preview": json.dumps(quote_payload),
+                    }
+                ]
+            }
+        },
+    }
+
+    facts = runner._dynamic_quote_projection_facts(record)
+
+    assert facts["action_result_present"] is True
+    assert facts["observer_projection_present"] is True
+    assert facts["runner_cold_readback_present"] is True
+    assert facts["observer_matches_action_result"] is False
+    assert facts["runner_cold_readback_matches_action_result"] is True
+    assert facts["complete_object_equal_across_chain"] is False
 
 
 def test_real_sample_runner_prioritizes_action_readbacks_before_ref_limit():

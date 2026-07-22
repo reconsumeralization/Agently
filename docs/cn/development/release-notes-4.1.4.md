@@ -253,6 +253,7 @@ result = (
 | Result text | task-strategy results 暴露 `final_response`；`get_text()` 与 `async_get_text()` 优先返回该 final response。 | 用 result text facades 获取面向用户的最终答案。 |
 | Result payloads | execution result payloads 暴露 terminal status、artifact status、final result data、task refs、completion notes、diagnostics。 | 用 structured result/meta data 驱动应用状态、审计和 UI detail panels。 |
 | Streams | AgentExecution streams 暴露 process events、instant items、delta text、retry boundaries、exchange state、action observations、terminal summaries。 | 从 `delta` 渲染用户文本；从 `instant` 或 RuntimeEvents 渲染结构化 UI state。 |
+| Structured request completion | AgentExecution 会投影 provisional `instant` fields，但其持有的 ModelRequest 会继续到自然 parsing、validation、usage/meta 与 `request.completed`。 | `instant` 只用于 UI 或可取消/幂等准备；AgentTask evidence 与业务决策使用最终 parsed data。 |
 | Runtime context | runtime context 保留为 diagnostics；model-hot task prompts 不把具体 runtime timestamps 写入生成制品。 | 将业务日期放入 caller input 或 source evidence。 |
 | Incremental acceptance | TaskBoard acceptance 携带 dirty/cache markers、card/evidence ids、verdict fingerprints、verification refs、counters、progress percent。 | 用 acceptance metadata 驱动 task status、board UI 和 verification efficiency。 |
 | Verifier reuse | TaskBoard final verification 可复用未变化的 green verifier verdict，并将 dirty verifier input 限定到受影响 acceptance items。 | 让 TaskBoard 只验证变化的 acceptance areas，同时保留 final verifier authority。 |
@@ -270,7 +271,7 @@ result = (
 | Workspace file IO | Workspace file IO 拥有 path containment、file refs、deterministic file info、handler dispatch、text read/write、optional export handlers、diagnostics。 | 将 file IO、export、file-action roots 保持在 Workspace 内。 |
 | Intelligent retrieval | `workspace.retrieve(...)` 为 records/files 提供共享 intelligent retrieval，包含 keyword/tag candidates、optional vector/hybrid candidates、rerank、refill、budgeted packaging。 | records/files 要作为 model context 或 AgentTask evidence 时使用 `retrieve(...)`。 |
 | Deterministic search | `workspace.grep(...)` 和 `workspace.grep_files(...)` 提供 records/files 的 deterministic exact search。 | 用 `grep(...)` / `grep_files(...)` 做精确查询、调试和诊断。 |
-| Vector retrieval | `LocalVectorIndex` 增加 provider-neutral vector scoring，支持 cosine、dot、L2 similarity。 | embedding providers 放在应用代码或 custom backends 中，通过 Workspace seams 传入 vector indexes。 |
+| Workspace store providers | Workspace 将 `DBStoreProvider`、`EmbeddingProvider`、`VectorStoreProvider` 拆开：默认 DB store 是 SQLite，`vector_store_provider="auto"` 会在 Chroma 可用时选择 Chroma，否则降级到 SQLite vector table。 | 通过 `db_store_provider` 接入 record DB adapter，通过 `embedding_provider` 接入向量化，通过 `vector_store_provider` 独立选择向量存储。能力较低的 DB store 保持同一协议面，对不支持的高级能力返回空值或缺省值。 |
 | Session memory | `SessionMemory` 成为 plugin protocol；内置 `AgentlyMemory` 将 global/session memory 存储为 Workspace records。 | 用 `AgentlyMemory` 实现 Workspace-backed Session memory 和 scoped recall。 |
 | Blocks | Blocks 将 AgentTask ExecutionPlan / PlanBlock work 降低为 TriggerFlow-backed ExecutionBlockGraph，并为已校验 TaskDAG nodes 提供显式可选 carrier。 | AgentTask 用 Blocks 承载 bounded work unit；TaskDAG 仅在调用方需要 block lifecycle evidence 或 result adapter 时显式调用 `compile_blocks(...)` / `async_run_blocks(...)`。 |
 | TaskDAG | TaskDAG 拥有 acyclic dynamic planning、validation、resolver binding、execution、retry metadata、result adaptation、evidence mapping。 | 用 TaskDAG 直接处理显式 DAG-shaped automation 和 dynamic planning。 |

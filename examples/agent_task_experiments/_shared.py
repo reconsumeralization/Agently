@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Literal, cast
@@ -126,7 +127,7 @@ def create_task_agent(
 ) -> tuple[Any, ProviderName, Path]:
     workspace = default_workspace(workspace_prefix)
     workspace.mkdir(parents=True, exist_ok=True)
-    agent = Agently.create_agent(name).use_workspace(workspace)
+    agent = Agently.create_agent(name).use_task_workspace(workspace, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=temperature)
     if language != "auto":
         agent.language(language)
@@ -136,12 +137,12 @@ def create_task_agent(
 def enable_coding_workspace(agent: Any) -> None:
     from agently.builtins.actions import RuntimePreflight
 
-    workspace = getattr(agent, "workspace", None)
-    if workspace is None:
-        raise RuntimeError("Coding examples require a Workspace-bound agent.")
-    root = Path(str(getattr(workspace, "files_root", getattr(workspace, "content_root")))).resolve()
+    task_workspace = getattr(agent, "task_workspace", None)
+    if task_workspace is None:
+        raise RuntimeError("Coding examples require a TaskWorkspace-bound agent.")
+    root = Path(str(task_workspace.root)).resolve()
     RuntimePreflight().register_actions(agent.action, action_id="inspect_code_runtimes")
-    agent.enable_workspace_file_actions(
+    agent.enable_task_workspace_file_actions(
         root=root,
         read=True,
         write=True,
@@ -231,11 +232,11 @@ def install_local_skill(skill_dir: Path, *, registry_root: Path) -> str:
 
 
 def enable_workspace_report_actions(agent: Any) -> None:
-    workspace = getattr(agent, "workspace", None)
-    if workspace is None:
-        raise RuntimeError("Workspace report examples require a Workspace-bound agent.")
-    root = Path(str(getattr(workspace, "files_root", getattr(workspace, "content_root")))).resolve()
-    agent.enable_workspace_file_actions(
+    task_workspace = getattr(agent, "task_workspace", None)
+    if task_workspace is None:
+        raise RuntimeError("Report examples require a TaskWorkspace-bound agent.")
+    root = Path(str(task_workspace.root)).resolve()
+    agent.enable_task_workspace_file_actions(
         root=root,
         read=True,
         write=True,
@@ -256,11 +257,18 @@ def stream_options() -> dict[str, Any]:
     return {"agent_task": {"stream_progress": True}}
 
 
-def run_and_print(execution: Any, *, provider: ProviderName, workspace: Path) -> dict[str, Any]:
-    return asyncio.run(async_run_and_print(execution, provider=provider, workspace=workspace))
+def run_and_print(execution: Any, *, provider: ProviderName, task_workspace: Path) -> dict[str, Any]:
+    return asyncio.run(
+        async_run_and_print(execution, provider=provider, task_workspace=task_workspace)
+    )
 
 
-async def async_run_and_print(execution: Any, *, provider: ProviderName, workspace: Path) -> dict[str, Any]:
+async def async_run_and_print(
+    execution: Any,
+    *,
+    provider: ProviderName,
+    task_workspace: Path,
+) -> dict[str, Any]:
     print("[DELTA_STREAM]")
     delta_text = ""
     async for chunk in execution.get_async_generator(type="delta"):
@@ -273,22 +281,29 @@ async def async_run_and_print(execution: Any, *, provider: ProviderName, workspa
 
     result = execution.get_result()
     data = await result.async_get_data()
+    full_data = await result.async_get_full_data()
     meta = await result.async_get_meta()
+    terminal_data: Mapping[str, Any] = (
+        full_data if isinstance(full_data, Mapping) else {}
+    )
+    nested_result = terminal_data.get("result")
+    if not terminal_data.get("status") and isinstance(nested_result, Mapping):
+        terminal_data = nested_result
     task_refs = meta.get("task_refs", {}) if isinstance(meta, dict) else {}
     route_logs = meta.get("logs", {}).get("route_logs", {}) if isinstance(meta, dict) else {}
     task_log = route_logs.get("agent_task", {}) if isinstance(route_logs, dict) else {}
     summary = {
         "provider": provider,
-        "status": data.get("status") if isinstance(data, dict) else "",
-        "accepted": data.get("accepted") if isinstance(data, dict) else None,
+        "status": terminal_data.get("status", ""),
+        "accepted": terminal_data.get("accepted"),
+        "artifact_status": terminal_data.get("artifact_status"),
+        "missing_criteria": terminal_data.get("missing_criteria"),
         "execution_strategy": (
-            data.get("execution_strategy")
-            if isinstance(data, dict)
-            else None
+            terminal_data.get("execution_strategy")
         )
         or (task_refs.get("execution_strategy") if isinstance(task_refs, dict) else None)
         or (task_log.get("execution_strategy") if isinstance(task_log, dict) else None),
-        "workspace": str(workspace),
+        "task_workspace": str(task_workspace),
         "delta_chars": len(delta_text),
         "final_preview": compact_text(data.get("final_result") if isinstance(data, dict) else data),
     }

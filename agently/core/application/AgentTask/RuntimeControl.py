@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from agently.types.data import TaskWorkspaceTerminalStatus
+
 from .TaskShared import *
 
 # A bounded AgentTask step should hand inconclusive action evidence back to the
@@ -40,10 +42,16 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 await self._emit("agent_task.resumed", {"task_id": self.id, "terminal": True})
                 await self._ensure_final_reflection()
                 await self._emit("result", self.result)
+                await self._apply_terminal_task_workspace_retention(
+                    status="completed" if self.status == "completed" else "failed"
+                )
+                self._release_terminal_action_artifact_scope()
                 await self._close_streams()
                 return self.result
             self.status = "running"
-            execution = self._flow.create_execution(auto_close=False)
+            execution = self._flow.create_execution(auto_close=False, record_store=False)
+            terminal_retention_status: TaskWorkspaceTerminalStatus | None = None
+            self._lifecycle_error = None
             try:
                 await self._record_phase(
                     "configured",
@@ -57,6 +65,14 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     },
                 )
                 await execution.async_start({"task_id": self.id})
+                # The lifecycle graph schedules later iterations through
+                # chunk-owned signals. Seal and drain those accepted signals
+                # before inspecting terminal state; otherwise async_start can
+                # return after lifecycle.start while transition.decide is
+                # still running in the queue.
+                await execution.async_close(reason="agent_task.lifecycle_complete")
+                if self._lifecycle_error is not None:
+                    raise self._lifecycle_error
                 if self.status == "running":
                     if self.max_iterations is not None:
                         self.status = "max_iterations"
@@ -70,6 +86,9 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                         "status": self.status,
                         "accepted": False,
                         "artifact_status": "partial",
+                        "task_id": self.id,
+                        "execution_strategy": self.execution_strategy,
+                        "effective_execution_strategy": self.effective_execution_strategy,
                         "reason": reason,
                         "final_response": self._agent_task_user_final_response(
                             accepted=False,
@@ -77,12 +96,39 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                             status=self.status,
                             reason=reason,
                         ),
-                        "iterations": len(self.iterations),
+                        "final_result": "",
+                        "artifact_refs": [],
+                        "missing_criteria": [],
                     }
                     await self._emit("agent_task.blocked", self.result)
                 await self._ensure_final_reflection()
                 await self._emit("result", self.result)
+                terminal_retention_status = (
+                    "completed" if self.status == "completed" else "failed"
+                )
                 return self.result
+            except asyncio.CancelledError as error:
+                self.status = "cancelled"
+                self._error = error
+                self.result = {
+                    "status": "cancelled",
+                    "accepted": False,
+                    "artifact_status": "partial",
+                    "task_id": self.id,
+                    "execution_strategy": self.execution_strategy,
+                    "effective_execution_strategy": self.effective_execution_strategy,
+                    "reason": "AgentTask was cancelled by its host.",
+                    "final_response": "Task was cancelled by its host.",
+                    "final_result": "",
+                    "artifact_refs": [],
+                    "missing_criteria": [],
+                }
+                await self._emit(
+                    "agent_task.cancelled",
+                    {"status": "cancelled", "task_id": self.id, "message": "AgentTask was cancelled by its host."},
+                )
+                terminal_retention_status = "cancelled"
+                raise
             except BaseException as error:
                 self.status = "timed_out" if self._is_timeout_error(error) else "error"
                 self._error = error
@@ -91,6 +137,7 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     {"type": error.__class__.__name__, "message": message, "status": self.status}
                 )
                 await self._emit("agent_task.error", self.diagnostics["errors"][-1])
+                terminal_retention_status = "failed"
                 raise
             finally:
                 # Always close the auto_close=False execution so its runtime is
@@ -99,6 +146,11 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                     await execution.async_close()
                 except Exception:
                     pass
+                if terminal_retention_status is not None:
+                    await self._apply_terminal_task_workspace_retention(
+                        status=terminal_retention_status
+                    )
+                    self._release_terminal_action_artifact_scope()
                 self.completed_at = time.time()
                 self._completed = True
                 await self._close_streams()
@@ -109,6 +161,46 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         except RuntimeError:
             return asyncio.run(self.async_run())
         return self.async_run()
+
+    def _release_terminal_action_artifact_scope(self) -> None:
+        """Release an untransferred task scope without changing task outcome."""
+
+        transferred_to = str(
+            getattr(self, "_action_artifact_scope_transferred_to_execution_id", "") or ""
+        ).strip()
+        artifact_scope = {"kind": "agent_task", "id": self.id}
+        if transferred_to:
+            self.diagnostics["action_artifact_release"] = {
+                "status": "transferred",
+                "scope": artifact_scope,
+                "owner": {"kind": "agent_execution", "id": transferred_to},
+            }
+            return
+        action = getattr(self.agent, "action", None)
+        release_scope = getattr(action, "_release_artifact_scope", None)
+        if not callable(release_scope):
+            return
+        try:
+            released = release_scope(artifact_scope)
+            self.diagnostics["action_artifact_release"] = {
+                "status": "released",
+                "scope": artifact_scope,
+                "released_count": released if isinstance(released, int) else 0,
+            }
+        except Exception as error:
+            self.diagnostics["action_artifact_release"] = {
+                "status": "failed",
+                "scope": artifact_scope,
+                "diagnostics": [
+                    {
+                        "code": "agent_task.action_artifact_release_failed",
+                        "message": _compact_agent_task_error_message(
+                            error,
+                            fallback=error.__class__.__name__,
+                        ),
+                    }
+                ],
+            }
 
     @staticmethod
     def _is_timeout_error(error: BaseException) -> bool:
@@ -136,6 +228,8 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             "accepted": False,
             "artifact_status": "partial",
             "task_id": self.id,
+            "execution_strategy": self.execution_strategy,
+            "effective_execution_strategy": self.effective_execution_strategy,
             "reason": reason,
             "final_response": self._agent_task_user_final_response(
                 accepted=False,
@@ -143,7 +237,9 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 status="timed_out",
                 reason=reason,
             ),
-            "iterations": len(self.iterations),
+            "final_result": "",
+            "artifact_refs": [],
+            "missing_criteria": [],
         }
         self.diagnostics.setdefault("terminal_reason", "timed_out")
         await self._emit_progress(iteration_index, "timed_out", f"Iteration {iteration_index}: { reason }")
@@ -253,22 +349,64 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
         return cast(dict[str, Any], meta) if isinstance(meta, Mapping) else None
 
     async def _await_task_request(self, awaitable, *, stage: str):
-        timeout_info = self._task_request_wait_timeout()
         task = asyncio.ensure_future(awaitable)
         heartbeat_task = self._start_heartbeat(stage=stage)
+        request_started_monotonic = time.monotonic()
+        request_timeout = self._task_request_timeout()
+        no_progress_timeout = self._task_no_progress_timeout()
         try:
-            if timeout_info is None:
-                return await task
-            timeout, limit_name = timeout_info
-            return await asyncio.wait_for(task, timeout=timeout)
-        except (asyncio.TimeoutError, TimeoutError) as error:
-            task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await task
+            while True:
+                now = time.monotonic()
+                latest_progress = max(
+                    request_started_monotonic,
+                    self._last_stream_emit_monotonic,
+                )
+                deadline_candidates: list[tuple[float, str, float | None]] = []
+                task_remaining = self._task_deadline_remaining()
+                if task_remaining is not None:
+                    deadline_candidates.append(
+                        (task_remaining, "max_seconds", self._task_max_seconds())
+                    )
+                if request_timeout is not None:
+                    deadline_candidates.append(
+                        (
+                            request_timeout - (now - request_started_monotonic),
+                            "request_timeout_seconds",
+                            request_timeout,
+                        )
+                    )
+                if no_progress_timeout is not None:
+                    deadline_candidates.append(
+                        (
+                            no_progress_timeout - (now - latest_progress),
+                            "max_no_progress_seconds",
+                            no_progress_timeout,
+                        )
+                    )
+                if not deadline_candidates:
+                    return await task
+                expired = [item for item in deadline_candidates if item[0] <= 0]
+                if expired:
+                    _, limit_name, timeout = min(expired, key=lambda item: item[0])
+                    break
+                wait_seconds = min(item[0] for item in deadline_candidates)
+                done, _ = await asyncio.wait({task}, timeout=wait_seconds)
+                if task in done:
+                    return await task
+
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
             if limit_name == "max_no_progress_seconds":
                 reason = (
                     f"AgentTask {stage} request made no progress before idle deadline: "
                     f"max_no_progress_seconds={timeout}."
+                )
+            elif limit_name == "max_seconds":
+                reason = (
+                    f"AgentTask {stage} request exceeded task max_seconds="
+                    f"{timeout}."
                 )
             else:
                 reason = f"AgentTask {stage} request timed out after {timeout} seconds."
@@ -277,7 +415,13 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
                 reason=reason,
                 limit_name=limit_name,
                 timeout_seconds=timeout,
-            ) from error
+            )
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
+            raise
         finally:
             await self._stop_heartbeat(heartbeat_task)
 
@@ -448,8 +592,30 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             return configured
         return _AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS
 
-    def _apply_child_execution_action_loop_guard(self, execution: Any) -> Any:
-        max_rounds = self._task_action_loop_max_rounds()
+    def _explicit_task_action_loop_max_rounds(self) -> tuple[bool, int | None]:
+        configured: Any = None
+        supplied = False
+        if "action_loop_max_rounds" in self.options:
+            supplied = True
+            configured = self.options.get("action_loop_max_rounds")
+        agent_task_options = self.options.get("agent_task")
+        if isinstance(agent_task_options, dict) and "action_loop_max_rounds" in agent_task_options:
+            supplied = True
+            configured = agent_task_options.get("action_loop_max_rounds")
+        if not supplied or configured is None:
+            return supplied, None
+        if isinstance(configured, bool) or not isinstance(configured, int) or configured < 0:
+            return True, _AGENT_TASK_DEFAULT_ACTION_LOOP_MAX_ROUNDS
+        return True, configured
+
+    def _apply_child_execution_action_loop_guard(
+        self,
+        execution: Any,
+        *,
+        max_rounds: int | None = None,
+    ) -> Any:
+        if max_rounds is None:
+            max_rounds = self._task_action_loop_max_rounds()
         if max_rounds is None:
             return execution
         request = getattr(execution, "request", None)
@@ -469,9 +635,60 @@ class AgentTaskRuntimeMixin(AgentTaskMixinBase):
             set_setting("tool.loop.enabled", False)
         return execution
 
+    def _apply_taskboard_action_loop_round_dispatch_policy(self, execution: Any) -> Any:
+        """Preserve value dependencies whenever a TaskBoard child enters ActionLoop."""
+
+        request = getattr(execution, "request", None)
+        settings = getattr(request, "settings", None)
+        set_setting = getattr(settings, "set", None)
+        if callable(set_setting):
+            # TaskBoard owns card-level orchestration but cannot prove that calls
+            # using different Action IDs are value-independent. Keep same-Action
+            # fan-out parallel while requiring a fresh planning round before a
+            # different Action capability is dispatched.
+            set_setting("action.loop.round_dispatch_policy", "single_action_id_cohort")
+            set_setting("tool.loop.round_dispatch_policy", "single_action_id_cohort")
+            supplied, max_rounds = self._explicit_task_action_loop_max_rounds()
+            # TaskBoard cards own an adaptive work unit. The generic child-loop
+            # convenience guard must not cut a search -> selected read ->
+            # synthesis value dependency. Task and no-progress deadlines remain
+            # the safety owner unless the caller explicitly supplies a bound.
+            set_setting("action.loop.max_rounds", max_rounds if supplied else None)
+            set_setting("tool.loop.max_rounds", max_rounds if supplied else None)
+        return execution
+
+    def _apply_taskboard_card_action_loop_policy(self, execution: Any, card: Any) -> Any:
+        """Keep exact batches bounded while allowing value-dependent Action backedges."""
+
+        self._apply_taskboard_action_loop_round_dispatch_policy(execution)
+        required_action_ids = self._taskboard_card_required_action_ids(card)
+        if len(required_action_ids) <= 1:
+            return self._apply_child_execution_action_loop_guard(execution, max_rounds=1)
+        supplied, max_rounds = self._explicit_task_action_loop_max_rounds()
+        request = getattr(execution, "request", None)
+        settings = getattr(request, "settings", None)
+        set_setting = getattr(settings, "set", None)
+        if not callable(set_setting):
+            return execution
+        if not supplied:
+            # A dependency-capable card may need search -> selected read ->
+            # validation. Task/no-progress deadlines remain the safety owner;
+            # the generic two-round convenience default must not cut the data
+            # dependency simply because several calls share one card.
+            set_setting("action.loop.max_rounds", None)
+            set_setting("tool.loop.max_rounds", None)
+            return execution
+        set_setting("action.loop.max_rounds", max_rounds)
+        set_setting("tool.loop.max_rounds", max_rounds)
+        return execution
+
     def _child_execution_options(self) -> dict[str, Any]:
         options = dict(self.options)
         options.pop("request_timeout_seconds", None)
+        # Every nested model consumer performs its own intent-bound TaskContext
+        # read. Preserve the AgentTask's declared disclosure budget and
+        # required-overflow policy across that execution boundary.
+        options["context_budget"] = dict(self.context_budget)
         agent_task_options = options.get("agent_task")
         if isinstance(agent_task_options, dict):
             filtered_agent_task_options = dict(agent_task_options)

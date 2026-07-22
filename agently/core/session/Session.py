@@ -50,14 +50,14 @@ class Session:
         auto_resize: bool = True,
         settings: dict[str, Any] | Settings = {},
         plugin_manager: Any = None,
-        workspace: Any = None,
-        workspace_provider: Callable[[], Any] | None = None,
+        memory_store: Any = None,
+        memory_store_provider: Callable[[], Any] | None = None,
     ):
         self.id = id if id is not None else uuid4().hex
         self._auto_resize = auto_resize
         self.plugin_manager = plugin_manager
-        self._memory_workspace = workspace
-        self._workspace_provider = workspace_provider
+        self._memory_store = memory_store
+        self._memory_store_provider = memory_store_provider
         if isinstance(settings, dict):
             from agently.base import settings as global_settings
 
@@ -99,52 +99,69 @@ class Session:
     def memory_mode(self) -> str | None:
         return self._memory_mode
 
-    def _resolve_memory_workspace(self):
-        if self._memory_workspace is not None:
-            return self._memory_workspace
-        if callable(self._workspace_provider):
-            workspace = self._workspace_provider()
-            if workspace is not None:
-                self._memory_workspace = workspace
-        return self._memory_workspace
+    def _resolve_memory_store(self):
+        if self._memory_store is not None:
+            return self._memory_store
+        if callable(self._memory_store_provider):
+            memory_store = self._memory_store_provider()
+            if memory_store is not None:
+                self._memory_store = memory_store
+        return self._memory_store
 
-    def bind_memory_workspace(self, workspace: Any):
-        self._memory_workspace = workspace
-        if self._memory_plugin is not None and hasattr(self._memory_plugin, "bind_workspace"):
-            self._memory_plugin.bind_workspace(workspace)
+    def bind_memory_store(self, memory_store: Any):
+        self._memory_store = memory_store
+        if self._memory_plugin is not None and hasattr(self._memory_plugin, "bind_memory_store"):
+            self._memory_plugin.bind_memory_store(memory_store)
         return self
 
-    def use_memory(self, *, mode: str = "AgentlyMemory", workspace: Any = None):
+    def use_memory(self, *, mode: str = "AgentlyMemory", memory_store: Any = None):
         plugin_manager = self.plugin_manager
         if plugin_manager is None:
             from agently.base import plugin_manager as global_plugin_manager
 
             plugin_manager = global_plugin_manager
             self.plugin_manager = plugin_manager
-        if workspace is not None:
-            self._memory_workspace = workspace
+        if memory_store is not None:
+            self._memory_store = memory_store
         else:
-            workspace = self._resolve_memory_workspace()
+            memory_store = self._resolve_memory_store()
         try:
             session_memory_class = plugin_manager.get_plugin("SessionMemory", mode)
         except Exception as exc:
             raise ValueError(f"SessionMemory mode '{ mode }' is not registered.") from exc
         self._memory_plugin = cast(Any, session_memory_class)(
             session=self,
-            workspace=workspace,
+            memory_store=memory_store,
             plugin_manager=plugin_manager,
             settings=self.settings,
         )
         self._memory_mode = mode
         return self
 
+    def create_memory_context_source(self, settings: "Settings | None" = None):
+        if self._memory_plugin is None:
+            return None
+        if getattr(self._memory_plugin, "memory_store", None) is None:
+            memory_store = self._resolve_memory_store()
+            if memory_store is not None:
+                self._memory_plugin.bind_memory_store(memory_store)
+        factory = getattr(self._memory_plugin, "create_context_source", None)
+        if not callable(factory):
+            raise TypeError(
+                "The active SessionMemory plugin must provide create_context_source(...)."
+            )
+        return factory(
+            session=self,
+            settings=settings or self.settings,
+        )
+
     async def async_prepare_memory(self, prompt: "Prompt", settings: "Settings"):
         if self._memory_plugin is None:
             return {}
-        if getattr(self._memory_plugin, "workspace", None) is None:
-            workspace = self._resolve_memory_workspace()
-            if workspace is not None:
-                self._memory_plugin.bind_workspace(workspace)
+        if getattr(self._memory_plugin, "memory_store", None) is None:
+            memory_store = self._resolve_memory_store()
+            if memory_store is not None:
+                self._memory_plugin.bind_memory_store(memory_store)
         return await self._memory_plugin.prepare_request(
             prompt=prompt,
             session=self,
@@ -161,10 +178,10 @@ class Session:
     ):
         if self._memory_plugin is None:
             return {}
-        if getattr(self._memory_plugin, "workspace", None) is None:
-            workspace = self._resolve_memory_workspace()
-            if workspace is not None:
-                self._memory_plugin.bind_workspace(workspace)
+        if getattr(self._memory_plugin, "memory_store", None) is None:
+            memory_store = self._resolve_memory_store()
+            if memory_store is not None:
+                self._memory_plugin.bind_memory_store(memory_store)
         return await self._memory_plugin.after_turn(
             session=self,
             user_content=user_content,

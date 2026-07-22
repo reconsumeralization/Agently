@@ -1,748 +1,296 @@
 ---
-title: Workspace
-description: Durable Workspace records for multi-turn task information management.
-keywords: Agently, Workspace, records, artifacts, checkpoints, multi-turn tasks
+title: Task context, files, and records
+description: TaskContext, ContextReader, TaskWorkspace, and RecordStore ownership boundaries.
+keywords: Agently, TaskContext, ContextReader, TaskWorkspace, RecordStore, progressive disclosure
 ---
 
-# Workspace
+# Task context, files, and records
 
-Workspace is the durable information boundary for multi-turn tasks. Use it when
-task information should survive across turns without being copied into prompts,
-Session history, or compact execution state.
+Agently separates four responsibilities that were previously exposed through
+one ambiguous Workspace concept.
 
-Workspace V1 is a foundation API. It stores and indexes records; it does not
-decide what the model should remember or what step to run next. Default Agents
-and TriggerFlow executions include lazy Workspace bindings, so `agent.workspace`
-and `flow.create_execution().require_runtime_resource("workspace")` are
-available without setup. The default local backend is materialized only when
-code first writes, reads, checkpoints, records evidence, or exposes the
-Workspace file area.
+| Owner | Responsibility | Does not own |
+|---|---|---|
+| `TaskContext` | Task-scoped information aggregate, direct entries, source bindings, and one internal derived index lifecycle | Files, persistence, semantic execution routing |
+| `ContextReader` | Consumer/phase-bound retrieval and progressive disclosure; returns `ContextPackage` | Source storage, writes, side effects |
+| `TaskWorkspace` | One explicit task file boundary: containment, mutation policy, format-aware readback, digest and file refs | Records, memory, snapshots, Skill selection |
+| `RecordStore` | Durable records, retrieval indexes, links, checkpoints, TriggerFlow snapshots/events, memory persistence | Task files, prompt assembly, semantic relevance judgment |
 
-Default local Workspaces are scoped to a longer-lived information domain, not
-to each execution. With an active `runtime.session_id`, the physical root is
-`.agently/workspaces/sessions/<session-id>`; without a session it is
-`.agently/workspaces/scripts/<script-scope>`. Agent, task, and execution
-records are logical partitions inside that shared backend, and editable files
-use scoped subdirectories under `files/`.
+`ContextSource` adapters make source-specific information readable without
+moving source truth into `TaskContext`. A source exposes structural descriptors
+through `async_enumerate_descriptors(...)` and bounded canonical content through
+`async_read_exact(...)`; it does not choose cross-source relevance. Built-in
+adapters cover SkillLibrary, TaskWorkspace, RecordStore, and SessionMemory
+recall. Applications may attach their own source kind, such as an authorized
+pinned-repository adapter.
 
-When a local Workspace is materialized, Agently writes an
-`AGENTLY_WORKSPACE.md` guide at the physical root and at each scoped editable
-`files_root`. The root guide explains `workspace.db`, `workspace.meta.json`,
-`content/`, and `files/`; the scoped file guide explains the current lineage and
-which directory external agents or Actions may edit. The filename intentionally
-is not `README.md` so cloned repositories and task deliverables can keep their
-own README semantics.
+A source may additionally implement the optional `ContextSourceScopedRead`
+protocol. ContextReader uses it only after the canonical ref has been selected
+and authorized, to locate a deterministic bounded range inside that ref. It is
+a source mechanism—not a second index or semantic relevance owner—and ordinary
+`async_read_exact(...)` remains the fallback.
 
-Scoped `files_root` guides also name the standard editable file areas:
-
-- `downloads/`: remote files materialized by Browse, Actions, or external
-  providers before `read_file(...)` / `export_file(...)` handling;
-- `artifacts/`: generated supporting artifacts, structured outputs, evidence
-  bundles, and non-primary deliverables;
-- `reports/`: user-facing readable deliverables, including long, sectioned, or
-  file-backed deliverables.
-
-Use `workspace.file_area_path(...)` when framework or application code needs a
-contained path inside one of those areas:
+## File boundary: TaskWorkspace
 
 ```python
-download_path = agent.workspace.file_area_path("downloads", "syllabus.pdf")
-report_path = agent.workspace.file_area_path("reports", "weekly.md", create=True)
+from agently import Agently, TaskWorkspace
+
+task_workspace = TaskWorkspace("./project", mode="read_only")
+agent = Agently.create_agent("repo-review").use_task_workspace(
+    "./project",
+    mode="read_only",
+)
 ```
 
-Temporary work that should be recovered or cleaned as scratch belongs to
-`workspace.open_scratch(...)` or `workspace.scratch_root()`, not a `scratch/`
-folder inside `files_root`.
+The configured path is the ordinary file root. Existing external files remain
+read-only unless `mode="read_write"` is selected. When a read-only boundary
+needs a new execution product, Agently uses the execution fallback under
+`.agently/files/<execution-id>/`; it does not overwrite an existing external
+file. TaskWorkspace private locator and content-version identity metadata stays
+under its own `.agently` area.
+
+Agents without an explicit path receive isolated defaults under
+`<entry-directory>/.agently/task_workspaces/<agent-id>`. Two Agents therefore
+do not silently share a task file boundary.
+
+Expose file operations to the model only when the task needs them:
 
 ```python
-agent = Agently.create_agent("repo-worker")
+agent.enable_task_workspace_file_actions(
+    read=True,
+    write=True,
+    expose_to_model=True,
+)
+```
 
-ref = await agent.workspace.put(
-    content=pytest_output,
+File-format extension stays on the same owner. Register a
+`TaskWorkspaceFileIOHandler` directly on the bound `TaskWorkspace`; there is no
+separate Workspace manager or factory whose registry can drift from the file
+boundary:
+
+```python
+task_workspace.register_file_io_handler(custom_file_handler)
+```
+
+TaskWorkspace produces stable locator and content-version facts for host-side
+readback. A short application citation alias such as `[[ref:ref_1]]` is a
+request-local display alias, not durable identity. Host code validates it and
+maps it back to the canonical reference identity.
+
+For a required AgentTask deliverable, the candidate bytes are first written as
+a staged candidate and completely read back for terminal verification. Only
+after verifier acceptance does TaskWorkspace perform digest-pinned atomic
+promotion to the declared target and completely read the promoted bytes again.
+Verification rejection leaves the previous target untouched; promotion or
+post-promotion readback failure changes the task to a blocked result rather
+than claiming delivery.
+
+## Persistence boundary: RecordStore
+
+```python
+from agently.core.storage import RecordStore
+
+record_store = RecordStore("./project-state", mode="read_write")
+agent.use_record_store(record_store)
+
+ref = await record_store.put(
+    {"status": "verified"},
     collection="observations",
-    kind="test_output",
-    summary="pytest failed in route fallback test",
-    scope={"task_id": "issue-123", "turn": 1},
-    source={"type": "command", "name": "pytest"},
-)
-
-records = await agent.workspace.grep(
-    "route fallback",
-    filters={"collection": "observations", "kind": "test_output"},
-)
-
-context_pack = await agent.workspace.build_context(
-    goal="Fix the route fallback failure.",
-    scope={"task_id": "issue-123"},
-    budget={"tokens": 12000},
-    profile="auto",
+    kind="review_result",
+    scope={"task_id": "review-42"},
 )
 ```
 
-`workspace.grep(...)` is deterministic record search. It supports structural
-filters such as `collection`, `kind`, record `id`, record `path`,
-`scope.<key>`, and `meta.<key>`. Use these filters when the planner or
-application already knows the relevant collection, record, path, or task scope;
-they narrow retrieval without turning a search hit into semantic acceptance.
-`workspace.search(...)` keeps the compatibility return shape of record refs, but
-its implementation may automatically use the shared retrieval packaging path
-when a broad query produces many candidates. Use `workspace.grep(...)` when the
-caller requires the old deterministic candidate list.
+The local provider materializes records at
+`<root>/.agently/records/records.db`. Binding a RecordStore does not create or
+change a TaskWorkspace. `SessionMemory` and TriggerFlow durability use
+RecordStore ports.
 
-For deterministic file search, use `workspace.grep_files(...)`. The
-compatibility method `workspace.search_files(...)` keeps returning file-search
-hits, but may automatically use retrieval packaging for large candidate pools.
-Use `workspace.grep_files(...)` when the caller requires the old deterministic
-line/file search result set:
+TriggerFlow can opt out of its default RecordStore view with
+`record_store=False`, or bind an explicit store:
 
 ```python
-hits = await agent.workspace.grep_files(
-    "deadline",
-    path="notes",
-    pattern="*.md",
-    max_results=10,
+execution = flow.create_execution(
+    record_store=record_store,
+    runtime_resources={"runtime_event_store": record_store},
+    auto_close=False,
 )
 ```
 
-## Retrieval
+AgentTask process state stays in memory and runtime logs by default. Enable
+`record_store_recovery` only when restart recovery is required. Recovery refs
+are RecordStore refs; final deliverable files remain TaskWorkspace refs.
 
-Use `workspace.retrieve(...)` when the caller wants the shared intelligent
-retrieval strategy: keyword/tag candidates, optional vector candidates,
-structure-gated model rerank, dropped-candidate refill, and budget packaging.
+## Information delivery: TaskContext and ContextReader
 
 ```python
-results = await agent.workspace.retrieve(
-    query="What should this session remember?",
-    tags=["preference", "project"],
-    scope={"memory_scope": "SESSION_MEMORY"},
-    sources=["records", "files"],
-    budget={"chars": 12000},
-    selection="length",
+from agently.core.context import TaskContext
+from agently.core.storage import RecordStoreContextSource
+from agently.types.data import ContextBudget, ContextReadIntent
+
+task_context = TaskContext("review-42")
+task_context.put(
+    role="instruction",
+    content="Never modify source files during review.",
+    required=True,
 )
-```
-
-Defaults are conservative:
-
-- candidate source is record keyword/FTS search plus tag retrieval;
-- selection uses a character budget (`selection="length"`);
-- `selection="top_n"` is available when callers need a fixed number of items;
-- retrieval candidate strategy and rerank are separate decisions:
-  `method="auto"` chooses the candidate source, while `rerank=None` decides
-  whether model rerank is worth the extra request;
-- `method="auto"` is the default. It resolves to keyword/tag retrieval unless a
-  non-noop backend `vector_index` is present and Workspace retrieval settings
-  express vector preference, for example
-  `workspace.retrieval.candidate_strategy="hybrid"`,
-  `workspace.retrieval.vector_preferred=True`, or
-  `workspace.retrieval.embedding_model="<model-name>"`;
-- `method="keyword"`, `method="vector"`, and `method="hybrid"` remain explicit
-  caller overrides;
-- the default local backend keeps `NoopVectorIndex`; provider-specific
-  embedding clients are application or plugin logic and should be installed by
-  supplying a backend `vector_index`. If callers install the built-in
-  `LocalVectorIndex(embedder)`, Workspace uses cosine similarity by default and
-  also supports `similarity="dot"` or `similarity="l2"`. Custom vector indexes
-  own their own distance formula. The Chroma integration defaults its collection
-  space to cosine as its adapter-level default;
-- if the backend only has `NoopVectorIndex`, vector mode degrades to
-  deterministic candidates and records diagnostics;
-- `rerank=None` uses a structural cost gate: rerank is skipped for focused
-  candidate pools and used for oversized, weakly filtered, mixed-source, or
-  highly dispersed pools;
-- broad-pool rerank sees a bounded candidate-summary window before final
-  packaging, so dropped candidates do not starve later relevant records or file
-  snippets;
-- selected record payloads use `record_representation="auto"` by default:
-  short structured records keep a compact structure with cold fields omitted,
-  while long or noisy records use deterministic model-hot projections; every
-  item carries `original_ref` and `projection` metadata, and the raw Workspace
-  record remains the source of truth for readback;
-- cold fields are non-hot record mechanics such as `audit`, `source_system`,
-  `tags`, and `noise`; they are omitted from the model-hot package, not from
-  the stored Workspace record;
-- callers can set `budget={"record_representation": "raw"}` or
-  `budget={"record_representation": "projected"}` when they need a fixed
-  representation policy;
-- callers can still force rerank with `rerank=True` or disable it with
-  `rerank=False`;
-- if model rerank fails after retry, retrieval keeps deterministic candidates
-  and records diagnostics.
-
-### Retrieval references in natural-language answers
-
-When a later model answer cites selected retrieval results, keep full source
-records in host code. Give the model one short trusted `ref_id` per source plus
-only the title/snippet facts it needs, and require inline tokens in the
-application-level form `[[ref:<ref_id>]]`, for example `[[ref:r1]]`. AgentTask
-code can reuse an evidence-ledger `cite_as` such as `e1` as the token id.
-
-Do not use a bare `${ref_id}` token: `${...}` already belongs to Agently prompt
-and TaskDAG placeholder families. The `[[ref:...]]` protocol is an application
-rendering convention, not a new Workspace or Agently public API.
-
-The following pattern validates model citations, turns them into Markdown links,
-emits the answer, and then emits complete application-approved source-card
-details for hover cards, a source list, or reply-attached result cards. Keep raw
-provider/Workspace records host-side and apply authorization and redaction
-before emitting card fields:
-
-```python
-from __future__ import annotations
-
-import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any
-from urllib.parse import urlparse
-
-from agently import Agently
-
-
-REF_TOKEN = re.compile(r"\[\[ref:([A-Za-z0-9._:-]+)\]\]")
-
-
-def prepare_refs(
-    records: Sequence[Mapping[str, Any]],
-) -> tuple[list[dict[str, str]], dict[str, dict[str, Any]]]:
-    refs_by_id: dict[str, dict[str, Any]] = {}
-    model_refs: list[dict[str, str]] = []
-    for index, record in enumerate(records, start=1):
-        ref_id = f"r{index}"
-        full_record = {**dict(record), "ref_id": ref_id}
-        refs_by_id[ref_id] = full_record
-        model_refs.append({
-            "ref_id": ref_id,
-            "title": str(record.get("title", "")),
-            "snippet": str(record.get("snippet", "")),
-        })
-    return model_refs, refs_by_id
-
-
-def build_source_card(record: Mapping[str, Any]) -> dict[str, Any]:
-    # Extend this explicit frontend contract as needed; do not emit the raw record.
-    fields = ("ref_id", "title", "url", "snippet", "source_name", "published_at")
-    return {field: record[field] for field in fields if field in record}
-
-
-def trusted_http_url(value: Any) -> str:
-    url = str(value)
-    if urlparse(url).scheme not in {"http", "https"}:
-        raise ValueError(f"unsupported source URL: {url}")
-    return url
-
-
-def render_refs(
-    answer: str,
-    refs_by_id: Mapping[str, Mapping[str, Any]],
-) -> tuple[str, list[dict[str, Any]]]:
-    used_ids: list[str] = []
-
-    def replace(match: re.Match[str]) -> str:
-        ref_id = match.group(1)
-        record = refs_by_id.get(ref_id)
-        if record is None:
-            raise ValueError(f"unknown retrieval ref: {ref_id}")
-        used_ids.append(ref_id)
-        label = str(record.get("title") or ref_id).replace("\\", "\\\\").replace("]", "\\]")
-        return f"[{label}]({trusted_http_url(record.get('url'))})"
-
-    rendered = REF_TOKEN.sub(replace, answer)
-    unique_ids = list(dict.fromkeys(used_ids))
-    return rendered, [build_source_card(refs_by_id[ref_id]) for ref_id in unique_ids]
-
-
-async def answer_with_refs(
-    question: str,
-    retrieved_records: Sequence[Mapping[str, Any]],
-    emit: Callable[[dict[str, Any]], Awaitable[None]],
-) -> None:
-    model_refs, refs_by_id = prepare_refs(retrieved_records)
-
-    def validate_refs(data: dict[str, Any], _ctx: Any) -> bool | dict[str, Any]:
-        cited_ids = REF_TOKEN.findall(data.get("answer", ""))
-        if not cited_ids:
-            return {"ok": False, "reason": "answer must cite at least one offered ref"}
-        unknown = {
-            ref_id
-            for ref_id in cited_ids
-            if ref_id not in refs_by_id
-        }
-        if unknown:
-            return {"ok": False, "reason": f"unknown refs: {sorted(unknown)}"}
-        return True
-
-    result = (
-        Agently.create_request("retrieval-reference-answer")
-        .input({"question": question, "retrieval_results": model_refs})
-        .instruct([
-            "Answer from retrieval_results.",
-            "Cite a source inline as [[ref:<ref_id>]] using only an offered ref_id.",
-            "Do not copy source URLs or hidden metadata into the answer.",
-        ])
-        .output({
-            "answer": (
-                str,
-                "Natural-language answer with inline [[ref:<ref_id>]] citations",
-                True,
-            ),
-        })
-        .validate(validate_refs)
-        .get_result()
-    )
-
-    # No progressive consumer here, so read final data directly.
-    data = await result.async_get_data()
-    rendered_answer, source_cards = render_refs(data["answer"], refs_by_id)
-
-    await emit({"type": "answer", "text": rendered_answer})
-    await emit({"type": "retrieval_refs", "items": source_cards})
-```
-
-This protocol keeps citation choice model-owned while identity validation,
-link construction, authorized source-detail transport, and frontend rendering
-stay deterministic and host-owned.
-
-`retrieve(...)` is a Workspace strategy, not a Session-memory-only feature.
-Session memory, text fragments, and file retrieval can all use it.
-
-Use `agent.use_workspace(...)` when the application needs a stable explicit
-root, read-only mode, or a registered backend provider:
-
-```python
-agent.use_workspace("./.agently/runs/issue-123")
-```
-
-Standalone Workspaces can be created directly or through the Agently factory:
-
-```python
-from agently import Agently, Workspace
-
-shared_workspace = Workspace("./.agently/projects/issue-123")
-factory_workspace = Agently.create_workspace("./.agently/projects/issue-124")
-```
-
-When several Agents, TriggerFlow executions, or service workers must share task
-information, create and manage a shared Workspace explicitly and bind each
-consumer to that same Workspace. This is the preferred shape for application
-level information sharing because the Workspace remains a durable substrate
-instead of an implicit global singleton:
-
-```python
-shared_workspace = Agently.create_workspace("./.agently/projects/issue-123")
-
-agent = Agently.create_agent("repo-worker").use_workspace(shared_workspace)
-execution = flow.create_execution(workspace=shared_workspace)
-```
-
-`flow.create_execution()` binds the current session/script default Workspace by
-default and gives the execution its own scoped file root under
-`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`.
-Pass `workspace=False` to opt out, or pass a Workspace instance, path, or
-backend when the execution should use an explicitly selected Workspace.
-
-Do not rely on separate explicitly isolated Workspaces to communicate with each
-other. If a TriggerFlow execution needs to move information between isolated
-Workspaces, make that transfer explicit in application logic: search or read
-from the source Workspace, write into the destination Workspace, then link the
-resulting refs. Workspace does not provide a cross-space messaging or
-replication protocol.
-
-## What It Stores
-
-Use records for observations, decisions, artifacts, and compact checkpoints.
-Large command output, generated reports, transcripts, and patches should be
-stored as Workspace content and represented in runtime state by record refs.
-
-```python
-checkpoint_ref = await agent.workspace.checkpoint(
-    "issue-123",
-    {"phase": "debugging", "refs": [ref]},
-    step_id="run-tests",
+task_context.attach(
+    RecordStoreContextSource(record_store),
+    binding_id="review-records",
+    scope="task",
 )
 
-state = await agent.workspace.get_data(checkpoint_ref)
-latest = await agent.workspace.latest_checkpoint("issue-123")
-history = await agent.workspace.checkpoint_history("issue-123")
-```
-
-`get(...)` reads stored content as text. Use `get_data(...)` when records contain
-JSON-compatible structured data such as dicts, lists, or checkpoint state.
-
-## Durable Provider Reads
-
-The local Workspace backend also exposes the default durable-provider contract
-for single-node development and restart-safe local work. Use stable reference
-envelopes when runtime state should carry a compact pointer instead of copying
-large content.
-
-```python
-ref_envelope = await agent.workspace.ref_envelope(ref)
-segment = await agent.workspace.read_bounded(ref, offset=0, limit=4096)
-
-async for chunk in agent.workspace.stream_read(ref, chunk_size=8192):
-    process(chunk["content"])
-```
-
-`ref_envelope` includes the Workspace id, record id, collection, content ref,
-digest, size, creation time, policy labels, and backend capability hints.
-`read_bounded(...)` and `stream_read(...)` read large records by segment so
-execution state can keep refs while restore code reads only the required
-portion.
-
-Runtime events can be stored as durable records when a TriggerFlow or
-application execution wants restart diagnostics without using DevTools as the
-source of truth:
-
-```python
-execution = flow.create_execution(workspace=agent.workspace)
-snapshot_ref = await execution.async_save(step_id="review")
-
-event_record = await agent.workspace.append_runtime_event(
-    "issue-123-execution",
-    {"event_type": "triggerflow.interrupt_raised", "payload": {"id": "approval"}},
-    idempotency_key="approval-request-1",
-    snapshot_ref=snapshot_ref,
-    artifact_refs=[ref],
+reader = task_context.reader(
+    consumer="review-planner",
+    phase="planning",
+    budget=ContextBudget(max_chars=6000, max_blocks=12),
 )
-
-events = await agent.workspace.query_runtime_events(
-    "issue-123-execution",
-    sequence_from=event_record["sequence"],
-)
-```
-
-RuntimeEvent storage preserves per-execution sequence, idempotency key,
-state version, parent event id, causation id, parent signal id, aggregation
-scope, operator id, interrupt id, resume request id, actor id, lease owner id,
-snapshot refs, artifact refs, and exchange id. Use `expected_sequence=...`
-when a distributed provider needs fail-closed append ordering, and use
-`idempotency_key=...` for callback or webhook retry safety. Workspace does not
-decide pause/resume, approval, retry, or DAG readiness; those semantics remain
-owned by TriggerFlow, PolicyApproval, ExecutionExchange, and AgentExecution.
-
-Workspace-backed durable providers also expose TriggerFlow-facing snapshot CAS,
-lease, and artifact-ref helpers:
-
-```python
-snapshot_ref = await agent.workspace.put_snapshot(
-    execution.run_context.run_id,
-    execution.save(),
-    expected_state_version=previous_state_version,
-)
-
-lease = await agent.workspace.claim_lease(
-    execution.run_context.run_id,
-    "worker-1",
-    ttl=30.0,
-    expected_state_version=snapshot_state_version,
-)
-await agent.workspace.heartbeat_lease(
-    execution.run_context.run_id,
-    "worker-1",
-    lease["lease_token"],
-)
-
-artifact_ref = await agent.workspace.put_artifact_ref(
-    execution.run_context.run_id,
-    large_payload,
-    metadata={"kind": "snapshot_payload"},
-)
-```
-
-`expected_state_version=...` fails closed when the latest checkpoint state
-version does not match the caller's read cursor. Lease methods enforce owner
-and token checks inside the selected provider. The local backend provides this
-single-node durable-provider seam for development and local restart recovery;
-production cross-worker guarantees still belong to the selected backend.
-
-## Links And Diagnostics
-
-Links record typed relationships between records and can be queried without
-accessing backend storage directly.
-
-```python
-decision_ref = await agent.workspace.put(
-    {"decision": "Patch route fallback"},
-    collection="decisions",
-    kind="loop_decision",
-    scope={"task_id": "issue-123"},
-)
-
-await agent.workspace.link(decision_ref, ref, relation="responds_to")
-links = await agent.workspace.links(source=decision_ref, relation="responds_to")
-
-capabilities = agent.workspace.capabilities()
-```
-
-`link_evidence(...)` is a convenience wrapper over `link(...)` that records
-execution id, operation id, RuntimeEvent id, checkpoint id, exchange id, and
-artifact refs in link metadata. Retention anchors can preserve lineage and
-summary refs across compaction:
-
-```python
-await agent.workspace.link_evidence(
-    request_ref,
-    result_ref,
-    relation="resulted_in",
-    execution_id="issue-123-execution",
-    runtime_event_id=event_record["event_id"],
-    checkpoint_id=checkpoint_ref["id"],
-    artifact_refs=[ref],
-)
-
-await agent.workspace.add_retention_anchor(
-    "issue-123-execution",
-    anchor_type="compaction",
-    record_ref=ref,
-    preserved_event_ids=[event_record["event_id"]],
-)
-```
-
-`capabilities()` reports the active backend components for content, metadata,
-checkpoint, RuntimeEvent storage, ref resolution, retention policy, text index,
-policy, and vector index. It also reports capability flags such as
-`supports_event_sequence`, `supports_range_read`, `supports_stream_read`,
-`supports_retention`, `supports_compaction_anchor`, `supports_cas`,
-`supports_lease`, `supports_artifact_refs`, and `supports_remote_backend`.
-Distributed recovery should fail closed when the selected provider lacks the
-required flags or the matching provider methods.
-
-## Action Boundary
-
-`agent.workspace.files_root` defines an ordinary editable working tree for
-shell, Node.js, and file actions. In shared default Workspaces this is a scoped
-lineage subdirectory such as
-`files/lineage/<root-kind>/<root-id>/.../agent/<agent-scope>/files`,
-`files/lineage/<root-kind>/<root-id>/.../execution/<execution-id>/files`, or
-`files/lineage/<root-kind>/<root-id>/.../task/<task-id>/files`.
-Filesystem-like action helpers inherit that boundary when no explicit root or
-cwd is passed, including when the Agent is still using its lazy default
-Workspace.
-`agent.workspace.content_root` remains the shared managed record-content store
-used by Workspace records.
-
-```python
-agent.enable_workspace_file_actions(write=True)
-agent.enable_coding_agent_actions()
-agent.enable_shell(commands=["pwd", "pytest"])
-agent.enable_nodejs()
-```
-
-`enable_workspace_file_actions(...)` does not create a second Workspace. It
-exposes list/search/read/write file actions over the current Workspace file
-area. Pass `export=True` together with `write=True` when the Agent should also
-receive an `export_file` action. Pass an explicit `root=` or `cwd=` only when an
-action must use an independent directory.
-
-`enable_coding_agent_actions(...)` is the Workspace-owned profile for coding
-agents. It exposes `read_file`, `glob_files`, `grep_files`, `edit_file`,
-`apply_patch`, and guarded `write_file` actions over the same file boundary.
-Use `edit_file(...)` or `apply_patch(...)` for targeted edits, and keep shell
-commands for tests, builds, git status/diff/log inspection, and read-only
-diagnostics. In coding-agent mode, full-file `write_file(...)` is guarded by
-prior read state or an expected SHA unless the host explicitly disables that
-policy.
-
-## File IO Handlers
-
-Workspace file reads, writes, and exports use registered
-`WorkspaceFileIOHandler` implementations. Workspace owns path containment,
-deterministic file info, handler dispatch, digests, and file refs; handlers own
-format-specific parsing or rendering. Workspace does not become a shell
-executor, MCP client, renderer lifecycle owner, OCR engine, or model requester.
-
-```python
-await agent.workspace.write_file("notes/todo.txt", "ship docs")
-read_result = await agent.workspace.read_file("notes/todo.txt", max_bytes=4096)
-
-materialized = await agent.workspace.materialize_file(
-    "downloads/syllabus.pdf",
-    pdf_bytes,
-    source={"kind": "remote_download", "url": "https://example.com/syllabus.pdf"},
-    media_type="application/pdf",
-)
-
-export_result = await agent.workspace.export_file(
-    "report.md",
-    "report.pdf",
-    export_kind="markdown_pdf",
-)
-```
-
-The default text handler reads UTF-8 / UTF-8-SIG text, writes plain text, and
-returns bounded content with `bytes`, `sha256`, `offset`, `read_bytes`,
-`truncated`, diagnostics, and file refs. Unknown binary files return
-`readable=False` with diagnostics instead of replacement-character content.
-`search_files` only searches files that are readable text through the same
-handler registry. Search results keep the original `path`, `line`, and `text`
-fields, and also include `role="evidence_snippet"`, bounded snippet counts, and
-a `truncated` flag plus a nested `locator_ref` with `content_state="ref_only"`.
-Use the visible snippet as evidence only within that excerpt; use the locator
-as a target for a later bounded `read_file(...)` or Blocks
-`workspace_operation` readback.
-
-Blocks `workspace_operation` can also run scoped Workspace retrieval through
-the compatibility `search` operation name plus bounded ref/path reads through
-`read_bounded`. The `search` operation uses `workspace.retrieve(...)` as the
-shared retrieval strategy for Workspace records and files, then returns typed
-`locator_ref` and `evidence_snippet` facts; it does not decide whether a hit is
-semantically useful or whether a task is complete. In Flat AgentTask steps,
-planner-provided `scoped_retrieval.query_groups` are lowered to these Blocks
-retrieval facts before the bounded `agent_step` consumes them. Query groups may
-set `search_surface` to `workspace_index`, `workspace_files`, or
-`workspace_index_and_files`, may carry structural filters (`collection`,
-`kind`, `id`, `path`, `scope`, or `meta`), and may pass explicit retrieval
-options such as `tags`, `method`, `rerank`, `selection`, `top_n`, or
-`max_candidates` when the task requires them. This keeps large retained records
-and files out of the hot context until a bounded retrieval or readback needs
-them.
-For `workspace_index`, put record collections in `filters.collection`; use
-`filters.kind` only when the exact record kind is known, and do not use `path`
-for collection names. Singleton filter lists are normalized to scalar values
-before execution.
-When AgentTask injects scoped retrieval results into a later Flat step or
-TaskBoard card, it uses a compact model-hot view: bounded snippets, truncation
-facts, line/range facts, and actionable locator handles stay visible, while
-reconstructable provenance such as `sha256`, byte counts, handler/media details,
-backend/search-engine facts, execution block ids, and full file refs remains in
-the raw Workspace/Blocks evidence for programmatic audit and readback.
-TaskBoard applies the same split to readback continuations: external
-`target_refs` such as HTTP/HTTPS URLs become Action evidence work, while
-Workspace/content paths and retained-note refs become bounded Workspace readback
-cards. Intermediate readback previews keep content, path, range, and truncation
-facts hot, and readback work-unit hot payloads use compact refs rather than full
-provenance refs. SHA, byte counts, media/handler details, backend facts, execution
-block ids, and other programmatically traceable provenance stay in cold
-Workspace/Blocks evidence, final artifact audit metadata, DevTools, or runner
-logs. Final verifier hot input uses path/ref handles, bounded content or
-preview, and truncation status; it does not need SHA only to judge task
-sufficiency.
-For `workspace_files`, `query` is the content text to search, `path` is the
-directory or file scope, and `pattern` is a file glob such as `*.md`, `*`, or
-`**` for recursive file search. Local Workspace file search uses `rg` as a
-grep-style search engine when available and falls back to bounded file scanning.
-Blocks use a small bounded context around file matches by default so related
-nearby facts can be visible without reading the whole file.
-
-`materialize_file(...)` is for framework-owned or application-owned byte
-materialization, such as a Browse action downloading a remote PDF into
-`downloads/` before a later `read_file(...)` parses it through the handler
-registry. It records `bytes`, `sha256`, `media_type`, diagnostics, and file
-refs, but it does not parse PDF/Office/image content itself and does not change
-the plain-text contract of `write_file(...)`.
-
-Built-in optional handlers cover:
-
-- PDF text extraction through optional `pypdf`;
-- `.docx`, `.xlsx`, and `.pptx` extraction through optional Office packages;
-- image preparation as ModelRequest-compatible attachments, with interpretation
-  still owned by `.image(...)` or another VLM-capable ModelRequest path;
-- HTML/Markdown export to PDF or screenshot through optional renderer
-  dependencies, with network fetch disabled by default.
-
-Optional dependency missing, unsupported file type, unsupported export kind, and
-image-only/scanned PDF cases return structured diagnostics. Outside-root,
-missing-path, and permission failures remain execution errors.
-
-Custom handlers can be registered on the Workspace manager:
-
-```python
-Agently.workspace.register_file_io_handler(custom_handler)
-Agently.workspace.register_file_io_handler(custom_handler, replace=True)
-Agently.workspace.unregister_file_io_handler("custom-handler")
-```
-
-See:
-
-- `examples/workspace/workspace_file_io_handlers.py` for text read/write,
-  unsupported binary diagnostics, and deterministic optional export dependency
-  failure;
-- `examples/workspace/workspace_file_io_real_documents.py` for real text
-  read/write, PDF/Office extraction, and HTML/Markdown export E2E;
-- `examples/workspace/workspace_file_io_real_vlm.py` for real image attachment
-  preparation plus a VLM model request. The VLM example defaults to
-  `qwen3-vl-plus`, requires a real provider key, and does not mock image
-  interpretation. Use `WORKSPACE_FILE_IO_VLM_ENV_FILE` when the key lives in a
-  non-default dotenv file.
-
-File boundary policy metadata can be persisted for audit without turning
-Workspace into a cwd manager:
-
-```python
-await agent.workspace.record_file_policy(
-    allowed_roots=[str(agent.workspace.files_root)],
-    root_source="workspace",
-    policy_labels=["customer-data"],
-)
-```
-
-## Not A Memory Strategy
-
-Workspace V1 intentionally does not expose model-callable memory verbs such as
-`remember(...)`, `observe(...)`, or `decide(...)`. Those are higher-level
-affordances for future Action, ContextBuilder, or WorkLoop layers. In V1,
-application code decides what to write, and `workspace.build_context(...)`
-packages stored records into a `ContextPackage` through pluggable planner,
-retriever, and packager profiles.
-
-## Plugin Seams
-
-Workspace exposes low-level backend seams for content, metadata, checkpoints,
-RuntimeEvent storage, ref resolution, retention, evidence links, text index,
-policy, and vector index. The default local backend is filesystem content plus
-SQLite metadata/FTS and `NoopVectorIndex`; provider-specific embedding clients
-belong in application code, a custom backend, or a plugin-provided
-`vector_index`. The built-in `LocalVectorIndex(embedder)` is available when an
-application wants a provider-neutral local vector scorer; its default similarity
-is cosine, with dot product and L2 as explicit options.
-ContextBuilder exposes
-`ContextPlanner`, `WorkspaceContextRetriever`, and `ContextPackager`; advanced
-model-assisted planning, vector retrieval, reranking, compression, and remote
-backends are expected to arrive as plugins over this foundation.
-
-Custom backends can be passed directly to `agent.use_workspace(...)` or
-registered by name when they implement the Workspace backend protocol:
-
-```python
-Agently.workspace.register_backend_provider("audit", build_audit_backend)
-
-agent = (
-    Agently.create_agent("repo-worker")
-    .use_workspace(
-        "tenant-a",
-        provider="audit",
-        provider_options={"tenant_id": "tenant-a"},
+package = await reader.async_read(
+    ContextReadIntent(
+        query="What evidence is relevant to the failed review?",
+        filters={"source_kinds": ["record_store"]},
     )
 )
 ```
 
-Provider factories receive `root`, `create`, `mode`, and any
-`provider_options`, then return a `WorkspaceBackend`. Unregistered provider
-names fail fast instead of falling back to the local backend. If no explicit
-provider is selected, the Agent's lazy default Workspace uses the current
-session or script scoped local backend. The test suite includes a protocol-level
-remote audit provider proof that exercises the same checkpoint, RuntimeEvent,
-evidence link, and capability paths as the local backend. That proof is not a
-public Redis, Postgres, or object-storage adapter; production providers must
-still report their real capabilities and fail closed when distributed recovery
-requirements are missing.
-TriggerFlow tests also read Workspace-backed execution snapshots through the provider and
-load pause/continue, policy-approval waits, and `when(..., mode="and")`
-join progress through TriggerFlow, so Workspace remains storage rather than a
-workflow control plane.
+`TaskContext` is the only task-information aggregate. TaskContext owns source
+bindings and one internal `ContextIndex` that builds, synchronizes, invalidates,
+and reuses derived source partitions. ContextIndex is not a public manager and
+never becomes canonical source truth. TaskContext creates readers with
+`task_context.reader(...)` and restores their exported state with
+`task_context.restore_reader(...)`; constructing or restoring a
+`ContextReader` independently is not supported. The reader is a public,
+consumer/phase-bound handle, comparable to an execution handle owned by its
+aggregate. `ContextPackage` is the immutable value returned across a request,
+AgentTask, Blocks, or persistence boundary; it is not another context owner.
 
-See `examples/workspace/workspace_loop_foundation.py` for an explicit
-TriggerFlow loop that stores structured observations, links decisions to
-evidence, checkpoints compact state, and builds a ContextPackage.
+Each reader pins one TaskContext/source revision snapshot. If that snapshot
+is already stale before a read, refresh it explicitly or create a new reader.
+If candidate listing itself advances a source revision while the TaskContext
+structure remains unchanged (for example, a source establishes a lazy read
+view), ContextReader optimistically re-pins and recollects once. Repeated or
+concurrent mutation still fails closed. Required and explicitly requested blocks
+cannot be silently dropped. Optional prose relevance uses an Agently
+`ModelRequest` semantic selector when more than one candidate needs judgment;
+selection keys are host-issued and validated before canonical records are
+reconstructed.
 
-See `examples/workspace/workspace_shared_default_management.py` for the default
-session-scoped Workspace behavior: multiple Agents and TriggerFlow executions
-share one physical `workspace.db` while execution file roots stay isolated.
+ContextIndex enumerates source descriptors into revision/profile/provider-keyed
+partitions. It may use `structural`, `lexical`, or host-configured `hybrid`
+candidate retrieval, but exact bytes still come from the source's
+`async_read_exact(...)` port or, after ref selection, its optional deterministic
+scoped-read port. Reusable partitions may avoid rebuilding
+unchanged embeddings; vector failure degrades only when policy allows it and is
+reported in package diagnostics. ContextReader owns consumer-local offsets,
+deduplication, optional ModelRequest selection, exact readback, and package
+budgets. The returned package exposes per-binding `source_coverage` and index
+diagnostics, never internal cache keys or provider vectors.
 
-See `examples/workspace/workspace_with_action_output.py` for the Action
-boundary: a file action writes into `workspace.files_root`, a shell action reads
-that file, application code explicitly writes the action output as a Workspace
-observation, and ContextBuilder packages it into a ContextPackage.
+The immutable ContextPackage retains complete omission and diagnostic facts for
+audit. Model-hot AgentTask views bound repetitive optional omission details and
+add reason counts; required delivery still fails closed before that projection.
 
-`workspace.ingest(...)` remains as a compatibility alias for older code. New
-code should use `workspace.put(...)`; when an older profile path is needed, pass
-`profile=...` to `put`.
+Context delivery is media-aware. Plain text and source-parsed text may enter a
+package; the built-in TaskWorkspace source parses supported PDF, DOCX, XLSX,
+and PPTX files before disclosure. A document whose parser or optional
+dependency is unavailable is ref-only. A PDF or Office descriptor and exact read
+must both preserve `context_representation=parsed_text`, and the exact body must
+be text; a caller-supplied string without that parser provenance is not admitted.
+Known non-text MIME types or file extensions cannot be overridden by a conflicting
+`content_kind="text"` claim. Conflicting type signals fail closed to a non-text
+or unknown representation. Mainstream Python, Node.js, Go, C, and C++ source
+extensions are classified as text, including empty source files.
+
+Images, archives, executables, audio, video, unknown formats, and arbitrary bytes
+are never coerced into guessed text. Their model-visible projection is limited to
+the canonical filename/ref. Source-provided summaries, OCR text, and inferred
+contents are stripped; MIME, digest, and size facts may remain host-side for audit.
+
+An image is ref-only unless the exact consumer explicitly declares image
+attachment support:
+
+```python
+from agently.types.data import ContextConsumer
+
+reader = task_context.reader(
+    consumer=ContextConsumer(
+        "visual-reviewer",
+        capabilities={"attachments": {"image": True}},
+    ),
+)
+```
+
+For AgentTask, declare the same capability on the selected task strategy:
+
+```python
+execution = agent.goal("Review the attached chart").strategy(
+    "taskboard",
+    context_consumer_capabilities={"attachments": {"image": True}},
+)
+```
+
+Agently does not infer vision support from a model name or from a generic
+`attachments=True` flag. When explicitly supported, ContextReader emits a
+validated image attachment block and AgentTask binds it through the
+ModelRequest attachment channel; the data URL is not serialized into the text
+context pack. Without that explicit capability the model receives only the
+filename/ref, never a generated summary or OCR substitute. Image interpretation
+remains model-owned. An invalid or empty attachment fails the selected read
+instead of falling back to a filename-based guess.
+
+Required content remains fail-closed when it cannot fit. A caller that has
+explicitly accepted a lossy projection may request
+`metadata={"required_overflow": "lossy_digest"}`. Skill sources then return a
+bounded `completeness="lossy"` outline with the immutable full ref, ordered
+section refs, original size, and omission facts; they do not silently truncate
+the authority-bearing instructions. Optional section candidates still use the
+semantic selector. A host-only preflight that intentionally wants no optional
+selection may additionally set `optional_selection="none"`.
+
+AgentTask carries the same policy in its context budget:
+
+```python
+execution = agent.goal(goal, success_criteria=criteria).strategy(
+    "taskboard",
+    context_budget={
+        "chars": 12_000,
+        "required_overflow": "lossy_digest",
+    },
+)
+```
+
+Use this only when the Skill or caller accepts lossy disclosure. Otherwise use
+a larger/focused consumer or let the required Skill fail before business work.
+
+`source_kinds` is structural source filtering, not semantic routing and not a
+closed enumeration. Valid values come from the source kinds actually attached
+to that TaskContext, including built-in adapters such as `task_workspace`,
+`record_store`, `skill_library`, `session_memory`, or `pinned_repository` when present. Unknown
+kinds fail before source enumeration.
+
+AgentTask creates an independent reader/package for each concrete planner,
+worker, control-card, and verifier request. A successful response records a
+`ContextConsumption` with the exact package, response/request id, phase, and
+block ids; failed requests record no consumption and emit no
+`skills.context.bound` event. AgentTask meta exposes both `context_packages`
+and `context_consumptions` for audit.
+
+## AgentExecution ownership
+
+Every AgentExecution owns one TaskContext and execution-scoped views of the
+Agent's TaskWorkspace and RecordStore. AgentTask reuses the exact TaskContext
+and TaskWorkspace view handed to it by AgentExecution. Skills are bound as
+immutable SkillLibrary revisions through a Skill ContextSource; they do not
+create a Skills route or execution engine.
+
+With `record_store_recovery` enabled, the durable snapshot also preserves
+TaskContext direct entries, reconstructible built-in source bindings, reader
+disclosure history, packages, and consumptions. Skill sources are rebuilt from
+their exact immutable `revision_ref`. Custom ContextSources are not
+automatically reconstructible and fail resume explicitly instead of disappearing.
+
+Use `execution.async_read_task_context(consumer_id=..., phase=..., intent=...)`
+when the ordinary AgentExecution should build the package. `intent` accepts a
+query string or `ContextReadIntent`; when omitted, AgentExecution uses its task
+target. Blocks accepts an already
+bound `context_reader` for its read-only `context_read` block.

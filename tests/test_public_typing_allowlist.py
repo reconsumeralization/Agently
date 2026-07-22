@@ -121,6 +121,15 @@ def test_public_typing_allowlist_is_enforced_for_declared_public_surfaces() -> N
         for name, target in _declared_public_callables(resolved_surface).items():
             observed_violations.extend(_callable_violations(surface_symbol, resolved_surface, name, target))
 
+    for callable_symbol in allowlist.get("required_typed_callables", []):
+        assert isinstance(callable_symbol, str) and callable_symbol
+        owner_symbol, name = callable_symbol.rsplit(".", 1)
+        owner = _resolve_symbol(owner_symbol)
+        target = _resolve_symbol(callable_symbol)
+        assert inspect.isclass(owner)
+        assert callable(target)
+        observed_violations.extend(_callable_violations(owner_symbol, owner, name, target))
+
     unexpected = [
         f"{symbol}:{position}"
         for symbol, position in observed_violations

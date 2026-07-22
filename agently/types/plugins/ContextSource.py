@@ -1,0 +1,92 @@
+# Copyright 2023-2026 AgentEra(Agently.Tech)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, Protocol, runtime_checkable
+
+from agently.types.data import (
+    ContextSourceChangeSet,
+    ContextSourceDescriptorPage,
+    ContextSourceRead,
+)
+
+
+@runtime_checkable
+class ContextSource(Protocol):
+    """Source truth port used by TaskContext's internal index and readers."""
+
+    source_id: str
+    source_kind: str
+
+    @property
+    def source_revision(self) -> str: ...
+
+    async def async_enumerate_descriptors(
+        self,
+        *,
+        profile: Mapping[str, Any],
+        cursor: str | None,
+        limit: int,
+    ) -> ContextSourceDescriptorPage: ...
+
+    async def async_read_exact(
+        self,
+        source_ref: str,
+        *,
+        max_chars: int,
+        representation: str | None = None,
+        range_start: int = 0,
+    ) -> ContextSourceRead: ...
+
+
+@runtime_checkable
+class ContextSourceScopedRead(Protocol):
+    """Optional bounded-range lookup inside one selected canonical source ref.
+
+    ContextIndex and ContextReader still own candidate selection and packaging.
+    This capability only locates one literal query inside an already authorized
+    ref; it does not own semantic relevance or acceptance judgment.
+    """
+
+    async def async_read_scoped(
+        self,
+        source_ref: str,
+        *,
+        query: str,
+        max_chars: int,
+        representation: str | None = None,
+        range_start: int = 0,
+    ) -> ContextSourceRead: ...
+
+
+@runtime_checkable
+class ContextSourceChangeFeed(Protocol):
+    """Optional trustworthy descriptor-delta capability."""
+
+    async def async_changes(
+        self,
+        *,
+        from_revision: str,
+        to_revision: str,
+        profile: Mapping[str, Any],
+    ) -> ContextSourceChangeSet: ...
+
+
+__all__ = [
+    "ContextSource",
+    "ContextSourceChangeFeed",
+    "ContextSourceScopedRead",
+]

@@ -16,15 +16,15 @@ agent.set_action_loop(max_rounds=4)
 #
 # Instead of registering a fixed function, a sandbox action lets the model
 # generate arbitrary Python code that Agently runs through a Docker-backed profile.
-# The model must store its final answer in a variable named `result`.
+# The model must print its final answer as JSON or bounded text.
 # This is useful for one-off computations, data transformations, or any task
 # where the exact code needed depends on the input.
 
-agent.action.register_python_sandbox_action(
+agent.enable_python(
     action_id="run_python",
     desc=(
-        "Execute a Python code snippet inside a Docker-backed sandbox environment. "
-        "Always assign the final answer to the variable `result` before the code ends."
+        "Execute Python through the Workspace-bound CodeExecution chain. "
+        "Always print the final answer as JSON before the code ends."
     ),
     expose_to_model=True,
     sandbox="auto",
@@ -70,10 +70,10 @@ def demo_python_sandbox_sorting():
 # Price range (max - min): 83.75
 #
 # How it works:
-# register_python_sandbox_action() creates a special action that accepts a Python code
-# string from the model. The code is executed through a Docker-backed runtime profile
-# with network disabled by default. The value of the `result` variable at the end of
-# execution becomes the action's return value.
+# enable_python() creates a CodeExecution Action that accepts source_code from the
+# model. The immutable source bundle is materialized through TaskWorkspace and runs
+# through the selected Docker provider with network disabled by default. Bounded
+# stdout and declared output artifacts become the action result.
 # The model writes computation as Python code instead of calling a fixed function —
 # useful when the exact logic depends on the specific question asked.
 # The ActionResult contains model_digest (a summary the model can read) and

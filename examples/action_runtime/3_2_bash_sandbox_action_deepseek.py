@@ -18,7 +18,7 @@ agent.action.register_bash_sandbox_action(
     allowed_cmd_prefixes=["pwd", "ls", "echo"],
     allowed_workdir_roots=[str(repo_root)],
     default_policy={
-        "workspace_roots": [str(repo_root)],
+        "task_workspace_roots": [str(repo_root)],
         "allowed_cmd_prefixes": ["pwd", "ls", "echo"],
         "timeout_seconds": 10,
     },

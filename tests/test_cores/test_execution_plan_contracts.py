@@ -40,7 +40,6 @@ from agently.types.data import (
     PlanBlockInstance,
     ResultAdapter,
     ReplanSignal,
-    SkillActivation,
     TaskFrame,
 )
 
@@ -146,7 +145,7 @@ def test_execution_plan_contains_plan_blocks_not_runtime_blocks():
             "plan_id": "p1",
             "task_frame_id": "f1",
             "plan_blocks": [
-                {"id": "ctx", "plan_block_id": "skills.webapp.skill_activation", "kind": "skill_activation"},
+                {"id": "ctx", "plan_block_id": "context_read", "kind": "context_read"},
                 {"id": "draft", "plan_block_id": "model.structured", "kind": "model_request"},
                 {"id": "shot", "plan_block_id": "browser.action_call", "kind": "action_call"},
             ],
@@ -177,7 +176,7 @@ def test_execution_plan_requires_plan_id():
         ExecutionPlan.from_value({"plan_blocks": []})
 
 
-# --- CapabilityResolution / SkillActivation --------------------------------
+# --- CapabilityResolution ---------------------------------------------------
 
 
 def test_capability_resolution_round_trip():
@@ -193,22 +192,6 @@ def test_capability_resolution_round_trip():
     assert resolution.denied_capabilities == ("fs.write",)
     assert resolution.scoped_action_candidates == ({"action_id": "open_browser"},)
     assert CapabilityResolution.from_value(resolution.to_dict()).to_dict() == resolution.to_dict()
-
-
-def test_skill_activation_records_plan_block_recommendations_without_execution():
-    activation = SkillActivation.from_value(
-        {
-            "skill_id": "webapp-testing",
-            "loaded_guidance_refs": "webapp-testing:SKILL.md",
-            "capability_needs": {"need": "web_browse"},
-            "action_candidate_specs": {"capability": "web_browse", "grants": False},
-            "plan_block_recommendations": {"plan_block_id": "browser.action_call"},
-        }
-    )
-    assert activation.loaded_guidance_refs == ("webapp-testing:SKILL.md",)
-    assert activation.plan_block_recommendations == ({"plan_block_id": "browser.action_call"},)
-    assert activation.action_candidate_specs == ({"capability": "web_browse", "grants": False},)
-    assert SkillActivation.from_value(activation.to_dict()).to_dict() == activation.to_dict()
 
 
 # --- Blocks contracts -------------------------------------------------------
@@ -377,7 +360,7 @@ def test_evidence_envelope_derives_legacy_buckets_from_canonical_items():
 
     assert envelope.action_evidence[0]["id"] == "quote.failed"
     assert envelope.action_evidence[0]["status"] == "failed"
-    assert envelope.workspace_refs == ("src/app.py",)
+    assert envelope.context_refs == ("src/app.py",)
     assert EvidenceEnvelope.from_value({"diagnostics": [{"message": "boom"}]}).evidence_items[0]["status"] == "failed"
 
 
@@ -420,7 +403,6 @@ def test_replan_signal_rejects_unknown_status():
         (TaskFrame, {"id": "f", "objective": "o"}, EXECUTION_PLAN_SCHEMA_VERSION),
         (ExecutionPlan, {"plan_id": "p"}, EXECUTION_PLAN_SCHEMA_VERSION),
         (CapabilityResolution, {}, EXECUTION_PLAN_SCHEMA_VERSION),
-        (SkillActivation, {"skill_id": "s"}, EXECUTION_PLAN_SCHEMA_VERSION),
         (EvidenceEnvelope, {}, EXECUTION_PLAN_SCHEMA_VERSION),
         (ReplanSignal, {"status": "continue"}, EXECUTION_PLAN_SCHEMA_VERSION),
         (PlanBlock, {"id": "pb", "kind": "model_request"}, BLOCKS_SCHEMA_VERSION),
@@ -444,7 +426,6 @@ def test_schema_version_defaults_and_survives_round_trip(contract, payload, sche
         (ExecutionPlanEdge, {"from": "a", "to": "b"}),
         (ExecutionPlan, {"plan_id": "p"}),
         (CapabilityResolution, {}),
-        (SkillActivation, {"skill_id": "s"}),
         (EvidenceEnvelope, {}),
         (ReplanSignal, {"status": "continue"}),
         (PlanBlock, {"id": "pb", "kind": "model_request"}),
@@ -466,15 +447,17 @@ def test_from_value_rejects_non_mapping(contract, payload):
 
 def test_kind_and_signal_constants_are_complete():
     assert PLAN_BLOCK_INSTANCE_KINDS == PLAN_BLOCK_KINDS
-    assert "skill_activation" in PLAN_BLOCK_KINDS
+    assert "skill_activation" not in PLAN_BLOCK_KINDS
+    assert "context_read" in PLAN_BLOCK_KINDS
     assert "dag_segment" in PLAN_BLOCK_KINDS
     assert "agent_step" in PLAN_BLOCK_KINDS
-    assert len(PLAN_BLOCK_KINDS) == 14
-    assert "skill_activation" in EXECUTION_BLOCK_KINDS
+    assert len(PLAN_BLOCK_KINDS) == 13
+    assert "skill_activation" not in EXECUTION_BLOCK_KINDS
+    assert "context_read" in EXECUTION_BLOCK_KINDS
     assert "dag_node" in EXECUTION_BLOCK_KINDS
     assert "snapshot" in EXECUTION_BLOCK_KINDS
     assert "agent_step" in EXECUTION_BLOCK_KINDS
-    assert len(EXECUTION_BLOCK_KINDS) == 14
+    assert len(EXECUTION_BLOCK_KINDS) == 13
     assert "block.replan_requested" in STANDARD_BLOCK_SIGNALS
     assert "block.completed" in STANDARD_BLOCK_SIGNALS
     assert len(STANDARD_BLOCK_SIGNALS) == 10

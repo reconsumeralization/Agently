@@ -233,7 +233,7 @@ class EventCenter:
     async def async_emit(self, event: "Mapping[str, Any] | ObservationEvent | RuntimeEvent"):
         event_object = self._normalize_event(event)
         await_tasks: list[asyncio.Task[Any]] = []
-        for hook_name, registration in self._hooks.items():
+        for hook_name, registration in list(self._hooks.items()):
             if not matches_runtime_event_type(event_object.event_type, registration.event_types):
                 continue
             task = await self._prepare_hook_delivery(registration, event_object)

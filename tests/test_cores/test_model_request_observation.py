@@ -222,6 +222,7 @@ class MockSlowCancelableRequester:
     name = "MockSlowCancelableRequester"
     DEFAULT_SETTINGS: dict[str, Any] = {}
     canceled_attempts = 0
+    started: asyncio.Event | None = None
 
     def __init__(self, prompt, settings):
         self.prompt = prompt
@@ -230,6 +231,7 @@ class MockSlowCancelableRequester:
     @classmethod
     def reset(cls):
         cls.canceled_attempts = 0
+        cls.started = asyncio.Event()
 
     @staticmethod
     def _on_register():
@@ -255,6 +257,9 @@ class MockSlowCancelableRequester:
 
     async def request_model(self, request_data: AgentlyRequestData):
         del request_data
+        started = type(self).started
+        if started is not None:
+            started.set()
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
@@ -298,6 +303,9 @@ class MockHandlerDrivenRequester:
     def build_request_handlers(self, request_data: AgentlyRequestData):
         async def execute(state: AttemptState):
             prompt_text = str(request_data.data.get("prompt_text", ""))
+            if "yield fail" in prompt_text:
+                yield "error", RuntimeError("handler yielded provider failure")
+                return
             if "after-output retry" in prompt_text:
                 if state.attempt_index == 1:
                     yield "message", '{"reply": "partial'
@@ -457,6 +465,22 @@ async def test_model_request_events_include_prompt_and_child_run_lineage():
             meta={"flow_name": "observation-flow"},
         )
         request = _create_request()
+        request.settings.set(
+            "plugins.ModelRequester.MockObservationRequester.timeout",
+            {"connect": 3.0, "read": 17.0, "write": 5.0, "pool": 7.0},
+        )
+        request.settings.set(
+            "plugins.ModelRequester.MockObservationRequester.timeout_mode",
+            "first_token",
+        )
+        request.settings.set(
+            "plugins.ModelRequester.MockObservationRequester.stream_idle_timeout",
+            19.0,
+        )
+        request.settings.set(
+            "plugins.ModelRequester.MockObservationRequester.request_retry",
+            {"max_attempts": 3, "after_output": True},
+        )
         request.input("Summarize the morning operations notes.")
         request.instruct("Focus on GPU cloud demand and operational risk.")
 
@@ -498,6 +522,12 @@ async def test_model_request_events_include_prompt_and_child_run_lineage():
         requesting_event = next(event for event in model_events if event.event_type == "model.requesting")
         assert requesting_event.payload["request"]["request_url"] == "mock://observation-requester"
         assert requesting_event.payload["attempt_index"] == 1
+        assert requesting_event.payload["liveness"] == {
+            "timeout_mode": "first_token",
+            "timeout": {"connect": 3.0, "read": 17.0, "write": 5.0, "pool": 7.0},
+            "stream_idle_timeout": 19.0,
+            "request_retry": {"max_attempts": 3, "after_output": True},
+        }
 
         started_event = next(event for event in model_events if event.event_type == "model.request_started")
         started_telemetry = started_event.payload["model_request_telemetry"]
@@ -709,6 +739,45 @@ async def test_handler_driven_provider_error_becomes_core_runtime_event():
         assert requester_error_telemetry["error"]["message"] == "handler provider failed"
     finally:
         Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.parametrize("runtime_raise_error", [True, False])
+@pytest.mark.asyncio
+async def test_yielded_provider_error_emits_one_terminal_status_and_one_requester_error(runtime_raise_error):
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    previous_raise_error = Agently.settings.get("runtime.raise_error")
+    hook_name = "test_model_request_observation.yielded_error_capture"
+    Agently.settings.set("runtime.raise_error", runtime_raise_error)
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        request = _create_handler_driven_request()
+        request.input("yield fail with cold request evidence")
+        response = request.get_response()
+
+        with pytest.raises(RuntimeError, match="handler yielded provider failure"):
+            await response.async_get_text()
+
+        terminal_statuses = [
+            event
+            for event in captured
+            if event.event_type == "model.status"
+            and event.payload.get("status") == "failed"
+            and event.payload.get("retry") is False
+        ]
+        requester_errors = [event for event in captured if event.event_type == "model.requester.error"]
+
+        assert len(terminal_statuses) == 1
+        assert len(requester_errors) == 1
+        assert requester_errors[0].error is not None
+        assert requester_errors[0].error.message == "handler yielded provider failure"
+        assert "yield fail with cold request evidence" in str(requester_errors[0].payload["request_data"])
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+        Agently.settings.set("runtime.raise_error", previous_raise_error)
 
 
 @pytest.mark.asyncio
@@ -1465,7 +1534,11 @@ async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_canc
 
         async def fail_branch(data: TriggerFlowRuntimeData):
             del data
-            await asyncio.sleep(0.05)
+            assert MockSlowCancelableRequester.started is not None
+            await asyncio.wait_for(
+                MockSlowCancelableRequester.started.wait(),
+                timeout=1,
+            )
             raise RuntimeError("branch boom")
 
         flow.batch(slow_branch, fail_branch)
@@ -1520,7 +1593,11 @@ async def test_trigger_flow_for_each_failure_waits_for_sibling_cleanup():
                 agent = _create_slow_agent()
                 execution = agent.input("Wait for for_each sibling cancellation.")
                 return await execution.async_get_text()
-            await asyncio.sleep(0.05)
+            assert MockSlowCancelableRequester.started is not None
+            await asyncio.wait_for(
+                MockSlowCancelableRequester.started.wait(),
+                timeout=1,
+            )
             raise RuntimeError("for_each branch boom")
 
         flow.to(prepare_items).for_each(concurrency=2).to(analyze_item).end_for_each()

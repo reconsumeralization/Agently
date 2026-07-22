@@ -152,7 +152,7 @@ def resolve_task_board_planning_policy(
             "Use allowed_execution_shape='readback' when the card's only work is bounded cold artifact readback from existing dependency refs.",
             "A control card returns the deliverable or card-local synthesis plus sufficient, gaps, "
             "next_board_action, diagnostics, and optional patch_proposal in one structured payload. "
-            "patch_proposal may be a TaskBoardPatch for board-state changes or a Workspace text patch "
+            "patch_proposal may be a TaskBoardPatch for board-state changes or a TaskWorkspace text patch "
             "for precise artifact repair.",
             "After evidence fan-in, prefer one terminal control card that combines synthesis, verification, and next-step decision instead of a serial chain of synthesis -> risk -> finalization -> review control cards.",
             "Create multiple dependent control cards only when each one produces a distinct user-visible artifact, waits for different upstream evidence, or represents a materially separate decision that cannot be verified in the same request.",
@@ -198,7 +198,8 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                     str,
                     "Optional handler-defined execution shape. Use control for synthesis/finalization/verification "
                     "cards that should run as one structured model request; use readback for scoped cold artifact "
-                    "readback; use auto or actions for tool, Workspace, side-effect, or mixed action/readback cards. "
+                    "readback; keep auto for cards that use scoped_retrieval without Actions; use actions only for "
+                    "mounted Actions, TaskWorkspace side effects, or mixed Action/readback cards. "
                     "Avoid serial control-only chains when one control card can synthesize, verify, and decide continuation.",
                     False,
                 ),
@@ -209,12 +210,12 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                 ),
                 "scoped_retrieval": (
                     dict,
-                    "Optional bounded retrieval plan: {query_groups: [{query, expected_role, search_surface?, path?, pattern?, filters?, max_results?, snippet_limit?}]}. query is content text or an exact phrase to search, not a list/read/search command. For workspace_index records, put collection names in filters.collection, do not put collection names in path, and use filters.kind only when the exact record kind is provided; never infer a generic kind such as note. For workspace_files, path is the directory/file scope and pattern is one file glob such as *.md, * or **. Use filters.content_contains only for explicit content keyword lists. The executor returns factual locator_ref/evidence_snippet records only.",
+                    "Optional bounded TaskContext retrieval plan: {query_groups: [{query, expected_role, source_kinds?: [exact values offered by input.retrieval_policy.source_kinds], path?, pattern?, filters?, max_results?, snippet_limit?}]}. query is content text or an exact phrase to search, not a list/read/search Action command. Do not invent or hardcode source kinds. For record_store records, put collection names in filters.collection, do not put collection names in path, and use filters.kind only when the exact record kind is provided; never infer a generic kind such as note. For task_workspace files, path is the directory/file scope and pattern is one file glob such as *.md, * or **. Other source kinds define their descriptor/ref scope through the offered policy. Use filters.content_contains only for explicit content keyword lists. ContextReader returns factual locator_ref/evidence_snippet records only.",
                     False,
                 ),
                 "preflight_kind": (
                     str,
-                    "Optional readiness check kind such as resource_health, readback, or capability_check. Preflight cards may only use mounted capabilities or existing Workspace refs.",
+                    "Optional readiness check kind such as resource_health, readback, or capability_check. Preflight cards may only use mounted capabilities or existing TaskWorkspace refs.",
                     False,
                 ),
                 "requires_capability_ids": (
@@ -222,9 +223,33 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                     "Optional mounted capability ids required before this card can run. This is a structural requirement, not a permission grant.",
                     False,
                 ),
-                "requires_workspace_refs": (
+                "action_commands": (
+                    [
+                        {
+                            "purpose": (str, "Bounded purpose of this exact Action call.", False),
+                            "action_id": (
+                                str,
+                                "Exact id from the offered planner_capabilities Action set.",
+                                False,
+                            ),
+                            "action_input": (
+                                dict,
+                                "Complete kwargs object matching that Action's offered input contract.",
+                                False,
+                            ),
+                        }
+                    ],
+                    "Complete exhaustive Action call batch for this card when every argument is already known at board-planning time. The card completes after this exact batch. Omit when an argument depends on a future card result, and put later synthesis or final delivery on a dependent control card.",
+                    False,
+                ),
+                "requires_task_workspace_refs": (
                     [str],
-                    "Optional Workspace/readback refs that must already exist for this preflight card.",
+                    "Optional TaskWorkspace/readback refs that must already exist for this preflight card.",
+                    False,
+                ),
+                "final_task_workspace_deliverables": (
+                    [str],
+                    "Exact TaskWorkspace-relative final paths explicitly required by the submitted task and owned by this card. Omit for intermediate artifacts or when no exact final path was requested.",
                     False,
                 ),
                 "focus_item_ids": (
@@ -469,7 +494,13 @@ def _card_from_planning_item(
     scoped_retrieval = value.get("scoped_retrieval")
     preflight_kind = str(value.get("preflight_kind") or "").strip()
     requires_capability_ids = _str_list(value.get("requires_capability_ids"))
-    requires_workspace_refs = _str_list(value.get("requires_workspace_refs"))
+    action_commands = _planning_action_commands(value.get("action_commands"), card_id=card_id)
+    declared_execution_shape = str(
+        value.get("allowed_execution_shape") or "auto"
+    ).strip()
+    resolved_execution_shape = declared_execution_shape
+    requires_task_workspace_refs = _str_list(value.get("requires_task_workspace_refs"))
+    final_task_workspace_deliverables = _str_list(value.get("final_task_workspace_deliverables"))
     focus_item_ids = _str_list(value.get("focus_item_ids"))
     metadata: dict[str, Any] = {
         "action_block": action_block,
@@ -492,9 +523,21 @@ def _card_from_planning_item(
     if requires_capability_ids:
         metadata["requires_capability_ids"] = requires_capability_ids
         evidence_contract["requires_capability_ids"] = requires_capability_ids
-    if requires_workspace_refs:
-        metadata["requires_workspace_refs"] = requires_workspace_refs
-        evidence_contract["requires_workspace_refs"] = requires_workspace_refs
+    if action_commands:
+        metadata["action_commands"] = action_commands
+        evidence_contract["action_commands"] = action_commands
+        if declared_execution_shape.lower().replace("-", "_") != "actions":
+            metadata["declared_execution_shape"] = declared_execution_shape
+            metadata["execution_shape_normalization"] = (
+                "exact_action_commands_override_generic_shape_hint"
+            )
+            resolved_execution_shape = "actions"
+    if requires_task_workspace_refs:
+        metadata["requires_task_workspace_refs"] = requires_task_workspace_refs
+        evidence_contract["requires_task_workspace_refs"] = requires_task_workspace_refs
+    if final_task_workspace_deliverables:
+        metadata["final_task_workspace_deliverables"] = final_task_workspace_deliverables
+        evidence_contract["final_task_workspace_deliverables"] = final_task_workspace_deliverables
     if focus_item_ids:
         metadata["focus_item_ids"] = focus_item_ids
         evidence_contract["focus_item_ids"] = focus_item_ids
@@ -515,11 +558,42 @@ def _card_from_planning_item(
         ),
         input_refs=tuple(evidence_to_use),
         required_outputs=(done_when,) if done_when else (),
-        allowed_execution_shape=str(value.get("allowed_execution_shape") or "auto"),
+        allowed_execution_shape=resolved_execution_shape,
         evidence_contract=evidence_contract,
         failure_policy=failure_policy,
         metadata=metadata,
     )
+
+
+def _planning_action_commands(value: Any, *, card_id: str) -> list[dict[str, Any]]:
+    if value in (None, [], ()):
+        return []
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        raise TypeError(f"TaskBoard planning card '{card_id}' action_commands must be a sequence.")
+    commands: list[dict[str, Any]] = []
+    for index, raw_command in enumerate(value):
+        if not isinstance(raw_command, Mapping):
+            raise TypeError(
+                f"TaskBoard planning card '{card_id}' action_commands[{index}] must be a mapping."
+            )
+        action_id = str(raw_command.get("action_id") or "").strip()
+        action_input = raw_command.get("action_input")
+        if not action_id:
+            raise ValueError(
+                f"TaskBoard planning card '{card_id}' action_commands[{index}] requires action_id."
+            )
+        if not isinstance(action_input, Mapping):
+            raise TypeError(
+                f"TaskBoard planning card '{card_id}' action_commands[{index}] action_input must be a mapping."
+            )
+        commands.append(
+            {
+                "purpose": str(raw_command.get("purpose") or f"Use {action_id}").strip(),
+                "action_id": action_id,
+                "action_input": dict(action_input),
+            }
+        )
+    return commands
 
 
 def _canonical_taskboard_card_id(

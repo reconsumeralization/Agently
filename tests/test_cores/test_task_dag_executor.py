@@ -5,6 +5,7 @@ import time
 import pytest
 
 from agently import Agently
+from agently.core.storage import RecordStore
 from agently.builtins.plugins import AgentlyTaskDAGPlanner
 from agently.core import (
     TaskDAG,
@@ -362,7 +363,10 @@ async def test_task_dag_executor_preserves_artifact_refs():
 
 @pytest.mark.asyncio
 async def test_task_dag_runtime_events_project_recovery_facts(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "task-dag-runtime-events")
+    record_store = RecordStore(
+        tmp_path / "task-dag-runtime-events",
+        mode="read_write",
+    )
 
     async def artifact_task(context):
         return {
@@ -381,11 +385,17 @@ async def test_task_dag_runtime_events_project_recovery_facts(tmp_path):
         ],
     }
     compiled = TaskDAGExecutor({"artifact": artifact_task, "local": local_task}).compile(graph)
-    execution = compiled.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    execution = compiled.create_execution(
+        auto_close=False,
+        runtime_resources={
+            "record_store": record_store,
+            "runtime_event_store": record_store,
+        },
+    )
 
     await execution.async_start({"doc": "policy"})
     await execution.async_close(timeout=1)
-    runtime_events = await workspace.query_runtime_events(execution.id)
+    runtime_events = await record_store.query_runtime_events(execution.id)
     dag_node_events = [
         event
         for event in runtime_events

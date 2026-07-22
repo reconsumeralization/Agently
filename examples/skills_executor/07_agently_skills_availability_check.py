@@ -24,7 +24,7 @@ from agently import Agently
 # prove model-owned route selection. This script:
 #   1. Installs the active skills from a local Agently-Skills clone in a fresh
 #      local registry.
-#   2. Lists each installed skill with its purpose and activation hints.
+#   2. Lists each installed skill with its purpose and compatibility selection hints.
 #   3. Runs a plan-resolution check for every skill using required mode and the
 #      deterministic planner — no model API key is needed.
 #   4. Reports an overall availability verdict.
@@ -56,15 +56,15 @@ from agently import Agently
 #
 # all_available=True
 #
-# Skill activation hints:
+# Compatibility selection hints:
 #   agently:
 #     keywords: []
 #     invocation_names: []
 #   ...
 #
-# Note: these guidance-only skills carry no activation keywords by default.
-# Use this output only as registry/eligibility evidence. Route ownership and
-# model-owned skill choice must be verified by separate model-backed examples.
+# Note: the released facade retains the activation_hints payload key, but these
+# values are compatibility metadata only. Local code must not use them as a
+# router. Use this output only as registry/eligibility evidence.
 
 
 def main() -> None:
@@ -103,7 +103,11 @@ def main() -> None:
 
     print(f"\nInstalled Agently-Skills ({len(pack_skills)}):")
     for skill in pack_skills:
-        purpose = skill.get("purpose", "")
+        purpose = str(
+            skill.get("description")
+            or skill.get("card", {}).get("description")
+            or ""
+        )
         truncated = purpose[:80] + ("..." if len(purpose) > 80 else "")
         print(f"  {skill['skill_id']}: {truncated}")
 
@@ -138,8 +142,8 @@ def main() -> None:
 
     print(f"\nall_available={all_available}")
 
-    # Step 4: Show activation hints so developers know how to trigger each skill.
-    print("\nSkill activation hints:")
+    # Step 4: Inspect compatibility selection metadata. It is not a local router.
+    print("\nCompatibility selection hints:")
     for skill in pack_skills:
         contract = Agently.skills_executor.inspect_skills(skill["skill_id"])
         card = contract.get("card", {})
@@ -154,9 +158,9 @@ def main() -> None:
                [Agently.skills_executor.inspect_skills(s["skill_id"]).get("card", {})
                 for s in pack_skills]):
         print(
-            "\nNote: these guidance-only skills carry no activation keywords.\n"
-            "This script verifies explicit selection only. Use a model-backed\n"
-            "auto-orchestration example to verify route ownership and skill choice."
+            "\nNote: these guidance-only skills carry no compatibility keywords.\n"
+            "The activation_hints payload key is retained by the released facade only;\n"
+            "do not use it for local routing or as execution evidence."
         )
 
 

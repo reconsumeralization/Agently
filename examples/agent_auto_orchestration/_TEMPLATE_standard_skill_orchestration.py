@@ -1,7 +1,7 @@
-"""TEMPLATE — Standard SKILL.md single-shot label + host-side orchestration.
+"""TEMPLATE — Standard SKILL.md binding + host-side orchestration.
 
-This file is the canonical reference for the default single_shot compatibility
-label. It is NOT numbered and NOT meant to be a polished demo; it exists so the
+This file is a compact reference for the released result-shaped compatibility
+adapter. It is NOT numbered and NOT meant to be a polished demo; it exists so the
 host-owned orchestration boundary is unambiguous.
 
 Run:
@@ -25,12 +25,9 @@ and metadata.
     (+ optional public metadata such as `keywords`) and a markdown body of
     instructions. No `skill.yaml`; a root-level skill.yaml/skill.json now
     makes install FAIL on purpose.
-  * The default route label is `single_shot`: `run_skills_task(...)` builds a
-    Blocks ExecutionPlan with `skill_activation` plus a `model_request` block,
-    injects the SKILL.md body as instructions, and the model produces a
-    structured result in one request. Multi-step compatibility labels lower to
-    trusted `flow_segment` blocks instead of custom Skills-local workflow
-    engines.
+  * `run_skills_task(...)` is a compatibility adapter over one ordinary
+    AgentExecution. AgentExecution binds the immutable Skill revision into
+    TaskContext; ContextReader discloses it to the normal model-request route.
   * Side effects, persistence, durable waiting/resume, and approval policy stay
     with the owning Agently layer: host code, TriggerFlow, Action /
     ActionRuntime, and ExecutionResource.
@@ -38,8 +35,8 @@ and metadata.
 So the migration recipe for every old `skill.yaml` staged Skill is:
   1. Move the stage `purpose` prose into the SKILL.md body as plain guidance.
   2. Use `output=` for simple single-shot results. If model-side decomposition is
-     genuinely needed, select a host `effort=` / route option that lowers through
-     Blocks instead of adding Skill-owned stage metadata.
+     genuinely needed, express it through AgentTask, TaskDAG, or TriggerFlow
+     instead of adding Skill-owned stage metadata.
   3. Lift side-effecting `action` stages OUT of the Skill into host code,
      Action/ActionRuntime, ExecutionResource, or TriggerFlow chunks.
 ────────────────────────────────────────────────────────────────────────────────
@@ -68,7 +65,7 @@ from examples.dynamic_task._shared import configure_model
 #    slug -> "incident-response-planner"), `description` (drives the decision card
 #    and model_decision routing), and `keywords`. The body is what the model reads.
 #    There is deliberately NO skill.yaml and NO execution metadata here because
-#    this template demonstrates the default single_shot compatibility label.
+#    this template demonstrates the released AgentExecution adapter.
 # ═══════════════════════════════════════════════════════════════════════════════
 SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "incident-response-planner"
 
@@ -106,8 +103,8 @@ def save_runbook(output_dir: Path, incident_id: str, plan: str, runbook: str) ->
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. Compose Skill (guidance) + host step (side effect) with TriggerFlow.
-#    Chunk A: run the Skill through the single_shot compatibility label, shaping
-#             the result with output (this replaces the old per-stage schema).
+#    Chunk A: bind the Skill to AgentExecution and shape the ordinary model
+#             result with output (this replaces the old per-stage schema).
 #    Chunk B: take the structured result and run the host persistence step.
 # ═══════════════════════════════════════════════════════════════════════════════
 def build_flow(agent, skill_id: str, output_dir: Path) -> TriggerFlow:
@@ -162,7 +159,7 @@ async def main() -> None:
 
     print("=" * 60)
     print("installed skill_id:", skill_id)
-    print("route: skills (mode=required) -> single_shot Blocks label")
+    print("route: required Skill context -> ordinary AgentExecution")
     execution = flow.create_execution()
     await execution.async_start(alert)
     state = await execution.async_close()
@@ -179,7 +176,7 @@ if __name__ == "__main__":
 # ────────────────────────────────────────────────────────────────────────────────
 # Expected key output from a real run (shape; lengths vary by model):
 #   installed skill_id: incident-response-planner
-#   route: skills (mode=required) -> single_shot Blocks label
+#   route: required Skill context -> ordinary AgentExecution
 #   skill status: success
 #   plan length: ~3,000-5,000 chars
 #   runbook length: ~2,000-4,000 chars
@@ -187,6 +184,6 @@ if __name__ == "__main__":
 #
 # Compare with the old 12_model_plan_incident_response.py: the three stages
 # (analyze_incident / generate_runbook / save_runbook) are gone. analyze + generate
-# collapsed into ONE single_shot Blocks-backed Skill request; save moved into
-# the host TriggerFlow.
+# collapsed into one AgentExecution request with required Skill context; save
+# moved into the host TriggerFlow.
 # ────────────────────────────────────────────────────────────────────────────────

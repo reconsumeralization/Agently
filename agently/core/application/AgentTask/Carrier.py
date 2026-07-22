@@ -15,15 +15,422 @@
 
 from __future__ import annotations
 
+from agently.types.data import RunContext
+
 from .TaskShared import *
 
 
 class AgentTaskCarrierMixin(AgentTaskMixinBase):
+    def _bounded_action_result_refs(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Project only trusted cold-reference identities across a work-unit boundary."""
+
+        artifact_refs: list[dict[str, Any]] = []
+        file_refs: list[dict[str, Any]] = []
+        artifact_seen: set[tuple[str, str, str]] = set()
+        file_seen: set[tuple[str, str, str]] = set()
+        for record in records:
+            raw_artifact_refs = record.get("artifact_refs")
+            if isinstance(raw_artifact_refs, Sequence) and not isinstance(
+                raw_artifact_refs, str | bytes | bytearray
+            ):
+                for raw_ref in raw_artifact_refs:
+                    if not isinstance(raw_ref, Mapping):
+                        continue
+                    ref = dict(DataFormatter.sanitize(raw_ref))
+                    selection_key = str(ref.get("selection_key") or "").strip()
+                    if not selection_key:
+                        continue
+                    ref.setdefault("owner", "action_artifact")
+                    ref.setdefault("locator", selection_key)
+                    content_version = str(
+                        ref.get("content_version") or ref.get("sha256") or ""
+                    ).strip()
+                    if not content_version:
+                        manager = getattr(getattr(self.agent, "action", None), "_artifact_manager", None)
+                        get_artifact_id = getattr(manager, "get_artifact_id_for_selection", None)
+                        get_artifact = getattr(manager, "get_artifact", None)
+                        artifact_id = (
+                            get_artifact_id(selection_key)
+                            if callable(get_artifact_id)
+                            else None
+                        )
+                        artifact = get_artifact(artifact_id) if artifact_id and callable(get_artifact) else None
+                        if isinstance(artifact, Mapping):
+                            content_version = str(artifact.get("sha256") or "").strip()
+                    if content_version:
+                        ref["content_version"] = content_version
+                    key = (
+                        str(ref.get("owner") or ""),
+                        str(ref.get("locator") or ""),
+                        content_version,
+                    )
+                    if key in artifact_seen:
+                        continue
+                    artifact_seen.add(key)
+                    artifact_refs.append(ref)
+            raw_file_refs = record.get("file_refs")
+            if isinstance(raw_file_refs, Sequence) and not isinstance(
+                raw_file_refs, str | bytes | bytearray
+            ):
+                for raw_ref in raw_file_refs:
+                    if not isinstance(raw_ref, Mapping):
+                        continue
+                    ref = dict(DataFormatter.sanitize(raw_ref))
+                    path = str(ref.get("path") or "").strip()
+                    if not path:
+                        continue
+                    ref.setdefault("owner", "task_workspace")
+                    ref.setdefault("locator", path)
+                    content_version = str(
+                        ref.get("content_version")
+                        or ref.get("content_version_id")
+                        or ref.get("sha256")
+                        or ""
+                    ).strip()
+                    if content_version:
+                        ref["content_version"] = content_version
+                    key = (
+                        str(ref.get("owner") or ""),
+                        str(ref.get("locator") or ""),
+                        content_version,
+                    )
+                    if key in file_seen:
+                        continue
+                    file_seen.add(key)
+                    file_refs.append(ref)
+        return artifact_refs, file_refs
+
+    def _normalize_bounded_action_commands(
+        self,
+        *,
+        raw_commands: Any,
+        required_action_ids: Sequence[str],
+        unit_label: str,
+    ) -> tuple[list[dict[str, Any]], tuple[str, str] | None]:
+        """Validate model-authored Action commands against mounted contracts."""
+
+        if not isinstance(raw_commands, Sequence) or isinstance(
+            raw_commands, str | bytes | bytearray
+        ):
+            return [], (
+                "invalid_shape",
+                f"{unit_label} action_commands must be a sequence of command mappings.",
+            )
+
+        registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
+        has_action = getattr(registry, "has", None)
+        get_spec = getattr(registry, "get_spec", None)
+        commands: list[dict[str, Any]] = []
+        for index, raw_command in enumerate(raw_commands):
+            if not isinstance(raw_command, Mapping):
+                return [], (
+                    "invalid_command",
+                    f"{unit_label} action_commands[{index}] must be a mapping.",
+                )
+            action_id = str(raw_command.get("action_id") or "").strip()
+            action_input = raw_command.get("action_input")
+            if not action_id or not callable(has_action) or not has_action(action_id):
+                return [], (
+                    "unknown_action",
+                    f"{unit_label} action command references unavailable Action '{action_id}'.",
+                )
+            if not isinstance(action_input, Mapping):
+                return [], (
+                    "invalid_input",
+                    f"{unit_label} action command '{action_id}' requires an action_input mapping.",
+                )
+
+            spec = get_spec(action_id) if callable(get_spec) else None
+            spec_mapping: Mapping[str, Any] = spec if isinstance(spec, Mapping) else {}
+            kwargs = spec_mapping.get("kwargs")
+            meta = spec_mapping.get("meta")
+            if isinstance(kwargs, Mapping):
+                declared_keys = {str(key) for key in kwargs}
+                host_only_keys = set(
+                    self._normalize_string_list(
+                        meta.get("host_only_input_keys") if isinstance(meta, Mapping) else []
+                    )
+                )
+                unexpected_keys = sorted(
+                    str(key)
+                    for key in action_input
+                    if str(key) not in declared_keys or str(key) in host_only_keys
+                )
+                if unexpected_keys:
+                    return [], (
+                        "invalid_input_keys",
+                        f"{unit_label} action command '{action_id}' includes undeclared or host-only "
+                        f"input keys: {', '.join(unexpected_keys)}.",
+                    )
+                required_input_keys = set(
+                    self._normalize_string_list(spec_mapping.get("required_input_keys"))
+                )
+                missing_input_keys = sorted(required_input_keys - set(action_input))
+                if missing_input_keys:
+                    return [], (
+                        "missing_input_keys",
+                        f"{unit_label} action command '{action_id}' is missing required "
+                        f"input keys: {', '.join(missing_input_keys)}.",
+                    )
+
+            commands.append(
+                {
+                    "purpose": str(raw_command.get("purpose") or f"Use {action_id}").strip(),
+                    "action_id": action_id,
+                    "action_input": dict(action_input),
+                }
+            )
+
+        required = set(self._normalize_string_list(required_action_ids))
+        command_action_ids = {command["action_id"] for command in commands}
+        missing_required = sorted(required - command_action_ids)
+        if missing_required:
+            return [], (
+                "missing_required_action",
+                f"{unit_label} action_commands omitted required Action ids: "
+                + ", ".join(missing_required)
+                + ".",
+            )
+        return commands, None
+
+    def _bounded_action_command_failure(
+        self,
+        *,
+        execution_id: str,
+        code: str,
+        message: str,
+        execution_kind: str,
+        command_source: str,
+        action_planning_model_requests: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        diagnostic = {
+            "code": code,
+            "message": message,
+            "execution_kind": execution_kind,
+            "command_source": command_source,
+            "action_planning_model_requests": action_planning_model_requests,
+        }
+        return (
+            {
+                "status": "failed",
+                "step_result": message,
+                "answer": "",
+                "remaining_work": [message],
+                "diagnostics": [diagnostic],
+            },
+            {
+                "execution_id": execution_id,
+                "status": "failed",
+                "route": {"selected_route": "action_call", "status": "failed"},
+                "logs": {"action_logs": [], "route_logs": {}, "errors": [diagnostic]},
+                "diagnostics": [diagnostic],
+            },
+        )
+
+    async def _execute_bounded_action_commands(
+        self,
+        *,
+        raw_commands: Any,
+        required_action_ids: Sequence[str],
+        execution_id: str,
+        code_prefix: str,
+        execution_kind: str,
+        command_source: str,
+        action_planning_model_requests: int,
+        unit_label: str,
+        todo_suggestion: str,
+        concurrency: int | None = None,
+        iteration_index: int | None = None,
+        project_flat_action_batch: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Validate one bounded command batch and dispatch it through ActionRuntime."""
+
+        def failure(code_suffix: str, message: str) -> tuple[dict[str, Any], dict[str, Any]]:
+            return self._bounded_action_command_failure(
+                execution_id=execution_id,
+                code=f"{code_prefix}.{code_suffix}",
+                message=message,
+                execution_kind=execution_kind,
+                command_source=command_source,
+                action_planning_model_requests=action_planning_model_requests,
+            )
+
+        commands, validation_error = self._normalize_bounded_action_commands(
+            raw_commands=raw_commands,
+            required_action_ids=required_action_ids,
+            unit_label=unit_label,
+        )
+        if validation_error is not None:
+            return failure(*validation_error)
+        commands = [
+            {
+                **command,
+                "todo_suggestion": todo_suggestion,
+                "source_protocol": command_source,
+            }
+            for command in commands
+        ]
+
+        owner_context = {"iteration": iteration_index, "strategy": "flat"}
+        projection_meta = {
+            "execution_id": execution_id,
+            "route": {"selected_route": "action_call", "status": "running"},
+        }
+        if project_flat_action_batch:
+            if len(commands) <= 1 or concurrency == 1:
+                batch_is_parallel: bool | None = False
+            elif isinstance(concurrency, int) and not isinstance(concurrency, bool) and concurrency > 1:
+                batch_is_parallel = True
+            else:
+                batch_is_parallel = None
+            await self._emit_planned_action_batch(
+                iteration_index=iteration_index,
+                commands=commands,
+                execution_id=execution_id,
+                round_index=None,
+                concurrency=concurrency,
+                parallel=batch_is_parallel,
+                projection_source="validated_bounded_commands",
+            )
+            for command_index, command in enumerate(commands):
+                await self._emit_normalized_action_event(
+                    "started",
+                    {
+                        "id": command["action_id"],
+                        "status": "started",
+                        "command_index": command_index,
+                    },
+                    execution_meta=projection_meta,
+                    owner_context=owner_context,
+                    projection_source="validated_bounded_commands",
+                    posthoc_projection=False,
+                )
+
+        parent_run_context = RunContext.create(
+            run_kind="agent_execution",
+            execution_id=execution_id,
+            agent_name=self.agent.name,
+            meta={"task_id": self.id, "execution_kind": execution_kind},
+        )
+        raw_action_logs = await self.agent.action._async_execute_action_calls(
+            action_calls=commands,
+            settings=self.agent.settings,
+            agent_name=self.agent.name,
+            parent_run_context=parent_run_context,
+            concurrency=concurrency,
+        )
+        action_logs = [
+            dict(record)
+            for record in raw_action_logs
+            if isinstance(record, Mapping)
+        ]
+        if project_flat_action_batch:
+            for command_index, record in enumerate(action_logs):
+                normalized_record = {**record, "command_index": command_index}
+                await self._emit_normalized_action_event(
+                    "failed" if self._action_record_failed(normalized_record) else "completed",
+                    normalized_record,
+                    execution_meta=projection_meta,
+                    owner_context=owner_context,
+                    projection_source="validated_bounded_commands",
+                    posthoc_projection=False,
+                )
+        all_succeeded = len(action_logs) == len(commands) and all(
+            self._bounded_action_command_succeeded(record) for record in action_logs
+        )
+        artifact_refs, file_refs = self._bounded_action_result_refs(action_logs)
+        diagnostic = {
+            "execution_kind": execution_kind,
+            "command_source": command_source,
+            "action_planning_model_requests": action_planning_model_requests,
+            "command_count": len(commands),
+            "action_ids": [command["action_id"] for command in commands],
+            "command_concurrency": concurrency,
+        }
+        status = "completed" if all_succeeded else "failed"
+        summary = (
+            f"Executed {len(action_logs)} bounded Action call(s)."
+            if all_succeeded
+            else "One or more bounded Action calls failed."
+        )
+        return (
+            {
+                "status": status,
+                "step_result": summary,
+                "answer": summary,
+                "evidence": [
+                    f"Action {record.get('action_id')} {record.get('status')}."
+                    for record in action_logs
+                ],
+                "remaining_work": [] if all_succeeded else ["Inspect failed Action diagnostics."],
+                "diagnostics": [] if all_succeeded else [diagnostic],
+                "artifact_refs": DataFormatter.sanitize(artifact_refs),
+                "file_refs": DataFormatter.sanitize(file_refs),
+            },
+            {
+                "execution_id": execution_id,
+                "status": "success" if all_succeeded else "failed",
+                "route": {"selected_route": "action_call", "status": status},
+                "logs": {
+                    "action_logs": action_logs,
+                    "artifact_refs": DataFormatter.sanitize(artifact_refs),
+                    "file_refs": DataFormatter.sanitize(file_refs),
+                    "route_logs": {},
+                    "errors": [] if all_succeeded else [diagnostic],
+                },
+                "diagnostics": [diagnostic],
+            },
+        )
+
+    @staticmethod
+    def _bounded_action_command_succeeded(record: Any) -> bool:
+        if not isinstance(record, Mapping):
+            return False
+        return record.get("ok") is True or str(record.get("status") or "").strip().lower() in {
+            "success",
+            "succeeded",
+            "ok",
+            "completed",
+            "partial_success",
+        }
+
+    def _bounded_action_contracts(
+        self,
+        required_action_ids: Sequence[str],
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        registry = getattr(getattr(self.agent, "action", None), "action_registry", None)
+        get_spec = getattr(registry, "get_spec", None)
+        contracts: list[dict[str, Any]] = []
+        for action_id in self._normalize_string_list(required_action_ids):
+            spec = get_spec(action_id) if callable(get_spec) else None
+            if not isinstance(spec, Mapping) or spec.get("expose_to_model", True) is not True:
+                return [], action_id
+            contracts.append(
+                {
+                    key: DataFormatter.sanitize(spec.get(key))
+                    for key in (
+                        "action_id",
+                        "name",
+                        "desc",
+                        "kwargs",
+                        "required_input_keys",
+                        "returns",
+                        "side_effect_level",
+                        "read_only",
+                    )
+                    if spec.get(key) not in (None, "", [], {})
+                }
+            )
+        return contracts, None
+
     def _build_flat_work_unit_intent(
         self,
         iteration_index: int,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
     ) -> WorkUnitIntent:
         effective_shape = str(plan.get("effective_execution_shape") or plan.get("execution_shape") or "direct")
         execution_policy = self._step_execution_policy()
@@ -32,34 +439,54 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             step_scope = {}
         scoped_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
         repair_context = self._active_repair_context()
-        input_payload = {
-            "task_id": self.id,
-            "iteration": iteration_index,
-            "goal": self.goal,
-            "success_criteria": self.success_criteria,
-            "task_context_contract": self._task_context_contract_for_model_prompt(),
-            "plan": DataFormatter.sanitize(plan),
-            "execution_prompt": self._execution_prompt_context(),
-            "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-            "retrieval_policy": scoped_retrieval_policy(),
-            "context_summary": {
-                "item_count": len(context_pack.get("items", [])),
-                "profile": context_pack.get("profile"),
-            },
-        }
-        delivery_contract = {
-            "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
-            "deliverable_mode": plan.get("deliverable_mode"),
-            "task_context_contract": self._task_context_contract_for_model_prompt(),
-            "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-        }
-        if repair_context:
-            input_payload["repair_context"] = DataFormatter.sanitize(repair_context)
-            delivery_contract["repair_context"] = DataFormatter.sanitize(repair_context)
+        grounding_patch_context = self._flat_grounding_task_workspace_patch_context(repair_context)
+        if grounding_patch_context:
+            effective_shape = "direct"
+            scoped_ids = []
+        if grounding_patch_context:
+            objective = "Apply the structured material-claim repair contract to the authorized TaskWorkspace artifact."
+            input_payload = {
+                "task_id": self.id,
+                "iteration": iteration_index,
+                "authorized_task_workspace_target": {
+                    "path": grounding_patch_context.get("path"),
+                    "content_version_id": grounding_patch_context.get("content_version_id"),
+                },
+            }
+            delivery_contract = {
+                "deliverable_mode": "",
+                "material_claim_task_workspace_patch": DataFormatter.sanitize(grounding_patch_context),
+            }
+        else:
+            objective = str(plan.get("step_instruction") or "")
+            input_payload = {
+                "task_id": self.id,
+                "iteration": iteration_index,
+                "goal": self.goal,
+                "success_criteria": self.success_criteria,
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
+                "plan": DataFormatter.sanitize(plan),
+                "execution_prompt": self._execution_prompt_context(),
+                "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+                "retrieval_policy": self._task_context_retrieval_policy(),
+                "context_summary": {
+                    "item_count": len(context_pack.get("items", [])),
+                    "profile": context_pack.get("profile"),
+                },
+            }
+            delivery_contract = {
+                "execution_prompt": DataFormatter.sanitize(self._execution_prompt_context()),
+                "deliverable_mode": plan.get("deliverable_mode"),
+                "task_context_contract": self._task_context_contract_for_model_prompt(),
+                "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
+            }
+            if repair_context:
+                input_payload["repair_context"] = DataFormatter.sanitize(repair_context)
+                delivery_contract["repair_context"] = DataFormatter.sanitize(repair_context)
         return WorkUnitIntent(
             id=f"iter-{iteration_index}:flat-step",
             origin="flat_step",
-            objective=str(plan.get("step_instruction") or ""),
+            objective=objective,
             input_payload=input_payload,
             evidence_requirements=tuple(
                 {"capability_id": capability_id, "source": "step_scope"} for capability_id in scoped_ids
@@ -73,10 +500,24 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 for capability_id in scoped_ids
             ),
             delivery_contract=delivery_contract,
+            retrieval_policy=self._task_context_retrieval_policy(),
             runtime_preferences={
-                "handler": "agent_task_bounded_step",
-                "deliverable_mode": plan.get("deliverable_mode"),
+                "handler": (
+                    "agent_task_material_claim_patch"
+                    if grounding_patch_context
+                    else "agent_task_bounded_step"
+                ),
+                "deliverable_mode": "" if grounding_patch_context else plan.get("deliverable_mode"),
                 "preferred_execution_shape": effective_shape,
+                "plan_block_kind": (
+                    "action_call"
+                    if effective_shape == "actions"
+                    and (
+                        self._normalize_string_list(plan.get("required_action_ids"))
+                        or plan.get("action_commands") not in (None, [], ())
+                    )
+                    else "agent_step"
+                ),
                 "step_plan": execution_policy.get("step_plan", "direct"),
                 "strategy": "flat",
             },
@@ -87,7 +528,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         *,
         work_unit: WorkUnitIntent,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
         execution_id: str,
         handler: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]],
         start_payload: Mapping[str, Any],
@@ -102,7 +543,10 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "plan_id": execution_plan.plan_id,
                 "plan_blocks": [block.to_dict() for block in execution_plan.plan_blocks],
                 "edges": [edge.to_dict() for edge in execution_plan.edges],
-                "capability_resolution": self._blocks_capability_resolution(plan).to_dict(),
+                "capability_resolution": self._blocks_capability_resolution(
+                    plan,
+                    work_unit=work_unit,
+                ).to_dict(),
                 "evidence_requirements": [dict(item) for item in execution_plan.evidence_requirements],
                 "result_contracts": [dict(item) for item in execution_plan.result_contracts],
                 "runtime_policy": {
@@ -117,13 +561,24 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         handler_name = str(work_unit.runtime_preferences.get("handler") or "agent_task_bounded_step")
         blocks_execution = flow.create_execution(
             auto_close=False,
-            workspace=self.workspace,
+            record_store=False,
             runtime_resources={
                 "blocks.handlers": {
                     "agent_task_bounded_step": handler,
                     handler_name: handler,
                 }
             },
+        )
+        # Blocks is an execution substrate. TaskWorkspace remains the explicit
+        # file-effect resource, while all heterogeneous task information is
+        # disclosed through a consumer-bound ContextReader.
+        blocks_execution.set_runtime_resource("task_workspace", self.task_workspace)
+        blocks_execution.set_runtime_resource(
+            "context_reader",
+            self._task_context_reader(
+                phase="execution",
+                consumer_id=f"agent_task:{self.id}:blocks:{work_unit.id}",
+            ),
         )
         await blocks_execution.async_start(
             {
@@ -215,6 +670,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         execution: Any,
         language_policy: Mapping[str, Any],
         input_payload: Mapping[str, Any],
+        info_payload: Mapping[str, Any] | None = None,
         instruction: str,
         output_schema: Mapping[str, Any],
         output_format: str,
@@ -227,17 +683,30 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         meta_waiter: Callable[[Awaitable[Any]], Awaitable[Any]] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         payload = dict(input_payload)
+        resolved_info_payload = dict(info_payload or {})
         if isinstance(carrier_output_policy, Mapping):
             payload["carrier_output_policy"] = DataFormatter.sanitize(dict(carrier_output_policy))
+        context_phase = "card" if "taskboard.card" in started_event else "execution"
+        request_context_pack, context_package = await self._read_task_context_view(
+            phase=context_phase,
+            consumer_id=f"agent_task:{self.id}:worker:{execution.id}",
+            intent=str(payload.get("goal") or payload.get("card") or instruction or self.goal),
+        )
+        if "context_pack" in resolved_info_payload and "context_pack" not in payload:
+            resolved_info_payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
+        else:
+            payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
+        self._bind_task_context_attachments(execution, context_package)
         execution.input(payload)
+        if resolved_info_payload:
+            execution.info(resolved_info_payload)
         execution.language(language_policy.get("language", "auto"))
         if use_output:
             execution.instruct(instruction)
             execution.output(dict(output_schema), format=output_format)
         else:
             execution.instruct(
-                instruction
-                + " For this work unit, return the natural-language body directly as plain text. "
+                instruction + " For this work unit, return the natural-language body directly as plain text. "
                 "Do not wrap the body in JSON, XML fields, YAML, Markdown frontmatter, or diagnostic labels."
             )
         await self._emit(
@@ -269,6 +738,26 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             with suppress(asyncio.CancelledError, Exception):
                 await stream_task
             raise
+        if isinstance(meta, Mapping):
+            logs = meta.get("logs")
+            logs = logs if isinstance(logs, Mapping) else {}
+            response_ids = logs.get("model_response_ids")
+            if not isinstance(response_ids, Sequence) or isinstance(
+                response_ids,
+                str | bytes | bytearray,
+            ):
+                response_ids = []
+            phase = "work.execute.taskboard" if "taskboard.card" in started_event else "work.execute"
+            for response_id in self._normalize_string_list(response_ids):
+                self._record_task_context_consumption(
+                    context_package,
+                    request_id=response_id,
+                )
+                await self._emit_required_skill_context_bound(
+                    request_context_pack,
+                    request_id=response_id,
+                    phase=phase,
+                )
         return result, cast(dict[str, Any], meta)
 
     @staticmethod
@@ -307,7 +796,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         self,
         work_unit_or_iteration: WorkUnitIntent | int,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
     ):
         from agently.types.data import ExecutionPlan, ExecutionPlanEdge, PlanBlockInstance
 
@@ -335,8 +824,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "action_call",
                 "mcp_tool_call",
                 "script_action",
-                "workspace_operation",
-                "skill_activation",
+                "context_read",
                 "approval_wait",
                 "external_wait",
                 "validation",
@@ -400,16 +888,32 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             )
             for block in retrieval_blocks
         )
+        evidence_requirements: list[dict[str, Any]] = [
+            dict(item)
+            for item in work_unit.evidence_requirements
+            if isinstance(item, Mapping)
+        ]
+        seen_capability_ids = {
+            str(item.get("capability_id") or "").strip()
+            for item in evidence_requirements
+            if str(item.get("capability_id") or "").strip()
+        }
+        for capability_id in self._normalize_string_list(
+            step_scope.get("allowed_capability_ids")
+        ):
+            if capability_id in seen_capability_ids:
+                continue
+            evidence_requirements.append(
+                {"capability_id": capability_id, "source": "step_scope"}
+            )
+            seen_capability_ids.add(capability_id)
         return ExecutionPlan(
             plan_id=f"{self.id}:{work_unit.id}:execution-plan",
             task_frame_id=f"{self.id}:{work_unit.id}:task-frame",
             plan_blocks=(*retrieval_blocks, agent_plan_block),
             edges=retrieval_edges,
             semantic_outputs={"step": agent_plan_block.id},
-            evidence_requirements=tuple(
-                {"capability_id": capability_id, "source": "step_scope"}
-                for capability_id in self._normalize_string_list(step_scope.get("allowed_capability_ids"))
-            ),
+            evidence_requirements=tuple(evidence_requirements),
             result_contracts=(
                 {
                     "name": "agent_task_step",
@@ -438,20 +942,39 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         if not isinstance(query_groups, Sequence) or isinstance(query_groups, (str, bytes, bytearray)):
             return ()
         blocks: list[PlanBlockInstance] = []
-        for index, raw_group in enumerate(query_groups[:8]):
+        reserved_results = 0
+        for index, raw_group in enumerate(query_groups):
             if not isinstance(raw_group, Mapping):
                 continue
             query = str(raw_group.get("query") or "").strip()
             if not query:
                 continue
+            raw_max_results = raw_group.get("max_results", 8)
+            try:
+                max_results = int(raw_max_results)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "Scoped retrieval max_results must be a positive integer."
+                ) from error
+            if max_results <= 0:
+                raise ValueError(
+                    "Scoped retrieval max_results must be a positive integer."
+                )
+            reserved_results += max_results
+            if reserved_results > SCOPED_RETRIEVAL_RESULT_CAPACITY:
+                raise ValueError(
+                    "Scoped retrieval exceeds the model-visible evidence capacity "
+                    f"of {SCOPED_RETRIEVAL_RESULT_CAPACITY} results; split the work "
+                    "into consumer-owned continuation batches."
+                )
             expected_role = str(raw_group.get("expected_role") or "evidence_snippet").strip()
             filters = cls._scoped_retrieval_filters(raw_group)
             include_snippets = expected_role != "locator_ref"
             bound_inputs: dict[str, Any] = {
-                "operation": "search",
+                "operation": "read",
                 "query": query,
                 "filters": filters,
-                "max_results": raw_group.get("max_results", 8),
+                "max_results": max_results,
                 "include_snippets": include_snippets,
                 "snippet_limit": raw_group.get("snippet_limit", 1200),
                 "snippet_offset": raw_group.get("snippet_offset", 0),
@@ -463,16 +986,10 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 if value is not None:
                     bound_inputs[key] = value
             for key in (
-                "search_surface",
+                "source_kinds",
                 "include_hidden",
                 "max_file_bytes",
-                "context_lines",
                 "tags",
-                "method",
-                "selection",
-                "top_n",
-                "rerank",
-                "max_candidates",
             ):
                 value = raw_group.get(key)
                 if value is not None:
@@ -480,20 +997,20 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             blocks.append(
                 PlanBlockInstance(
                     id=f"{work_unit.id}:scoped-retrieval-{index}",
-                    plan_block_id="workspace_operation",
-                    kind="workspace_operation",
-                    intent=f"Run scoped Workspace retrieval for query group {index + 1}.",
+                    plan_block_id="context_read",
+                    kind="context_read",
+                    intent=f"Read scoped task context for query group {index + 1}.",
                     bound_inputs=bound_inputs,
                     output_contract={
                         "locator_refs": "bounded targets only; content not read",
                         "evidence_snippets": "bounded source text when requested",
                     },
                     evidence_contract={
-                        "role_policy": scoped_retrieval_policy(),
+                        "role_policy": dict(work_unit.retrieval_policy),
                         "semantic_acceptance_owner": "planner_or_verifier",
                     },
                     runtime_preferences={
-                        "retrieval_policy": scoped_retrieval_policy(),
+                        "retrieval_policy": dict(work_unit.retrieval_policy),
                         "query_group_index": index,
                     },
                 )
@@ -536,7 +1053,12 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return value
 
     @classmethod
-    def _scoped_retrieval_results_from_block_context(cls, block_context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _scoped_retrieval_results_from_block_context(
+        cls,
+        block_context: Mapping[str, Any],
+        *,
+        include_host_identity: bool = False,
+    ) -> list[dict[str, Any]]:
         state = block_context.get("state")
         if not isinstance(state, Mapping):
             return []
@@ -547,41 +1069,96 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         for item in results:
             if not isinstance(item, Mapping):
                 continue
-            if str(item.get("kind") or "") != "workspace_operation":
+            if str(item.get("kind") or "") != "context_read":
                 continue
             output = item.get("output")
             if not isinstance(output, Mapping):
                 continue
-            if str(output.get("operation") or "") != "search":
+            if str(output.get("operation") or "") != "read":
                 continue
             scoped_results.append(
                 {
                     "query": output.get("query"),
                     "filters": DataFormatter.sanitize(output.get("filters") or {}),
                     "bounded": cls._model_hot_scoped_retrieval_bounded(output.get("bounded")),
-                    "locator_refs": cls._model_hot_locator_refs(output.get("locator_refs")),
-                    "evidence_snippets": cls._model_hot_evidence_snippets(output.get("evidence_snippets")),
+                    "locator_refs": cls._model_hot_locator_refs(
+                        output.get("locator_refs"),
+                        include_host_identity=include_host_identity,
+                    ),
+                    "evidence_snippets": cls._model_hot_evidence_snippets(
+                        output.get("evidence_snippets"),
+                        include_host_identity=include_host_identity,
+                    ),
                     "diagnostics": cls._model_hot_diagnostics(output.get("diagnostics")),
                 }
             )
         return scoped_results
 
-    @classmethod
-    def _evidence_ledger_from_block_context(cls, block_context: Mapping[str, Any]) -> dict[str, Any]:
+    def _evidence_ledger_from_block_context(
+        self,
+        block_context: Mapping[str, Any],
+        *,
+        include_host_identity: bool = False,
+    ) -> dict[str, Any]:
+        def project(value: Mapping[str, Any]) -> dict[str, Any]:
+            stable_ledger = self._stable_evidence_ledger_view(
+                value,
+                max_items=64,
+                include_body=True,
+                body_chars=1200,
+                budget_selection="content_first",
+            )
+            return self._model_evidence_ledger_projection(
+                stable_ledger,
+                max_items=64,
+                include_host_identity=include_host_identity,
+            )
+
         state = block_context.get("state")
         if not isinstance(state, Mapping):
-            return cls._model_hot_evidence_ledger(evidence_ledger_view({"evidence_items": ()}, max_items=64, include_body=False))
+            return project({"evidence_items": ()})
         evidence_items = state.get("evidence_items")
         if isinstance(evidence_items, Sequence) and not isinstance(evidence_items, (str, bytes, bytearray)):
-            return cls._model_hot_evidence_ledger(
-                evidence_ledger_view({"evidence_items": evidence_items}, max_items=64, include_body=False)
-            )
+            return project({"evidence_items": evidence_items})
         results = state.get("execution_block_results")
         if isinstance(results, Sequence) and not isinstance(results, (str, bytes, bytearray)):
-            return cls._model_hot_evidence_ledger(
-                evidence_ledger_view({"execution_block_results": results}, max_items=64, include_body=False)
-            )
-        return cls._model_hot_evidence_ledger(evidence_ledger_view({"evidence_items": ()}, max_items=64, include_body=False))
+            return project({"execution_block_results": results})
+        return project({"evidence_items": ()})
+
+    def _flat_step_evidence_ledger(self, block_context: Mapping[str, Any]) -> dict[str, Any]:
+        """Join prior AgentTask evidence with current Blocks evidence by trusted ref id."""
+        current = self._evidence_ledger_from_block_context(block_context)
+        cumulative = self._model_evidence_ledger_projection(
+            self._cumulative_evidence_ledger({}),
+            max_items=64,
+        )
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for ledger in (current, cumulative):
+            raw_items = ledger.get("items") if isinstance(ledger, Mapping) else None
+            if not isinstance(raw_items, Sequence) or isinstance(raw_items, str | bytes | bytearray):
+                continue
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    continue
+                reference_id = str(item.get("reference_id") or "").strip()
+                if not reference_id or reference_id in seen:
+                    continue
+                seen.add(reference_id)
+                items.append(dict(DataFormatter.sanitize(item)))
+        return {
+            "items": items,
+            "item_count": len(items),
+            "omitted_count": max(
+                int(current.get("omitted_count") or 0)
+                + int(cumulative.get("omitted_count") or 0),
+                0,
+            ),
+            "selection_policy": (
+                "Use only an exact offered items[].reference_id in evidence_use.evidence_ids. "
+                "The host joins that short task-scoped reference to canonical evidence."
+            ),
+        }
 
     @classmethod
     def _model_hot_evidence_ledger(cls, ledger: Mapping[str, Any]) -> dict[str, Any]:
@@ -635,39 +1212,42 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         if not isinstance(value, Mapping):
             return {}
         allowed_keys = (
-            "search_surface",
-            "retrieval_strategy",
-            "retrieval_method",
-            "retrieval_selection",
-            "retrieval_rerank",
-            "retrieval_candidate_count",
-            "retrieval_selected_count",
-            "retrieval_omitted",
-            "max_results",
-            "total_matches",
+            "package_id",
+            "task_context_id",
+            "context_revision",
             "returned_results",
-            "file_returned_results",
-            "include_snippets",
-            "snippet_offset",
-            "snippet_limit",
-            "file_path",
-            "file_pattern",
-            "context_lines",
+            "used_chars",
+            "omitted_count",
         )
         return DataFormatter.sanitize({key: value.get(key) for key in allowed_keys if key in value})
 
     @classmethod
-    def _model_hot_locator_refs(cls, value: Any) -> list[dict[str, Any]]:
+    def _model_hot_locator_refs(
+        cls,
+        value: Any,
+        *,
+        include_host_identity: bool = False,
+    ) -> list[dict[str, Any]]:
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             return []
         refs: list[dict[str, Any]] = []
         for item in value:
             if isinstance(item, Mapping):
-                refs.append(cls._model_hot_locator_ref(item))
+                refs.append(
+                    cls._model_hot_locator_ref(
+                        item,
+                        include_host_identity=include_host_identity,
+                    )
+                )
         return refs
 
     @classmethod
-    def _model_hot_evidence_snippets(cls, value: Any) -> list[dict[str, Any]]:
+    def _model_hot_evidence_snippets(
+        cls,
+        value: Any,
+        *,
+        include_host_identity: bool = False,
+    ) -> list[dict[str, Any]]:
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             return []
         snippets: list[dict[str, Any]] = []
@@ -679,7 +1259,9 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "role",
                 "content_state",
                 "source",
-                "workspace_source",
+                "source_ref",
+                "source_revision",
+                "task_workspace_source",
                 "path",
                 "record_id",
                 "collection",
@@ -688,12 +1270,22 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "line_start",
                 "line_end",
                 "offset",
+                "range_start",
+                "query_match",
                 "truncated",
                 "body_state",
                 "raw_chars",
                 "projected_chars",
             ):
                 cls._copy_model_hot_field(snippet, item, key)
+            if include_host_identity:
+                for key in (
+                    "execution_block_id",
+                    "block_id",
+                    "source_id",
+                    "binding_id",
+                ):
+                    cls._copy_model_hot_field(snippet, item, key)
             content = item.get("content")
             if content is None:
                 content = item.get("snippet", item.get("text"))
@@ -701,7 +1293,10 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 snippet["content"] = str(content)
             locator_ref = item.get("locator_ref")
             if isinstance(locator_ref, Mapping):
-                snippet["locator_ref"] = cls._model_hot_locator_ref(locator_ref)
+                snippet["locator_ref"] = cls._model_hot_locator_ref(
+                    locator_ref,
+                    include_host_identity=include_host_identity,
+                )
             projection = item.get("projection")
             if isinstance(projection, Mapping):
                 snippet["projection"] = cls._model_hot_projection(projection)
@@ -735,13 +1330,20 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize(ref)
 
     @classmethod
-    def _model_hot_locator_ref(cls, value: Mapping[str, Any]) -> dict[str, Any]:
+    def _model_hot_locator_ref(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        include_host_identity: bool = False,
+    ) -> dict[str, Any]:
         ref: dict[str, Any] = {}
         for key in (
             "role",
             "content_state",
             "source",
-            "workspace_source",
+            "source_ref",
+            "source_revision",
+            "task_workspace_source",
             "rank",
             "index",
             "path",
@@ -760,9 +1362,18 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             "line",
             "line_start",
             "line_end",
+            "range_start",
             "truncated",
         ):
             cls._copy_model_hot_field(ref, value, key)
+        if include_host_identity:
+            for key in (
+                "execution_block_id",
+                "block_id",
+                "source_id",
+                "binding_id",
+            ):
+                cls._copy_model_hot_field(ref, value, key)
         raw_ref = value.get("ref")
         if isinstance(raw_ref, Mapping):
             compact_ref: dict[str, Any] = {}
@@ -833,17 +1444,45 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             return prefixed_fallback
         return fallback
 
-    def _blocks_capability_resolution(self, plan: dict[str, Any]):
+    def _blocks_capability_resolution(
+        self,
+        plan: dict[str, Any],
+        *,
+        work_unit: WorkUnitIntent | None = None,
+    ):
         from agently.types.data import CapabilityResolution
 
         step_scope = plan.get("step_scope")
         if not isinstance(step_scope, dict):
             step_scope = {}
-        scoped_ids = self._normalize_string_list(step_scope.get("allowed_capability_ids"))
+        work_unit_ids = self._normalize_string_list(
+            [
+                item.get("capability_id") or item.get("id")
+                for item in (
+                    work_unit.capability_scope
+                    if isinstance(work_unit, WorkUnitIntent)
+                    else ()
+                )
+                if isinstance(item, Mapping)
+            ]
+        )
+        step_scope_ids = self._normalize_string_list(
+            step_scope.get("allowed_capability_ids")
+        )
+        scoped_ids = self._merge_string_lists(work_unit_ids, step_scope_ids)
+        work_unit_id_set = set(work_unit_ids)
         return CapabilityResolution(
             allowed_capabilities=tuple(scoped_ids),
             scoped_action_candidates=tuple(
-                {"action_id": capability_id, "capability_id": capability_id, "source": "AgentTask.step_scope"}
+                {
+                    "action_id": capability_id,
+                    "capability_id": capability_id,
+                    "source": (
+                        "AgentTask.work_unit"
+                        if capability_id in work_unit_id_set
+                        else "AgentTask.step_scope"
+                    ),
+                }
                 for capability_id in scoped_ids
             ),
             diagnostics=(
@@ -963,7 +1602,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             "work_unit_result": cls._compact_work_unit_result_for_meta(work_unit_result),
             "output_policy": output_policy.to_dict(),
             "block_result": cls._compact_block_result_for_meta(block_result),
-            "workspace_operations": cls._compact_workspace_operations_for_meta(snapshot),
+            "context_reads": cls._compact_context_reads_for_meta(snapshot),
             "snapshot_status": snapshot.get("status") if isinstance(snapshot, Mapping) else None,
         }
 
@@ -1113,7 +1752,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 output = item.get("output")
                 output_summary: dict[str, Any] = {}
                 if isinstance(output, Mapping):
-                    if str(item.get("kind") or "") == "workspace_operation":
+                    if str(item.get("kind") or "") == "context_read":
                         for output_key in ("operation", "query", "filters", "bounded", "diagnostics"):
                             if output_key in output:
                                 output_summary[output_key] = cls._compact_value_for_meta(
@@ -1124,7 +1763,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         if isinstance(locator_refs, (list, tuple)):
                             output_summary["locator_ref_count"] = len(locator_refs)
                             if locator_refs:
-                                output_summary["first_locator_ref"] = cls._compact_workspace_ref_or_snippet_for_meta(
+                                output_summary["first_locator_ref"] = cls._compact_task_workspace_ref_or_snippet_for_meta(
                                     locator_refs[0],
                                     max_chars=1000,
                                 )
@@ -1132,7 +1771,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         if isinstance(evidence_snippets, (list, tuple)):
                             output_summary["evidence_snippet_count"] = len(evidence_snippets)
                             if evidence_snippets:
-                                output_summary["first_evidence_snippet"] = cls._compact_workspace_ref_or_snippet_for_meta(
+                                output_summary["first_evidence_snippet"] = cls._compact_task_workspace_ref_or_snippet_for_meta(
                                     evidence_snippets[0],
                                     max_chars=1800,
                                 )
@@ -1210,7 +1849,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize(compact)
 
     @classmethod
-    def _compact_workspace_operations_for_meta(cls, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _compact_context_reads_for_meta(cls, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
         blocks_state = snapshot.get("blocks", {}) if isinstance(snapshot, Mapping) else {}
         results = blocks_state.get("execution_block_results") if isinstance(blocks_state, Mapping) else None
         if not isinstance(results, Sequence) or isinstance(results, (str, bytes, bytearray)):
@@ -1219,7 +1858,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         for item in results:
             if not isinstance(item, Mapping):
                 continue
-            if str(item.get("kind") or "") != "workspace_operation":
+            if str(item.get("kind") or "") != "context_read":
                 continue
             output = item.get("output")
             if not isinstance(output, Mapping):
@@ -1232,7 +1871,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             if isinstance(locator_refs, (list, tuple)):
                 output_summary["locator_ref_count"] = len(locator_refs)
                 if locator_refs:
-                    output_summary["first_locator_ref"] = cls._compact_workspace_ref_or_snippet_for_meta(
+                    output_summary["first_locator_ref"] = cls._compact_task_workspace_ref_or_snippet_for_meta(
                         locator_refs[0],
                         max_chars=1000,
                     )
@@ -1240,7 +1879,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             if isinstance(evidence_snippets, (list, tuple)):
                 output_summary["evidence_snippet_count"] = len(evidence_snippets)
                 if evidence_snippets:
-                    output_summary["first_evidence_snippet"] = cls._compact_workspace_ref_or_snippet_for_meta(
+                    output_summary["first_evidence_snippet"] = cls._compact_task_workspace_ref_or_snippet_for_meta(
                         evidence_snippets[0],
                         max_chars=1800,
                     )
@@ -1262,7 +1901,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return operations
 
     @classmethod
-    def _compact_workspace_ref_or_snippet_for_meta(cls, value: Any, *, max_chars: int) -> Any:
+    def _compact_task_workspace_ref_or_snippet_for_meta(cls, value: Any, *, max_chars: int) -> Any:
         if not isinstance(value, Mapping):
             return cls._compact_value_for_meta(value, max_chars=max_chars)
         compact: dict[str, Any] = {}
@@ -1327,7 +1966,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         request = getattr(execution, "request", None)
         set_settings = getattr(request, "set_settings", None)
         if callable(set_settings):
-            set_settings("action.workspace", self.workspace)
+            set_settings("action.task_workspace", self.task_workspace)
 
 
 __all__ = ["AgentTaskCarrierMixin"]

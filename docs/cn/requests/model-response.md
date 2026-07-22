@@ -141,6 +141,12 @@ heartbeat item 保持 structured-only，
 不会追加 synthetic `$delta` 文本。`type="all"` 仍是 raw audit stream，
 不包含这些 synthetic projection item。
 
+结构化 `AgentExecution` 会让其持有的 `ModelRequest` 一直运行到 provider/parser
+自然终态。`instant` 中出现 ensured 字段或已闭合的 mapping 字段，只表示该 provisional
+path 已可见；它不会取消请求，也不能证明后续 evidence、self-check、summary、progress、
+diagnostics、最终校验、usage 或 terminal events 已经到达。因此，无论调用方只读取最终
+结果还是同时消费流，成功请求都会保留包括 `request.completed` 在内的普通完成链路。
+
 ```python
 execution = agent.input("总结这份事故更新。")
 async for item in execution.get_async_generator(type="instant"):

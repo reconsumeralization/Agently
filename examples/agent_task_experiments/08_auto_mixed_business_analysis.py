@@ -57,7 +57,6 @@ async def main() -> None:
 
     options = stream_options()
     options["capability_evidence_requirements"] = [
-        {"capability_id": skill_id, "capability_kind": "skill", "kind": "capability_used"},
         {"capability_id": "get_board_question_packet", "capability_kind": "action", "kind": "action_succeeded"},
         {"capability_id": "crm_pipeline_snapshot", "capability_kind": "action", "kind": "action_succeeded"},
         {"capability_id": "competitor_signal_snapshot", "capability_kind": "action", "kind": "action_succeeded"},
@@ -69,7 +68,7 @@ async def main() -> None:
             "Write a board-ready market-entry memo for the mid-market healthcare operations segment. "
             "Use get_board_question_packet, the local MCP CRM and competitor signal tools, "
             "and the installed market-entry-analyst Skill guidance. "
-            "Write the memo to final.md in the Workspace and return a concise final summary. "
+            "Write the memo to final.md in the TaskWorkspace and return a concise final summary. "
             "Treat MCP CRM and competitor data as example business-system data, not a production export.",
             success_criteria=[
                 "The memo states the board decision it supports.",
@@ -79,9 +78,9 @@ async def main() -> None:
                 "The final report is written to final.md and clearly labels example MCP data boundaries.",
             ],
         )
-        .create_execution(options=options)
+        .strategy("auto", options=options)
     )
-    await async_run_and_print(execution, provider=provider, workspace=workspace)
+    await async_run_and_print(execution, provider=provider, task_workspace=workspace)
 
 
 if __name__ == "__main__":
@@ -92,7 +91,7 @@ if __name__ == "__main__":
 # execution_strategy=auto. Auto selected TaskBoard, used the native
 # get_board_question_packet action, local stdio MCP crm_pipeline_snapshot and
 # competitor_signal_snapshot tools, the installed market-entry-analyst Skill,
-# and Workspace write_file/read_file. The run produced final.md
+# and TaskWorkspace write_file/read_file. The run produced final.md
 # (5335 bytes, sha256
 # e1531a4c44bf01179ba1a61773c450d8de37706a7ad6db2feae547b82c73d838)
 # with a board decision, required question answers, CRM/competitor evidence,

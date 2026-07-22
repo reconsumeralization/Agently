@@ -41,7 +41,7 @@ def main() -> None:
         ],
         options=stream_options(),
     )
-    run_and_print(execution, provider=provider, workspace=workspace)
+    run_and_print(execution, provider=provider, task_workspace=workspace)
 
 
 if __name__ == "__main__":

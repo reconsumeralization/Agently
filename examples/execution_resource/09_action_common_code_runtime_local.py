@@ -18,11 +18,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from agently import Agently
-from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
-    CODE_RUNTIME_PROFILES,
-)
 
 ACTION_ID = "run_python_code_runtime"
+SUPPORTED_ADAPTERS = ("python", "nodejs", "go", "cpp")
 
 
 def main():
@@ -31,7 +29,10 @@ def main():
         language="python",
         action_id=ACTION_ID,
         expose_to_model=False,
-        provisioning_profile="developer",
+        providers=["docker"],
+        unsafe_fallback=True,
+        isolation="preferred",
+        provisioning_profile="strict",
     )
 
     result = agent.action.execute_action(
@@ -46,24 +47,31 @@ def main():
     )
 
     data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
-    supported = ", ".join(sorted(CODE_RUNTIME_PROFILES))
+    meta = data.get("meta", {}) if isinstance(data.get("meta"), dict) else {}
+    capabilities = (
+        meta.get("provider_capabilities", {})
+        if isinstance(meta.get("provider_capabilities"), dict)
+        else {}
+    )
+    supported = ", ".join(SUPPORTED_ADAPTERS)
     print("status:", result.get("status"))
     print("stdout:", str(data.get("stdout", "")).strip().replace("\n", " | "))
-    print("catalog:", supported)
+    print("provider safety:", capabilities.get("safety_class", "unavailable"))
+    print("adapters:", supported)
 
 
 if __name__ == "__main__":
     main()
 
 
-# Expected key output with a local Docker service:
+# Expected key output with Docker or the explicitly enabled local fallback:
 # status: success
 # stdout: runtime:python | result:42
-# catalog: bash, c, cpp, csharp, go, java, lua, nodejs, perl, php, python, r, ruby, rust, typescript
+# adapters: python, nodejs, go, cpp
 #
 # Working principle:
-# agent.enable_code_runtime(language="python", provisioning_profile="developer")
-# registers a Docker-backed Action whose ExecutionResource profile may pull the
-# missing runtime image, then runs fixed provider-owned entrypoint code. The
-# common-language catalog also includes JavaScript/Node.js, TypeScript, C, C++,
-# Go, Rust, Java, C#/.NET, PHP, Ruby, Perl, R, Lua, and Bash profiles.
+# agent.enable_code_runtime(...) registers a provider-neutral Action. It binds a
+# TaskWorkspace grant, tries Docker first, materializes an immutable adapter
+# bundle, and uses the explicitly authorized unsafe local provider only when no
+# eligible Docker provider is available. The built-in adapters are Python,
+# Node.js, Go, and C++.

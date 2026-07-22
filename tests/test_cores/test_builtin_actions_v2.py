@@ -1,3 +1,4 @@
+import copy
 import json
 import sqlite3
 from typing import Any, cast
@@ -12,8 +13,8 @@ from agently.builtins.tools import Browse as LegacyBrowse
 from agently.builtins.tools import Cmd as LegacyCmd
 from agently.builtins.tools import Search as LegacySearch
 from agently.core.application.AgentExecution.Context import AgentExecutionContext
+from agently.core import TaskWorkspace
 from agently.core.runtime.RuntimeContext import bind_runtime_context
-from agently.core.workspace._defaults import WORKSPACE_GUIDE_FILENAME
 
 
 def test_builtins_actions_is_preferred_import_path_and_tools_is_facade():
@@ -94,22 +95,63 @@ def test_mcp_and_acp_optional_dependencies_wait_for_explicit_use(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cmd_without_workspace_boundary_fails_closed_no_cwd_fallback(tmp_path):
-    # Without a Workspace-issued working directory, Cmd must refuse instead of
+async def test_cmd_without_task_workspace_boundary_fails_closed_no_cwd_fallback(tmp_path):
+    # Without a TaskWorkspace-issued working directory, Cmd must refuse instead of
     # silently running in the process cwd (spec sections 8.6 / 9).
     cmd = Cmd(allowed_cmd_prefixes=["pwd"])
     assert cmd.allowed_workdir_roots == []
     result = await cmd.run("pwd")
     assert result["ok"] is False
-    assert result["reason"] == "workspace_boundary_required"
+    assert result["reason"] == "task_workspace_boundary_required"
 
 
 @pytest.mark.asyncio
-async def test_cmd_with_workspace_boundary_runs_in_injected_root(tmp_path):
+async def test_cmd_with_task_workspace_boundary_runs_in_injected_root(tmp_path):
     cmd = Cmd(allowed_cmd_prefixes=["pwd"], allowed_workdir_roots=[str(tmp_path)])
     result = await cmd.run("pwd")
     assert result["ok"] is True
     assert str(tmp_path) in result["stdout"]
+
+
+@pytest.mark.asyncio
+async def test_cmd_resolves_relative_workdir_from_injected_root(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cmd = Cmd(allowed_cmd_prefixes=["pwd"], allowed_workdir_roots=[str(tmp_path)])
+
+    root_result = await cmd.run("pwd", workdir=".")
+    child_result = await cmd.run("pwd", workdir="project")
+
+    assert root_result["ok"] is True
+    assert child_result["ok"] is True
+    assert root_result["stdout"].strip() == str(tmp_path.resolve())
+    assert child_result["stdout"].strip() == str(project.resolve())
+
+
+@pytest.mark.asyncio
+async def test_cmd_collapses_task_workspace_root_prefixed_relative_workdir(tmp_path):
+    execution_root = tmp_path / ".agently" / "files" / "execution-1"
+    execution_root.mkdir(parents=True)
+    child = execution_root / "reports"
+    child.mkdir()
+    cmd = Cmd(
+        allowed_cmd_prefixes=["pwd"],
+        allowed_workdir_roots=[str(execution_root)],
+    )
+
+    root_result = await cmd.run(
+        "pwd",
+        workdir=".agently/files/execution-1",
+    )
+    child_result = await cmd.run(
+        "pwd",
+        workdir=".agently/files/execution-1/reports",
+    )
+
+    assert root_result["ok"] is True
+    assert child_result["ok"] is True
+    assert root_result["stdout"].strip() == str(execution_root.resolve())
+    assert child_result["stdout"].strip() == str(child.resolve())
 
 
 def test_v2_default_plugins_are_registered():
@@ -119,13 +161,13 @@ def test_v2_default_plugins_are_registered():
     assert {
         "SearchActionExecutor",
         "BrowseActionExecutor",
-        "NodeJSActionExecutor",
+        "CodeExecutionActionExecutor",
         "DockerActionExecutor",
         "SQLiteActionExecutor",
     }.issubset(action_executors)
     assert {
         "ACPExecutionResourceProvider",
-        "NodeExecutionResourceProvider",
+        "TrustedLocalExecutionResourceProvider",
         "DockerExecutionResourceProvider",
         "BrowserExecutionResourceProvider",
         "SQLiteExecutionResourceProvider",
@@ -165,7 +207,7 @@ class FakeACPProvider:
 
 
 def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
-    agent = Agently.create_agent().use_workspace(tmp_path / "workspace")
+    agent = Agently.create_agent().use_task_workspace(tmp_path / "task_workspace")
     provider = FakeACPProvider(
         [
             {"agent_id": "codex", "name": "Codex", "status": "ready", "endpoint": "local"},
@@ -191,9 +233,9 @@ def test_agent_use_acp_registers_handshake_verified_actions(tmp_path):
     assert run_result.get("status") == "success"
     assert run_result.get("agent_id") == "codex"
     assert run_result.get("data", {}).get("output") == "codex: inspect the current branch"
-    assert provider.runs[0]["root"] == str(agent.workspace.files_root)
-    assert provider.runs[0]["working_dir"] == str(agent.workspace.files_root)
-    assert (agent.workspace.files_root / WORKSPACE_GUIDE_FILENAME).is_file()
+    assert provider.runs[0]["root"] == str(agent.task_workspace.root)
+    assert provider.runs[0]["working_dir"] == str(agent.task_workspace.root)
+    assert not (agent.task_workspace.root / ".agently").exists()
 
 
 def test_agent_use_acp_skips_missing_or_failed_agents(tmp_path):
@@ -326,6 +368,37 @@ def test_agent_use_actions_accepts_search_package():
     result = agent.action.execute_action("search", {"query": "Agently", "max_results": 2})
     assert result.get("status") == "success"
     assert result.get("data") == [{"title": "Agently", "href": "https://example.com", "body": "limit=2"}]
+
+
+def test_search_batch_registration_rolls_back_and_restores_host_action_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    agent = Agently.create_agent()
+    agent.action.register_action(
+        action_id="search",
+        desc="Host-owned search Action.",
+        kwargs={"query": (str, "query")},
+        func=lambda query: {"host": query},
+    )
+    original_register = agent.action.register_action
+    registration_count = 0
+
+    def fail_second_registration(**kwargs: Any):
+        nonlocal registration_count
+        registration_count += 1
+        if registration_count == 2:
+            raise RuntimeError("search batch registration failed")
+        return original_register(**kwargs)
+
+    monkeypatch.setattr(agent.action, "register_action", fail_second_registration)
+
+    with pytest.raises(RuntimeError, match="search batch registration failed"):
+        agent.use_actions(Search(timeout=1))
+
+    restored = agent.action.action_registry.get_spec("search")
+    assert restored is not None
+    assert restored.get("desc") == "Host-owned search Action."
+    assert not agent.action.action_registry.has("search_news")
 
 
 def test_agent_language_policy_updates_builtin_search_default_region():
@@ -716,7 +789,7 @@ async def test_browse_falls_back_from_curl_to_jina_reader_with_diagnostics():
 
 @pytest.mark.asyncio
 async def test_browse_curl_backend_materializes_remote_file_to_workspace(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "browse-curl-workspace")
+    task_workspace = TaskWorkspace(tmp_path / "browse-curl-workspace", mode="read_write")
     browse = Browse(
         fallback_order=("curl",),
         enable_playwright=False,
@@ -739,12 +812,16 @@ async def test_browse_curl_backend_materializes_remote_file_to_workspace(tmp_pat
 
     browse._curl_browse = fake_curl  # type: ignore[method-assign]
 
-    result = await browse._execute_action_method("browse", url="https://example.com/syllabus.pdf", workspace=workspace)
+    result = await browse._execute_action_method(
+        "browse",
+        url="https://example.com/syllabus.pdf",
+        task_workspace=task_workspace,
+    )
 
     assert result["status"] in {"success", "partial_success"}
     assert result["data"]["kind"] == "remote_file"
-    assert result["file_refs"][0]["path"].startswith("downloads/syllabus-")
-    assert (workspace.files_root / result["file_refs"][0]["path"]).is_file()
+    assert "downloads/syllabus-" in result["file_refs"][0]["path"]
+    assert (task_workspace.root / result["file_refs"][0]["path"]).is_file()
 
 
 def test_browse_action_failure_is_structured_error_not_success_text():
@@ -877,6 +954,67 @@ async def test_action_runtime_default_planning_uses_configured_model_key(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_action_runtime_default_planning_discloses_single_action_id_round_policy(monkeypatch):
+    import agently.core as agently_core
+
+    agent = Agently.create_agent()
+    agent.settings.set("action.loop.round_dispatch_policy", "single_action_id_cohort")
+    captured_info: list[dict[str, Any]] = []
+    captured_instructions: list[list[str]] = []
+
+    class FakeResult:
+        async def async_get_data(self):
+            return {"next_action": "response", "execution_commands": []}
+
+    class FakeResponse:
+        result = FakeResult()
+
+    class FakeModelRequest:
+        def __init__(self, *_, **__):
+            pass
+
+        def input(self, *_args, **_kwargs):
+            return self
+
+        def info(self, value):
+            captured_info.append(value)
+            return self
+
+        def instruct(self, value):
+            captured_instructions.append(value)
+            return self
+
+        def output(self, *_args, **_kwargs):
+            return self
+
+        def get_response(self, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(agently_core, "ModelRequest", FakeModelRequest)
+    prompt = Agently.create_prompt()
+    prompt.set("input", "search, then read a selected match")
+
+    await agent.action.action_runtime._default_structured_planning_handler(
+        {
+            "prompt": prompt,
+            "settings": agent.settings,
+            "agent_name": agent.name,
+            "round_index": 0,
+            "max_rounds": None,
+            "done_plans": [],
+            "last_round_records": [],
+        },
+        {"action_list": [{"name": "search"}, {"name": "read"}]},
+    )
+
+    assert captured_info[0]["round_dispatch_policy"] == "single_action_id_cohort"
+    assert any(
+        "same action_id" in instruction and "next round" in instruction
+        for instruction in captured_instructions[0]
+    )
+
+
+@pytest.mark.asyncio
 async def test_browse_recovers_http_to_https_and_returns_link_diagnostics():
     browse = Browse(
         fallback_order=("bs4",),
@@ -972,7 +1110,7 @@ async def test_browse_rejects_waf_shell_and_continues_protocol_candidates():
 
 @pytest.mark.asyncio
 async def test_browse_materializes_remote_file_to_workspace(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "browse-workspace")
+    task_workspace = TaskWorkspace(tmp_path / "browse-workspace", mode="read_write")
     browse = Browse(
         fallback_order=("bs4",),
         enable_playwright=False,
@@ -996,22 +1134,26 @@ async def test_browse_materializes_remote_file_to_workspace(tmp_path):
 
     browse._bs4_browse = fake_bs4  # type: ignore[method-assign]
 
-    result = await browse._execute_action_method("browse", url="https://example.com/syllabus.pdf", workspace=workspace)
+    result = await browse._execute_action_method(
+        "browse",
+        url="https://example.com/syllabus.pdf",
+        task_workspace=task_workspace,
+    )
 
     assert result["success"] is True
     assert result["status"] in {"success", "partial_success"}
     assert result["data"]["kind"] == "remote_file"
     assert result["data"]["media_type"] == "application/pdf"
-    assert result["file_refs"][0]["path"].startswith("downloads/syllabus-")
-    assert (workspace.files_root / result["file_refs"][0]["path"]).is_file()
+    assert "downloads/syllabus-" in result["file_refs"][0]["path"]
+    assert (task_workspace.root / result["file_refs"][0]["path"]).is_file()
     assert result["data"]["read_preview"]["path"] == result["file_refs"][0]["path"]
     assert "content_bytes" not in str(result)
 
 
-def test_browse_action_executor_uses_settings_workspace_for_remote_file(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "browse-action-workspace")
+def test_browse_action_executor_uses_settings_task_workspace_for_remote_file(tmp_path):
+    task_workspace = TaskWorkspace(tmp_path / "browse-action-workspace", mode="read_write")
     agent = Agently.create_agent()
-    cast(Any, agent.settings).set("action.workspace", workspace)
+    cast(Any, agent.settings).set("action.task_workspace", task_workspace)
     browse = Browse(
         fallback_order=("bs4",),
         enable_playwright=False,
@@ -1040,12 +1182,12 @@ def test_browse_action_executor_uses_settings_workspace_for_remote_file(tmp_path
     assert result.get("success") is True
     file_refs = result.get("file_refs", [])
     assert isinstance(file_refs, list)
-    assert file_refs[0]["path"].startswith("downloads/syllabus-")
-    assert (workspace.files_root / file_refs[0]["path"]).is_file()
+    assert "downloads/syllabus-" in file_refs[0]["path"]
+    assert (task_workspace.root / file_refs[0]["path"]).is_file()
 
 
 @pytest.mark.asyncio
-async def test_browse_remote_file_without_workspace_fails_closed():
+async def test_browse_remote_file_without_task_workspace_fails_closed():
     browse = Browse(
         fallback_order=("bs4",),
         enable_playwright=False,
@@ -1072,7 +1214,7 @@ async def test_browse_remote_file_without_workspace_fails_closed():
 
     assert result["success"] is False
     assert result["status"] == "blocked"
-    assert result["diagnostics"][0]["code"] == "browse.remote_file.workspace_required"
+    assert result["diagnostics"][0]["code"] == "browse.remote_file.task_workspace_required"
     assert "content_bytes" not in str(result)
 
 
@@ -1160,7 +1302,7 @@ def test_agent_enable_sqlite_registers_managed_sqlite_action(tmp_path):
     assert data.get("rows") == [{"name": "Agently"}]
 
 
-def test_instruction_heavy_action_records_digest_and_artifact_recall(tmp_path):
+def test_instruction_heavy_direct_action_releases_historical_artifact_refs(tmp_path):
     agent = Agently.create_agent()
     agent.enable_shell(root=tmp_path, commands=["pwd"], action_id="test_recall_bash", sandbox="trusted_local")
 
@@ -1193,29 +1335,38 @@ def test_instruction_heavy_action_records_digest_and_artifact_recall(tmp_path):
     assert isinstance(input_action_call_id, str)
     assert isinstance(output_artifact_id, str)
     assert isinstance(output_action_call_id, str)
+    assert all(ref.get("available") is False for ref in artifact_refs)
+    assert all(ref.get("full_value_available") is False for ref in artifact_refs)
 
     recalled_input = agent.action.read_action_artifact(
-        artifact_id=input_artifact_id,
-        action_call_id=input_action_call_id,
+        selection_key=str(input_ref.get("selection_key", "")),
     )
-    assert recalled_input.get("value", {}).get("api_token") == "[REDACTED]"
+    assert recalled_input.get("ok") is False
+    assert recalled_input.get("status") == "not_found"
 
     recalled = agent.action.read_action_artifact(
-        artifact_id=output_artifact_id,
-        action_call_id=output_action_call_id,
+        selection_key=str(output_ref.get("selection_key", "")),
     )
-    assert recalled.get("ok") is True
-    assert str(tmp_path) in str(recalled.get("value", {}).get("stdout", ""))
+    assert recalled.get("ok") is False
+    assert recalled.get("status") == "not_found"
 
     prompt_results = agent.action.to_action_results([result])
     visible = prompt_results["Inspect cwd"]
     assert isinstance(visible, dict)
     assert visible.get("action_call_id") == result.get("action_call_id")
-    assert visible.get("artifact_refs") == artifact_refs
+    visible_refs = visible.get("artifact_refs")
+    assert isinstance(visible_refs, list)
+    assert [ref.get("selection_key") for ref in visible_refs] == [
+        ref.get("selection_key") for ref in artifact_refs
+    ]
+    assert all(
+        set(ref).isdisjoint({"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"})
+        for ref in visible_refs
+    )
 
 
 @pytest.mark.asyncio
-async def test_action_loop_uses_digest_and_exposes_recall_after_artifacts(tmp_path):
+async def test_action_loop_exposes_live_recall_then_returns_historical_refs(tmp_path):
     agent = Agently.create_agent()
     tag = f"recall-loop-{agent.name}"
     action_id = "test_loop_recall_bash"
@@ -1271,17 +1422,82 @@ async def test_action_loop_uses_digest_and_exposes_recall_after_artifacts(tmp_pa
     )
 
     assert len(records) == 1
-    assert str(tmp_path) in str(records[0].get("data", {}).get("stdout", ""))
+    assert str(tmp_path) in str(
+        records[0].get("data", {}).get("result_preview", {}).get("stdout", "")
+    )
     assert len(seen_rounds) >= 2
     second_round = seen_rounds[1]
     assert "read_action_artifact" in second_round["action_ids"]
     visible_record = second_round["last_round_records"][0]
-    assert visible_record.get("data") == records[0].get("model_digest")
-    assert visible_record.get("result") == records[0].get("model_digest")
+    live_digest = visible_record.get("data")
+    returned_digest = records[0].get("model_digest")
+    assert isinstance(live_digest, dict)
+    assert isinstance(returned_digest, dict)
+    assert {
+        key: value for key, value in live_digest.items() if key != "artifact_refs"
+    } == {
+        key: value for key, value in returned_digest.items() if key != "artifact_refs"
+    }
+    assert visible_record.get("result") == live_digest
+    assert all(ref.get("available") is True for ref in live_digest.get("artifact_refs", []))
+    assert all(ref.get("available") is False for ref in returned_digest.get("artifact_refs", []))
 
 
 @pytest.mark.asyncio
-async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_context():
+async def test_action_loop_preserves_blocked_executor_reason_for_model_repair(tmp_path):
+    agent = Agently.create_agent()
+    tag = f"blocked-reason-{agent.name}"
+    action_id = "test_blocked_reason_bash"
+    agent.action.register_bash_sandbox_action(
+        action_id=action_id,
+        tags=[tag],
+        allowed_cmd_prefixes=["pwd"],
+        allowed_workdir_roots=[str(tmp_path)],
+        expose_to_model=True,
+    )
+    prompt = Agently.create_prompt()
+    prompt.set("input", "try one blocked command")
+    seen_records: list[list[dict[str, Any]]] = []
+
+    async def planning_handler(context, request):
+        _ = request
+        seen_records.append(context.get("last_round_records", []))
+        if context.get("round_index") == 0:
+            return {
+                "next_action": "execute",
+                "action_calls": [
+                    {
+                        "purpose": "Run a disallowed command",
+                        "action_id": action_id,
+                        "action_input": {
+                            "cmd": ["python -c 'print(1)'"],
+                            "workdir": str(tmp_path),
+                        },
+                    }
+                ],
+            }
+        return {"next_action": "response", "action_calls": []}
+
+    await agent.action.async_plan_and_execute(
+        prompt=prompt,
+        settings=agent.settings,
+        action_list=agent.action.get_action_list(tags=[tag]),
+        agent_name=agent.name,
+        planning_handler=planning_handler,
+        max_rounds=2,
+    )
+
+    blocked = seen_records[1][0]
+    digest = blocked.get("data", {})
+    assert blocked.get("status") == "blocked"
+    assert blocked.get("error") == "cmd_not_allowed"
+    assert digest.get("error") == "cmd_not_allowed"
+    assert digest.get("result_preview", {}).get("reason") == "cmd_not_allowed"
+    assert digest.get("diagnostics", [{}])[0].get("code") == "shell.cmd_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_action_loop_keeps_large_outputs_cold_then_releases_standalone_scope():
     agent = Agently.create_agent()
     marker = "RAW_OUTPUT_SHOULD_STAY_COLD"
 
@@ -1330,7 +1546,19 @@ async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_contex
         planning_handler=planning_handler,
     )
 
-    assert marker in json.dumps(records, ensure_ascii=False)
+    assert marker not in json.dumps(records, ensure_ascii=False)
+    output_ref = next(
+        ref
+        for ref in records[0].get("artifact_refs", [])
+        if ref.get("artifact_type") == "action_output"
+    )
+    assert output_ref.get("selection_key")
+    assert set(output_ref).isdisjoint(
+        {"artifact_id", "action_call_id", "sha256", "size", "bytes", "meta"}
+    )
+    assert output_ref.get("available") is False
+    assert output_ref.get("full_value_available") is False
+    assert agent.action._artifact_manager._artifacts == {}
     assert len(seen_rounds) >= 2
     second_round = seen_rounds[1]
     hot_context = json.dumps(
@@ -1341,7 +1569,7 @@ async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_contex
         ensure_ascii=False,
     )
     assert marker not in hot_context
-    assert len(hot_context) < 9000
+    assert len(hot_context) < 10000
     assert "read_action_artifact" in second_round["action_ids"]
     visible_record = second_round["last_round_records"][0]
     assert visible_record["data"]["same_as"] == "result"
@@ -1350,6 +1578,88 @@ async def test_action_loop_keeps_large_action_outputs_out_of_hot_planning_contex
     assert visible_digest["artifact_refs"]
     assert "preview" not in visible_digest["artifact_refs"][0]
     assert visible_record["artifacts"] == visible_record["artifact_refs"]
+
+
+@pytest.mark.asyncio
+async def test_action_loop_explicit_recall_returns_bounded_hot_page_without_recursive_ref():
+    agent = Agently.create_agent()
+    expected_path = "ultralytics/nn/modules/moe/routers.py"
+
+    @agent.action_func
+    def produce_large_repository_listing() -> dict[str, Any]:
+        return {
+            "a_path": expected_path,
+            "body": "x" * 12000,
+        }
+
+    prompt = Agently.create_prompt()
+    prompt.set("input", "discover and read the exact repository path")
+    seen_rounds: list[dict[str, Any]] = []
+
+    async def planning_handler(context, _request):
+        round_index = int(context.get("round_index", 0))
+        last_round_records = context.get("last_round_records", [])
+        seen_rounds.append(
+            {
+                "round_index": round_index,
+                "last_round_records": copy.deepcopy(last_round_records),
+            }
+        )
+        if round_index == 0:
+            return {
+                "next_action": "execute",
+                "action_calls": [
+                    {
+                        "purpose": "List repository paths",
+                        "action_id": "produce_large_repository_listing",
+                        "action_input": {},
+                    }
+                ],
+            }
+        if round_index == 1:
+            output_ref = next(
+                ref
+                for ref in last_round_records[0].get("artifact_refs", [])
+                if ref.get("artifact_type") == "action_output"
+            )
+            return {
+                "next_action": "execute",
+                "action_calls": [
+                    {
+                        "purpose": "Read the bounded repository listing page",
+                        "action_id": "read_action_artifact",
+                        "action_input": {
+                            "selection_key": output_ref["selection_key"],
+                            "offset": 0,
+                            "max_bytes": 4096,
+                        },
+                    }
+                ],
+            }
+        return {"next_action": "response", "action_calls": []}
+
+    records = await agent.action.async_plan_and_execute(
+        prompt=prompt,
+        settings=agent.settings,
+        action_list=agent.action.get_action_list(tags=[f"agent-{agent.name}"]),
+        agent_name=agent.name,
+        planning_handler=planning_handler,
+    )
+
+    assert len(seen_rounds) == 3
+    recalled_record = seen_rounds[2]["last_round_records"][0]
+    recall_digest = recalled_record["result"]
+    assert recall_digest["transfer_kind"] == "explicit_action_artifact_readback"
+    assert expected_path in recall_digest["result_preview"]["value"]
+    assert recalled_record["artifact_refs"] == []
+    assert recalled_record["artifacts"] == []
+    assert sum(
+        1
+        for record in records
+        for ref in record.get("artifact_refs", [])
+        if ref.get("artifact_type") == "action_output"
+    ) == 1
+    assert agent.action._artifact_manager._artifacts == {}
 
 
 def test_search_package_does_not_load_backend_during_registration(monkeypatch):

@@ -20,12 +20,12 @@ from pathlib import Path
 from agently.core.operation.ExecutionResource import ExecutionResourceError
 
 
-def materialize_workspace_boundary(
+def materialize_task_workspace_boundary(
     candidates: Iterable[object | None],
     *,
     label: str,
 ) -> str | None:
-    """Materialize a Workspace-issued file boundary into the provider context.
+    """Materialize a TaskWorkspace-issued file boundary into the provider context.
 
     Resolves the first usable candidate root, ensures it exists and is a writable
     directory, and returns it as an execution-ready working directory. The
@@ -58,13 +58,13 @@ def materialize_workspace_boundary(
         primary.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ExecutionResourceError(
-            f"{label} could not materialize the Workspace file boundary at {primary}: {exc}",
+            f"{label} could not materialize the TaskWorkspace file boundary at {primary}: {exc}",
             code="execution_resource.file_boundary_unavailable",
             payload={"boundary": str(primary)},
         ) from exc
     if not primary.is_dir():
         raise ExecutionResourceError(
-            f"{label} Workspace file boundary is not a directory: {primary}",
+            f"{label} TaskWorkspace file boundary is not a directory: {primary}",
             code="execution_resource.file_boundary_invalid",
             payload={"boundary": str(primary)},
         )

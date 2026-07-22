@@ -2,12 +2,13 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
+from agently import TriggerFlow, TriggerFlowRuntimeData
+from agently.core.storage import RecordStore
 
 
 async def triggerflow_durable_recovery_demo():
-    with tempfile.TemporaryDirectory(prefix="agently-triggerflow-recovery-") as workspace_dir:
-        workspace = Agently.create_workspace(Path(workspace_dir))
+    with tempfile.TemporaryDirectory(prefix="agently-triggerflow-recovery-") as record_dir:
+        record_store = RecordStore(Path(record_dir), mode="read_write")
         flow = TriggerFlow(name="durable-approval-recovery")
 
         async def draft_request(data: TriggerFlowRuntimeData):
@@ -44,19 +45,21 @@ async def triggerflow_durable_recovery_demo():
 
         execution = flow.create_execution(
             auto_close=False,
-            runtime_resources={"workspace": workspace},
+            record_store=record_store,
+            runtime_resources={"runtime_event_store": record_store},
         )
         await execution.async_start("pricing")
         snapshot_ref = await execution.async_save(step_id="waiting-approval")
-        saved_snapshot = await workspace.get_data(snapshot_ref)
+        saved_snapshot = await record_store.get_data(snapshot_ref)
 
         recovered = flow.create_execution(
             auto_close=False,
-            runtime_resources={"workspace": workspace},
+            record_store=record_store,
+            runtime_resources={"runtime_event_store": record_store},
         )
         load = await recovered.async_load(
             saved_snapshot,
-            runtime_resources={"workspace": workspace},
+            runtime_resources={"record_store": record_store, "runtime_event_store": record_store},
         )
         assert load["ready"] is True
 
@@ -70,9 +73,13 @@ async def triggerflow_durable_recovery_demo():
         resumed_state = recovered.save()
         replay = flow.create_execution(
             auto_close=False,
-            runtime_resources={"workspace": workspace},
+            record_store=record_store,
+            runtime_resources={"runtime_event_store": record_store},
         )
-        replay.load(resumed_state, runtime_resources={"workspace": workspace})
+        replay.load(
+            resumed_state,
+            runtime_resources={"record_store": record_store, "runtime_event_store": record_store},
+        )
         duplicate_result = await replay.async_continue_with(
             "approval",
             {"approved": True},
@@ -81,7 +88,7 @@ async def triggerflow_durable_recovery_demo():
         )
         snapshot = await replay.async_close()
         final_state = replay.save()
-        runtime_events = await workspace.query_runtime_events(replay.id)
+        runtime_events = await record_store.query_runtime_events(replay.id)
 
         resume_record = final_state["resume_ledger"]["approval"]["approval-webhook-42"]
         wait_request = final_state["interrupts"]["approval"]["external_wait_request"]
@@ -121,7 +128,7 @@ if __name__ == "__main__":
 #
 # How it works:
 # The first execution pauses at a durable ExternalWait approval request and
-# persists a Workspace-backed execution snapshot. A fresh execution loads
+# persists a RecordStore-backed execution snapshot. A fresh execution loads
 # that snapshot, accepts the approval with a stable resume_request_id, then a second
 # fresh execution receives the same callback id again.  The duplicate callback
 # returns the completed interrupt record instead of running finalize twice.

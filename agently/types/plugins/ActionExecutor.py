@@ -14,22 +14,22 @@
 
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from .base import AgentlyPlugin
-
 if TYPE_CHECKING:
     from agently.types.data import ActionCall, ActionPolicy, ActionSpec
     from agently.utils import Settings
 
 
 @runtime_checkable
-class ActionExecutor(AgentlyPlugin, Protocol):
+class ActionExecutor(Protocol):
     """
-    Atomic action backend plugin.
+    Atomic action backend contract.
 
     Implement this protocol when a third-party action changes only the execution
     backend, for example Docker, SandLock, a remote runner, or a vendor tool API.
-    The dispatcher owns policy merging and result normalization; executors should
-    focus on performing one action call.
+    Directly registered executors do not need to implement Agently plugin
+    lifecycle hooks. Plugin-loaded executors satisfy that separate contract at
+    the PluginManager boundary. The dispatcher owns policy merging and result
+    normalization; executors should focus on performing one action call.
     """
 
     kind: str

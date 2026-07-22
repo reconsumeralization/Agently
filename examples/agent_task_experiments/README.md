@@ -33,24 +33,24 @@ injection is what makes them task-oriented.
 The first five scripts cover the core experiment scenarios: stock-risk
 briefing, Agent engineering weekly report, LMCC mock exam generation,
 repository reading, and multi-runtime code execution.
-`05_auto_multiruntime_code_task.py` mounts Workspace coding actions, framework
+`05_auto_multiruntime_code_task.py` mounts TaskWorkspace coding actions, framework
 runtime preflight, and a bounded shell action because it writes and runs
 generated code.
 
 The mixed examples mount several capability types at once:
 
 - `06_auto_mixed_travel_planning.py` uses a native travel-policy Action, the
-  local `travel-planner` Skill, Workspace file actions, and the real remote
+  local `travel-planner` Skill, TaskWorkspace file actions, and the real remote
   AMap MCP endpoint for a Hangzhou domestic-travel scenario. It requires
   `AMAP_API_KEY` and the optional MCP runtime packages in the active Python
   environment.
 - `07_auto_mixed_equity_analysis.py` uses a native portfolio-mandate Action,
-  the local `equity-risk-reviewer` Skill, Workspace file actions, and a local
+  the local `equity-risk-reviewer` Skill, TaskWorkspace file actions, and a local
   stdio MCP business-system server for example market/news data. The MCP server
   is real protocol plumbing; its data is explicitly non-live example data, not
   investment advice.
 - `08_auto_mixed_business_analysis.py` uses a native board-context Action, the
-  local `market-entry-analyst` Skill, Workspace file actions, and the same
+  local `market-entry-analyst` Skill, TaskWorkspace file actions, and the same
   local stdio MCP server for example CRM and competitor-signal data. The data
   boundary is explicit and should not be presented as a production CRM export.
 

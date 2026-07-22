@@ -15,12 +15,13 @@
 from __future__ import annotations
 
 from typing import Any, Literal, TypeAlias
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
-from .workspace import WorkspaceRecordRef
+from .record_store import RecordRef
 
 
 AgentExecutionStatus: TypeAlias = Literal["created", "running", "success", "blocked", "error", "cancelled"] | str
+AgentExecutionRecordPurpose: TypeAlias = Literal["process", "deliverable", "recovery", "audit"]
 
 
 class AgentExecutionLineage(TypedDict):
@@ -39,7 +40,7 @@ class AgentExecutionLimits(TypedDict):
     max_no_progress_seconds: float | None
 
 
-class AgentExecutionWorkspaceRefs(TypedDict):
+class AgentExecutionRecordRefs(TypedDict):
     observations: list[str]
     artifacts: list[str]
     decisions: list[str]
@@ -56,6 +57,21 @@ class AgentExecutionDiagnostics(TypedDict):
     stages: dict[str, Any]
     last_progress: dict[str, Any]
     required_capabilities: list[dict[str, Any]]
+    task_workspace_retention: NotRequired[dict[str, Any]]
+    action_artifact_release: NotRequired["ActionArtifactReleaseDiagnostics"]
+
+
+class ActionArtifactReleaseDiagnostic(TypedDict):
+    code: str
+    message: str
+
+
+class ActionArtifactReleaseDiagnostics(TypedDict, total=False):
+    status: Literal["released", "deferred", "failed"]
+    scope: dict[str, str]
+    released_count: int
+    preserved_artifact_ids: list[str]
+    diagnostics: list[ActionArtifactReleaseDiagnostic]
 
 
 class AgentExecutionRouteInfo(TypedDict):
@@ -96,37 +112,24 @@ class AgentExecutionMeta(TypedDict):
     close_snapshot: dict[str, Any]
     logs: dict[str, Any]
     diagnostics: AgentExecutionDiagnostics
-    workspace_refs: AgentExecutionWorkspaceRefs
+    record_refs: AgentExecutionRecordRefs
 
 
-CapabilityKind: TypeAlias = Literal["action", "skill", "skill_pack"]
-CapabilityRoute: TypeAlias = Literal["model_request", "skills"]
+CapabilityKind: TypeAlias = Literal["action"]
+CapabilityRoute: TypeAlias = Literal["model_request", "agent_task"]
 GuidanceAccess: TypeAlias = Literal["prompt_bound", "route_context", "context_pack", "summary_only", "none"]
 
 
 class PlannerCapabilityCandidate(TypedDict, total=False):
-    """One planner-facing capability candidate, sanitized to inert data.
-
-    A capability is any route candidate the planner may choose: an Action, a
-    Skill, or a Skill pack. Carries no plugin
-    objects. Produced by the orchestrator route from its route-planner output and
-    passed into AgentTask options; AgentTask reads it but never reaches back into
-    the plugin (see AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC).
-
-    `route` is the execution shape that exposes the capability. `guidance_access`
-    records how the capability's instructions reach the model: `prompt_bound`
-    (bound into the model_request prompt before execution), `route_context`
-    (only when that route runs), `context_pack`, `summary_only`, or `none`
-    (e.g. a plain Action). `mode` is kind-specific and optional
-    (e.g. `model_decision`/`required` for skills) and is not normalized across
-    kinds.
-    """
+    """One planner-facing executable Action candidate, sanitized to inert data."""
 
     id: str
     kind: CapabilityKind
     route: CapabilityRoute
     guidance_access: GuidanceAccess
     mode: str
+    execution_resource_requirements: list[dict[str, Any]]
+    evidence_requirement_kind: EvidenceRequirementKind
     description: str
 
 
@@ -182,7 +185,7 @@ class AgentExecutionStreamMeta(TypedDict, total=False):
     lineage: AgentExecutionLineage
 
 
-class AgentExecutionWorkspaceRecord(TypedDict):
-    record: WorkspaceRecordRef
-    checkpoint: WorkspaceRecordRef | None
-    workspace_refs: AgentExecutionWorkspaceRefs
+class AgentExecutionRecordWrite(TypedDict):
+    record: RecordRef
+    checkpoint: RecordRef | None
+    record_refs: AgentExecutionRecordRefs

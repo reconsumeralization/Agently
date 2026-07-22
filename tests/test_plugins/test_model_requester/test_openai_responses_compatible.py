@@ -3,6 +3,7 @@ import json
 from typing import Any
 
 import pytest
+from httpx_sse import SSEError
 
 from types import SimpleNamespace
 
@@ -65,6 +66,55 @@ async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict,
     async for _event, _payload in plugin.request_model(request_data):
         pass
     return captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_http_error_message_excludes_request_body(monkeypatch: pytest.MonkeyPatch, stream: bool):
+    class FakeResponse:
+        status_code = 500
+        content = b'{"error":{"message":"upstream failed"}}'
+        text = content.decode()
+        headers = {"Content-Type": "application/json"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            return FakeResponse()
+
+    async def fail_sse(*args, **kwargs):
+        raise SSEError("provider returned non-SSE response")
+
+    monkeypatch.setattr(responses_module, "AsyncClient", FakeAsyncClient)
+    if stream:
+        monkeypatch.setattr(OpenAIResponsesCompatible, "_aiter_sse_with_retry", fail_sse)
+    request_marker = f"private-responses-{'stream-' if stream else ''}request-marker"
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": stream,
+            "request_retry": {"max_attempts": 1},
+        },
+        {"input": request_marker},
+    )
+
+    events = [item async for item in plugin.request_model(plugin.generate_request_data())]
+    error = next(payload for event, payload in events if event == "error")
+    message = str(error)
+
+    assert "Status Code: 500" in message
+    assert "upstream failed" in message
+    assert "Request Data:" not in message
+    assert request_marker not in message
 
 
 def collect_events(plugin: OpenAIResponsesCompatible, request_events: list[tuple[str, Any]]):
@@ -189,6 +239,7 @@ def test_prompt_tools_are_converted_and_explicit_tools_override_by_name():
                     "name": "lookup_issue",
                     "desc": "Lookup a GitHub issue.",
                     "kwargs": {"issue_id": (str, "Issue id")},
+                    "required_input_keys": ["issue_id"],
                 },
             ],
         },
@@ -203,6 +254,7 @@ def test_prompt_tools_are_converted_and_explicit_tools_override_by_name():
     assert search_docs["strict"] is True
     assert lookup_issue["strict"] is False
     assert lookup_issue["parameters"]["properties"]["issue_id"]["type"] == "string"
+    assert lookup_issue["parameters"]["required"] == ["issue_id"]
     assert lookup_issue["parameters"]["additionalProperties"] is False
     assert web_search == {"type": "web_search_preview"}
 

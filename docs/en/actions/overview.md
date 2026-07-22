@@ -17,7 +17,7 @@ This is not the orchestration layer. If you need branches, fan-out, approval, wa
 | Topic | Owns | Does not own |
 |---|---|---|
 | Action Runtime | Planning, action-call normalization, dispatch, action logs | Long-running workflow lifecycle |
-| Agent Component helpers | Business-facing shortcuts such as `enable_python`, `enable_shell`, and exposing the current Workspace file area through `enable_workspace_file_actions` | Provider lifecycle internals |
+| Agent Component helpers | Business-facing shortcuts such as `enable_python`, `enable_shell`, and exposing the current TaskWorkspace file area through `enable_task_workspace_file_actions` | Provider lifecycle internals |
 | Tools compatibility | `tool_func`, `use_tool`, `use_tools`, `extra.tool_logs` aliases | New extension design |
 | MCP | Loading remote or local MCP tools into the action surface | A separate workflow engine |
 | Sandbox actions | Running code through an `ActionExecutor` backend | General container orchestration |
@@ -29,8 +29,8 @@ Default plugin wiring lives in [`agently/_default_init.py`](../../../agently/_de
 
 - `ActionRuntime`: `AgentlyActionRuntime`
 - `ActionFlow`: `TriggerFlowActionFlow`
-- `ActionExecutor`: local function, MCP, Search/Browse, Python/Bash sandbox, Node.js, common code runtime, SQLite, Docker
-- `ExecutionResourceProvider`: MCP, Python, Bash, Node.js, Docker, Browser, SQLite
+- `ActionExecutor`: local function, MCP, Search/Browse, Bash, provider-neutral CodeExecution, SQLite, Docker
+- `ExecutionResourceProvider`: ACP, MCP, Bash, Docker, explicit unsafe trusted-local CodeExecution, Browser, SQLite
 
 The public facade is [`agently/core/operation/Action/`](../../../agently/core/operation/Action/). Agent-level mounting lives in [`agently/builtins/agent_extensions/ActionExtension.py`](../../../agently/builtins/agent_extensions/ActionExtension.py). The runnable examples are grouped under [`examples/action_runtime/README.md`](../../../examples/action_runtime/README.md), with model-backed cookbook patterns under [`examples/cookbook/`](../../../examples/cookbook/).
 

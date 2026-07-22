@@ -39,7 +39,7 @@ in the current process. It is not a recovery protocol.
 | Resource shape | Examples | Load expectation |
 |---|---|---|
 | Stateless or equivalently rebuildable | HTTP client, DB client, logger | Recreate from config and mount before load or through a resolver. |
-| Adapter over external durable state | Snapshot store, exchange provider, Workspace | Recreate the adapter, then validate external state refs, versions, and leases through the provider. |
+| Adapter over external durable state | Snapshot store, exchange provider, RecordStore | Recreate the adapter, then validate external state refs, versions, and leases through the provider. |
 | Stateful execution session | Browser page, sandbox process, tool session, remote task handle | The snapshot must carry a durable session/ref requirement; the provider must restore and validate it before load is ready. |
 | Non-recoverable transient state | Local lock, in-memory queue item, open transaction, coroutine frame | Do not cross a durable pause boundary with this state. Finish, abort, or fail load. |
 

@@ -42,6 +42,23 @@ DEFAULT_SAFE_CMD_PREFIXES = [
 ]
 
 
+def normalize_command_argv(cmd: str | Sequence[str]) -> list[str]:
+    """Normalize one shell command without invoking a shell.
+
+    A string is parsed with shell-style quoting. A sequence normally represents
+    argv tokens, but one sequence item may also contain the complete command.
+    The latter shape is common in structured model output and remains safe
+    because it is parsed into argv rather than executed through a shell.
+    """
+
+    if isinstance(cmd, str):
+        return shlex.split(cmd)
+    args = [str(item) for item in cmd]
+    if len(args) == 1:
+        return shlex.split(args[0])
+    return args
+
+
 class Cmd:
     def __init__(
         self,
@@ -63,11 +80,9 @@ class Cmd:
             for prefix in self.allowed_cmd_prefixes
             if isinstance(prefix, str) and prefix.strip()
         ]
-        # No implicit process-cwd boundary: a Workspace-bound shell must inject
-        # the working directory through the Workspace file boundary (e.g.
-        # agent.enable_shell(...) derives allowed_workdir_roots from the bound
-        # Workspace files_root). Executors must not invent a fallback cwd
-        # (spec sections 8.6 / 9).
+        # No implicit process-cwd boundary: a TaskWorkspace-bound shell must inject
+        # the working directory through the direct TaskWorkspace root. Executors
+        # must not invent a fallback cwd.
         roots = allowed_workdir_roots if allowed_workdir_roots is not None else []
         self.allowed_workdir_roots = [Path(root).resolve() for root in roots]
         self.timeout = timeout
@@ -91,10 +106,13 @@ class Cmd:
             desc=(
                 "Run a low-level allowlisted shell command with bounded stdout/stderr previews. "
                 "Prefer `agent.enable_shell(...)` for user-facing shell access, and prefer "
-                "Workspace file actions for reading, searching, editing, and writing files."
+                "TaskWorkspace file actions for reading, searching, editing, and writing files."
             ),
             kwargs={
-                "cmd": ("str | list[str]", "Command to run."),
+                "cmd": (
+                    "str | list[str]",
+                    "Exactly one command: a command string, argv tokens, or a one-item list containing the complete command.",
+                ),
                 "workdir": ("str | None", "Working directory."),
             },
             func=self.run,
@@ -114,9 +132,7 @@ class Cmd:
         return [action_id]
 
     def _normalize_cmd(self, cmd: str | Sequence[str]) -> list[str]:
-        if isinstance(cmd, str):
-            return shlex.split(cmd)
-        return list(cmd)
+        return normalize_command_argv(cmd)
 
     def _is_cmd_allowed(self, args: list[str]) -> bool:
         if not args:
@@ -150,10 +166,32 @@ class Cmd:
 
     def _resolve_workdir(self, workdir: str | Path | None) -> Path | None:
         if workdir is not None:
-            return Path(workdir).resolve()
+            requested = Path(workdir).expanduser()
+            if requested.is_absolute() or not self.allowed_workdir_roots:
+                return requested.resolve()
+            root = self.allowed_workdir_roots[0]
+            requested_parts = requested.parts
+            root_parts = root.parts
+            # TaskWorkspace evidence may expose the bound root as a logical
+            # relative locator (for example .agently/files/<execution_id>).
+            # When that locator already names the injected root, consume the
+            # matching prefix instead of appending the root twice. Any suffix
+            # remains an ordinary child path and the existing boundary check
+            # still rejects traversal outside the injected root.
+            for prefix_size in range(
+                min(len(requested_parts), len(root_parts)),
+                0,
+                -1,
+            ):
+                if tuple(root_parts[-prefix_size:]) != tuple(
+                    requested_parts[:prefix_size]
+                ):
+                    continue
+                return root.joinpath(*requested_parts[prefix_size:]).resolve()
+            return (root / requested).resolve()
         if self.allowed_workdir_roots:
             return self.allowed_workdir_roots[0]
-        # No Workspace-issued boundary configured; do not fall back to cwd.
+        # No TaskWorkspace-issued boundary configured; do not fall back to cwd.
         return None
 
     async def run(
@@ -169,14 +207,14 @@ class Cmd:
                 "ok": False,
                 "status": "blocked",
                 "need_approval": True,
-                "reason": "workspace_boundary_required",
+                "reason": "task_workspace_boundary_required",
                 "detail": (
-                    "No Workspace-issued working directory. Bind a Workspace and enable a "
-                    "Workspace-bound shell (agent.use_workspace(...) + agent.enable_shell(...)) so "
-                    "the working directory is injected through the Workspace file boundary; "
+                    "No TaskWorkspace-issued working directory. Bind a TaskWorkspace and enable a "
+                    "TaskWorkspace-bound shell (agent.use_task_workspace(...) + agent.enable_shell(...)) so "
+                    "the working directory is injected through the TaskWorkspace file boundary; "
                     "executors do not fall back to the process cwd."
                 ),
-                "diagnostics": [{"code": "shell.workspace_boundary_required"}],
+                "diagnostics": [{"code": "shell.task_workspace_boundary_required"}],
             }
         if not self._is_workdir_allowed(workdir):
             return {

@@ -346,7 +346,7 @@ def build_task_board_handoff_projection(
         },
         "metadata": {
             "authority": "orientation_only",
-            "full_state_sources": ["TaskBoardRevision", "EvidenceEnvelope", "Workspace checkpoint records"],
+            "full_state_sources": ["TaskBoardRevision", "EvidenceEnvelope", "RecordStore checkpoint records"],
             "bounded": True,
         },
     }
@@ -356,11 +356,11 @@ def task_board_preflight_diagnostics(
     revision: TaskBoardRevision | Mapping[str, Any],
     *,
     mounted_capabilities: Sequence[Mapping[str, Any] | str] | None = None,
-    workspace_refs: Sequence[Mapping[str, Any] | str] | None = None,
+    task_workspace_refs: Sequence[Mapping[str, Any] | str] | None = None,
 ) -> list[dict[str, Any]]:
     effective_revision = TaskBoardRevision.from_value(revision)
     capability_ids = _capability_ids(mounted_capabilities)
-    workspace_ref_ids = _capability_ids(workspace_refs)
+    task_workspace_ref_ids = _capability_ids(task_workspace_refs)
     diagnostics: list[dict[str, Any]] = []
 
     for card in effective_revision.graph.cards:
@@ -383,15 +383,15 @@ def task_board_preflight_diagnostics(
             )
         missing_refs = [
             ref_id
-            for ref_id in _clean_str_sequence(metadata.get("requires_workspace_refs"))
-            if ref_id not in workspace_ref_ids
+            for ref_id in _clean_str_sequence(metadata.get("requires_task_workspace_refs"))
+            if ref_id not in task_workspace_ref_ids
         ]
         if missing_refs:
             diagnostics.append(
                 {
-                    "code": "taskboard.preflight.missing_workspace_ref",
+                    "code": "taskboard.preflight.missing_task_workspace_ref",
                     "card_id": card.id,
-                    "missing_workspace_refs": missing_refs,
+                    "missing_task_workspace_refs": missing_refs,
                     "status": "blocked",
                 }
             )
@@ -788,13 +788,13 @@ def _fallback_scoped_evidence_ids(
             continue
         kind = str(item.get("kind") or item.get("type") or "").strip().lower()
         priority: int | None = None
-        if kind == "workspace_artifact.readback":
+        if kind == "task_workspace_artifact.readback":
             priority = 0
         elif "acceptance_locator" in kind or "artifact_locator" in kind:
             priority = 1
-        elif kind == "workspace_artifact.targeted_readback":
+        elif kind == "task_workspace_artifact.targeted_readback":
             priority = 2
-        elif kind == "workspace_artifact.acceptance_coverage":
+        elif kind == "task_workspace_artifact.acceptance_coverage":
             priority = 3
         if priority is None:
             continue
@@ -1181,7 +1181,7 @@ def _is_explicit_state_fact(value: Mapping[str, Any]) -> bool:
     if kind != "explicit_state_fact":
         return False
     scope = str(value.get("scope") or "task").strip().lower()
-    return scope in {"task", "task_scoped", "execution", "workspace"}
+    return scope in {"task", "task_scoped", "execution", "task_workspace"}
 
 
 def _dedupe_mappings(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

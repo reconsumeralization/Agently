@@ -31,7 +31,7 @@ CapabilityRiskLevel = Literal[
 class CapabilitySideEffectDescriptor(TypedDict, total=False):
     """Single shared side-effect declaration contract.
 
-    Action declarations, SkillsExecutor inference, and outbound policy input must
+    Action declarations, Skill-package projections, and outbound policy input must
     converge on this one descriptor instead of maintaining parallel declaration
     shapes for filesystem, network, credential, local-exec, durable-data, and
     external side-effect claims (spec sections 8.4 / 11.5).
@@ -40,9 +40,9 @@ class CapabilitySideEffectDescriptor(TypedDict, total=False):
 
     - Action declarations report file/network/credential/local-exec/external
       side-effect needs through it.
-    - SkillsExecutor inference produces it.
+    - A host may project a real-world Skill requirement into it.
     - PolicyApproval / outbound policy consume it.
-    - Workspace links decision and outcome evidence back to it.
+    - RecordStore may persist decision and outcome evidence for it.
 
     A declared descriptor never grants permission; it only declares intent that
     policy then allows or denies.

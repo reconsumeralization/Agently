@@ -73,7 +73,35 @@ def configure_agent_model_pool(agent: Any, *, temperature: float = 0.0) -> Provi
 
 def default_workspace(prefix: str) -> Path:
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    return Path(os.getenv("AGENT_TASK_WORKSPACE", "") or f".agently/tasks/{prefix}-{run_id}").resolve()
+    return Path(os.getenv("AGENT_TASK_WORKSPACE", "") or f"agent-task-workspaces/{prefix}-{run_id}").resolve()
+
+
+def resolve_result_artifact_path(task_workspace: Any, result: dict[str, Any], requested_path: str) -> Path:
+    """Resolve one trusted task file ref without assuming a physical file layout."""
+
+    root = Path(str(task_workspace.root)).resolve()
+    direct = (root / requested_path).resolve()
+    if direct.is_file():
+        return direct
+    raw_refs = result.get("artifact_refs", [])
+    refs = raw_refs if isinstance(raw_refs, list) else []
+    requested = Path(requested_path)
+    for raw_ref in refs:
+        if not isinstance(raw_ref, dict) or raw_ref.get("type") != "file":
+            continue
+        path_text = str(raw_ref.get("path") or "")
+        candidate = Path(path_text)
+        target = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        if target.is_file() and (
+            candidate == requested
+            or candidate.parts[-len(requested.parts) :] == requested.parts
+        ):
+            return target
+    return direct
 
 
 def print_stream_item(item: Any) -> None:

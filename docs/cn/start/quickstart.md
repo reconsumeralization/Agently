@@ -85,7 +85,8 @@ print(result)
 Agently 对一等核心实例同时支持直接构造和工厂 helper：
 
 ```python
-from agently import Agent, Agently, TriggerFlow
+from agently import Agent, Agently, TaskWorkspace, TriggerFlow
+from agently.core.storage import RecordStore
 
 agent = Agent("repo-worker")
 factory_agent = Agently.create_agent("repo-worker")
@@ -93,7 +94,8 @@ factory_agent = Agently.create_agent("repo-worker")
 flow = TriggerFlow(name="review-flow")
 factory_flow = Agently.create_trigger_flow("review-flow")
 
-workspace = Agently.create_workspace("./.agently/runs/review-flow")
+task_workspace = TaskWorkspace("./project", mode="read_only")
+record_store = RecordStore("./project-state", mode="read_write")
 ```
 
 ## 接下来读什么

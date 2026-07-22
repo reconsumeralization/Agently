@@ -50,7 +50,7 @@ class TaskBoardContext:
     schedule: TaskBoardSchedulePlan
     dependency_results: Mapping[str, TaskBoardCardResult] = field(default_factory=dict)
     model: Any = None
-    workspace: Any = None
+    task_workspace: Any = None
     effort: str = "medium"
     planning_policy: TaskBoardPlanningPolicy | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -178,7 +178,7 @@ class TaskBoard:
         *,
         handler: TaskBoardHandler | Mapping[str, TaskBoardHandler],
         model: Any = None,
-        workspace: Any = None,
+        task_workspace: Any = None,
         effort: str = "medium",
         planning_policy: TaskBoardPlanningPolicy | Mapping[str, Any] | None = None,
         name: str | None = None,
@@ -189,7 +189,7 @@ class TaskBoard:
         self.revision = TaskBoardRevision.from_value(revision)
         self.handler = handler
         self.model = model
-        self.workspace = workspace
+        self.task_workspace = task_workspace
         self.effort = effort
         self.planning_policy = (
             planning_policy
@@ -701,7 +701,7 @@ class TaskBoard:
             schedule=schedule,
             dependency_results=dependency_results,
             model=self.model,
-            workspace=self.workspace,
+            task_workspace=self.task_workspace,
             effort=self.effort,
             planning_policy=self.planning_policy,
             metadata=self.metadata,

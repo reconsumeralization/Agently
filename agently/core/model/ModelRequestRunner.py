@@ -119,6 +119,35 @@ class ModelRequestRunner:
     def cancel_logs(self):
         self.settings.set("$log.cancel_logs", True)
 
+    def _provider_liveness_snapshot(self, provider_name: str) -> dict[str, Any]:
+        """Project the effective non-secret provider liveness policy for diagnostics."""
+
+        namespace = f"plugins.ModelRequester.{provider_name}"
+        snapshot: dict[str, Any] = {}
+        timeout_mode = self.settings.get(f"{namespace}.timeout_mode", None)
+        if isinstance(timeout_mode, str) and timeout_mode.strip():
+            snapshot["timeout_mode"] = timeout_mode.strip()
+        raw_timeout = self.settings.get(f"{namespace}.timeout", None)
+        if isinstance(raw_timeout, Mapping):
+            snapshot["timeout"] = {
+                key: raw_timeout.get(key)
+                for key in ("connect", "read", "write", "pool")
+                if raw_timeout.get(key) is not None
+            }
+        stream_idle_timeout = self.settings.get(f"{namespace}.stream_idle_timeout", None)
+        if stream_idle_timeout is not None:
+            snapshot["stream_idle_timeout"] = stream_idle_timeout
+        raw_request_retry = self.settings.get(f"{namespace}.request_retry", None)
+        if isinstance(raw_request_retry, Mapping):
+            snapshot["request_retry"] = {
+                key: raw_request_retry.get(key)
+                for key in ("max_attempts", "after_output")
+                if raw_request_retry.get(key) is not None
+            }
+        elif raw_request_retry is False:
+            snapshot["request_retry"] = False
+        return cast(dict[str, Any], DataFormatter.sanitize(snapshot))
+
     @staticmethod
     def _status_from_error(error: BaseException, *, status: Literal["failed", "cancelled"]) -> dict[str, Any]:
         reason = str(error).strip() or error.__class__.__name__
@@ -691,6 +720,7 @@ class ModelRequestRunner:
                     "request_run_id": self.request_run_context.run_id,
                     "model_run_id": self.model_run_context.run_id,
                     "provider_family": provider_name,
+                    "liveness": self._provider_liveness_snapshot(provider_name),
                     **request_payload,
                 }
                 attach_model_request_telemetry(
@@ -853,21 +883,6 @@ class ModelRequestRunner:
                         "run": self.request_run_context,
                     }
                 )
-                if self.agent_execution_run_context is not None:
-                    await async_emit_runtime(
-                        {
-                            "event_type": "agent_execution.completed",
-                            "source": "ModelRequest",
-                            "message": f"AgentExecution completed for '{ self.agent_name }'.",
-                            "payload": {
-                                "agent_name": self.agent_name,
-                                "response_id": self.id,
-                                "request_run_id": self.request_run_context.run_id,
-                                "attempt_count": self.attempt_index,
-                            },
-                            "run": self.agent_execution_run_context,
-                        }
-                    )
             except BaseException as error:
                 if isinstance(error, (GeneratorExit, SystemExit)):
                     raise
@@ -943,23 +958,6 @@ class ModelRequestRunner:
                         "run": self.request_run_context,
                     }
                 )
-                if self.agent_execution_run_context is not None:
-                    await async_emit_runtime(
-                        {
-                            "event_type": "agent_execution.failed",
-                            "source": "ModelRequest",
-                            "level": "ERROR",
-                            "message": f"AgentExecution failed for '{ self.agent_name }'.",
-                            "payload": {
-                                "agent_name": self.agent_name,
-                                "response_id": self.id,
-                                "request_run_id": self.request_run_context.run_id,
-                                "attempt_count": self.attempt_index,
-                            },
-                            "error": error,
-                            "run": self.agent_execution_run_context,
-                        }
-                    )
                 raise
             finally:
                 if scheduler_slot_entered:

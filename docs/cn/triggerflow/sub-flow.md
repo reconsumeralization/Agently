@@ -119,6 +119,65 @@ def build_parent_flow():
 
 子流内 `data.async_put_into_stream(...)` 推的 item 出现在**父 execution** 的 runtime stream。从外部消费者看子流像是同一个 execution 的一部分。
 
+## 按 frame id 控制运行中的子流
+
+`capture` 和 `write_back` 是边界绑定，不是实时绑定：`capture` 在子流启动时
+复制选定的父值，`write_back` 只在子流成功完成后执行。host 如需检查、发送
+信号或取消运行中的子流，应保留显式父 execution handle，并使用 sub-flow
+frame：
+
+```python
+execution = parent_flow.create_execution(auto_close=False)
+start_task = asyncio.create_task(execution.async_start(input_value))
+
+# host 观察到该 execution 的 triggerflow.sub_flow_started 事件后：
+frames = execution.get_sub_flow_frames()
+frame_id = next(
+    frame_id
+    for frame_id, frame in frames.items()
+    if frame["status"] == "running"
+)
+
+await execution.async_emit_to_sub_flow(
+    frame_id,
+    "StopRequested",
+    {"reason": "superseded"},
+)
+
+cancelled = await execution.async_cancel_sub_flow(
+    frame_id,
+    reason="superseded",
+)
+await start_task
+```
+
+同步对应方法是 `emit_to_sub_flow(...)` 和 `cancel_sub_flow(...)`。
+
+可以运行 [`examples/trigger_flow/active_sub_flow_control.py`](../../../examples/trigger_flow/active_sub_flow_control.py)
+查看可确定复现的取消与 fencing 示例。
+
+只有当前调用赢得 active/waiting frame 的取消转换时，
+`async_cancel_sub_flow(...)` 才返回 `True`；过晚或重复取消返回 `False`。
+取消会让 frame 从 `cancel_requested` 进入 `cancelled`，取消框架管理的协作式
+进程内子任务，并阻止 child `write_back` 和父下游 continuation。它**不会**
+关闭父 execution，因此父 execution 仍能接收后续事件。
+
+`async_emit_to_sub_flow(...)` 通过 child execution 的正常 signal net 转发信号。
+child concurrency 预算仍然生效：控制 handler 如需与长时间运行的 child work
+并行执行，应为 sub-flow 配置足够的 `concurrency`。信号转发只是 best-effort
+控制手段；不可逆操作仍应以显式取消/fence，或应用、provider 自己的幂等/fence
+为正确性边界。若取消在信号转发期间获胜，转发调用会抛出 `RuntimeError`，对应
+signal handler 会被协作式取消。
+
+frame 可观察状态包括 `running`、`waiting`、`cancel_requested`、`cancelled`、
+`failed` 和 `completed`。运行中 frame 的元数据可以序列化用于审计，但 live
+execution 和 task 不可序列化。包含 `running` 或 `cancel_requested` frame 的
+snapshot 在 load 时会 fail closed；保存可重启恢复的 snapshot 前，应先让 active
+child 完成或取消。既有 `waiting` frame 仍通过投影到 root 的 interrupt 恢复。
+
+框架取消无法物理撤回已经提交的远端模型请求、线程、子进程或外部副作用；这些
+边界仍需要 provider abort、幂等或持久 fence 语义。
+
 ## 子流 pause 会投影到父 execution
 
 如果子流调用 `pause_for(...)`，父 execution 也会进入 waiting。外部系统仍只管理父 execution id 和父 interrupt id：

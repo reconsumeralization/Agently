@@ -11,7 +11,7 @@ from agently import Agently
 from legacy_agently_script_upgrade import configure_agent_model_pool
 
 
-TASK_ROOT = Path(".agently/tasks/goal-pursuit-acceptance-matrix").resolve()
+TASK_ROOT = Path("agent-task-workspaces/goal-pursuit-acceptance-matrix").resolve()
 
 
 async def _run_goal_pursuit_case(
@@ -25,7 +25,7 @@ async def _run_goal_pursuit_case(
 ) -> dict[str, Any]:
     if workspace_dir.exists():
         shutil.rmtree(workspace_dir)
-    agent = Agently.create_agent(agent_name).use_workspace(workspace_dir)
+    agent = Agently.create_agent(agent_name).use_task_workspace(workspace_dir)
     provider = configure_agent_model_pool(agent, temperature=0.0)
     execution = (
         agent
@@ -34,7 +34,7 @@ async def _run_goal_pursuit_case(
         .strategy(
             "task",
             task_id=task_id,
-            workspace=workspace_dir,
+            task_workspace=workspace_dir,
             limits={"max_model_requests": 8, "max_seconds": 180, "max_no_progress_seconds": 80},
             options={
                 "agent_task": {

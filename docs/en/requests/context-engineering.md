@@ -21,6 +21,7 @@ The model only knows what fits in its context window. Context engineering is the
 | Session chat history | user/assistant messages | accumulates across requests |
 | Session memo | system message | persists, written by custom resize handlers |
 | Knowledge base retrieval | injected by retrieval code | per-request, on demand |
+| `TaskContext` sources | bounded `ContextPackage` blocks | per task, consumer, and phase |
 | Tool / MCP results | tool messages | accumulates within one tool loop |
 
 Use the right slot for the right job:
@@ -46,6 +47,70 @@ Don't put everything in `input`. Don't put per-request payload in `info`.
 | The previous turns of a conversation | session chat history |
 | 100k tokens of company docs | KB with retrieval, not the prompt |
 | Recently retrieved facts that are relevant *this turn* | `info` for this request only |
+
+## Use TaskContext for task-scoped progressive disclosure
+
+Prompt slots own model-facing material; they do not own a task's source
+catalog. When one task may need Skills, files, records, SessionMemory recall,
+evidence, or a pinned repository, bind those sources to `TaskContext` and read
+one consumer/phase-specific `ContextPackage` through `ContextReader`.
+
+TaskContext owns an internal `ContextIndex`. Sources contribute structural
+descriptors and bounded exact reads; the internal index builds reusable
+revisioned structural, lexical, or optional hybrid partitions. ContextReader
+queries that index, performs any ModelRequest-owned optional relevance
+selection, reads canonical source content, and applies disclosure budgets. The
+model receives only the resulting blocks, refs, omissions, coverage, and
+diagnostics—not an entire source tree or internal vectors.
+
+Configure the derived index on its public aggregate owner. The embedding
+provider is a mechanism adapter only; the consumer-bound ModelRequest selector
+still decides semantic relevance:
+
+```python
+task_context.configure_index(
+    strategy="hybrid",
+    embedding_provider=embedding_provider,
+)
+```
+
+In hybrid mode, vector/lexical ranking narrows the optional descriptor window
+to the reader's `max_blocks` before semantic selection instead of multiplying
+that window fourfold. The selector may still omit every candidate or choose an
+ordered subset within the delivery budget. When structural filters leave one
+canonical candidate, the index skips a query embedding because there is no
+remaining order to improve.
+
+After one canonical ref is structurally selected, a source may optionally
+support deterministic bounded location inside that ref. This source-scoped read
+does not choose relevance or accept evidence; `ContextReader` still owns the
+read session and falls back to the ordinary bounded exact read when the optional
+port is absent. An exact non-wildcard path that leaves one authorized candidate
+does not need another model request merely to select that same candidate.
+
+The complete `ContextPackage` remains available for audit. AgentTask model-hot
+projections bound repetitive optional-omission details and carry aggregate
+reason counts, so an unselected source catalog does not become prompt content.
+When scoped evidence snippets are already present, each snippet carries one
+host-issued `reference_id`; repeated locator/body copies stay out of the hot
+prompt while canonical provenance remains host-side. The host joins each body
+one-to-one with its execution block, ContextBlock, source revision, binding,
+and canonical ref before disclosure. A missing or ambiguous join excludes the
+body and emits a diagnostic. Opaque execution/block/binding identities remain
+host-side; the model selects only `reference_id` plus relevant source labels.
+
+A scoped-retrieval plan may reserve at most 64 model-visible results across its
+query groups (the sum of each `max_results`). Overflow is rejected before the
+Blocks graph is compiled; it is never silently truncated. Split larger reads
+into consumer-owned continuation batches.
+
+Embedding usage and model prompt usage are separate facts. A cache hit or
+smaller ContextPackage can explain an efficiency change, but only complete
+provider-observed prompt-token usage from comparable requests proves a model
+input-token reduction. Never convert character counts into billed tokens.
+
+See [Task context, files, and records](workspace.md) for the source contract and
+ownership boundaries.
 
 ## Keep info diffable
 
@@ -77,7 +142,9 @@ If you're using actions / tools, the framework already injects the tool catalog 
 When the context window starts to fill up:
 
 - The default Session only trims the window by `session.max_length`; when you need summaries, register a custom resize handler and write the summary into session `memo`. See [Session Memory](session-memory.md).
-- For one-off long inputs, summarize before the request rather than truncating mid-sentence.
+- For task sources, prefer bounded TaskContext reads and reusable refs. For a
+  truly one-off long input, summarize before the request rather than truncating
+  mid-sentence.
 
 ## Per-request info without polluting the agent
 

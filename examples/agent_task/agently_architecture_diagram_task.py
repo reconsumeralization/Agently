@@ -13,7 +13,7 @@ longer architecture-document task:
     goal + effort + task strategy
         -> AgentExecution route: agent_task
         -> task step calls fetch_agently_architecture_sources as repository evidence
-        -> task writes a readable Mermaid architecture document to Workspace
+        -> task writes a readable Mermaid architecture document to TaskWorkspace
         -> independent model judge reviews whether the artifact fits the scenario
 
 The source-gathering Action only returns repository facts and excerpts. Diagram
@@ -45,6 +45,7 @@ from _business_example_common import (
     default_workspace,
     judge_business_artifact,
     print_stream_item,
+    resolve_result_artifact_path,
     write_summary,
 )
 
@@ -82,7 +83,7 @@ SOURCE_PATHS = [
     "agently/core/application/AgentExecution/Result.py",
     "agently/core/orchestration/TaskDAG/TaskDAGExecutor.py",
     "agently/core/orchestration/TriggerFlow/TriggerFlow.py",
-    "agently/core/workspace/Workspace.py",
+    "agently/core/TaskWorkspace/TaskWorkspace.py",
     "agently/core/application/SkillsExecutor/SkillsExecutor.py",
     "agently/builtins/plugins/ActionRuntime/AgentlyActionRuntime.py",
 ]
@@ -97,7 +98,7 @@ EXCERPT_TERMS = [
     "TriggerFlow",
     "ModelRequest",
     "ModelRequestResult",
-    "Workspace",
+    "TaskWorkspace",
     "Action",
     "ActionRuntime",
     "SkillsExecutor",
@@ -156,13 +157,12 @@ async def main() -> None:
     os.environ.setdefault("AGENT_TASK_JUDGE_TIMEOUT_SECONDS", "180")
     workspace_dir = default_workspace("agently-architecture-diagram")
     workspace_dir.mkdir(parents=True, exist_ok=True)
-    agent = Agently.create_agent("agent-task-agently-architecture-diagram").use_workspace(workspace_dir)
+    agent = Agently.create_agent("agent-task-agently-architecture-diagram").use_task_workspace(workspace_dir).use_record_store(workspace_dir, mode="read_write")
     provider = configure_agent_model_pool(agent, temperature=0.0)
-    workspace = agent.workspace
-    if workspace is None:
-        raise RuntimeError("Workspace was not initialized.")
+    task_workspace = agent.task_workspace
+    record_store = agent.record_store
 
-    agent.enable_workspace_file_actions(read=True, write=True, expose_to_model=True)
+    agent.enable_task_workspace_file_actions(read=True, write=True, expose_to_model=True)
 
     @agent.action_func
     def fetch_agently_architecture_sources() -> dict[str, Any]:
@@ -188,7 +188,7 @@ async def main() -> None:
         }
 
     agent.use_actions(fetch_agently_architecture_sources)
-    await workspace.put(
+    await record_store.put(
         content={
             "task": TASK_ID,
             "output_file": OUTPUT_FILE,
@@ -199,12 +199,12 @@ async def main() -> None:
         collection="observations",
         kind="architecture_diagram_task_brief",
         summary="Goal Pursuit task brief for generating an Agently architecture diagram.",
-        scope={"task_id": TASK_ID},
+        scope={"task_id": TASK_ID, "execution_id": TASK_ID},
         source={"type": "example_script", "name": "agently_architecture_diagram_task"},
     )
 
     print("[SETUP] Agently architecture diagram Goal Pursuit experiment")
-    print(f"[SETUP] Workspace: {workspace_dir}")
+    print(f"[SETUP] TaskWorkspace: {workspace_dir}")
     print(f"[SETUP] Provider: {provider}, model_key={TASK_MODEL_KEY}")
 
     goal = (
@@ -215,7 +215,7 @@ async def main() -> None:
         "makes that distinction important."
     )
     success_criteria = [
-        f"The final Markdown architecture document exists at `{OUTPUT_FILE}` in Workspace.",
+        f"The final Markdown architecture document exists at `{OUTPUT_FILE}` in TaskWorkspace.",
         "The document uses the architecture-diagram guidance and includes readable Mermaid diagrams.",
         "The document gives engineers a clear high-level view of Agently's major layers, ownership boundaries, and runtime path.",
         "The document handles uncertain, planned, or deferred areas responsibly instead of presenting everything as already landed.",
@@ -237,7 +237,7 @@ async def main() -> None:
         .strategy(
             "task",
             task_id=TASK_ID,
-            workspace=workspace_dir,
+            task_workspace=workspace_dir,
             limits={"max_model_requests": 16, "max_seconds": 360, "max_no_progress_seconds": 120},
             options={
                 "agent_task": {
@@ -262,7 +262,7 @@ async def main() -> None:
 
     result = await execution.async_start()
     meta = await execution.async_get_meta()
-    output_path = workspace.files_root / OUTPUT_FILE
+    output_path = resolve_result_artifact_path(task_workspace, result, OUTPUT_FILE)
     artifact_text = output_path.read_text(encoding="utf-8") if output_path.is_file() else ""
     model_judge = await judge_business_artifact(
         agent,
@@ -297,13 +297,13 @@ async def main() -> None:
         "model_judge": model_judge,
         "structural_smoke": structural_smoke,
         "replan_count": sum(1 for item in stream_items if item.path.endswith(".replan")),
-        "workspace_checkpoint_count": len(await workspace.checkpoint_history(TASK_ID)),
-        "workspace_decision_count": len(meta.get("workspace_refs", {}).get("decisions", [])),
+        "record_store_recovery_ref_count": len(meta.get("record_refs", {}).get("checkpoints", [])),
+        "workspace_process_record_count": len(meta.get("record_refs", {}).get("decisions", [])),
         "task_refs": result.get("task_refs") or meta.get("task_refs"),
         "stream_trace_file": str(stream_trace_path),
         "output_file": str(output_path),
     }
-    summary_path = workspace.files_root / SUMMARY_FILE
+    summary_path = task_workspace.root / SUMMARY_FILE
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_summary(summary)
@@ -322,7 +322,7 @@ if __name__ == "__main__":
 # example_accepted=true
 # structural_smoke.output_file_exists=true
 # structural_smoke.mermaid_block_count=2
-# workspace_checkpoint_count=1
+# record_store_recovery_ref_count=0 (default task process state stays in memory/logs)
 # task_refs.strategy="task"
 # output_file ends with files/outputs/agently_architecture_diagram.md
 #

@@ -1,10 +1,11 @@
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
 
-from agently import TriggerFlow, TriggerFlowRuntimeData
+from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
+from agently.types.data.event import normalize_triggerflow_event_type
 
 
 def _compat_result(value: Any):
@@ -19,6 +20,61 @@ class RuntimeIntegrityInput(BaseModel):
 
 class RuntimeIntegrityResult(BaseModel):
     value: str
+
+
+@pytest.mark.asyncio
+async def test_terminal_result_is_carried_once_and_closed_event_is_compact(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    large_body = "terminal-body-" + ("x" * 5000)
+    captured: dict[str, dict[str, Any]] = {}
+
+    async def capture(event):
+        event_type = normalize_triggerflow_event_type(event.event_type)
+        if event_type in {
+            "triggerflow.execution_completed",
+            "triggerflow.execution_closed",
+        }:
+            captured[event_type] = cast(dict[str, Any], event.payload)
+
+    hook_name = "test_terminal_result_is_carried_once_and_closed_event_is_compact.capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    flow = TriggerFlow(name="terminal-result-single-carrier")
+
+    async def produce(data: TriggerFlowRuntimeData):
+        return large_body
+
+    flow.to(produce).end()
+    execution = flow.create_execution(auto_close=False)
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+
+    try:
+        await execution.async_start("start")
+        close_result = await execution.async_close()
+        await Agently.event_center.async_flush(hook_name)
+
+        completed = captured["triggerflow.execution_completed"]
+        closed = captured["triggerflow.execution_closed"]
+        event_result = completed["result"]
+        assert close_result["$final_result"] == large_body
+        assert isinstance(event_result, dict)
+        assert event_result["kind"] == "triggerflow_terminal_result_omitted"
+        assert "caller still receives the full close result" in event_result["reason"]
+        assert "record_id" not in event_result
+        assert set(closed) == {
+            "reason",
+            "closed_at",
+            "execution_id",
+            "retention_status",
+        }
+        assert large_body not in repr(completed)
+        assert large_body not in repr(closed)
+        assert record_store._backend is None
+        assert not (tmp_path / ".agently").exists()
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
 
 
 async def _run_empty_for_each(flow: TriggerFlow):

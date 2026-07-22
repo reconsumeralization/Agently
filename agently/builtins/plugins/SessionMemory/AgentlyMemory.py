@@ -14,13 +14,17 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from agently.core.workspace.Retrieval import _default_model_unavailable_reason
-from agently.types.data.workspace import WorkspaceRetrievalPackage
+from agently.core.context import ModelRequestContextSelector, TaskContext
+from agently.core.storage.Retrieval import _default_model_unavailable_reason
+from agently.types.data import ContextBudget, ContextReadIntent
 from agently.types.plugins import SessionMemory
-from agently.utils import Settings, SettingsNamespace
+from agently.utils import DataFormatter, Settings, SettingsNamespace
+
+from .ContextSource import AgentlyMemoryContextSource
 
 
 GLOBAL_MEMORY = "GLOBAL_MEMORY"
@@ -32,21 +36,14 @@ class AgentlyMemory(SessionMemory):
     DEFAULT_SETTINGS = {
         "$global": {
             "session.memory.AgentlyMemory": {
-                "retrieve": {
+                "recall": {
                     "enabled": True,
-                    "budget": {"chars": 4000, "item_chars": 1200},
-                    "selection": "length",
-                    "sources": ["records"],
-                    "method": "keyword",
-                    "rerank": True,
-                    "rerank_min_candidates": 2,
-                    "keep_candidates_on_empty_rerank": True,
-                    "tags": [],
-                    "max_candidates": 50,
-                },
-                "retrieve_plan": {
-                    "enabled": True,
-                    "fallback_query_chars": 2000,
+                    "budget": {
+                        "max_chars": 4000,
+                        "max_blocks": 16,
+                        "max_block_chars": 1200,
+                    },
+                    "prompt_query_chars": 2000,
                 },
                 "extract": {
                     "enabled": True,
@@ -69,12 +66,12 @@ class AgentlyMemory(SessionMemory):
         self,
         *,
         session: Any,
-        workspace: Any = None,
+        memory_store: Any = None,
         plugin_manager: Any,
         settings: Settings,
     ) -> None:
         self.session = session
-        self.workspace = workspace
+        self.memory_store = memory_store
         self.plugin_manager = plugin_manager
         self.settings = settings
         self.plugin_settings = SettingsNamespace(settings, "session.memory.AgentlyMemory")
@@ -88,8 +85,20 @@ class AgentlyMemory(SessionMemory):
     def _on_unregister() -> None:
         pass
 
-    def bind_workspace(self, workspace: Any) -> None:
-        self.workspace = workspace
+    def bind_memory_store(self, memory_store: Any) -> None:
+        self.memory_store = memory_store
+
+    def create_context_source(
+        self,
+        *,
+        session: Any,
+        settings: Any,
+    ) -> AgentlyMemoryContextSource:
+        del settings
+        return AgentlyMemoryContextSource(
+            self._require_memory_store(),
+            session_id=str(session.id),
+        )
 
     async def prepare_request(
         self,
@@ -98,36 +107,52 @@ class AgentlyMemory(SessionMemory):
         session: Any,
         settings: Any,
     ) -> dict[str, Any]:
-        if not self.plugin_settings.get("retrieve.enabled", True):
-            return {"enabled": False, "reason": "retrieve_disabled"}
-        workspace = self._require_workspace()
-        plan = await self._plan_retrieval(prompt=prompt, session=session)
-        diagnostics: dict[str, Any] = {"plan": plan, "packages": {}}
-        budget = self._dict_setting("retrieve.budget", {"chars": 4000, "item_chars": 1200})
-        selection = str(self.plugin_settings.get("retrieve.selection", "length"))
-        if selection not in {"length", "top_n"}:
-            selection = "length"
-        tags = self._merge_tags(
-            self.plugin_settings.get("retrieve.tags", []),
-            plan.get("tags", []),
+        del settings
+        if not self.plugin_settings.get("recall.enabled", True):
+            return {"enabled": False, "reason": "recall_disabled"}
+        context = TaskContext(
+            task_id=f"session-request:{session.id}:{uuid.uuid4().hex}"
         )
-        scopes = []
-        if bool(plan.get("include_global", True)):
-            scopes.append(GLOBAL_MEMORY)
-        if bool(plan.get("include_session", True)):
-            scopes.append(SESSION_MEMORY)
-        for memory_scope in scopes:
-            package = await self._retrieve_scope(
-                workspace=workspace,
-                session=session,
-                query=str(plan.get("query") or ""),
-                tags=tags,
-                budget=budget,
-                selection=cast(Any, selection),
-                memory_scope=memory_scope,
-            )
-            diagnostics["packages"][memory_scope] = package.get("diagnostics", {})
-            prompt.set(memory_scope, self._prompt_memory_package(package))
+        source = self.create_context_source(session=session, settings=self.settings)
+        context.attach(
+            source,
+            binding_id=f"session-memory-binding:{session.id}",
+            scope="session",
+            metadata={"session_id": str(session.id)},
+        )
+        reader = context.reader(
+            consumer=f"session-request:{session.id}",
+            phase="direct",
+            budget=self._context_budget(),
+            semantic_selector=ModelRequestContextSelector(
+                lambda: self._create_model_request("selection")
+            ),
+        )
+        package = await reader.async_read(
+            ContextReadIntent(query=self._prompt_text(prompt))
+        )
+        prompt.set(
+            "info.session_memory_context",
+            {
+                "blocks": [
+                    {
+                        "content": DataFormatter.sanitize(block.content),
+                        "role": block.role,
+                        "source_ref": block.source_ref,
+                        "completeness": block.completeness,
+                    }
+                    for block in package.blocks
+                ]
+            },
+        )
+        diagnostics: dict[str, Any] = {
+            "enabled": True,
+            "path": "task_context",
+            "task_context_id": context.context_id,
+            "package_id": package.package_id,
+            "source_catalog": context.source_catalog(),
+            "diagnostics": [item.to_dict() for item in package.diagnostics],
+        }
         self.diagnostics.append({"phase": "prepare_request", **diagnostics})
         return diagnostics
 
@@ -145,7 +170,7 @@ class AgentlyMemory(SessionMemory):
             return {"enabled": False, "reason": "extract_disabled"}
         if not user_content and not assistant_content:
             return {"enabled": True, "stored": 0, "reason": "empty_turn"}
-        workspace = self._require_workspace()
+        memory_store = self._require_memory_store()
         try:
             memories = await self._extract_memories(
                 session=session,
@@ -168,7 +193,7 @@ class AgentlyMemory(SessionMemory):
             normalized = self._normalize_memory(memory, session=session)
             if normalized is None:
                 continue
-            stored_refs.append(await self._store_memory(workspace, normalized, session=session))
+            stored_refs.append(await self._store_memory(memory_store, normalized, session=session))
         diagnostics = {
             "enabled": True,
             "stored": len(stored_refs),
@@ -177,154 +202,13 @@ class AgentlyMemory(SessionMemory):
         self.diagnostics.append({"phase": "after_turn", **diagnostics})
         return diagnostics
 
-    def _require_workspace(self) -> Any:
-        if self.workspace is None:
+    def _require_memory_store(self) -> Any:
+        if self.memory_store is None:
             raise RuntimeError(
-                "Session memory mode 'AgentlyMemory' requires a Workspace. "
-                "Pass workspace=... to Session.use_memory(...) or activate the Session from an Agent with workspace support."
+                "Session memory mode 'AgentlyMemory' requires a RecordStore. "
+                "Pass memory_store=... to Session.use_memory(...) or activate the Session from an Agent with memory_store support."
             )
-        return self.workspace
-
-    async def _retrieve_scope(
-        self,
-        *,
-        workspace: Any,
-        session: Any,
-        query: str,
-        tags: list[str],
-        budget: dict[str, Any],
-        selection: Any,
-        memory_scope: str,
-    ) -> WorkspaceRetrievalPackage:
-        kind = "global_memory" if memory_scope == GLOBAL_MEMORY else "session_memory"
-        scope = {"memory_scope": memory_scope}
-        if memory_scope == SESSION_MEMORY:
-            scope["session_id"] = str(session.id)
-        retrieve_kwargs = {
-            "tags": tags,
-            "filters": {"collection": "memory", "kind": kind},
-            "scope": scope,
-            "sources": self._list_setting("retrieve.sources", ["records"]),
-            "budget": budget,
-            "selection": selection,
-            "method": cast(Any, self.plugin_settings.get("retrieve.method", "keyword")),
-            "max_candidates": self._int_setting("retrieve.max_candidates", 50),
-            "plugin_manager": self.plugin_manager,
-            "settings": self.settings,
-        }
-        rerank_enabled = bool(self.plugin_settings.get("retrieve.rerank", True))
-        if not rerank_enabled:
-            return await workspace.retrieve(
-                query,
-                rerank=False,
-                **retrieve_kwargs,
-            )
-
-        deterministic_package = await workspace.retrieve(
-            query,
-            rerank=False,
-            **retrieve_kwargs,
-        )
-        deterministic_diagnostics = deterministic_package.get("diagnostics", {})
-        candidate_count = self._diagnostic_count(deterministic_diagnostics, "candidate_count")
-        rerank_min_candidates = max(1, self._int_setting("retrieve.rerank_min_candidates", 2))
-        if candidate_count < rerank_min_candidates:
-            updated_diagnostics = dict(deterministic_diagnostics)
-            updated_diagnostics["memory_rerank_skipped"] = {
-                "enabled": True,
-                "reason": "candidate_count_below_min",
-                "candidate_count": candidate_count,
-                "rerank_min_candidates": rerank_min_candidates,
-            }
-            deterministic_package["diagnostics"] = updated_diagnostics
-            return deterministic_package
-
-        package = await workspace.retrieve(
-            query,
-            rerank=True,
-            rerank_handler=self._rerank_candidates,
-            **retrieve_kwargs,
-        )
-        if self._should_use_empty_rerank_fallback(package):
-            fallback_diagnostics = dict(deterministic_package.get("diagnostics") or {})
-            fallback_diagnostics["memory_rerank_empty_fallback"] = {
-                "enabled": True,
-                "reason": "rerank_dropped_all_memory_candidates",
-                "original": package.get("diagnostics", {}),
-            }
-            deterministic_package["diagnostics"] = fallback_diagnostics
-            return deterministic_package
-        return package
-
-    @staticmethod
-    def _diagnostic_count(diagnostics: Any, key: str) -> int:
-        if not isinstance(diagnostics, Mapping):
-            return 0
-        try:
-            return int(diagnostics.get(key, 0))
-        except (TypeError, ValueError):
-            return 0
-
-    def _should_use_empty_rerank_fallback(self, package: WorkspaceRetrievalPackage) -> bool:
-        if not bool(self.plugin_settings.get("retrieve.keep_candidates_on_empty_rerank", True)):
-            return False
-        diagnostics = package.get("diagnostics", {})
-        if not isinstance(diagnostics, Mapping):
-            return False
-        candidate_count = diagnostics.get("candidate_count", 0)
-        selected_count = diagnostics.get("selected_count", len(package.get("items", [])))
-        rerank = diagnostics.get("rerank", {})
-        if not isinstance(rerank, Mapping):
-            return False
-        try:
-            candidates = int(candidate_count)
-            selected = int(selected_count)
-            dropped = int(rerank.get("dropped", 0))
-        except (TypeError, ValueError):
-            return False
-        return (
-            candidates > 0
-            and selected == 0
-            and bool(rerank.get("enabled", False))
-            and not bool(rerank.get("degraded", False))
-            and dropped >= candidates
-        )
-
-    async def _plan_retrieval(self, *, prompt: Any, session: Any) -> dict[str, Any]:
-        prompt_text = self._prompt_text(prompt)
-        if not self.plugin_settings.get("retrieve_plan.enabled", True):
-            return self._fallback_retrieval_plan(prompt_text)
-        try:
-            payload = await self._model_request(
-                phase="retrieve_plan",
-                default_input={
-                    "session_id": str(session.id),
-                    "prompt": prompt_text,
-                    "configured_tags": self.plugin_settings.get("retrieve.tags", []),
-                },
-                default_instruct=(
-                    "Generate a compact retrieval query and optional tags for Session memory. "
-                    "Decide whether GLOBAL_MEMORY and SESSION_MEMORY are useful for this request."
-                ),
-                default_output={
-                    "query": (str, "Compact retrieval query for Workspace memory."),
-                    "tags": ([str], "Tags that should be used for memory retrieval."),
-                    "include_global": (bool, "Whether to retrieve Workspace-global memory."),
-                    "include_session": (bool, "Whether to retrieve active-session memory."),
-                },
-            )
-        except Exception as exc:
-            plan = self._fallback_retrieval_plan(prompt_text)
-            plan["diagnostics"] = {"degraded": True, "reason": "retrieve_plan_failed", "error": str(exc)}
-            return plan
-        if not isinstance(payload, Mapping):
-            return self._fallback_retrieval_plan(prompt_text)
-        return {
-            "query": str(payload.get("query") or self._fallback_query(prompt_text)),
-            "tags": self._merge_tags(payload.get("tags", [])),
-            "include_global": bool(payload.get("include_global", True)),
-            "include_session": bool(payload.get("include_session", True)),
-        }
+        return self.memory_store
 
     async def _extract_memories(
         self,
@@ -366,29 +250,6 @@ class AgentlyMemory(SessionMemory):
             return []
         return [dict(memory) for memory in raw_memories if isinstance(memory, Mapping)]
 
-    async def _rerank_candidates(self, *, query: str | None, candidates: list[dict[str, Any]]) -> Any:
-        return await self._model_request(
-            phase="rerank",
-            default_input={
-                "query": query or "",
-                "candidates": candidates,
-            },
-            default_instruct=(
-                "Judge which retrieved memory candidates are useful for the query. "
-                "Drop irrelevant candidates and keep useful candidates with relevance scores."
-            ),
-            default_output={
-                "decisions": [
-                    {
-                        "id": (str, "Candidate id exactly as provided."),
-                        "useful": (bool, "True when this memory should be injected."),
-                        "score": (float, "Relevance from 0.0 to 1.0."),
-                        "reason": (str, "Brief decision reason."),
-                    }
-                ]
-            },
-        )
-
     async def _model_request(
         self,
         *,
@@ -397,6 +258,13 @@ class AgentlyMemory(SessionMemory):
         default_instruct: str,
         default_output: Any,
     ) -> Any:
+        request = self._create_model_request(phase)
+        request.input(default_input)
+        request.instruct(default_instruct)
+        request.output(default_output, format="json")
+        return await request.async_get_data(max_retries=0, raise_ensure_failure=True)
+
+    def _create_model_request(self, phase: str) -> Any:
         unavailable = _default_model_unavailable_reason(self.settings)
         if unavailable is not None:
             raise RuntimeError(unavailable)
@@ -407,11 +275,8 @@ class AgentlyMemory(SessionMemory):
             agent_name=f"SessionMemory:{ self.name }:{ phase }",
             parent_settings=self.settings,
         )
-        request.input(default_input)
-        request.instruct(default_instruct)
-        request.output(default_output, format="json")
         self._apply_execution_config(request, phase)
-        return await request.async_get_data(max_retries=0, raise_ensure_failure=True)
+        return request
 
     def _apply_execution_config(self, request: Any, phase: str) -> None:
         execution = self.plugin_settings.get(f"{ phase }.execution", None)
@@ -450,12 +315,13 @@ class AgentlyMemory(SessionMemory):
             "provenance": provenance,
         }
 
-    async def _store_memory(self, workspace: Any, memory: dict[str, Any], *, session: Any) -> Any:
+    async def _store_memory(self, memory_store: Any, memory: dict[str, Any], *, session: Any) -> Any:
         memory_scope = str(memory["memory_scope"])
         scope = {"memory_scope": memory_scope}
         if memory_scope == SESSION_MEMORY:
             scope["session_id"] = str(session.id)
-        vector_meta = self._vector_index_meta(workspace)
+        vector_enabled = bool(self.plugin_settings.get("vector_index.enabled", False))
+        vector_meta = self._vector_index_meta(memory_store)
         provenance = dict(memory["provenance"])
         record_body = {
             "memory_scope": memory_scope,
@@ -466,13 +332,14 @@ class AgentlyMemory(SessionMemory):
             "provenance": provenance,
             "vector_index": vector_meta,
         }
-        return await workspace.put(
+        return await memory_store.put(
             record_body,
             collection="memory",
             kind=str(memory["kind"]),
             summary=str(memory["summary"]),
             scope=scope,
             source=provenance,
+            vector=vector_enabled,
             meta={
                 "tags": memory["tags"],
                 "memory_scope": memory_scope,
@@ -481,32 +348,17 @@ class AgentlyMemory(SessionMemory):
             },
         )
 
-    def _vector_index_meta(self, workspace: Any) -> dict[str, Any]:
-        vector_index = getattr(getattr(workspace, "backend", None), "vector_index", None)
+    def _vector_index_meta(self, memory_store: Any) -> dict[str, Any]:
+        capabilities = memory_store.capabilities()
+        materialized = {
+            str(component)
+            for component in capabilities.get("materialized_components", [])
+        }
         return {
             "requested": bool(self.plugin_settings.get("vector_index.enabled", False)),
-            "backend": type(vector_index).__name__ if vector_index is not None else None,
-            "available": vector_index is not None and getattr(vector_index, "name", None) != "noop",
+            "backend": None,
+            "available": {"embedding", "vector"}.issubset(materialized),
         }
-
-    def _prompt_memory_package(self, package: WorkspaceRetrievalPackage) -> list[dict[str, Any]]:
-        items = []
-        for item in package.get("items", []):
-            record = item.get("ref", {})
-            items.append(
-                {
-                    "summary": item.get("summary"),
-                    "content": item.get("content"),
-                    "tags": item.get("tags", []),
-                    "score": item.get("score"),
-                    "source_ref": {
-                        "collection": record.get("collection") if isinstance(record, Mapping) else None,
-                        "kind": record.get("kind") if isinstance(record, Mapping) else None,
-                        "id": record.get("id") if isinstance(record, Mapping) else None,
-                    },
-                }
-            )
-        return items
 
     def _prompt_text(self, prompt: Any) -> str:
         try:
@@ -516,20 +368,35 @@ class AgentlyMemory(SessionMemory):
                 text = prompt.to_serializable_prompt_data(inherit=True)
             except Exception:
                 text = prompt
-        return self._limit_text(str(text or ""), self._int_setting("retrieve_plan.fallback_query_chars", 2000))
+        resolved = self._limit_text(
+            str(text or ""),
+            self._int_setting("recall.prompt_query_chars", 2000),
+        )
+        return resolved.strip() or "Recall task-relevant Session memory."
 
-    def _fallback_retrieval_plan(self, prompt_text: str) -> dict[str, Any]:
-        return {
-            "query": self._fallback_query(prompt_text),
-            "tags": self._merge_tags(self.plugin_settings.get("retrieve.tags", [])),
-            "include_global": True,
-            "include_session": True,
-            "diagnostics": {"degraded": True, "reason": "deterministic_fallback"},
+    def _context_budget(self) -> ContextBudget:
+        budget = self._dict_setting(
+            "recall.budget",
+            {
+                "max_chars": 4000,
+                "max_blocks": 16,
+                "max_block_chars": 1200,
+            },
+        )
+        defaults = {
+            "max_chars": 4000,
+            "max_blocks": 16,
+            "max_block_chars": 1200,
         }
-
-    def _fallback_query(self, prompt_text: str) -> str:
-        limit = self._int_setting("retrieve_plan.fallback_query_chars", 2000)
-        return self._limit_text(prompt_text, limit)
+        resolved: dict[str, int] = {}
+        for key, default in defaults.items():
+            value = budget.get(key, default)
+            resolved[key] = (
+                value
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0
+                else default
+            )
+        return ContextBudget(**resolved)
 
     def _dict_setting(self, key: str, default: dict[str, Any]) -> dict[str, Any]:
         value = self.plugin_settings.get(key, default)
@@ -545,14 +412,6 @@ class AgentlyMemory(SessionMemory):
             except (TypeError, ValueError):
                 return default
         return default
-
-    def _list_setting(self, key: str, default: list[str]) -> list[str]:
-        value = self.plugin_settings.get(key, default)
-        if isinstance(value, str):
-            return [value]
-        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-            return [str(item) for item in value]
-        return list(default)
 
     def _merge_tags(self, *tag_groups: Any) -> list[str]:
         tags: list[str] = []

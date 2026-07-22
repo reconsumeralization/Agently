@@ -73,6 +73,11 @@ from .ExecutionResult import TriggerFlowExecutionResult
 from .ExecutionInterrupts import TriggerFlowExecutionInterrupts
 from .ExecutionPersistence import TriggerFlowExecutionPersistence
 from .ExecutionRuntimeIO import TriggerFlowExecutionRuntimeIO
+from .ExecutionRetention import (
+    TriggerFlowTerminalRetention,
+    apply_triggerflow_terminal_retention,
+    prepare_triggerflow_terminal_retention,
+)
 from .RecoveryDiagnostics import diagnose_runtime_event_records, project_runtime_event_record
 
 InputT = TypeVar("InputT")
@@ -148,6 +153,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             default=False,
         )
         self._close_lock = asyncio.Lock()
+        self._sub_flow_control_lock = asyncio.Lock()
+        self._live_sub_flow_executions: dict[str, "TriggerFlowExecution[Any, Any, Any]"] = {}
+        self._live_sub_flow_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._live_sub_flow_signal_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self.run_context = (
             run_context
             if run_context is not None
@@ -196,6 +205,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._auto_close_task: asyncio.Task[Any] | None = None
         self._close_started = False
         self._close_result: Any = None
+        self._terminal_state_frozen = False
+        self._terminal_retention: TriggerFlowTerminalRetention | None = None
         self._closed_event = asyncio.Event()
         self._runtime_stream_stopped = False
         self._intervention_mode: TriggerFlowInterventionMode = intervention_mode
@@ -258,6 +269,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self.continue_with = FunctionShifter.syncify(self.async_continue_with)
         self.intervene = FunctionShifter.syncify(self.async_intervene)
         self.mark_intervention_consumed = FunctionShifter.syncify(self.async_mark_intervention_consumed)
+        self.emit_to_sub_flow = FunctionShifter.syncify(self.async_emit_to_sub_flow)
+        self.cancel_sub_flow = FunctionShifter.syncify(self.async_cancel_sub_flow)
 
         # Result
         self.get_result = FunctionShifter.syncify(self.async_get_result)
@@ -776,6 +789,16 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     def _build_close_snapshot(self):
         return self._runtime_io.build_close_snapshot()
 
+    def _ensure_terminal_state_mutable(self):
+        if (
+            self._terminal_state_frozen
+            and self._lifecycle_state != TRIGGER_FLOW_LIFECYCLE_CLOSED
+        ):
+            raise RuntimeError(
+                f"TriggerFlow execution {self.id} can not mutate state because its "
+                "terminal close snapshot is frozen. Retry async_close() with the existing terminal unit."
+            )
+
     def _clear_transient_aggregation_state(self):
         for key in TRANSIENT_AGGREGATION_STATE_KEYS:
             self._system_runtime_data.pop(key, None)
@@ -843,12 +866,42 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 for task in remaining:
                     task.cancel()
                 await asyncio.gather(*remaining, return_exceptions=True)
-            results.extend(
-                task.result() if not task.cancelled() and task.exception() is None else task.exception()
-                for task in done
-            )
+            for task in done:
+                if task.cancelled():
+                    results.append(asyncio.CancelledError())
+                    continue
+                error = task.exception()
+                results.append(task.result() if error is None else error)
             if remaining:
                 return results
+
+    async def _raise_pending_task_errors(self, results: list[Any]):
+        if self._skip_exceptions:
+            return
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                if self._status == TRIGGER_FLOW_STATUS_CANCELLED:
+                    continue
+                self._set_status(TRIGGER_FLOW_STATUS_CANCELLED)
+                await self._emit_runtime_event(
+                    "triggerflow.execution_cancelled",
+                    level="WARNING",
+                    message=f"TriggerFlow execution '{ self.id }' was cancelled while draining managed tasks.",
+                    payload={"reason": "managed_task_cancelled"},
+                )
+                raise result
+            if isinstance(result, BaseException):
+                self._set_status(TRIGGER_FLOW_STATUS_FAILED)
+                if not self._runtime_failed_emitted:
+                    self._runtime_failed_emitted = True
+                    await self._emit_runtime_event(
+                        "triggerflow.execution_failed",
+                        level="ERROR",
+                        message=f"TriggerFlow execution '{ self.id }' failed while draining managed tasks.",
+                        payload={"reason": "managed_task_failed"},
+                        error=result,
+                    )
+                raise result
 
     def _ensure_auto_close_monitor(self):
         if (
@@ -958,6 +1011,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 payload={"reason": reason},
             )
             return self
+        self._ensure_terminal_state_mutable()
         if self._lifecycle_state != TRIGGER_FLOW_LIFECYCLE_OPEN:
             self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_OPEN)
             self._mark_activity()
@@ -996,7 +1050,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                     await self.async_seal(reason=reason)
                     sealed_for_close = True
 
-                await self._drain_pending_tasks(timeout=timeout)
+                pending_task_results = await self._drain_pending_tasks(timeout=timeout)
+                await self._raise_pending_task_errors(pending_task_results)
                 await self._handle_pending_interrupts_before_close(
                     pending_interrupts=pending_interrupts,
                     reason=reason,
@@ -1004,45 +1059,148 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 await self._async_expire_pending_interventions()
                 self._clear_transient_aggregation_state()
 
-                result = self._build_close_snapshot()
+                if self._terminal_retention is None:
+                    result = self._build_close_snapshot()
+                    self._terminal_state_frozen = True
+                else:
+                    result = self._terminal_retention["close_result"]
                 if self._status not in {TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
                     self._set_status(TRIGGER_FLOW_STATUS_COMPLETED)
+                if self._terminal_retention is None:
+                    self._terminal_retention = (
+                        await prepare_triggerflow_terminal_retention(
+                            self,
+                            result,
+                        )
+                    )
+                terminal_retention = self._terminal_retention
+                if self._status not in {TRIGGER_FLOW_STATUS_FAILED, TRIGGER_FLOW_STATUS_CANCELLED}:
                     if not self._runtime_completed_emitted:
-                        self._runtime_completed_emitted = True
                         await self._emit_runtime_event(
                             "triggerflow.execution_completed",
                             message=f"TriggerFlow execution '{ self.id }' completed.",
-                            payload={
-                                "result": self._to_serializable_value(result),
-                                "origin_chunk": self._get_origin_chunk_payload(),
-                            },
+                            payload=dict(terminal_retention["completed_event_payload"]),
+                            event_id=terminal_retention["completed_event_id"],
+                            event_timestamp=terminal_retention["completed_event_timestamp"],
+                            state_version=terminal_retention["completed_event_state_version"],
                         )
+                        self._runtime_completed_emitted = True
 
                 await self.async_stop_stream()
                 await self._release_managed_execution_resources()
 
-                self._closed_at = time.time()
                 self._close_result = result
-                self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_CLOSED)
-                await self._emit_runtime_event(
-                    "triggerflow.execution_closed",
-                    message=f"TriggerFlow execution '{ self.id }' closed.",
-                    payload={
+                closed_event_payload = terminal_retention["closed_event_payload"]
+                if closed_event_payload is None:
+                    self._closed_at = time.time()
+                    record_store_configured = (
+                        self._get_runtime_resource("record_store", None) is not None
+                    )
+                    prepared_result = terminal_retention["result"]
+                    retention_status = (
+                        str(prepared_result["status"])
+                        if prepared_result is not None
+                        else ("pending" if record_store_configured else "not_configured")
+                    )
+                    closed_event_payload = {
                         "reason": reason,
                         "closed_at": self._closed_at,
-                        "result": self._to_serializable_value(result),
-                    },
+                        "execution_id": self.id,
+                        "retention_status": retention_status,
+                    }
+                    terminal_retention["closed_event_payload"] = closed_event_payload
+                    terminal_retention["closed_event_timestamp"] = int(time.time() * 1000)
+                    terminal_retention["closed_event_state_version"] = self._state_version + 1
+                else:
+                    self._closed_at = cast(float, closed_event_payload["closed_at"])
+                    self._close_reason = str(closed_event_payload["reason"])
+                closed_event_task = asyncio.create_task(
+                    self._emit_runtime_event(
+                        "triggerflow.execution_closed",
+                        message=f"TriggerFlow execution '{ self.id }' closed.",
+                        payload=dict(closed_event_payload),
+                        event_id=terminal_retention["closed_event_id"],
+                        event_timestamp=cast(
+                            int,
+                            terminal_retention["closed_event_timestamp"],
+                        ),
+                        state_version=cast(
+                            int,
+                            terminal_retention["closed_event_state_version"],
+                        ),
+                    )
                 )
+                postcommit_error: BaseException | None = None
+                try:
+                    await asyncio.shield(closed_event_task)
+                except asyncio.CancelledError as error:
+                    postcommit_error = error
+                    if not closed_event_task.done():
+                        await asyncio.shield(closed_event_task)
+                self._set_lifecycle_state(TRIGGER_FLOW_LIFECYCLE_CLOSED)
+                try:
+                    terminal_retention = await apply_triggerflow_terminal_retention(
+                        self,
+                        terminal_retention,
+                    )
+                    self._terminal_retention = terminal_retention
+                except BaseException as error:
+                    postcommit_error = error
+                retention_result = terminal_retention["result"]
+                if retention_result is not None:
+                    retention_event_type = (
+                        "triggerflow.execution_retention_applied"
+                        if retention_result["status"] in {"applied", "noop"}
+                        else "triggerflow.execution_retention_deferred"
+                    )
+                    try:
+                        await self._emit_runtime_event(
+                            retention_event_type,
+                            level=(
+                                "INFO"
+                                if retention_result["status"] in {"applied", "noop"}
+                                else "WARNING"
+                            ),
+                            message=(
+                                f"TriggerFlow execution '{self.id}' terminal retention "
+                                f"finished with status '{retention_result['status']}'."
+                            ),
+                            payload={
+                                "execution_id": self.id,
+                                "status": retention_result["status"],
+                                "retained_ref_count": len(
+                                    retention_result["retained_refs"]
+                                ),
+                                "recovery_snapshot_status": retention_result[
+                                    "recovery_snapshot_status"
+                                ],
+                                "diagnostics": retention_result["diagnostics"],
+                            },
+                            persist=False,
+                        )
+                    except BaseException as error:
+                        if not isinstance(error, Exception):
+                            postcommit_error = postcommit_error or error
                 self._closed_event.set()
                 self._trigger_flow.remove_execution(self)
 
                 if self._auto_close_task is not None and self._auto_close_task is not asyncio.current_task():
                     self._auto_close_task.cancel()
+                if postcommit_error is not None:
+                    raise postcommit_error
                 return self._close_result
             except BaseException:
+                if self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED:
+                    raise
                 self._close_started = False
                 self._close_reason = None
-                if sealed_for_close and self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_SEALED:
+                if self._terminal_retention is None:
+                    self._terminal_state_frozen = False
+                if (
+                    sealed_for_close
+                    and self._terminal_retention is None
+                    and self._lifecycle_state == TRIGGER_FLOW_LIFECYCLE_SEALED
+                ):
                     await self.async_unseal(reason="close_failed")
                 raise
 
@@ -1054,23 +1212,47 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         message: str | None = None,
         payload: Any = None,
         error: BaseException | None = None,
+        persist: bool = True,
+        event_id: str | None = None,
+        event_timestamp: int | None = None,
+        state_version: int | None = None,
     ):
         from agently.base import async_emit_runtime
 
+        event_data: dict[str, Any] = {
+            "event_type": event_type,
+            "source": "TriggerFlowExecution",
+            "level": level,
+            "message": message,
+            "payload": payload,
+            "error": error,
+            "run": self.run_context,
+            "meta": {"execution_id": self.id},
+        }
+        if event_id is not None:
+            event_data["event_id"] = event_id
+        if event_timestamp is not None:
+            event_data["timestamp"] = event_timestamp
         event = RuntimeEvent.model_validate(
-            {
-                "event_type": event_type,
-                "source": "TriggerFlowExecution",
-                "level": level,
-                "message": message,
-                "payload": payload,
-                "error": error,
-                "run": self.run_context,
-                "meta": {"execution_id": self.id},
-            }
+            event_data
         )
-        await self._persist_runtime_event(event)
-        await async_emit_runtime(event)
+        persistence_error: BaseException | None = None
+        if persist:
+            try:
+                await self._persist_runtime_event(
+                    event,
+                    state_version=state_version,
+                )
+            except BaseException as error:
+                persistence_error = error
+        try:
+            await async_emit_runtime(event)
+        except BaseException as delivery_error:
+            if persistence_error is not None:
+                raise persistence_error from delivery_error
+            raise
+        if persistence_error is not None:
+            raise persistence_error
 
     async def _emit_runtime_definition_event(self):
         if self._runtime_definition_emitted:
@@ -1378,7 +1560,12 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 return value
         return None
 
-    async def _persist_runtime_event(self, event: RuntimeEvent):
+    async def _persist_runtime_event(
+        self,
+        event: RuntimeEvent,
+        *,
+        state_version: int | None = None,
+    ):
         runtime_event_store = self._runtime_event_store
         if runtime_event_store is None:
             return None
@@ -1387,7 +1574,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             append_runtime_event,
             {
                 "idempotency_key": event.event_id,
-                "state_version": self._state_version,
+                "state_version": (
+                    self._state_version
+                    if state_version is None
+                    else state_version
+                ),
                 "parent_signal_id": self._runtime_event_parent_signal_id(event),
                 "node_id": self._runtime_event_node_id(event),
                 "operator_id": self._runtime_event_operator_id(event),
@@ -1468,6 +1659,225 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._bump_state_version()
         return frame
 
+    def _register_live_sub_flow(
+        self,
+        frame_id: str,
+        child_execution: "TriggerFlowExecution[Any, Any, Any]",
+        control_task: asyncio.Task[Any],
+        frame: dict[str, Any],
+    ):
+        normalized_frame_id = str(frame_id)
+        self._live_sub_flow_executions[normalized_frame_id] = child_execution
+        self._live_sub_flow_tasks[normalized_frame_id] = control_task
+        self._set_sub_flow_frame(normalized_frame_id, frame)
+
+    def _unregister_live_sub_flow(
+        self,
+        frame_id: str,
+        child_execution: "TriggerFlowExecution[Any, Any, Any]",
+    ):
+        normalized_frame_id = str(frame_id)
+        if self._live_sub_flow_executions.get(normalized_frame_id) is child_execution:
+            self._live_sub_flow_executions.pop(normalized_frame_id, None)
+            self._live_sub_flow_tasks.pop(normalized_frame_id, None)
+            self._live_sub_flow_signal_tasks.pop(normalized_frame_id, None)
+
+    def _sub_flow_event_payload(self, frame: dict[str, Any], **extra: Any):
+        payload = {
+            "execution_id": self.id,
+            "parent_execution_id": frame.get("parent_execution_id", self.id),
+            "parent_operator_id": frame.get("parent_operator_id"),
+            "frame_id": frame.get("frame_id"),
+            "child_execution_id": frame.get("child_execution_id"),
+            "child_flow_name": frame.get("child_flow_name"),
+            "status": frame.get("status"),
+        }
+        payload.update(extra)
+        return payload
+
+    async def async_emit_to_sub_flow(
+        self,
+        frame_id: str,
+        trigger_event: str,
+        value: Any = None,
+        *,
+        trigger_type: Literal["event", "runtime_data", "flow_data"] = "event",
+    ):
+        normalized_frame_id = str(frame_id)
+        signal_task: asyncio.Task[Any]
+        async with self._sub_flow_control_lock:
+            frame = self._get_sub_flow_frames().get(normalized_frame_id)
+            if not isinstance(frame, dict):
+                raise KeyError(
+                    f"Can not emit to TriggerFlow sub flow frame '{ normalized_frame_id }' because it was not found."
+                )
+            child_execution = self._live_sub_flow_executions.get(normalized_frame_id)
+            if frame.get("status") != "running" or child_execution is None:
+                raise RuntimeError(
+                    f"Can not emit to TriggerFlow sub flow frame '{ normalized_frame_id }' because it is not active "
+                    f"(status={frame.get('status')!r})."
+                )
+            signal_task = asyncio.create_task(
+                child_execution.async_emit(
+                    str(trigger_event),
+                    value,
+                    trigger_type=trigger_type,
+                    _source="parent_sub_flow_control",
+                    _meta={
+                        "parent_execution_id": self.id,
+                        "sub_flow_frame_id": normalized_frame_id,
+                    },
+                )
+            )
+            self._live_sub_flow_signal_tasks.setdefault(normalized_frame_id, set()).add(signal_task)
+        try:
+            result = await signal_task
+        except asyncio.CancelledError:
+            current_frame = self._get_sub_flow_frames().get(normalized_frame_id)
+            if isinstance(current_frame, dict) and current_frame.get("status") in {
+                "cancel_requested",
+                "cancelled",
+            }:
+                raise RuntimeError(
+                    f"TriggerFlow sub flow frame '{ normalized_frame_id }' was cancelled while forwarding "
+                    f"signal '{ trigger_event }'."
+                ) from None
+            raise
+        finally:
+            async with self._sub_flow_control_lock:
+                signal_tasks = self._live_sub_flow_signal_tasks.get(normalized_frame_id)
+                if signal_tasks is not None:
+                    signal_tasks.discard(signal_task)
+                    if not signal_tasks:
+                        self._live_sub_flow_signal_tasks.pop(normalized_frame_id, None)
+        await self._emit_runtime_event(
+            "triggerflow.sub_flow_signal_forwarded",
+            message=(
+                f"TriggerFlow execution '{ self.id }' forwarded signal '{ trigger_event }' "
+                f"to sub-flow frame '{ normalized_frame_id }'."
+            ),
+            payload=self._sub_flow_event_payload(
+                frame,
+                trigger_event=str(trigger_event),
+                trigger_type=trigger_type,
+                value=self._to_serializable_value(value),
+            ),
+        )
+        return result
+
+    async def async_cancel_sub_flow(
+        self,
+        frame_id: str,
+        *,
+        reason: str = "manual",
+    ) -> bool:
+        normalized_frame_id = str(frame_id)
+        control_task: asyncio.Task[Any] | None = None
+        signal_tasks: list[asyncio.Task[Any]] = []
+        child_execution: TriggerFlowExecution[Any, Any, Any] | None = None
+        requested_frame: dict[str, Any]
+        finalized_here = False
+        async with self._sub_flow_control_lock:
+            stored_frame = self._get_sub_flow_frames().get(normalized_frame_id)
+            if not isinstance(stored_frame, dict):
+                raise KeyError(
+                    f"Can not cancel TriggerFlow sub flow frame '{ normalized_frame_id }' because it was not found."
+                )
+            status = stored_frame.get("status")
+            if status in {"cancel_requested", "cancelled", "completed", "failed", "interrupted"}:
+                return False
+            if status not in {"running", "waiting"}:
+                return False
+            control_task = self._live_sub_flow_tasks.get(normalized_frame_id)
+            if control_task is asyncio.current_task():
+                raise RuntimeError(
+                    f"TriggerFlow sub flow frame '{ normalized_frame_id }' can not cancel itself from its control task."
+                )
+            requested_frame = copy.deepcopy(stored_frame)
+            requested_frame["status"] = "cancel_requested"
+            requested_frame["cancel_requested_at"] = time.time()
+            requested_frame["cancel_reason"] = str(reason)
+            self._set_sub_flow_frame(normalized_frame_id, requested_frame)
+            child_execution = self._live_sub_flow_executions.get(normalized_frame_id)
+            signal_tasks = list(self._live_sub_flow_signal_tasks.get(normalized_frame_id, set()))
+
+        await self._emit_runtime_event(
+            "triggerflow.sub_flow_cancel_requested",
+            level="WARNING",
+            message=(
+                f"TriggerFlow execution '{ self.id }' requested cancellation of "
+                f"sub-flow frame '{ normalized_frame_id }'."
+            ),
+            payload=self._sub_flow_event_payload(requested_frame, reason=str(reason)),
+        )
+
+        if child_execution is not None:
+            child_execution._set_status(TRIGGER_FLOW_STATUS_CANCELLED)
+            await child_execution._emit_runtime_event(
+                "triggerflow.execution_cancelled",
+                level="WARNING",
+                message=(
+                    f"TriggerFlow child execution '{ child_execution.id }' was cancelled by "
+                    f"parent frame '{ normalized_frame_id }'."
+                ),
+                payload={
+                    "reason": str(reason),
+                    "parent_execution_id": self.id,
+                    "sub_flow_frame_id": normalized_frame_id,
+                },
+            )
+
+        tasks_to_cancel = [
+            task
+            for task in [*signal_tasks, control_task]
+            if task is not None and not task.done()
+        ]
+        for task in tasks_to_cancel:
+            task.cancel()
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+        async with self._sub_flow_control_lock:
+            stored_frame = self._get_sub_flow_frames().get(normalized_frame_id)
+            if not isinstance(stored_frame, dict):
+                return True
+            if stored_frame.get("status") == "cancel_requested":
+                finalized_here = True
+                cancelled_frame = copy.deepcopy(stored_frame)
+                cancelled_frame["status"] = "cancelled"
+                cancelled_frame["cancelled_at"] = time.time()
+                if child_execution is not None:
+                    cancelled_frame["child_saved_state"] = child_execution.save()
+                projected_ids = set(cancelled_frame.get("projected_interrupts", {}))
+                if projected_ids:
+                    interrupts = self._get_interrupts().copy()
+                    for interrupt_id in projected_ids:
+                        interrupt = interrupts.get(interrupt_id)
+                        if not isinstance(interrupt, dict) or interrupt.get("status") != "waiting":
+                            continue
+                        cancelled_interrupt = copy.deepcopy(interrupt)
+                        cancelled_interrupt["status"] = "cancelled"
+                        cancelled_interrupt["cancelled_at"] = cancelled_frame["cancelled_at"]
+                        cancelled_interrupt["cancel_reason"] = str(reason)
+                        interrupts[interrupt_id] = cancelled_interrupt
+                    self._system_runtime_data.set("interrupts", interrupts)
+                self._set_sub_flow_frame(normalized_frame_id, cancelled_frame)
+            else:
+                cancelled_frame = copy.deepcopy(stored_frame)
+
+        self._refresh_waiting_status()
+        if finalized_here and cancelled_frame.get("status") == "cancelled":
+            await self._emit_runtime_event(
+                "triggerflow.sub_flow_cancelled",
+                level="WARNING",
+                message=(
+                    f"TriggerFlow execution '{ self.id }' cancelled sub-flow frame "
+                    f"'{ normalized_frame_id }'."
+                ),
+                payload=self._sub_flow_event_payload(cancelled_frame, reason=str(reason)),
+            )
+        return True
+
     def _build_resume_context(self, interrupt_id: str, interrupt: dict[str, Any], value: Any):
         return self._interrupts.build_resume_context(interrupt_id, interrupt, value)
 
@@ -1480,7 +1890,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     def _get_runtime_resource(self, key: str, default: Any = None):
         return self._runtime_resources.get(str(key), default)
 
-    def require_runtime_resource(self, key: str):
+    def require_runtime_resource(self, key: str) -> Any:
         key = str(key)
         if key not in self._runtime_resources:
             available = sorted(str(resource_key) for resource_key in self.get_runtime_resources().keys())
@@ -1506,24 +1916,62 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             self._set_runtime_resource(str(key), value)
         return self
 
+    def _recovery_provider_candidate(self) -> Any | None:
+        durable_provider = self._get_runtime_resource("durable_provider")
+        if durable_provider is not None:
+            return durable_provider
+        return self._get_runtime_resource("record_store")
+
+    def _activate_recovery_durability(self, *, reason: str) -> Any | None:
+        provider = self._recovery_provider_candidate()
+        supports_snapshot = callable(getattr(provider, "put_snapshot", None))
+        if provider is not None:
+            if self._snapshot_store is None and supports_snapshot:
+                self._bind_snapshot_store(provider)
+        if self._snapshot_store is not None and self._system_runtime_data.get(
+            "recovery_durability_activation", None, inherit=False
+        ) is None:
+            self._system_runtime_data.set(
+                "recovery_durability_activation",
+                {
+                    "reason": str(reason),
+                    "activated_at_state_version": self._state_version,
+                },
+            )
+        return provider
+
+    async def _async_activate_recovery_durability(
+        self,
+        *,
+        reason: str,
+        persist_snapshot: bool = False,
+        step_id: str | None = None,
+    ) -> Any | None:
+        provider = self._activate_recovery_durability(reason=reason)
+        if persist_snapshot and self._snapshot_store is None:
+            raise RuntimeError(
+                "TriggerFlow recovery snapshot persistence requires a snapshot store."
+            )
+        if persist_snapshot:
+            await self.async_save(step_id=step_id)
+        return provider
+
+    def _bind_configured_durability_resources(self) -> None:
+        durable_provider = self._get_runtime_resource("durable_provider")
+        snapshot_store = self._get_runtime_resource("snapshot_store")
+        runtime_event_store = self._get_runtime_resource("runtime_event_store")
+        if snapshot_store is not None:
+            self._bind_snapshot_store(snapshot_store)
+        elif callable(getattr(durable_provider, "put_snapshot", None)):
+            self._bind_snapshot_store(durable_provider)
+        if runtime_event_store is not None:
+            self._bind_runtime_event_store(runtime_event_store)
+
     def _bind_durable_provider_resource(self, key: str, value: Any):
-        if key == "workspace":
-            if self._snapshot_store is None and hasattr(value, "put_snapshot"):
-                self._bind_snapshot_store(value)
-            if self._runtime_event_store is None and hasattr(value, "append_runtime_event"):
-                self._bind_runtime_event_store(value)
+        if key == "record_store":
             return
-        if key == "durable_provider":
-            if hasattr(value, "put_snapshot"):
-                self._bind_snapshot_store(value)
-            if hasattr(value, "append_runtime_event"):
-                self._bind_runtime_event_store(value)
-            return
-        if key == "snapshot_store":
-            self._bind_snapshot_store(value)
-            return
-        if key == "runtime_event_store":
-            self._bind_runtime_event_store(value)
+        if key in {"durable_provider", "snapshot_store", "runtime_event_store"}:
+            self._bind_configured_durability_resources()
 
     def _clear_runtime_resources(self):
         self._runtime_resources.clear()
@@ -1832,15 +2280,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return latest
 
     def _compaction_provider(self, snapshot_store: Any, runtime_event_store: Any):
-        if snapshot_store is not None and (
-            hasattr(snapshot_store, "put_artifact_ref")
-            or hasattr(snapshot_store, "add_retention_anchor")
-        ):
+        if snapshot_store is not None and hasattr(snapshot_store, "put_artifact_ref"):
             return snapshot_store
-        if runtime_event_store is not None and (
-            hasattr(runtime_event_store, "put_artifact_ref")
-            or hasattr(runtime_event_store, "add_retention_anchor")
-        ):
+        if runtime_event_store is not None and hasattr(runtime_event_store, "put_artifact_ref"):
             return runtime_event_store
         return snapshot_store
 
@@ -1935,7 +2377,6 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         if isinstance(retained_anchors, dict):
             retained_anchors = [retained_anchors]
         anchor_ids: list[str] = []
-        event_ids = [str(record.get("event_id")) for record in records if record.get("event_id")]
         for anchor in retained_anchors or []:
             if not isinstance(anchor, dict):
                 continue
@@ -1947,15 +2388,6 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 **metadata,
                 **anchor_result_metadata,
             }
-            if provider is not None and hasattr(provider, "add_retention_anchor"):
-                anchor_ref = await provider.add_retention_anchor(
-                    self.id,
-                    anchor_type=str(anchor.get("anchor_type", "compaction")),
-                    sequence=anchor.get("sequence", segment_from),
-                    preserved_event_ids=event_ids,
-                    meta=anchor_metadata,
-                )
-                anchor_metadata["retention_anchor_ref"] = self._to_serializable_value(anchor_ref)
             self._record_retained_lineage_anchor(
                 anchor_id,
                 anchor_type=str(anchor.get("anchor_type", "compaction")),
@@ -2059,6 +2491,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         encoding: str | None = "utf-8",
         require_idle: bool = False,
     ):
+        self._activate_recovery_durability(reason="save")
         return self._persistence.save(
             path,
             encoding=encoding,
@@ -2074,6 +2507,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         execution_resources: "list[ExecutionResourceRequirement] | None" = None,
         validate_resources: bool = False,
     ):
+        if runtime_resources:
+            self._update_runtime_resources(runtime_resources)
+        self._bind_configured_durability_resources()
+        self._activate_recovery_durability(reason="load")
         return self._persistence.load(
             state,
             encoding=encoding,
@@ -2083,7 +2520,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         )
 
     def _bind_snapshot_store(self, snapshot_store: "TriggerFlowExecutionSnapshotStore | None"):
-        if snapshot_store is not None and not hasattr(snapshot_store, "put_snapshot"):
+        if snapshot_store is not None and not callable(
+            getattr(snapshot_store, "put_snapshot", None)
+        ):
             raise TypeError(
                 "TriggerFlow snapshot_store must expose async put_snapshot(run_id, state, step_id=...)."
             )
@@ -2091,7 +2530,9 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         return self
 
     def _bind_runtime_event_store(self, runtime_event_store: "RuntimeEventStore | None"):
-        if runtime_event_store is not None and not hasattr(runtime_event_store, "append_runtime_event"):
+        if runtime_event_store is not None and not callable(
+            getattr(runtime_event_store, "append_runtime_event", None)
+        ):
             raise TypeError(
                 "TriggerFlow runtime_event_store must expose async append_runtime_event(execution_id, event, ...)."
             )
@@ -2203,6 +2644,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         )
         resolved_runtime_resources = dict(runtime_resources or {})
         resolved_runtime_resources.update(resolver_report.get("runtime_resources", {}))
+        if resolved_runtime_resources:
+            self._update_runtime_resources(resolved_runtime_resources)
+        self._bind_configured_durability_resources()
+        self._activate_recovery_durability(reason="async_load")
         self.load(
             state,
             encoding=encoding,
@@ -2250,8 +2695,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         require_idle: bool = False,
         require_distributed_provider: bool = False,
     ):
+        await self._async_activate_recovery_durability(reason="async_save")
         resolved_snapshot_store = snapshot_store if snapshot_store is not None else self._snapshot_store
-        if resolved_snapshot_store is None or not hasattr(resolved_snapshot_store, "put_snapshot"):
+        if resolved_snapshot_store is None or not callable(
+            getattr(resolved_snapshot_store, "put_snapshot", None)
+        ):
             raise TypeError(
                 "TriggerFlow snapshot_store must expose async put_snapshot(run_id, state, step_id=...). "
                 "Pass snapshot_store to async_save(...) or set runtime resource 'snapshot_store'."
@@ -2527,6 +2975,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
 
                 async def run_handler(
                     handler_func,
+                    handler_data: TriggerFlowRuntimeData[Any, Any, Any],
                     *,
                     handler_id: str,
                     bound_operator: dict[str, Any] | None,
@@ -2560,9 +3009,11 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                                 ),
                                 chunk_run_context=bound_chunk_run_context,
                             ):
-                                return await handler_func
+                                return await handler_func(handler_data)
                         except BaseException as error:
                             if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                                raise
+                            if isinstance(error, asyncio.CancelledError):
                                 raise
                             if bound_operator is not None and bound_chunk_run_context is not None:
                                 await self._emit_chunk_runtime_event(
@@ -2623,22 +3074,22 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                         self._active_handler_count -= 1
                         self._mark_activity()
 
-                handler_task = FunctionShifter.asyncify(handler)(
-                    TriggerFlowRuntimeData(
-                        trigger_event=signal.trigger_event,
-                        trigger_type=signal.trigger_type,
-                        value=signal.value,
-                        execution=self,
-                        _layer_marks=signal.layer_marks.copy(),
-                        signal=signal,
-                        chunk_run_context=chunk_run_context,
-                    )
+                handler_func = FunctionShifter.asyncify(handler)
+                handler_data = TriggerFlowRuntimeData(
+                    trigger_event=signal.trigger_event,
+                    trigger_type=signal.trigger_type,
+                    value=signal.value,
+                    execution=self,
+                    _layer_marks=signal.layer_marks.copy(),
+                    signal=signal,
+                    chunk_run_context=chunk_run_context,
                 )
                 tasks.append(
                     self._track_task(
                         asyncio.ensure_future(
                             run_handler(
-                                handler_task,
+                                handler_func,
+                                handler_data,
                                 handler_id=handler_id,
                                 bound_operator=operator,
                                 bound_chunk_run_context=chunk_run_context,
@@ -2715,6 +3166,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         *,
         emit: bool = True,
     ):
+        self._ensure_terminal_state_mutable()
         futures = []
         handlers = self._handlers["runtime_data"]
 

@@ -31,7 +31,7 @@ This handbook is organized as a learning path. If you have not run a single requ
    - [Model Response](requests/model-response.md)
    - [Session Memory](requests/session-memory.md)
    - [Context Engineering](requests/context-engineering.md)
-   - [Workspace](requests/workspace.md)
+   - [Task context, files, and records](requests/workspace.md)
 
 3. **Actions** — model-callable actions, built-in capability packages, MCP, managed execution resources, and compatibility surfaces
    - [Actions Overview](actions/overview.md)
@@ -49,6 +49,7 @@ This handbook is organized as a learning path. If you have not run a single requ
    - [Event Center](observability/event-center.md)
    - [DevTools](observability/devtools.md)
    - [Coding Agents](development/coding-agents.md)
+   - [Agently 4.1.4.2 Development Notes](development/release-notes-4.1.4.2.md)
    - [Agently 4.1.4 Development Notes](development/release-notes-4.1.4.md)
    - [Agently 4.1.3.9 Release Notes](development/release-notes-4.1.3.9.md)
    - [Agently 4.1.3.8 Release Notes](development/release-notes-4.1.3.8.md)

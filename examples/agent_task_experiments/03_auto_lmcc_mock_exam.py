@@ -24,7 +24,7 @@ def main() -> None:
             "请基于下面的资料边界，为 LMCC 青少年组方向生成一套 3 题短版迷你模拟题。"
             "只能使用资料包中的信息，不要声称已经读取完整官方大纲。输出中文，包含题目、答案、"
             "简明解析、考察点、覆盖说明和超纲自查。每题解析不超过 80 个汉字；覆盖说明和超纲自查"
-            "使用短列表，不写长表格，整体保持紧凑，方便 delta 流和 Workspace 回读展示。\n\n"
+            "使用短列表，不写长表格，整体保持紧凑，方便 delta 流和 TaskWorkspace 回读展示。\n\n"
             f"{SOURCE_PACKET}"
         ),
         success_criteria=[
@@ -35,7 +35,7 @@ def main() -> None:
         ],
         options=stream_options(),
     )
-    run_and_print(execution, provider=provider, workspace=workspace)
+    run_and_print(execution, provider=provider, task_workspace=workspace)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ from agently.core.model.AttachmentInput import ImageDetail, build_image_attachme
 from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input, _UNSET
 from agently.core.model.ModelRequestResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.runtime import resolve_parent_run_context
+from agently.core.TaskWorkspace import TaskWorkspace
 from agently.utils import DataFormatter, FunctionShifter, Settings
 from agently.utils.LanguagePolicy import apply_language_policy_to_prompt, resolve_language_policy
 
@@ -68,8 +69,8 @@ class _AgentDefinitionBuilder:
         self._agent.set_settings(*args, **kwargs)
         return self
 
-    def use_workspace(self, *args: Any, **kwargs: Any) -> Self:
-        cast(Any, self._agent).use_workspace(*args, **kwargs)
+    def use_task_workspace(self, *args: Any, **kwargs: Any) -> Self:
+        cast(Any, self._agent).use_task_workspace(*args, **kwargs)
         return self
 
     def configure_policy_approval(self, *args: Any, **kwargs: Any) -> Self:
@@ -245,7 +246,7 @@ class BaseAgent:
         prompt: Mapping[str, Any] | Any | None = None,
         actions: Any = None,
         skills: Any = None,
-        workspace: str | os.PathLike[str] | None = None,
+        task_workspace: str | os.PathLike[str] | None = None,
         policy: Mapping[str, Any] | None = None,
         settings: Mapping[str, Any] | None = None,
         **kwargs: Any,
@@ -276,8 +277,8 @@ class BaseAgent:
                     use_skills(item, always=True)
             else:
                 use_skills(skills, always=True)
-        if workspace is not None:
-            cast(Any, self).use_workspace(workspace)
+        if task_workspace is not None:
+            cast(Any, self).use_task_workspace(task_workspace)
         if policy is not None:
             handler = policy.get("handler")
             self.configure_policy_approval(handler=str(handler) if handler is not None else None)
@@ -548,16 +549,16 @@ class BaseAgent:
         strategy: str | None,
         task_refs: dict[str, Any],
         close_snapshot: dict[str, Any],
-        failed: bool = False,
+        terminal_status: Literal["completed", "failed", "cancelled"],
     ) -> None:
         from agently.base import async_emit_runtime
 
-        event_type = "agent_execution.failed" if failed else "agent_execution.completed"
+        event_type = f"agent_execution.{terminal_status}"
         await async_emit_runtime(
             {
                 "event_type": event_type,
                 "source": "BaseAgent",
-                "message": f"AgentExecution { 'failed' if failed else 'completed' } for '{ self.name }'.",
+                "message": f"AgentExecution {terminal_status} for '{ self.name }'.",
                 "payload": {
                     "execution_id": execution_id,
                     "status": status,
@@ -1026,7 +1027,7 @@ class BaseAgent:
         goal: str,
         success_criteria: list[str] | None = None,
         execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
-        workspace: str | os.PathLike[str] | None = None,
+        task_workspace: str | os.PathLike[str] | None = None,
         max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
         context_profile: str = "auto",
@@ -1035,20 +1036,12 @@ class BaseAgent:
         options: dict[str, Any] | None = None,
         task_id: str | None = None,
     ) -> "AgentExecution":
-        if workspace is not None:
-            cast(Any, self).use_workspace(workspace)
+        if task_workspace is not None:
+            cast(Any, self).use_task_workspace(task_workspace)
         normalized_execution = AgentTask.normalize_execution_strategy(execution)
         resolved_task_id = task_id or f"agent_task_{uuid.uuid4().hex}"
         resolved_options = dict(options or {})
         agent_task_options = dict(resolved_options.get("agent_task") or {})
-        scoped_workspace_action_ids: list[str] = []
-        if bool(agent_task_options.get("enable_workspace_readback_actions")) or bool(
-            agent_task_options.get("enable_workspace_coding_actions")
-        ):
-            scoped_workspace_action_ids = self._enable_task_workspace_read_actions(
-                resolved_task_id,
-                coding_agent=bool(agent_task_options.get("enable_workspace_coding_actions")),
-            )
         language_policy = self.settings.get("agent.language_policy", None)
         if isinstance(language_policy, Mapping):
             agent_task_options.setdefault("language_policy", dict(language_policy))
@@ -1058,7 +1051,7 @@ class BaseAgent:
             "goal": goal,
             "success_criteria": success_criteria,
             "execution": normalized_execution,
-            "workspace": workspace,
+            "task_workspace": task_workspace,
             "max_iterations": max_iterations,
             "verify": verify,
             "context_profile": context_profile,
@@ -1074,49 +1067,63 @@ class BaseAgent:
                 "task": {key: value for key, value in task_options.items() if value is not None},
             },
         )
-        if scoped_workspace_action_ids:
-            agent_execution.use_actions(scoped_workspace_action_ids)
+        scoped_task_workspace_action_ids: list[str] = []
+        if bool(agent_task_options.get("enable_task_workspace_readback_actions")) or bool(
+            agent_task_options.get("enable_task_workspace_coding_actions")
+        ):
+            scoped_task_workspace_action_ids = self._enable_task_workspace_read_actions(
+                task_workspace=agent_execution.task_workspace,
+                coding_agent=bool(agent_task_options.get("enable_task_workspace_coding_actions")),
+            )
+        if scoped_task_workspace_action_ids:
+            agent_execution.use_actions(scoped_task_workspace_action_ids)
         agent_execution.goal(goal, success_criteria)
-        agent_execution.workspace = getattr(self, "workspace", None)
         return agent_execution
 
-    def _enable_task_workspace_read_actions(self, task_id: str, *, coding_agent: bool = False) -> list[str]:
-        workspace = getattr(self, "workspace", None)
-        with_scope_node = getattr(workspace, "with_scope_node", None)
+    def _enable_task_workspace_read_actions(
+        self,
+        *,
+        task_workspace: TaskWorkspace | None = None,
+        coding_agent: bool = False,
+    ) -> list[str]:
+        task_workspace = task_workspace or getattr(self, "task_workspace", None)
         enable = getattr(
             self,
-            "enable_coding_agent_actions" if coding_agent else "enable_workspace_file_actions",
+            "enable_coding_agent_actions"
+            if coding_agent
+            else "enable_task_workspace_file_actions",
             None,
         )
-        if not callable(with_scope_node) or not callable(enable):
+        if not isinstance(task_workspace, TaskWorkspace) or not callable(enable):
             return []
+        execution_scope = str(task_workspace.execution_id or "").strip()
+        if not execution_scope:
+            return []
+        safe_scope = "".join(
+            character if character.isalnum() or character in {"-", "_"} else "_"
+            for character in execution_scope
+        )
+        action_prefix = f"task_workspace_{safe_scope}__"
         try:
-            task_workspace = with_scope_node(
-                "tasks",
-                task_id,
-                scope={"task_id": task_id},
-                search_scope={"task_id": task_id},
-            )
-            files_root = getattr(task_workspace, "files_root", None)
-            if files_root is None:
-                return []
             enable(
-                root=files_root,
+                root=task_workspace.root,
+                task_workspace=task_workspace,
                 read=True,
                 write=bool(coding_agent),
                 search=True,
                 list_files=True,
                 expose_to_model=True,
+                action_prefix=action_prefix,
                 max_file_bytes=50000,
                 max_search_file_bytes=200000,
                 desc=(
                     "Read and edit files written by this AgentTask, including trusted "
-                    "Workspace deliverables and bounded evidence readbacks. Prefer "
+                    "TaskWorkspace deliverables and bounded evidence readbacks. Prefer "
                     "edit_file/apply_patch for targeted repairs."
                     if coding_agent
                     else (
                         "Read files written by this AgentTask, including trusted "
-                        "Workspace deliverables and bounded evidence readbacks."
+                        "TaskWorkspace deliverables and bounded evidence readbacks."
                     )
                 ),
             )
@@ -1136,17 +1143,18 @@ class BaseAgent:
             "edit_file",
             "apply_patch",
         )
-        return [action_id for action_id in candidates if has_action(action_id)]
+        scoped_candidates = [f"{action_prefix}{action_id}" for action_id in candidates]
+        return [action_id for action_id in scoped_candidates if has_action(action_id)]
 
     async def async_resume(
         self,
         task_id: str,
         *,
-        workspace: str | os.PathLike[str] | None = None,
+        task_workspace: str | os.PathLike[str] | None = None,
     ) -> "AgentExecution":
         """Resume a previously checkpointed Agent task as an AgentExecution.
 
-        Reads the task's latest durable snapshot from the Workspace and returns
+        Reads the task's latest durable snapshot from the RecordStore and returns
         a task-strategy AgentExecution draft. The returned execution continues
         from the iteration after the last completed one (or exposes the stored
         terminal result) through the normal AgentExecution result/meta/stream
@@ -1155,20 +1163,24 @@ class BaseAgent:
         from agently.core.application import AgentTask
 
         normalized_task_id = str(task_id)
-        task = await AgentTask.async_resume(cast(Any, self), normalized_task_id, workspace=workspace)
+        task = await AgentTask.async_resume(
+            cast(Any, self),
+            normalized_task_id,
+            task_workspace=task_workspace,
+        )
         execution = self.create_execution(
             lineage={"task_id": normalized_task_id},
             options={
                 "strategy": "task",
                 "task": {
                     "task_id": normalized_task_id,
-                    "workspace": workspace,
+                    "task_workspace": task_workspace,
                     "resume": True,
                 },
             },
         )
         execution.goal(task.goal, list(task.success_criteria))
-        execution.workspace = getattr(self, "workspace", None)
+        execution.record_store = getattr(self, "record_store", None)
         execution.task_record = task
         execution.task_refs = {
             "task_id": task.id,
@@ -1182,26 +1194,26 @@ class BaseAgent:
         self,
         task_id: str,
         *,
-        workspace: str | os.PathLike[str] | None = None,
+        task_workspace: str | os.PathLike[str] | None = None,
     ) -> "AgentExecution":
-        return FunctionShifter.syncify(self.async_resume)(task_id, workspace=workspace)
+        return FunctionShifter.syncify(self.async_resume)(task_id, task_workspace=task_workspace)
 
     async def async_resume_task(
         self,
         task_id: str,
         *,
-        workspace: str | os.PathLike[str] | None = None,
+        task_workspace: str | os.PathLike[str] | None = None,
     ) -> "AgentExecution":
         """Compatibility alias for async_resume(...)."""
-        return await self.async_resume(task_id, workspace=workspace)
+        return await self.async_resume(task_id, task_workspace=task_workspace)
 
     def resume_task(
         self,
         task_id: str,
         *,
-        workspace: str | os.PathLike[str] | None = None,
+        task_workspace: str | os.PathLike[str] | None = None,
     ) -> "AgentExecution":
-        return self.resume(task_id, workspace=workspace)
+        return self.resume(task_id, task_workspace=task_workspace)
 
     def create_task_loop(
         self,
@@ -1209,7 +1221,7 @@ class BaseAgent:
         goal: str,
         success_criteria: list[str] | None = None,
         execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
-        workspace: str | os.PathLike[str] | None = None,
+        task_workspace: str | os.PathLike[str] | None = None,
         max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
         context_profile: str = "auto",
@@ -1222,7 +1234,7 @@ class BaseAgent:
             goal=goal,
             success_criteria=success_criteria,
             execution=execution,
-            workspace=workspace,
+            task_workspace=task_workspace,
             max_iterations=max_iterations,
             verify=verify,
             context_profile=context_profile,
@@ -1348,7 +1360,7 @@ class BaseAgent:
         always: bool = False,
     ) -> "Self | AgentExecution":
         if always:
-            self.agent_prompt.set("instruct", ["{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!"])
+            self.agent_prompt.append("instruct", "{system.rule} ARE IMPORTANT RULES YOU SHALL FOLLOW!")
             self.agent_prompt.set("system.rule", prompt, mappings=mappings)
             return self
         return self.create_execution().rule(prompt, mappings=mappings)
@@ -1386,7 +1398,7 @@ class BaseAgent:
     ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
-            self.agent_prompt.set("instruct", ["YOU MUST REACT AND RESPOND AS {system.role}!"])
+            self.agent_prompt.append("instruct", "YOU MUST REACT AND RESPOND AS {system.role}!")
             self.agent_prompt.set("system.your_role", prompt, mappings=mappings)
             return self
         return self.create_execution().role(prompt, mappings=mappings)
@@ -1424,7 +1436,7 @@ class BaseAgent:
     ) -> "Self | AgentExecution":
         prompt, mappings = _resolve_quick_prompt_input(prompt, value, mappings, kwargs)
         if always:
-            self.agent_prompt.set("instruct", ["{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!"])
+            self.agent_prompt.append("instruct", "{system.user_info} IS IMPORTANT INFORMATION ABOUT USER!")
             self.agent_prompt.set("system.user_info", prompt, mappings=mappings)
             return self
         return self.create_execution().user_info(prompt, mappings=mappings)

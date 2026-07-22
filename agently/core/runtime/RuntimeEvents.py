@@ -318,16 +318,20 @@ async def async_emit_model_requester_error(
     payload: dict[str, Any] | None = None,
     run: Any = None,
 ) -> None:
-    """Emit the official provider request error RuntimeEvent from core."""
+    """Emit the official provider request error RuntimeEvent from core.
 
-    from agently.base import async_emit_runtime, settings
+    Publication is observation-only. The owning request stream remains
+    responsible for propagating the original provider error.
+    """
+
+    from agently.base import async_emit_runtime
 
     event_payload: dict[str, Any] = {}
     if payload:
         event_payload.update(payload)
     if request_data is not None:
         event_payload.setdefault("request_data", request_data)
-    error_info, raiseable_error = _normalize_error(error)
+    error_info, _ = _normalize_error(error)
     attach_model_request_telemetry(
         event_payload,
         event_kind="model.requester.error",
@@ -346,8 +350,6 @@ async def async_emit_model_requester_error(
             "run": run,
         }
     )
-    if settings.get("runtime.raise_error") and raiseable_error is not None:
-        raise raiseable_error
 
 
 async def async_emit_response_parser_observation(
@@ -399,7 +401,7 @@ async def async_emit_response_parser_observation(
 
 
 async def async_emit_action_flow_observation(observation: dict[str, Any]) -> None:
-    """Map ActionFlow observations to official RuntimeEvent records."""
+    """Map an Action-owned bounded observation to official RuntimeEvent records."""
 
     from agently.base import async_emit_runtime
     from agently.types.data import ObservationEvent
@@ -434,7 +436,7 @@ async def async_emit_action_flow_observation(observation: dict[str, Any]) -> Non
         level=observation.get("level", "INFO"),
         message=observation.get("message"),
         payload=resolved_payload,
-        error=ErrorInfo.from_exception(error) if isinstance(error, BaseException) else error,
+        error=error,
         run=observation.get("run"),
     )
     await async_emit_runtime(primary_event)

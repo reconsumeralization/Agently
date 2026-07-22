@@ -1,8 +1,7 @@
 # Agent Auto-Orchestration Examples
 
 These examples are the current recommended examples for AgentExecution,
-Dynamic Task DAG, ActionRuntime, and the Blocks-backed Skills compatibility
-path.
+Dynamic Task DAG, ActionRuntime, and direct AgentExecution Skill binding.
 
 Older Skills auto-orchestration examples from before the 4.1.3.8 Blocks
 lifecycle refactor were moved to:
@@ -25,7 +24,6 @@ Ollama where supported.
 python examples/agent_auto_orchestration/02_actions_dag_streaming.py
 python examples/agent_auto_orchestration/05_model_field_delta_streaming.py
 python examples/agent_auto_orchestration/06_parallel_dag_field_streaming.py
-python examples/agent_auto_orchestration/19_remote_skills_weather_event_ops.py
 python examples/agent_auto_orchestration/20_agent_execution_lineage_workspace_loop.py
 python examples/agent_auto_orchestration/21_agent_execution_github_issue_intake.py
 python examples/agent_auto_orchestration/22_unified_agent_execution_result.py
@@ -33,11 +31,9 @@ python examples/agent_auto_orchestration/23_agent_execution_auto_dispatch.py
 python examples/agent_auto_orchestration/24_independent_dynamic_task_dag.py
 ```
 
-`_TEMPLATE_standard_skill_orchestration.py` remains as the compact reference for
-the default `single_shot` Skills compatibility facade. Direct Skills examples
-should pass selected Skills to `run_skills_task(..., skills=[...])`; use
-`agent.use_skills(...).input(...).start()` when the goal is AgentExecution route
-candidate registration.
+`_TEMPLATE_standard_skill_orchestration.py` shows the released
+`run_skills_task(...)` convenience adapter. New code should prefer
+`agent.use_skills(...).input(...)` and consume the ordinary AgentExecution.
 
 ## Current Examples
 
@@ -47,12 +43,8 @@ candidate registration.
   with `kind="model"` nodes and field-level runtime streaming.
 - **06 - Parallel DAG Field Delta Streaming.** Independent multi-branch Dynamic
   Task DAG with concurrent workstreams and a fan-in executive brief.
-- **19 - Remote Skills Weather Event Ops.** Current Blocks-backed remote Skills
-  acceptance example. Weather facts come from a real MCP server through
-  ActionRuntime; selected Skills execute through `effort="normal"` and expose
-  Blocks close-snapshot evidence.
-- **20 - AgentExecution Lineage Workspace Loop.** Two-step AgentExecution
-  lineage and Workspace persistence example.
+- **20 - AgentExecution Lineage Context Loop.** Two-step AgentExecution
+  lineage, RecordStore persistence, and TaskContext disclosure example.
 - **21 - GitHub Issue Intake.** AgentExecution plus restricted shell Action for
   real GitHub CLI issue intake.
 - **22 - Unified AgentExecution Result.** Minimal quick prompt plus task-loop

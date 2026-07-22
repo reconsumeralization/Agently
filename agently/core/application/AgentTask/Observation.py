@@ -15,96 +15,58 @@
 
 from __future__ import annotations
 
+from agently.types.data import ContextConsumption, ContextPackage
+
 from .TaskShared import *
 
 
 class AgentTaskObservationMixin(AgentTaskMixinBase):
+    def _memory_process_ref(
+        self,
+        kind: str,
+        *,
+        iteration: int | None = None,
+        phase: str | None = None,
+    ) -> "RecordRef":
+        """Return a compact run-local locator without writing TaskWorkspace or RecordStore state."""
+
+        sequence = len(getattr(self, "_stream_items", []))
+        suffix = phase or kind
+        return cast(
+            RecordRef,
+            {
+                "id": f"{self.id}:{suffix}:{iteration if iteration is not None else sequence}",
+                "kind": kind,
+                "storage": "memory",
+                "task_id": self.id,
+                "iteration": iteration,
+            },
+        )
+
     async def _record_decision(
         self,
         iteration_index: int,
         plan: dict[str, Any],
-        context_pack: "WorkspaceContextPackage",
-    ) -> "WorkspaceRecordRef":
-        record_ref = await self.workspace.put(
-            content={
-                "iteration": iteration_index,
-                "plan": DataFormatter.sanitize(plan),
-                "process_summary": self._process_summary_from_value(plan, stage="plan"),
-                "context_pack_diagnostics": DataFormatter.sanitize(context_pack.get("diagnostics", {})),
-                "context_item_count": len(context_pack.get("items", [])),
-            },
-            collection="decisions",
-            kind="agent_task_decision",
-            summary=f"{self.id} iteration {iteration_index} planning decision",
-            scope={"task_id": self.id, "iteration": iteration_index},
-            source={"type": "agent_task", "phase": "plan"},
-            meta={"task_id": self.id, "iteration": iteration_index},
-        )
-        self._append_workspace_ref("decisions", record_ref)
-        return record_ref
+        context_pack: "TaskContextView",
+    ) -> "RecordRef":
+        _ = plan, context_pack
+        return self._memory_process_ref("agent_task_decision", iteration=iteration_index, phase="decision")
 
     async def _record_observation(
         self,
         iteration_index: int,
         *,
         plan: dict[str, Any],
-        decision_ref: "WorkspaceRecordRef",
+        decision_ref: "RecordRef",
         execution_result: Any,
         execution_meta: dict[str, Any],
-    ) -> tuple["WorkspaceRecordRef", "WorkspaceRecordRef | None"]:
-        record_ref = await self.workspace.put(
-            content={
-                "iteration": iteration_index,
-                "plan": DataFormatter.sanitize(plan),
-                "decision_ref": decision_ref,
-                "execution_result": DataFormatter.sanitize(execution_result),
-                "execution_meta": DataFormatter.sanitize(execution_meta),
-                "process_summary": self._process_summary_from_value(execution_result, stage="execution"),
-            },
-            collection="observations",
-            kind="agent_task_observation",
-            summary=f"{self.id} iteration {iteration_index} execution observation",
-            scope={"task_id": self.id, "iteration": iteration_index},
-            source={"type": "agent_task", "phase": "execute", "execution_id": execution_meta.get("execution_id")},
-            meta={"task_id": self.id, "iteration": iteration_index},
-        )
-        checkpoint_ref = await self.workspace.put_checkpoint(
-            self.id,
-            {
-                "task_id": self.id,
-                "iteration": iteration_index,
-                "status": self.status,
-                "decision_ref": decision_ref,
-                "observation_ref": record_ref,
-            },
-            step_id=f"iteration-{iteration_index}",
-        )
-        decision_link = await self.workspace.link_evidence(
-            record_ref,
-            decision_ref,
-            relation="implements_decision",
-            execution_id=str(execution_meta.get("execution_id") or "") or None,
-            checkpoint_id=checkpoint_ref.get("id"),
-            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
-        )
-        checkpoint_link = await self.workspace.link_evidence(
-            record_ref,
-            checkpoint_ref,
-            relation="checkpointed_by",
-            execution_id=str(execution_meta.get("execution_id") or "") or None,
-            checkpoint_id=checkpoint_ref.get("id"),
-            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
-        )
-        self._append_workspace_ref("observations", record_ref)
-        self._append_workspace_ref("checkpoints", checkpoint_ref)
-        self._append_workspace_ref("evidence_links", decision_link)
-        self._append_workspace_ref("evidence_links", checkpoint_link)
-        await self._emit(
-            "agent_task.checkpoint",
-            {"iteration": iteration_index, "checkpoint": checkpoint_ref},
+    ) -> tuple["RecordRef", "RecordRef | None"]:
+        _ = plan, decision_ref, execution_result
+        record_ref = self._memory_process_ref(
+            "agent_task_observation", iteration=iteration_index, phase="observation"
         )
         await self._emit_action_observation_events(iteration_index, execution_meta=execution_meta)
-        return record_ref, checkpoint_ref
+        return record_ref, None
 
     async def _record_taskboard_checkpoint(
         self,
@@ -115,12 +77,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         runtime_topology: Mapping[str, Any] | None = None,
         terminal_reason: str | None = None,
         final_result: Mapping[str, Any] | None = None,
-    ) -> tuple["WorkspaceRecordRef | None", "WorkspaceRecordRef | None"]:
+    ) -> tuple["RecordRef | None", "RecordRef | None"]:
         try:
             effective_revision = TaskBoardRevision.from_value(revision)
-            revision_dict = effective_revision.to_dict()
             evidence_view = build_task_board_evidence_view(effective_revision).to_dict()
-            schedule = TaskBoard(effective_revision, handler=lambda _context: None).schedule()
             explicit_state_facts = task_board_explicit_state_facts(effective_revision, evidence_view=evidence_view)
             previous_acceptance_index = getattr(self, "_latest_taskboard_acceptance_index", None)
             if not isinstance(previous_acceptance_index, Mapping):
@@ -146,132 +106,29 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 explicit_state_facts=explicit_state_facts,
                 previous_acceptance_index=previous_acceptance_index,
             )
-            acceptance_verification_plan = build_task_board_incremental_verification_plan(acceptance_index)
-            scoped_evidence_view = build_task_board_scoped_evidence_view(
-                acceptance_index,
-                evidence_view=evidence_view,
-            )
-            guidance_projection = self._guidance_context_projection()
             self._latest_taskboard_acceptance_index = DataFormatter.sanitize(acceptance_index)
             revision_id = str(effective_revision.revision_id)
-            step_id = f"taskboard-{stage}-{tick_index}-{revision_id}"
-            handoff_projection = build_task_board_handoff_projection(
-                task_id=self.id,
-                execution_strategy=self.execution_strategy,
-                effective_execution_strategy=self.effective_execution_strategy or "taskboard",
-                stage=stage,
-                tick_index=tick_index,
-                revision=effective_revision,
-                schedule=schedule,
-                evidence_view=evidence_view,
-                acceptance_index=acceptance_index,
-                runtime_topology=runtime_topology or {},
-                final_result=final_result or {},
-                explicit_state_facts=explicit_state_facts,
-            )
-            record_ref = await self.workspace.put(
-                content={
-                    "schema_version": "agent_task_taskboard_checkpoint/v1",
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                    "status": self.status,
-                    "revision": DataFormatter.sanitize(revision_dict),
-                    "evidence_view": DataFormatter.sanitize(evidence_view),
-                    "acceptance_index": DataFormatter.sanitize(acceptance_index),
-                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
-                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
-                    "guidance": DataFormatter.sanitize(guidance_projection),
-                    "handoff_projection": DataFormatter.sanitize(handoff_projection),
-                    "runtime_topology": DataFormatter.sanitize(runtime_topology or {}),
-                    "terminal_reason": terminal_reason,
-                    "final_result": DataFormatter.sanitize(final_result or {}),
-                },
-                collection="observations",
-                kind="agent_task_taskboard_checkpoint",
-                summary=f"{self.id} TaskBoard {stage} checkpoint {revision_id}",
-                scope={
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                    "revision_id": revision_id,
-                },
-                source={"type": "agent_task", "phase": "taskboard_checkpoint", "stage": stage},
-                meta={
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                    "revision_id": revision_id,
-                },
-            )
-            checkpoint_ref = await self.workspace.put_checkpoint(
-                self.id,
-                {
-                    "schema_version": "agent_task_taskboard_checkpoint/v1",
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                    "step_id": step_id,
-                    "status": self.status,
-                    "revision_id": revision_id,
-                    "revision_ref": record_ref.get("id"),
-                    "acceptance_index": DataFormatter.sanitize(acceptance_index),
-                    "acceptance_verification_plan": DataFormatter.sanitize(acceptance_verification_plan),
-                    "taskboard_scoped_evidence_view": DataFormatter.sanitize(scoped_evidence_view),
-                    "guidance": DataFormatter.sanitize(guidance_projection),
-                    "handoff_projection": DataFormatter.sanitize(handoff_projection),
-                    "terminal_reason": terminal_reason,
-                    "final_status": (final_result or {}).get("status"),
-                    "accepted": (final_result or {}).get("accepted"),
-                },
-                step_id=step_id,
-            )
-            checkpoint_link = await self.workspace.link_evidence(
-                record_ref,
-                checkpoint_ref,
-                relation="checkpointed_by",
-                checkpoint_id=checkpoint_ref.get("id"),
-                meta={
-                    "owner": "AgentTask",
-                    "task_id": self.id,
-                    "strategy": "taskboard",
-                    "stage": stage,
-                    "tick_index": tick_index,
-                },
-            )
-            self._append_workspace_ref("observations", record_ref)
-            self._append_workspace_ref("checkpoints", checkpoint_ref)
-            self._append_workspace_ref("evidence_links", checkpoint_link)
-            await self._emit(
-                "agent_task.checkpoint",
-                {"iteration": tick_index, "strategy": "taskboard", "checkpoint": checkpoint_ref},
-            )
-            await self._emit(
-                "agent_task.taskboard.checkpoint",
-                {
-                    "stage": stage,
-                    "tick_index": tick_index,
-                    "revision_id": revision_id,
-                    "checkpoint": checkpoint_ref,
-                    "revision_ref": record_ref,
-                },
-            )
             await self._write_taskboard_resume_snapshot(
                 stage=stage,
                 tick_index=tick_index,
                 revision=effective_revision,
                 evidence_view=evidence_view,
                 acceptance_index=acceptance_index,
-                handoff_projection=handoff_projection,
                 runtime_topology=runtime_topology or {},
                 terminal_reason=terminal_reason,
                 final_result=final_result,
             )
-            return record_ref, checkpoint_ref
+            await self._emit(
+                "agent_task.taskboard.tick_recorded",
+                {
+                    "stage": stage,
+                    "tick_index": tick_index,
+                    "revision_id": revision_id,
+                    "terminal_reason": terminal_reason,
+                    "status": str((final_result or {}).get("status") or self.status),
+                },
+            )
+            return None, None
         except Exception as error:
             self.diagnostics.setdefault("taskboard_checkpoint_errors", []).append(
                 {
@@ -287,31 +144,12 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         self,
         iteration_index: int,
         verification: dict[str, Any],
-        observation_ref: "WorkspaceRecordRef",
-    ) -> "WorkspaceRecordRef":
-        record_ref = await self.workspace.put(
-            content={
-                "iteration": iteration_index,
-                "verification": DataFormatter.sanitize(verification),
-                "observation_ref": observation_ref,
-                "process_summary": self._process_summary_from_value(verification, stage="verification"),
-            },
-            collection="verification",
-            kind="agent_task_verification",
-            summary=f"{self.id} iteration {iteration_index} verification",
-            scope={"task_id": self.id, "iteration": iteration_index},
-            source={"type": "agent_task", "phase": "verify"},
-            meta={"task_id": self.id, "iteration": iteration_index},
+        observation_ref: "RecordRef",
+    ) -> "RecordRef":
+        _ = verification, observation_ref
+        return self._memory_process_ref(
+            "agent_task_verification", iteration=iteration_index, phase="verification"
         )
-        evidence_link = await self.workspace.link_evidence(
-            record_ref,
-            observation_ref,
-            relation="verifies_observation",
-            meta={"owner": "AgentTask", "task_id": self.id, "iteration": iteration_index},
-        )
-        self._append_workspace_ref("verification", record_ref)
-        self._append_workspace_ref("evidence_links", evidence_link)
-        return record_ref
 
     def _reflection_density(self) -> str:
         agent_task_options = self.options.get("agent_task")
@@ -371,9 +209,9 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         iteration_index: int,
         *,
         phase: str,
-        subject_ref: "WorkspaceRecordRef | None",
+        subject_ref: "RecordRef | None",
         summary: dict[str, Any],
-    ) -> "WorkspaceRecordRef | None":
+    ) -> "RecordRef | None":
         content = {
             "task_id": self.id,
             "iteration": iteration_index,
@@ -383,52 +221,23 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "subject_ref": DataFormatter.sanitize(subject_ref),
             "completion_evidence": False,
         }
-        try:
-            record_ref = await self.workspace.put(
-                content=content,
-                collection="reflections",
-                kind="agent_task_reflection",
-                summary=f"{self.id} iteration {iteration_index} {phase} reflection",
-                scope={"task_id": self.id, "iteration": iteration_index},
-                source={"type": "agent_task", "phase": "reflect", "reflection_phase": phase},
-                meta={"task_id": self.id, "iteration": iteration_index, "completion_evidence": False},
-            )
-            if subject_ref:
-                evidence_link = await self.workspace.link_evidence(
-                    record_ref,
-                    subject_ref,
-                    relation="reflects_on",
-                    meta={
-                        "owner": "AgentTask",
-                        "task_id": self.id,
-                        "iteration": iteration_index,
-                        "completion_evidence": False,
-                    },
-                )
-                self._append_workspace_ref("evidence_links", evidence_link)
-            self._append_workspace_ref("reflections", record_ref)
-            reflection_summary = {
-                "iteration": iteration_index,
-                "phase": phase,
-                "record_ref": record_ref,
-                "summary": DataFormatter.sanitize(summary),
-                "completion_evidence": False,
-            }
-            self.reflections.append(reflection_summary)
-            await self._emit(
-                f"agent_task.iteration.{iteration_index}.reflection.{phase}",
-                {"record": record_ref, "summary": reflection_summary["summary"]},
-            )
-            return record_ref
-        except Exception as error:
-            self.diagnostics.setdefault("reflection_record_errors", []).append(
-                {
-                    "type": error.__class__.__name__,
-                    "message": _compact_agent_task_error_message(error, fallback=error.__class__.__name__),
-                    "phase": phase,
-                }
-            )
-            return None
+        _ = content, subject_ref
+        record_ref = self._memory_process_ref(
+            "agent_task_reflection", iteration=iteration_index, phase=f"reflection:{phase}"
+        )
+        reflection_summary = {
+            "iteration": iteration_index,
+            "phase": phase,
+            "record_ref": record_ref,
+            "summary": DataFormatter.sanitize(summary),
+            "completion_evidence": False,
+        }
+        self.reflections.append(reflection_summary)
+        await self._emit(
+            f"agent_task.iteration.{iteration_index}.reflection.{phase}",
+            {"record": record_ref, "summary": reflection_summary["summary"]},
+        )
+        return record_ref
 
     async def _ensure_final_reflection(self) -> None:
         if any(item.get("phase") == "final" for item in self.reflections if isinstance(item, dict)):
@@ -446,10 +255,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             },
         )
 
-    def _append_workspace_ref(self, collection: str, ref: dict[str, Any] | None):
+    def _append_record_ref(self, collection: str, ref: dict[str, Any] | None):
         if not ref:
             return
-        bucket = self.workspace_refs.setdefault(collection, [])
+        bucket = self.record_refs.setdefault(collection, [])
         ref_id = str(ref.get("id") or "")
         if ref_id and ref_id not in bucket:
             bucket.append(ref_id)
@@ -469,12 +278,26 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "iterations": DataFormatter.sanitize(self.iterations),
             "reflections": DataFormatter.sanitize(self.reflections),
             "guidance_items": DataFormatter.sanitize(getattr(self, "guidance_items", [])),
-            "guidance_refs": DataFormatter.sanitize(self.workspace_refs.get("guidance", [])),
+            "guidance_refs": DataFormatter.sanitize(self.record_refs.get("guidance", [])),
+            "context_packages": DataFormatter.sanitize(
+                [
+                    package.to_dict()
+                    for package in self.context_packages
+                    if isinstance(package, ContextPackage)
+                ]
+            ),
+            "context_consumptions": DataFormatter.sanitize(
+                [
+                    consumption.to_dict()
+                    for consumption in self.context_consumptions
+                    if isinstance(consumption, ContextConsumption)
+                ]
+            ),
             "resumed_from_iteration": self._resumed_from_iteration,
             "resumed_iteration_summaries": DataFormatter.sanitize(self._resumed_iteration_summaries),
             "result": DataFormatter.sanitize(self.result),
             "diagnostics": DataFormatter.sanitize(self.diagnostics),
-            "workspace_refs": DataFormatter.sanitize(self.workspace_refs),
+            "record_refs": DataFormatter.sanitize(self.record_refs),
             "started_at": self.started_at,
             "completed_at": self.completed_at,
         }
@@ -506,6 +329,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             await queue.put(item)
         self._stream_queues.append(queue)
         start_task = asyncio.create_task(self.async_run())
+        start_task_joined = False
         try:
             while True:
                 item = await queue.get()
@@ -515,7 +339,17 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 if projected is not None:
                     yield projected
             await start_task
+            start_task_joined = True
         finally:
+            if not start_task_joined:
+                if not start_task.done():
+                    start_task.cancel()
+                try:
+                    await start_task
+                except BaseException:
+                    # Joining is cleanup: the generator's original cancellation,
+                    # close, or child failure remains the caller-visible error.
+                    pass
             if queue in self._stream_queues:
                 self._stream_queues.remove(queue)
 
@@ -924,15 +758,33 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         approval_required_actions = cls._action_ids_by_final_status(action_statuses, {"approval_required"})
         required_actions, required_skills = cls._required_capability_constraints(execution_meta)
         missing_required_actions = [action_id for action_id in required_actions if action_id not in action_ids]
-        selected_skill_ids = cls._selected_skill_ids(logs)
-        missing_required_skills = [skill_id for skill_id in required_skills if skill_id not in selected_skill_ids]
-        succeeded_actions = cls._action_ids_by_final_status(
-            action_statuses, {"success", "succeeded", "partial_success"}
+        skill_context_consumptions = cls._skill_context_consumptions(logs)
+        consumed_skill_ids = list(
+            dict.fromkeys(
+                str(item.get("skill_id") or "").strip()
+                for item in skill_context_consumptions
+                if str(item.get("skill_id") or "").strip()
+                and str(item.get("request_id") or "").strip()
+            )
+        )
+        missing_required_skill_context = [
+            skill_id for skill_id in required_skills if skill_id not in consumed_skill_ids
+        ]
+        succeeded_actions = list(
+            dict.fromkeys(
+                cls._action_ids_by_status(
+                    action_records, {"success", "succeeded", "partial_success"}
+                )
+            )
         )
         route = execution_meta.get("route", {})
         artifact_refs = logs.get("artifact_refs", [])
+        file_refs = logs.get("file_refs", [])
         artifact_readbacks = cls._artifact_readback_evidence_ids(artifact_refs)
-        workspace_refs = execution_meta.get("workspace_refs") or logs.get("workspace_refs", {})
+        record_refs = execution_meta.get("record_refs") or logs.get("record_refs", {})
+        task_workspace_refs = execution_meta.get("task_workspace_refs") or logs.get(
+            "task_workspace_refs", {}
+        )
         raw_errors = logs.get("errors", [])
         execution_errors: list[Any]
         if isinstance(raw_errors, list):
@@ -960,15 +812,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             )
             if callable(merge_evidence_requirements):
                 capability_evidence_requirements = merge_evidence_requirements(capability_evidence_requirements)
-        # Unified capability-evidence view (AGENT_TASK_CAPABILITY_AWARE_EXECUTION_QUALITY_SPEC):
-        # one capability id space across kinds plus per-kind evidence buckets. A
-        # capability is "used" when it ran (action) or was selected (skill). The
-        # artifacts/validations buckets are reserved: no structural producer feeds
-        # them yet, so the verifier guard does not enforce those evidence kinds.
-        capabilities_used: list[str] = []
-        for capability_id in [*action_ids, *selected_skill_ids]:
-            if capability_id and capability_id not in capabilities_used:
-                capabilities_used.append(capability_id)
+        capabilities_used = list(dict.fromkeys(action_ids))
         return {
             "model_response_count": (
                 len(logs.get("model_responses", [])) if isinstance(logs.get("model_responses", []), list) else 0
@@ -984,18 +828,25 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "required_actions": required_actions,
             "capability_evidence_requirements": capability_evidence_requirements,
             "missing_required_actions": missing_required_actions,
-            "selected_skill_ids": selected_skill_ids,
+            "consumed_skill_ids": consumed_skill_ids,
             "required_skills": required_skills,
-            "missing_required_skills": missing_required_skills,
+            "missing_required_skill_context": missing_required_skill_context,
             "capabilities_used": capabilities_used,
             "capability_evidence": {
                 "actions": {"succeeded": succeeded_actions, "failed": failed_actions},
-                "skills": {"selected": selected_skill_ids},
                 "artifacts": {"readback": artifact_readbacks},
                 "validations": {"passed": [], "failed": []},
             },
+            "context_evidence": {
+                "skills": {
+                    "consumed": consumed_skill_ids,
+                    "consumptions": skill_context_consumptions,
+                }
+            },
             "artifact_refs": DataFormatter.sanitize(artifact_refs),
-            "workspace_refs": DataFormatter.sanitize(workspace_refs),
+            "file_refs": DataFormatter.sanitize(file_refs),
+            "record_refs": DataFormatter.sanitize(record_refs),
+            "task_workspace_refs": DataFormatter.sanitize(task_workspace_refs),
             "route": DataFormatter.sanitize(route),
             "status": str(execution_meta.get("status") or ""),
             "errors": DataFormatter.sanitize(execution_errors),
@@ -1077,26 +928,17 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         )
 
     @staticmethod
-    def _selected_skill_ids(logs: dict[str, Any]) -> list[str]:
-        route_logs = logs.get("route_logs", {})
-        if not isinstance(route_logs, dict):
+    def _skill_context_consumptions(logs: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = logs.get("skill_context_consumptions", [])
+        if not isinstance(raw, Sequence) or isinstance(raw, str | bytes | bytearray):
             return []
-        skill_ids: list[str] = []
-        selected_groups: list[Any] = []
-        plan = route_logs.get("plan", {})
-        if isinstance(plan, dict):
-            selected_groups.append(plan.get("selected_skills", []))
-        selected_groups.append(route_logs.get("prompt_bound_skills", []))
-        for selected in selected_groups:
-            if not isinstance(selected, list):
-                continue
-            for item in selected:
-                if not isinstance(item, dict):
-                    continue
-                skill_id = str(item.get("skill_id") or item.get("id") or item.get("name") or "").strip()
-                if skill_id and skill_id not in skill_ids:
-                    skill_ids.append(skill_id)
-        return skill_ids
+        return [
+            dict(DataFormatter.sanitize(item))
+            for item in raw
+            if isinstance(item, Mapping)
+            and str(item.get("skill_id") or "").strip()
+            and str(item.get("request_id") or "").strip()
+        ]
 
     @classmethod
     def _collect_execution_action_records(
@@ -1139,15 +981,17 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
     @staticmethod
     def _dedupe_action_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, str, str]] = set()
+        seen: set[tuple[str, str, str, str, str, str]] = set()
         for record in records:
-            action_id = str(record.get("id") or record.get("name") or "")
+            action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "")
             call_id = str(record.get("action_call_id") or "")
+            round_index = str(record.get("round_index") if record.get("round_index") is not None else "")
+            command_index = str(record.get("command_index") if record.get("command_index") is not None else "")
             preview_sha = str(record.get("result_preview_sha256") or "")
             preview = str(record.get("result_preview") or "")
             if len(preview) > 120:
                 preview = preview[:120]
-            key = (action_id, call_id, preview_sha, preview)
+            key = (action_id, call_id, round_index, command_index, preview_sha, preview)
             if key in seen:
                 continue
             seen.add(key)
@@ -1167,29 +1011,168 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         if owner_context is None:
             owner_context = self._action_event_owner_context(iteration_index, execution_meta)
         for record in records:
-            action_id = str(record.get("id") or record.get("name") or "").strip()
+            indexed_record = dict(record)
+            action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "").strip()
             if not action_id:
                 continue
             await self._emit_normalized_action_event(
                 "started",
-                record,
+                indexed_record,
                 execution_meta=execution_meta,
                 owner_context=owner_context,
             )
-            if self._action_record_failed(record):
+            if self._action_record_failed(indexed_record):
                 await self._emit_normalized_action_event(
                     "failed",
-                    record,
+                    indexed_record,
                     execution_meta=execution_meta,
                     owner_context=owner_context,
                 )
             else:
                 await self._emit_normalized_action_event(
                     "completed",
-                    record,
+                    indexed_record,
                     execution_meta=execution_meta,
                     owner_context=owner_context,
                 )
+
+    async def _emit_planned_action_batch(
+        self,
+        *,
+        iteration_index: int | None,
+        commands: Sequence[Mapping[str, Any]],
+        execution_id: str,
+        round_index: int | None,
+        concurrency: int | None,
+        parallel: bool | None,
+        projection_source: str,
+    ) -> None:
+        actions: list[dict[str, Any]] = []
+        for position, command in enumerate(commands):
+            if not isinstance(command, Mapping):
+                continue
+            action_id = " ".join(str(command.get("action_id") or "").split())[:80]
+            if not action_id:
+                continue
+            purpose = " ".join(str(command.get("purpose") or f"Use {action_id}").split())[:180]
+            action_call_id = " ".join(str(command.get("action_call_id") or "").split())[:120]
+            actions.append(
+                {
+                    "position": position,
+                    "action_id": action_id,
+                    "purpose": purpose,
+                    "action_call_id": action_call_id or None,
+                }
+            )
+        if not actions:
+            return
+        normalized_concurrency = concurrency if isinstance(concurrency, int) and concurrency > 0 else None
+        normalized_parallel = parallel if isinstance(parallel, bool) else None
+        source = " ".join(str(projection_source or "").split())[:80]
+        await self._emit(
+            "agent_task.action.batch.planned",
+            {
+                "iteration": iteration_index,
+                "round_index": round_index,
+                "command_count": len(actions),
+                "concurrency": normalized_concurrency,
+                "parallel": normalized_parallel,
+                "actions": actions,
+                "projection_source": source,
+            },
+            meta={
+                "task_id": self.id,
+                "status": self.status,
+                "stream_kind": "action_observation",
+                "phase": "planned",
+                "strategy": "flat",
+                "iteration": iteration_index,
+                "round_index": round_index,
+                "execution_id": execution_id,
+                "projection_source": source,
+            },
+        )
+
+    async def _project_live_action_observation(
+        self,
+        iteration_index: int,
+        observation: Mapping[str, Any],
+        *,
+        child_execution_id: str,
+    ) -> None:
+        kind = str(observation.get("kind") or "").strip().lower()
+        payload = observation.get("payload")
+        if not isinstance(payload, Mapping):
+            return
+        if kind == "plan_ready":
+            decision = payload.get("decision")
+            if not isinstance(decision, Mapping):
+                return
+            commands = decision.get("action_calls")
+            if not isinstance(commands, Sequence) or isinstance(commands, str | bytes | bytearray):
+                return
+            stream_projection = observation.get("stream_projection")
+            stream_projection = stream_projection if isinstance(stream_projection, Mapping) else {}
+            if stream_projection.get("dispatch_confirmed") is not True:
+                return
+            concurrency = stream_projection.get("concurrency")
+            parallel = stream_projection.get("parallel")
+            round_index = payload.get("round_index")
+            await self._emit_planned_action_batch(
+                iteration_index=iteration_index,
+                commands=[command for command in commands if isinstance(command, Mapping)],
+                execution_id=child_execution_id,
+                round_index=(
+                    round_index
+                    if isinstance(round_index, int) and not isinstance(round_index, bool)
+                    else None
+                ),
+                concurrency=(
+                    concurrency
+                    if isinstance(concurrency, int) and not isinstance(concurrency, bool)
+                    else None
+                ),
+                parallel=parallel if isinstance(parallel, bool) else None,
+                projection_source="action.plan_ready",
+            )
+            return
+
+        phase_by_kind = {
+            "action_started": "started",
+            "action_completed": "completed",
+            "action_failed": "failed",
+            "action_blocked": "failed",
+            "action_approval_required": "failed",
+        }
+        phase = phase_by_kind.get(kind)
+        if phase is None:
+            return
+        raw_record = payload.get("command") if phase == "started" else payload.get("record")
+        record = dict(raw_record) if isinstance(raw_record, Mapping) else {}
+        action_id = str(
+            record.get("action_id")
+            or record.get("id")
+            or payload.get("action_name")
+            or ""
+        ).strip()
+        if not action_id:
+            return
+        record["id"] = action_id
+        record["status"] = "started" if phase == "started" else record.get("status", phase)
+        command_index = payload.get("command_index") if phase == "started" else payload.get("record_index")
+        if isinstance(command_index, int) and not isinstance(command_index, bool):
+            record["command_index"] = command_index
+        round_index = payload.get("round_index")
+        if isinstance(round_index, int) and not isinstance(round_index, bool):
+            record["round_index"] = round_index
+        await self._emit_normalized_action_event(
+            cast(Literal["started", "completed", "failed"], phase),
+            record,
+            execution_meta={"execution_id": child_execution_id, "route": {}},
+            owner_context={"iteration": iteration_index, "strategy": "flat"},
+            projection_source=f"action.{phase}",
+            posthoc_projection=False,
+        )
 
     @staticmethod
     def _action_event_owner_context(iteration_index: int | None, execution_meta: Mapping[str, Any]) -> dict[str, Any]:
@@ -1217,11 +1200,15 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         *,
         execution_meta: Mapping[str, Any],
         owner_context: Mapping[str, Any],
+        projection_source: str = "execution_meta.action_logs",
+        posthoc_projection: bool = True,
     ) -> None:
         if self._normalized_action_event_already_emitted(phase, record, execution_meta=execution_meta):
             return
-        action_id = str(record.get("id") or record.get("name") or "").strip()
+        action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "").strip()
         action_call_id = str(record.get("action_call_id") or "").strip()
+        command_index = record.get("command_index")
+        round_index = record.get("round_index")
         status = str(record.get("status") or "").strip() or ("started" if phase == "started" else phase)
         payload: dict[str, Any] = {
             "action_id": action_id,
@@ -1231,8 +1218,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "kind": str(record.get("kind") or "").strip() or None,
             "execution_id": execution_meta.get("execution_id"),
             "route": DataFormatter.sanitize(execution_meta.get("route", {})),
-            "projection_source": "execution_meta.action_logs",
-            "posthoc_projection": True,
+            "projection_source": projection_source,
+            "posthoc_projection": posthoc_projection,
+            "command_index": command_index if isinstance(command_index, int) and not isinstance(command_index, bool) else None,
+            "round_index": round_index if isinstance(round_index, int) and not isinstance(round_index, bool) else None,
             **{key: value for key, value in owner_context.items() if value is not None},
         }
         if "input_preview" in record:
@@ -1254,7 +1243,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 "warnings",
             ):
                 if key in record:
-                    payload[key] = record.get(key)
+                    if key in {"artifact_refs", "file_refs"}:
+                        payload[key] = await self._public_action_file_refs(record.get(key))
+                    else:
+                        payload[key] = record.get(key)
             source_refs = self._collect_source_refs_from_action_records([record])
             if source_refs:
                 payload["source_refs"] = source_refs
@@ -1274,15 +1266,62 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 "stream_kind": "action_observation",
                 "action_id": action_id,
                 "action_call_id": action_call_id or None,
+                "command_index": payload.get("command_index"),
+                "round_index": payload.get("round_index"),
                 "phase": phase,
                 "iteration": owner_context.get("iteration"),
                 "origin": owner_context.get("origin"),
                 "work_unit_id": owner_context.get("work_unit_id"),
                 "strategy": owner_context.get("strategy"),
                 "card_id": owner_context.get("card_id"),
-                "projection_source": "execution_meta.action_logs",
+                "projection_source": projection_source,
+                "trusted_ref_projection": True,
             },
         )
+
+    async def _public_action_file_refs(self, refs: Any) -> list[dict[str, Any]]:
+        if not isinstance(refs, Sequence) or isinstance(refs, str | bytes | bytearray):
+            return []
+        task_workspace = getattr(self, "task_workspace", None)
+        projected: list[dict[str, Any]] = []
+        for raw_ref in refs[:8]:
+            if not isinstance(raw_ref, Mapping):
+                continue
+            ref = dict(DataFormatter.sanitize(dict(raw_ref)))
+            ref.pop("open_path", None)
+            ref.pop("open_path_verified", None)
+            ref.pop("display_path", None)
+            projected.append(ref)
+            path = str(ref.get("path") or "").strip()
+            expected_sha256 = str(ref.get("sha256") or "").strip()
+            expected_bytes = ref.get("bytes")
+            if (
+                task_workspace is None
+                or not path
+                or not expected_sha256
+                or not isinstance(expected_bytes, int)
+                or isinstance(expected_bytes, bool)
+                or expected_bytes < 0
+                or ref.get("available") is False
+            ):
+                continue
+            try:
+                target = task_workspace.resolve_file_path(path)
+                if not target.is_file():
+                    continue
+                readback = await task_workspace.read_file(path, max_bytes=1)
+                if (
+                    readback.get("ok") is not True
+                    or str(readback.get("sha256") or "") != expected_sha256
+                    or int(readback.get("bytes", -1)) != expected_bytes
+                ):
+                    continue
+                ref["open_path"] = str(target.resolve())
+                ref["open_path_verified"] = True
+                ref["display_path"] = self._task_workspace_artifact_display_path(path)
+            except Exception:
+                continue
+        return projected
 
     def _normalized_action_event_already_emitted(
         self,
@@ -1295,8 +1334,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         if not isinstance(emitted, set):
             emitted = set()
             setattr(self, "_emitted_action_event_keys", emitted)
-        action_id = str(record.get("id") or record.get("name") or "").strip()
+        action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "").strip()
         action_call_id = str(record.get("action_call_id") or "").strip()
+        command_index = record.get("command_index")
+        round_index = record.get("round_index")
         preview_key = str(record.get("result_preview_sha256") or "")
         if not preview_key:
             try:
@@ -1312,16 +1353,34 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 )[:160]
             except Exception:
                 preview_key = f"{record.get('input_preview') or ''}|{record.get('result_preview') or ''}"[:160]
-        key = (
-            str(phase),
-            str(execution_meta.get("execution_id") or ""),
-            action_id,
-            action_call_id,
-            preview_key or str(record.get("status") or ""),
-        )
-        if key in emitted:
+        execution_id = str(execution_meta.get("execution_id") or "")
+        keys: list[tuple[Any, ...]] = []
+        if action_call_id:
+            keys.append((str(phase), execution_id, "call", action_call_id))
+        if isinstance(command_index, int) and not isinstance(command_index, bool):
+            keys.append(
+                (
+                    str(phase),
+                    execution_id,
+                    "position",
+                    round_index if isinstance(round_index, int) and not isinstance(round_index, bool) else None,
+                    command_index,
+                    action_id,
+                )
+            )
+        if not keys:
+            keys.append(
+                (
+                    str(phase),
+                    execution_id,
+                    "fingerprint",
+                    action_id,
+                    preview_key or str(record.get("status") or ""),
+                )
+            )
+        if any(key in emitted for key in keys):
             return True
-        emitted.add(key)
+        emitted.update(keys)
         return False
 
     @staticmethod
@@ -1352,7 +1411,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             if isinstance(record, Mapping):
                 key = "|".join(
                     str(record.get(field) or "")
-                    for field in ("artifact_id", "action_call_id", "path", "sha256", "source_url")
+                    for field in ("selection_key", "artifact_id", "action_call_id", "path", "sha256", "source_url")
                 )
                 if not key.strip("|"):
                     key = json.dumps(DataFormatter.sanitize(record), ensure_ascii=False, sort_keys=True)
@@ -1368,7 +1427,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
     def _collect_source_refs_from_action_records(cls, records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []
         for record in records:
-            action_id = str(record.get("id") or record.get("name") or "").strip()
+            action_id = str(record.get("action_id") or record.get("id") or record.get("name") or "").strip()
             action_call_id = str(record.get("action_call_id") or "").strip()
 
             def collect(value: Any, *, path: str = "") -> None:
@@ -1491,6 +1550,10 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             "action_type": str(record.get("action_type") or record.get("type") or ""),
             "kind": str(record.get("kind") or ""),
         }
+        for identity_key in ("round_index", "command_index"):
+            identity_value = record.get(identity_key)
+            if isinstance(identity_value, int) and not isinstance(identity_value, bool):
+                compact[identity_key] = identity_value
         action_call_id = str(record.get("action_call_id") or record.get("call_id") or "").strip()
         if action_call_id:
             compact["action_call_id"] = action_call_id
@@ -1499,8 +1562,20 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         if not isinstance(raw, Mapping):
             raw = {}
         model_digest = record.get("model_digest")
+        if (
+            isinstance(model_digest, Mapping)
+            and model_digest.get("same_as") == "result"
+            and isinstance(record.get("result"), Mapping)
+        ):
+            model_digest = record.get("result")
         if not isinstance(model_digest, Mapping) or not model_digest:
             raw_model_digest = raw.get("model_digest")
+            if (
+                isinstance(raw_model_digest, Mapping)
+                and raw_model_digest.get("same_as") == "result"
+                and isinstance(raw.get("result"), Mapping)
+            ):
+                raw_model_digest = raw.get("result")
             if isinstance(raw_model_digest, Mapping) and raw_model_digest:
                 model_digest = raw_model_digest
         digest = model_digest if isinstance(model_digest, Mapping) and model_digest else (raw or record)

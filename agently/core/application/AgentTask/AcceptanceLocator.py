@@ -23,7 +23,7 @@ from typing import Any
 from agently.utils import DataFormatter
 
 
-ACCEPTANCE_LOCATOR_KIND = "workspace_artifact.acceptance_locator"
+ACCEPTANCE_LOCATOR_KIND = "task_workspace_artifact.acceptance_locator"
 
 _HEADING_RE = re.compile(r"^\s{0,3}(?P<marks>#{1,6})\s+(?P<title>.+?)\s*#*\s*$")
 _SPACE_RE = re.compile(r"\s+")
@@ -128,7 +128,7 @@ def acceptance_points_from_manifest(manifest: Mapping[str, Any] | None, *, max_p
     return DataFormatter.sanitize(points)
 
 
-def build_workspace_artifact_acceptance_locator_items(
+def build_task_workspace_artifact_acceptance_locator_items(
     *,
     path: str,
     source: str,
@@ -197,6 +197,39 @@ def build_workspace_artifact_acceptance_locator_items(
             index=index,
         )
         items.append(item)
+    located_heading_lines: set[int] = set()
+    for item in items:
+        line_start = item.get("line_start")
+        if item.get("status") == "ok" and isinstance(line_start, int):
+            located_heading_lines.add(line_start)
+    for heading_index, heading in enumerate(_primary_section_headings(headings)):
+        if len(items) >= max_items:
+            break
+        line_start = heading.get("line_start")
+        if isinstance(line_start, int) and line_start in located_heading_lines:
+            continue
+        title = str(heading.get("title") or "").strip()
+        if not title:
+            continue
+        items.append(
+            _locator_item(
+                path=artifact_path,
+                source=source,
+                point={
+                    "criterion_id": f"artifact:heading:{heading_index}",
+                    "criterion": f"Artifact heading: {title}",
+                    "expected_anchor": title,
+                    "source": "artifact_structure",
+                },
+                locator=heading,
+                source_evidence_ids=_dedupe_strings(
+                    [artifact_evidence_id, *(source_evidence_ids or ())]
+                ),
+                index=len(items),
+            )
+        )
+        if isinstance(line_start, int):
+            located_heading_lines.add(line_start)
     if not items and headings:
         item = _locator_item(
             path=artifact_path,
@@ -230,9 +263,9 @@ def acceptance_locator_view_from_ledger(value: Any, *, max_items: int = 32) -> d
             continue
         if str(item.get("kind") or "") != ACCEPTANCE_LOCATOR_KIND:
             continue
+        stable_reference_id = str(item.get("reference_id") or "").strip()
+        canonical_id = str(item.get("id") or "").strip()
         locator: dict[str, Any] = {
-            "id": str(item.get("id") or ""),
-            "cite_as": str(item.get("cite_as") or ""),
             "status": str(item.get("status") or ""),
             "body_state": str(item.get("body_state") or ""),
             "point_source": str(item.get("point_source") or ""),
@@ -248,8 +281,13 @@ def acceptance_locator_view_from_ledger(value: Any, *, max_items: int = 32) -> d
             "byte_offset": item.get("byte_offset"),
             "byte_end": item.get("byte_end"),
             "content_fingerprint": str(item.get("content_fingerprint") or ""),
-            "source_evidence_ids": _string_list(item.get("source_evidence_ids")),
         }
+        if not canonical_id and stable_reference_id:
+            locator["reference_id"] = stable_reference_id
+        else:
+            locator["id"] = canonical_id
+            locator["cite_as"] = str(item.get("cite_as") or "")
+            locator["source_evidence_ids"] = _string_list(item.get("source_evidence_ids"))
         locators.append(DataFormatter.sanitize({key: value for key, value in locator.items() if value not in ("", [], None)}))
         if len(locators) >= max_items:
             break
@@ -335,9 +373,9 @@ def _locator_item(
         "byte_end": locator.get("byte_end"),
         "content_fingerprint": str(locator.get("content_fingerprint") or ""),
         "source_evidence_ids": list(source_evidence_ids),
-        "source": "agent_task.workspace_artifact.acceptance_locator",
+        "source": "agent_task.task_workspace_artifact.acceptance_locator",
         "provenance": {
-            "source": "agent_task.workspace_artifact.acceptance_locator",
+            "source": "agent_task.task_workspace_artifact.acceptance_locator",
             "artifact_source": source,
             "path": path,
             "criterion_id": criterion_id,
@@ -353,13 +391,17 @@ def _locator_item(
     if status != "ok":
         item["diagnostics"] = [
             {
-                "code": "agent_task.workspace_artifact.acceptance_locator_not_found",
-                "message": "Acceptance locator anchor was not found in the trusted Workspace artifact.",
+                "code": "agent_task.task_workspace_artifact.acceptance_locator_not_found",
+                "message": "Acceptance locator anchor was not found in the trusted TaskWorkspace artifact.",
                 "expected_anchor": anchor,
                 "criterion": criterion,
             }
         ]
-    return DataFormatter.sanitize({key: value for key, value in item.items() if value not in ("", [], None)})
+    # Every value above is constructed from bounded scalar projections and
+    # string-id lists. Re-sanitizing each locator recursively is both redundant
+    # and pathologically expensive when a verification pass produces many
+    # acceptance points.
+    return {key: value for key, value in item.items() if value not in ("", [], None)}
 
 
 def _locate_acceptance_point(
@@ -651,7 +693,7 @@ def _fingerprint(value: str) -> str:
 
 
 def _locator_evidence_id(*, path: str, source: str, criterion_id: str, anchor: str, index: int) -> str:
-    raw = f"workspace_artifact_acceptance_locator:{source}:{path}:{criterion_id}:{anchor or index}"
+    raw = f"task_workspace_artifact_acceptance_locator:{source}:{path}:{criterion_id}:{anchor or index}"
     return "".join(ch if ch.isalnum() or ch in "._:-/" else "_" for ch in raw)[:240]
 
 
@@ -659,6 +701,6 @@ __all__ = [
     "ACCEPTANCE_LOCATOR_KIND",
     "acceptance_locator_view_from_ledger",
     "acceptance_points_from_manifest",
-    "build_workspace_artifact_acceptance_locator_items",
+    "build_task_workspace_artifact_acceptance_locator_items",
     "collect_acceptance_points",
 ]

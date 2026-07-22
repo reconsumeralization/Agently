@@ -19,10 +19,14 @@ from typing import Any
 import pytest
 
 from agently import Agently
-from agently.builtins.plugins.Blocks.AgentlyBlocks import ExecutionBlockRegistry, PlanBlockRegistry
-from agently.core.application.SkillsExecutor import DictSkillSource, SkillCapabilityAdapter
+from agently.builtins.plugins.Blocks.AgentlyBlocks import (
+    ExecutionBlockRegistry,
+    PlanBlockRegistry,
+    _ledger_items_from_context_read,
+)
 from agently.core import TaskDAGExecutor
-from agently.types.data import BlockCompileRequest
+from agently.core.context import TaskContext
+from agently.types.data import BlockCompileRequest, ContextBudget, ContextConsumer
 
 
 def test_default_blocks_plugin_is_registered():
@@ -32,7 +36,7 @@ def test_default_blocks_plugin_is_registered():
     assert {
         "model_request",
         "action_call",
-        "skill_activation",
+        "context_read",
         "dag_segment",
         "approval_wait",
         "external_wait",
@@ -49,7 +53,7 @@ def test_blocks_compile_maps_plan_blocks_to_execution_block_graph():
                 "task_frame_id": "frame-1",
                 "plan_id": "plan-1",
                 "plan_blocks": [
-                    {"id": "context", "plan_block_id": "skill_activation", "kind": "skill_activation"},
+                    {"id": "context", "plan_block_id": "context_read", "kind": "context_read"},
                     {"id": "validate", "plan_block_id": "validation", "kind": "validation"},
                 ],
                 "edges": [{"from": "context", "to": "validate"}],
@@ -59,12 +63,12 @@ def test_blocks_compile_maps_plan_blocks_to_execution_block_graph():
 
     assert graph.graph_id == "blocks:plan-1"
     assert [block.id for block in graph.execution_blocks] == [
-        "context:skill_activation",
+        "context:context_read",
         "validate:validation",
     ]
-    assert graph.edges[0].from_execution_block == "context:skill_activation"
+    assert graph.edges[0].from_execution_block == "context:context_read"
     assert graph.edges[0].to_execution_block == "validate:validation"
-    assert graph.start_blocks == ("context:skill_activation",)
+    assert graph.start_blocks == ("context:context_read",)
     assert graph.terminal_blocks == ("validate:validation",)
 
 
@@ -77,8 +81,8 @@ def test_blocks_compile_rejects_denied_capability_before_runtime():
                 "plan_blocks": [
                     {
                         "id": "write",
-                        "plan_block_id": "workspace_operation",
-                        "kind": "workspace_operation",
+                        "plan_block_id": "context_read",
+                        "kind": "context_read",
                         "capability_requirements": [{"need": "fs.write"}],
                     }
                 ],
@@ -206,7 +210,7 @@ async def test_blocks_runtime_executes_on_triggerflow_with_handler_and_evidence(
 
     execution = flow.create_execution(
         auto_close=False,
-        workspace=False,
+        record_store=False,
         runtime_resources={"blocks.handlers": {"echo_action": echo_action}},
     )
     await execution.async_start({"customer": "ACME"})
@@ -272,7 +276,7 @@ async def test_blocks_replan_signal_cancels_only_affected_downstream_blocks():
 
     execution = Agently.blocks.bind_runtime(graph).create_execution(
         auto_close=False,
-        workspace=False,
+        record_store=False,
         runtime_resources={"blocks.handlers": {"root": root, "affected": affected}},
     )
     await execution.async_start({"input": "x"})
@@ -286,515 +290,128 @@ async def test_blocks_replan_signal_cancels_only_affected_downstream_blocks():
     assert evidence.diagnostics[0]["status"] == "replan_segment"
 
 
-@pytest.mark.asyncio
-async def test_blocks_skill_activation_uses_adapter_and_records_context_evidence():
-    adapter = SkillCapabilityAdapter(
-        DictSkillSource(
-            {
-                "webapp-testing": {
-                    "skill_id": "webapp-testing",
-                    "card": {"name": "Web App Testing", "description": "Browser QA guidance"},
-                    "guidance": {"body": "Use browser screenshots and write files only after approval."},
-                    "resource_index": {
-                        "references/readback.md": {"kind": "reference", "summary": "Readback checks", "size": 40}
-                    },
-                }
-            }
-        )
-    )
-    graph = Agently.blocks.compile(
+
+
+def _context_read_graph(*, operation: str = "read"):
+    return Agently.blocks.compile(
         {
-            "plan_id": "plan-skill-activation",
+            "plan_id": f"plan-context-{operation}",
             "plan_blocks": [
                 {
-                    "id": "ctx",
-                    "plan_block_id": "skill_activation",
-                    "kind": "skill_activation",
-                    "bound_inputs": {"skill_id": "webapp-testing", "task": "capture browser screenshot"},
+                    "id": "context",
+                    "plan_block_id": "context_read",
+                    "kind": "context_read",
+                    "intent": "Find the task deadline.",
+                    "bound_inputs": {
+                        "operation": operation,
+                        "query": "task deadline",
+                    },
                 }
             ],
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_blocks_context_read_uses_bound_context_reader():
+    task_context = TaskContext("task-blocks")
+    task_context.put(
+        role="information",
+        content="The task deadline is 2026-07-01.",
+        source_ref="task/deadline",
+        required=True,
+    )
+    reader = task_context.reader(
+        consumer=ContextConsumer("blocks:execution"),
+        phase="execution",
+        budget=ContextBudget(max_chars=2000, max_blocks=8, max_block_chars=1000),
+    )
+    graph = _context_read_graph()
     execution = Agently.blocks.bind_runtime(graph).create_execution(
         auto_close=False,
-        workspace=False,
-        runtime_resources={"skills.capability_adapter": adapter},
+        record_store=False,
+        runtime_resources={"context_reader": reader},
     )
 
-    await execution.async_start({"url": "https://example.test"})
+    await execution.async_start({"ignored": True})
     snapshot = await execution.async_close(timeout=5)
 
     evidence = Agently.blocks.map_evidence(graph, snapshot)
-    assert evidence.skill_evidence[0]["skill_id"] == "webapp-testing"
-    assert evidence.skill_evidence[0]["evidence_kind"] == "skill_context"
-    assert evidence.skill_evidence[0]["proves_side_effect"] is False
-    assert evidence.skill_evidence[0]["execution_block_id"] == "ctx:skill_activation"
     output = evidence.execution_block_results[0]["output"]
-    assert any(need["need"] == "web_browse" for need in output["capability_needs"])
-    assert any(item["plan_block_id"] == "action_call" for item in output["plan_block_recommendations"])
+    assert output["operation"] == "read"
+    assert output["query"] == "task deadline"
+    assert output["context_package"]["task_context_id"] == task_context.context_id
+    assert output["context_package"]["blocks"][0]["content"] == "The task deadline is 2026-07-01."
+    assert output["locator_refs"][0]["source_ref"] == "task/deadline"
+    assert output["evidence_snippets"][0]["content"] == "The task deadline is 2026-07-01."
+    for field in (
+        "execution_block_id",
+        "block_id",
+        "source_id",
+        "source_revision",
+        "source_ref",
+        "binding_id",
+    ):
+        assert output["locator_refs"][0][field]
+        assert output["evidence_snippets"][0][field]
+        assert output["locator_refs"][0][field] == output["evidence_snippets"][0][field]
+    assert output["bounded"]["source_coverage"] == {}
+    assert output["bounded"]["continuation_available"] is False
+
+
+def test_blocks_context_read_ledger_keeps_ref_only_snippet_state():
+    items = _ledger_items_from_context_read(
+        {"id": "read:media", "execution_block_id": "read:media"},
+        {
+            "query": "diagram",
+            "locator_refs": [],
+            "evidence_snippets": [
+                {
+                    "content_state": "ref_only",
+                    "content": None,
+                    "execution_block_id": "read:media",
+                    "block_id": "context-block:media",
+                    "source_id": "source:media",
+                    "source_revision": "revision:1",
+                    "source_ref": "assets/diagram.png",
+                    "binding_id": "binding:media",
+                }
+            ],
+            "diagnostics": [],
+        },
+        start_index=0,
+    )
+
+    assert len(items) == 1
+    assert items[0]["body_state"] == "ref_only"
+    assert "body" not in items[0]
 
 
 @pytest.mark.asyncio
-async def test_blocks_compile_skill_activation_before_model_action_dag_segment():
-    adapter = SkillCapabilityAdapter(
-        DictSkillSource(
-            {
-                "script-review": {
-                    "skill_id": "script-review",
-                    "card": {"name": "Script Review", "description": "Review scripts before execution"},
-                    "guidance": {"body": "Load script review criteria before planning fixes."},
-                    "resource_index": {},
-                }
-            }
-        )
+async def test_blocks_context_read_requires_context_reader():
+    execution = Agently.blocks.bind_runtime(_context_read_graph()).create_execution(
+        auto_close=False,
+        record_store=False,
     )
-    dag = {
-        "graph_id": "script-review-dag",
-        "task_schema_version": "task_dag/v1",
-        "tasks": [
-            {"id": "plan_fix", "kind": "model"},
-            {"id": "run_script", "kind": "action", "depends_on": ["plan_fix"]},
-        ],
-        "semantic_outputs": {"script": "run_script"},
-    }
+    with pytest.raises(RuntimeError, match="context_reader"):
+        await execution.async_start({"ignored": True})
 
-    async def model_node(_context):
-        return {"fix_plan": "normalize imports before running the script"}
 
-    async def action_node(context):
-        return {
-            "status": "success",
-            "dependency_results": dict(context["dependency_results"]),
-            "action_evidence": [
-                {
-                    "action_id": "run_script",
-                    "status": "success",
-                    "proves_side_effect": True,
-                }
-            ],
-        }
-
-    executor = TaskDAGExecutor({"model": model_node, "action": action_node})
-    validation = executor.validator.validate(dag, resolver=executor.resolver)
-    graph = Agently.blocks.compile(
-        {
-            "plan_id": "skill-to-dag",
-            "plan_blocks": [
-                {
-                    "id": "ctx",
-                    "plan_block_id": "skill_activation",
-                    "kind": "skill_activation",
-                    "bound_inputs": {"skill_id": "script-review", "task": "repair the script"},
-                },
-                {
-                    "id": "dag",
-                    "plan_block_id": "dag_segment",
-                    "kind": "dag_segment",
-                    "bound_inputs": {
-                        "task_dag": dag,
-                        "task_dag_validation": validation,
-                        "handler_prefix": "task_dag:script-review-dag",
-                    },
-                },
-            ],
-            "edges": [{"from": "ctx", "to": "dag"}],
-        }
+@pytest.mark.asyncio
+async def test_blocks_context_read_rejects_side_effect_operations():
+    task_context = TaskContext("task-blocks")
+    reader = task_context.reader(
+        consumer=ContextConsumer("blocks:execution"),
+        phase="execution",
     )
-
-    assert [block.kind for block in graph.execution_blocks] == [
-        "skill_activation",
-        "dag_node",
-        "dag_node",
-    ]
-    assert [block.source_task_dag_node_id for block in graph.execution_blocks] == [
-        None,
-        "plan_fix",
-        "run_script",
-    ]
-    assert ("ctx:skill_activation", "dag:dag_node:plan_fix") in {
-        (edge.from_execution_block, edge.to_execution_block) for edge in graph.edges
-    }
-    assert ("dag:dag_node:plan_fix", "dag:dag_node:run_script") in {
-        (edge.from_execution_block, edge.to_execution_block) for edge in graph.edges
-    }
-
+    graph = _context_read_graph(operation="write")
     execution = Agently.blocks.bind_runtime(graph).create_execution(
         auto_close=False,
-        workspace=False,
-        runtime_resources={
-            "skills.capability_adapter": adapter,
-            "blocks.handlers": {
-                "task_dag:script-review-dag:plan_fix": model_node,
-                "task_dag:script-review-dag:run_script": action_node,
-            },
-        },
+        record_store=False,
+        runtime_resources={"context_reader": reader},
     )
-    await execution.async_start({"script": "legacy.py"})
-    snapshot = await execution.async_close(timeout=5)
-
-    evidence = Agently.blocks.map_evidence(graph, snapshot)
-    assert evidence.skill_evidence[0]["skill_id"] == "script-review"
-    assert evidence.action_evidence[0]["action_id"] == "run_script"
-    assert evidence.action_evidence[0]["source_task_dag_node_id"] == "run_script"
-
-
-@pytest.mark.asyncio
-async def test_blocks_workspace_operation_puts_through_workspace_resource_with_ingest_alias(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "blocks-workspace")
-    graph = Agently.blocks.compile(
-        {
-            "plan_id": "plan-workspace",
-            "plan_blocks": [
-                {
-                    "id": "store",
-                    "plan_block_id": "workspace_operation",
-                    "kind": "workspace_operation",
-                    "bound_inputs": {
-                        "operation": "ingest",
-                        "content": {"answer": "ok"},
-                        "collection": "observations",
-                        "kind": "blocks_example_observation",
-                    },
-                }
-            ],
-        }
-    )
-    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
-
-    await execution.async_start({"ignored": True})
-    snapshot = await execution.async_close(timeout=5)
-
-    evidence = Agently.blocks.map_evidence(graph, snapshot)
-    block_output = evidence.execution_block_results[0]["output"]
-    ref = block_output["ref"]
-    assert block_output["operation"] == "put"
-    assert block_output["compat_operation"] == "ingest"
-    assert evidence.workspace_refs == (ref["id"],)
-    assert await workspace.get_data(ref) == {"answer": "ok"}
-
-
-@pytest.mark.asyncio
-async def test_blocks_workspace_operation_search_returns_scoped_retrieval_roles(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-search")
-    expected_ref = await workspace.put(
-        content="Alpha deadline is 2026-07-01. Keep this scoped evidence short.",
-        collection="observations",
-        kind="note",
-        summary="alpha deadline note",
-        scope={"task_id": "alpha"},
-    )
-    await workspace.put(
-        content="Beta deadline is unrelated and must stay outside the scoped result.",
-        collection="observations",
-        kind="note",
-        summary="beta deadline note",
-        scope={"task_id": "beta"},
-    )
-    graph = Agently.blocks.compile(
-        {
-            "plan_id": "plan-workspace-search",
-            "plan_blocks": [
-                {
-                    "id": "search",
-                    "plan_block_id": "workspace_operation",
-                    "kind": "workspace_operation",
-                    "bound_inputs": {
-                        "operation": "search",
-                        "query": "deadline",
-                        "filters": {"scope.task_id": "alpha"},
-                        "max_results": 4,
-                        "include_snippets": True,
-                        "snippet_limit": 24,
-                    },
-                }
-            ],
-        }
-    )
-
-    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
-    await execution.async_start({"ignored": True})
-    snapshot = await execution.async_close(timeout=5)
-
-    evidence = Agently.blocks.map_evidence(graph, snapshot)
-    output = evidence.execution_block_results[0]["output"]
-    assert output["operation"] == "search"
-    assert output["query"] == "deadline"
-    assert output["filters"] == {"scope.task_id": "alpha"}
-    assert output["bounded"]["max_results"] == 4
-    assert output["bounded"]["retrieval_strategy"] == "workspace.retrieve"
-    assert output["bounded"]["retrieval_selection"] == "top_n"
-    assert output["bounded"]["snippet_limit"] == 24
-    assert [item["ref"]["id"] for item in output["locator_refs"]] == [expected_ref["id"]]
-    assert output["locator_refs"][0]["role"] == "locator_ref"
-    assert output["locator_refs"][0]["content_state"] == "ref_only"
-    assert output["evidence_snippets"][0]["role"] == "evidence_snippet"
-    assert output["evidence_snippets"][0]["content_state"] == "bounded_readback_available"
-    assert output["evidence_snippets"][0]["locator_ref"]["ref"]["id"] == expected_ref["id"]
-    assert output["evidence_snippets"][0]["snippet_chars"] <= 24
-    assert output["evidence_snippets"][0]["truncated"] is True
-    assert evidence.workspace_refs == (expected_ref["id"],)
-    ledger_items = {item["kind"]: item for item in evidence.evidence_items}
-    assert ledger_items["workspace_operation.search"]["status"] == "ok"
-    assert ledger_items["locator_ref"]["body_state"] == "ref_only"
-    assert ledger_items["evidence_snippet"]["body_state"] == "truncated"
-    assert ledger_items["evidence_snippet"]["status"] == "ok"
-    assert ledger_items["evidence_snippet"]["id"]
-    assert not {"useful", "accepted", "semantically_relevant"}.intersection(output)
-
-
-@pytest.mark.asyncio
-async def test_blocks_workspace_operation_search_preserves_record_representation_metadata(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-projected-search")
-    expected_ref = await workspace.put(
-        {
-            "source_system": "crm_activity_export",
-            "subject": "CivicPay credit guidance",
-            "attributes": {
-                "raw_lines": [
-                    "Merchant: CivicPay",
-                    "Credit policy: service credits may not exceed 15 percent.",
-                ]
-            },
-            "audit": {"schema": "crm.varying.v3"},
-        },
-        collection="support-intel",
-        kind="credit_policy",
-        scope={"task_id": "projection"},
-    )
-    graph = Agently.blocks.compile(
-        {
-            "plan_id": "plan-workspace-projected-search",
-            "plan_blocks": [
-                {
-                    "id": "search",
-                    "plan_block_id": "workspace_operation",
-                    "kind": "workspace_operation",
-                    "bound_inputs": {
-                        "operation": "search",
-                        "query": "CivicPay credit",
-                        "filters": {"scope.task_id": "projection", "collection": "support-intel"},
-                        "max_results": 2,
-                        "include_snippets": True,
-                        "snippet_limit": 800,
-                    },
-                }
-            ],
-        }
-    )
-
-    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
-    await execution.async_start({"ignored": True})
-    snapshot = await execution.async_close(timeout=5)
-
-    evidence = Agently.blocks.map_evidence(graph, snapshot)
-    output = evidence.execution_block_results[0]["output"]
-    snippet = output["evidence_snippets"][0]
-    assert output["locator_refs"][0]["record_id"] == expected_ref["id"]
-    assert snippet["content_state"] == "compact_structured_record"
-    assert snippet["original_ref"]["record_id"] == expected_ref["id"]
-    assert snippet["projection"]["strategy"] == "compact_structured_record"
-    assert snippet["projection"]["chosen_representation"] == "compact_structured"
-    assert "Credit policy: service credits may not exceed 15 percent." in snippet["content"]
-    assert "source_system" not in snippet["content"]
-    ledger_items = {item["kind"]: item for item in evidence.evidence_items}
-    assert ledger_items["evidence_snippet"]["body_state"] == "bounded"
-
-
-@pytest.mark.asyncio
-async def test_blocks_workspace_operation_search_calls_workspace_retrieve(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-retrieve-options")
-    expected_ref = await workspace.put(
-        content="Alpha deadline is 2026-07-01.",
-        collection="observations",
-        kind="note",
-        summary="alpha deadline note",
-        meta={"tags": ["alpha", "deadline"]},
-    )
-    captured: dict[str, Any] = {}
-    original_retrieve = workspace.retrieve
-
-    async def capture_retrieve(query, **kwargs):
-        captured["query"] = query
-        captured["kwargs"] = dict(kwargs)
-        return await original_retrieve(query, **kwargs)
-
-    workspace.retrieve = capture_retrieve  # type: ignore[method-assign]
-    graph = Agently.blocks.compile(
-        {
-            "plan_id": "plan-workspace-retrieve-options",
-            "plan_blocks": [
-                {
-                    "id": "search",
-                    "plan_block_id": "workspace_operation",
-                    "kind": "workspace_operation",
-                    "bound_inputs": {
-                        "operation": "search",
-                        "query": "deadline",
-                        "tags": ["alpha"],
-                        "method": "hybrid",
-                        "selection": "top_n",
-                        "top_n": 1,
-                        "rerank": False,
-                        "max_candidates": 5,
-                        "max_results": 1,
-                        "include_snippets": True,
-                    },
-                }
-            ],
-        }
-    )
-
-    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
-    await execution.async_start({"ignored": True})
-    snapshot = await execution.async_close(timeout=5)
-
-    evidence = Agently.blocks.map_evidence(graph, snapshot)
-    output = evidence.execution_block_results[0]["output"]
-    assert captured["query"] == "deadline"
-    assert captured["kwargs"]["tags"] == ["alpha"]
-    assert captured["kwargs"]["method"] == "hybrid"
-    assert captured["kwargs"]["selection"] == "top_n"
-    assert captured["kwargs"]["top_n"] == 1
-    assert captured["kwargs"]["rerank"] is False
-    assert captured["kwargs"]["max_candidates"] == 5
-    assert output["bounded"]["retrieval_strategy"] == "workspace.retrieve"
-    assert output["bounded"]["retrieval_method"] == "hybrid"
-    assert [item["ref"]["id"] for item in output["locator_refs"]] == [expected_ref["id"]]
-
-
-@pytest.mark.asyncio
-async def test_blocks_workspace_operation_search_empty_result_enters_ledger(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-empty-search")
-    graph = Agently.blocks.compile(
-        {
-            "plan_id": "plan-empty-search",
-            "plan_blocks": [
-                {
-                    "id": "search",
-                    "plan_block_id": "workspace_operation",
-                    "kind": "workspace_operation",
-                    "bound_inputs": {
-                        "operation": "search",
-                        "query": "definitely-not-present",
-                        "max_results": 2,
-                        "include_snippets": True,
-                    },
-                }
-            ],
-        }
-    )
-
-    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
-    await execution.async_start({"ignored": True})
-    snapshot = await execution.async_close(timeout=5)
-
-    evidence = Agently.blocks.map_evidence(graph, snapshot)
-    search_item = next(item for item in evidence.evidence_items if item["kind"] == "workspace_operation.search")
-    assert search_item["status"] == "empty"
-    assert search_item["supports"]["unavailability"] is True
-
-
-@pytest.mark.asyncio
-async def test_blocks_workspace_operation_search_can_use_workspace_files_surface(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-file-search")
-    await workspace.write_file("notes/todo.md", "alpha\nrelease deadline is 2026-07-01\n")
-    await workspace.put(
-        content="Indexed record is unrelated to the file-only query.",
-        collection="observations",
-        kind="note",
-        summary="unrelated index record",
-    )
-    graph = Agently.blocks.compile(
-        {
-            "plan_id": "plan-workspace-file-search",
-            "plan_blocks": [
-                {
-                    "id": "search-files",
-                    "plan_block_id": "workspace_operation",
-                    "kind": "workspace_operation",
-                    "bound_inputs": {
-                        "operation": "search",
-                        "query": "deadline",
-                        "search_surface": "workspace_files",
-                        "path": "notes",
-                        "pattern": "*.md",
-                        "max_results": 3,
-                        "max_file_bytes": 1024,
-                    },
-                }
-            ],
-        }
-    )
-
-    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
-    await execution.async_start({"ignored": True})
-    snapshot = await execution.async_close(timeout=5)
-
-    evidence = Agently.blocks.map_evidence(graph, snapshot)
-    output = evidence.execution_block_results[0]["output"]
-    assert output["operation"] == "search"
-    assert output["bounded"]["search_surface"] == "workspace_files"
-    assert output["bounded"]["retrieval_strategy"] == "workspace.retrieve"
-    assert output["bounded"]["search_engines"] in (["workspace_file_grep"], ["workspace_file_scan"])
-    assert output["bounded"]["index_total_matches"] == 0
-    assert output["bounded"]["file_returned_results"] == 1
-    assert output["bounded"]["returned_results"] == 1
-    assert output["bounded"]["candidate_bytes"] >= output["bounded"]["returned_snippet_bytes"]
-    assert output["locator_refs"][0]["role"] == "locator_ref"
-    assert output["locator_refs"][0]["content_state"] == "ref_only"
-    assert output["locator_refs"][0]["path"] == "notes/todo.md"
-    assert output["evidence_snippets"][0]["role"] == "evidence_snippet"
-    assert output["evidence_snippets"][0]["content"] == "alpha\nrelease deadline is 2026-07-01"
-    assert output["evidence_snippets"][0]["truncated"] is False
-    assert output["evidence_snippets"][0]["line_start"] == 1
-    assert output["evidence_snippets"][0]["line_end"] == 2
-    assert output["evidence_snippets"][0]["locator_ref"]["path"] == "notes/todo.md"
-    assert not {"useful", "accepted", "semantically_relevant"}.intersection(output)
-
-
-@pytest.mark.asyncio
-async def test_blocks_workspace_operation_read_bounded_returns_evidence_snippet(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "blocks-workspace-read-bounded")
-    ref = await workspace.put(
-        "abcdefghijklmnopqrstuvwxyz",
-        collection="artifacts",
-        kind="text_artifact",
-        summary="alphabet artifact",
-    )
-    graph = Agently.blocks.compile(
-        {
-            "plan_id": "plan-workspace-read-bounded",
-            "plan_blocks": [
-                {
-                    "id": "read",
-                    "plan_block_id": "workspace_operation",
-                    "kind": "workspace_operation",
-                    "bound_inputs": {
-                        "operation": "read_bounded",
-                        "ref": ref,
-                        "offset": 4,
-                        "limit": 6,
-                    },
-                }
-            ],
-        }
-    )
-
-    execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=workspace)
-    await execution.async_start({"ignored": True})
-    snapshot = await execution.async_close(timeout=5)
-
-    evidence = Agently.blocks.map_evidence(graph, snapshot)
-    output = evidence.execution_block_results[0]["output"]
-    snippet = output["evidence_snippet"]
-    assert output["operation"] == "read_bounded"
-    assert snippet["role"] == "evidence_snippet"
-    assert snippet["content"] == "efghij"
-    assert snippet["offset"] == 4
-    assert snippet["size"] == 6
-    assert snippet["total_size"] == 26
-    assert snippet["locator_ref"]["ref"]["id"] == ref["id"]
-    assert evidence.workspace_refs == (ref["id"],)
+    with pytest.raises(ValueError, match="read-only"):
+        await execution.async_start({"ignored": True})
 
 
 @pytest.mark.asyncio
@@ -820,7 +437,7 @@ async def test_blocks_approval_wait_uses_policy_approval_gate():
                 ],
             }
         )
-        execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=False)
+        execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, record_store=False)
 
         await execution.async_start({"draft": True})
         snapshot = await execution.async_close(timeout=5)
@@ -857,7 +474,7 @@ async def test_blocks_approval_wait_global_access_control_auto_allow():
                 ],
             }
         )
-        execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, workspace=False)
+        execution = Agently.blocks.bind_runtime(graph).create_execution(auto_close=False, record_store=False)
 
         await execution.async_start({"draft": True})
         snapshot = await execution.async_close(timeout=5)
@@ -874,7 +491,7 @@ async def test_blocks_approval_wait_global_access_control_auto_allow():
 
 
 @pytest.mark.asyncio
-async def test_blocks_approval_wait_uses_triggerflow_pause_and_resume():
+async def test_blocks_approval_wait_uses_triggerflow_pause_and_resume(tmp_path):
     Agently.configure_policy_approval(handler="fail_closed")
     try:
         graph = Agently.blocks.compile(
@@ -899,7 +516,7 @@ async def test_blocks_approval_wait_uses_triggerflow_pause_and_resume():
         execution = await Agently.blocks.bind_runtime(graph).async_start_execution(
             {"draft": True},
             wait_for_result=False,
-            workspace=False,
+            record_store=tmp_path / "approval-resume",
         )
         pending = execution.get_pending_interrupts()
 
@@ -923,7 +540,7 @@ async def test_blocks_approval_wait_uses_triggerflow_pause_and_resume():
 
 
 @pytest.mark.asyncio
-async def test_blocks_external_wait_uses_triggerflow_pause_and_resume():
+async def test_blocks_external_wait_uses_triggerflow_pause_and_resume(tmp_path):
     graph = Agently.blocks.compile(
         {
             "plan_id": "plan-external-wait",
@@ -945,7 +562,7 @@ async def test_blocks_external_wait_uses_triggerflow_pause_and_resume():
     execution = await Agently.blocks.bind_runtime(graph).async_start_execution(
         None,
         wait_for_result=False,
-        workspace=False,
+        record_store=tmp_path / "external-wait",
     )
     pending = execution.get_pending_interrupts()
 
@@ -994,7 +611,7 @@ async def test_blocks_dag_segment_reuses_task_dag_validation_and_runtime_signals
     assert graph.edges[0].to_execution_block == "dag:dag_node:final"
 
     flow = Agently.blocks.bind_runtime(graph)
-    execution = flow.create_execution(auto_close=False, workspace=False)
+    execution = flow.create_execution(auto_close=False, record_store=False)
     await execution.async_start({"doc": "policy"})
     snapshot = await execution.async_close(timeout=5)
 
@@ -1085,7 +702,7 @@ def test_task_dag_executor_blocks_path_still_rejects_invalid_dag():
 
 
 @pytest.mark.asyncio
-async def test_blocks_external_wait_forwards_exchange_metadata_to_envelope():
+async def test_blocks_external_wait_forwards_exchange_metadata_to_envelope(tmp_path):
     graph = Agently.blocks.compile(
         {
             "plan_id": "plan-external-wait-metadata",
@@ -1113,7 +730,7 @@ async def test_blocks_external_wait_forwards_exchange_metadata_to_envelope():
     execution = await Agently.blocks.bind_runtime(graph).async_start_execution(
         None,
         wait_for_result=False,
-        workspace=False,
+        record_store=tmp_path / "external-wait-metadata",
     )
     pending = execution.get_pending_interrupts()
     envelope = pending["external-callback"]["external_wait_request"]

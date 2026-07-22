@@ -4,15 +4,15 @@ import inspect
 import importlib
 from pathlib import Path
 
+import agently.types.plugins as plugin_types
+
 from agently.builtins.plugins.ActionExecutor import (
     BashSandboxActionExecutor,
     BrowseActionExecutor,
-    CodeRuntimeActionExecutor,
+    CodeExecutionActionExecutor,
     DockerActionExecutor,
     LocalFunctionActionExecutor,
     MCPActionExecutor,
-    NodeJSActionExecutor,
-    PythonSandboxActionExecutor,
     SearchActionExecutor,
     SQLiteActionExecutor,
 )
@@ -24,26 +24,21 @@ from agently.builtins.plugins.ExecutionResourceProvider import (
     BrowserExecutionResourceProvider,
     DockerExecutionResourceProvider,
     MCPExecutionResourceProvider,
-    NodeExecutionResourceProvider,
-    PythonExecutionResourceProvider,
     SQLiteExecutionResourceProvider,
+    TrustedLocalExecutionResourceProvider,
 )
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import AnthropicCompatible
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
 from agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible import OpenAIResponsesCompatible
-from agently.builtins.agent_extensions.SkillsExtension._SkillsContext import AgentSkillsManagerContext
-from agently.builtins.plugins.SkillsManager import AgentlySkillsManager
-from agently.builtins.plugins.SkillsExecutor import AgentlySkillsExecutor
 from agently.types.plugins import (
     ActionExecutor,
     ActionFlow,
     ActionRuntime,
     AgentExecution,
     AgentOrchestrator,
+    ContextSource,
     ExecutionResourceProvider,
-    SkillsManager,
-    SkillsExecutor,
-    SkillsRuntimeContext,
+    SessionMemory,
 )
 from agently.utils.Settings import Settings
 
@@ -56,43 +51,26 @@ def _method_names(protocol: type) -> list[str]:
     ]
 
 
-def test_builtin_skills_executor_matches_plugin_protocol():
-    plugin = AgentlySkillsExecutor(settings=Settings(name="protocol-test"))
+def test_context_source_protocol_is_descriptor_and_exact_read_only():
+    change_feed = getattr(plugin_types, "ContextSourceChangeFeed", None)
 
-    assert isinstance(plugin, SkillsExecutor)
-    for method_name in _method_names(SkillsExecutor):
-        assert callable(getattr(plugin, method_name))
-
-
-def test_builtin_skills_manager_matches_plugin_protocol():
-    plugin = AgentlySkillsManager(settings=Settings(name="protocol-manager-test"))
-
-    assert isinstance(plugin, SkillsManager)
-    for method_name in _method_names(SkillsManager):
-        assert callable(getattr(plugin, method_name))
+    assert not hasattr(plugin_types, "ContextSourceCandidateWindow")
+    assert not hasattr(ContextSource, "async_list_candidates")
+    assert not hasattr(ContextSource, "async_read")
+    assert hasattr(ContextSource, "async_enumerate_descriptors")
+    assert hasattr(ContextSource, "async_read_exact")
+    assert {"source_id", "source_kind"}.issubset(ContextSource.__annotations__)
+    assert change_feed is not None
+    assert _method_names(change_feed) == ["async_changes"]
 
 
-def test_builtin_skills_executor_has_no_stage_action_defaults():
-    assert AgentlySkillsExecutor.DEFAULT_SETTINGS == {}
+def test_session_memory_protocol_exposes_context_source_instead_of_retrieval_policy():
+    methods = _method_names(SessionMemory)
 
-
-def test_agent_skills_context_matches_runtime_protocol():
-    class FakeAgent:
-        settings = Settings(name="fake-skills-agent")
-
-        def input(self, *_args, **_kwargs):  # pragma: no cover - protocol shape only
-            raise AssertionError("not used")
-
-        class action:
-            action_registry = None
-
-            @staticmethod
-            async def async_execute_action(*_args, **_kwargs):  # pragma: no cover - protocol shape only
-                return {"status": "success"}
-
-    context = AgentSkillsManagerContext(FakeAgent())
-
-    assert isinstance(context, SkillsRuntimeContext)
+    assert "create_context_source" in methods
+    assert "prepare_request" in methods
+    assert "retrieve" not in methods
+    assert "rerank" not in methods
 
 
 def test_builtin_execution_resource_providers_match_protocol():
@@ -101,14 +79,14 @@ def test_builtin_execution_resource_providers_match_protocol():
         BrowserExecutionResourceProvider(),
         DockerExecutionResourceProvider(),
         MCPExecutionResourceProvider(),
-        NodeExecutionResourceProvider(),
-        PythonExecutionResourceProvider(),
         SQLiteExecutionResourceProvider(),
+        TrustedLocalExecutionResourceProvider(),
     ]
 
     for provider in providers:
         assert isinstance(provider, ExecutionResourceProvider)
-        assert provider.kind
+        assert provider.provider_id
+        assert provider.supported_kinds
         for method_name in _method_names(ExecutionResourceProvider):
             assert callable(getattr(provider, method_name))
 
@@ -125,12 +103,10 @@ def test_builtin_action_executors_match_protocol():
     executors = [
         LocalFunctionActionExecutor(lambda: None),
         MCPActionExecutor(action_id="protocol_mcp", transport={"type": "direct", "tools": []}),
-        PythonSandboxActionExecutor(),
         BashSandboxActionExecutor(timeout=1),
         SearchActionExecutor(search=FakeSearch(), method_name="search"),
         BrowseActionExecutor(browse=FakeBrowse()),
-        NodeJSActionExecutor(timeout=1),
-        CodeRuntimeActionExecutor(language="python", timeout=1),
+        CodeExecutionActionExecutor(language="python", timeout=1),
         DockerActionExecutor(timeout=1),
         SQLiteActionExecutor(),
     ]
@@ -233,24 +209,3 @@ def test_model_requester_runtime_handler_contract_imports_and_ownership():
     for source_file in source_files:
         source = source_file.read_text(encoding="utf-8")
         assert [term for term in forbidden_terms if term in source] == []
-
-
-def test_skills_executor_does_not_embed_business_case_mappings():
-    plugin_root = Path(__file__).resolve().parents[1] / "agently" / "builtins" / "plugins" / "SkillsExecutor"
-    source = "\n".join(path.read_text(encoding="utf-8").lower() for path in plugin_root.glob("*.py"))
-
-    forbidden_terms = [
-        "stock",
-        "investment",
-        "earnings",
-        "travel",
-        "itinerary",
-        "rain-day",
-        "lesson",
-        "education",
-        "retrieval_practice",
-        "webapp",
-        "playwright_trace",
-        "wanderlog",
-    ]
-    assert [term for term in forbidden_terms if term in source] == []

@@ -14,16 +14,296 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
+from typing import ContextManager
+
 from .TaskShared import *
 
 
 class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
     """TaskBoard cold evidence readback and hot/cold ref projection."""
 
+    def _taskboard_contiguous_read_end(
+        self,
+        ranges: Sequence[Mapping[str, Any]],
+    ) -> int:
+        normalized = sorted(
+            (
+                (
+                    self._coerce_non_negative_int(item.get("offset")),
+                    self._coerce_non_negative_int(item.get("end")),
+                )
+                for item in ranges
+                if isinstance(item, Mapping)
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        contiguous_end = 0
+        for offset, end in normalized:
+            if end <= contiguous_end:
+                continue
+            if offset > contiguous_end:
+                break
+            contiguous_end = end
+        return contiguous_end
+
+    def _taskboard_read_progress_records(
+        self,
+        *,
+        owner: str,
+        locator: str,
+        content_version: str,
+    ) -> list[Mapping[str, Any]]:
+        state = getattr(self, "_taskboard_read_progress", None)
+        raw_items = state.get("items") if isinstance(state, Mapping) else None
+        if not isinstance(raw_items, Mapping):
+            return []
+        records: list[Mapping[str, Any]] = []
+        for record in raw_items.values():
+            if not isinstance(record, Mapping):
+                continue
+            if str(record.get("owner") or "") != owner:
+                continue
+            if str(record.get("locator") or "") != locator:
+                continue
+            recorded_version = str(record.get("content_version") or "")
+            if content_version:
+                if recorded_version != content_version:
+                    continue
+            elif owner != "action_artifact":
+                # A TaskWorkspace locator may change in place. Without a
+                # content version, a prior range cannot prove current progress.
+                continue
+            records.append(record)
+        return records
+
+    def _record_taskboard_read_progress(
+        self,
+        readback: Mapping[str, Any],
+        *,
+        card_id: str,
+    ) -> None:
+        if not bool(readback.get("ok")):
+            return
+        owner = str(readback.get("owner") or "").strip()
+        locator = str(
+            readback.get("locator")
+            or readback.get("selection_key")
+            or readback.get("path")
+            or ""
+        ).strip()
+        content_version = str(readback.get("content_version") or "").strip()
+        if not owner or not locator:
+            return
+        raw_range = readback.get("range")
+        if isinstance(raw_range, Mapping):
+            offset = self._coerce_non_negative_int(raw_range.get("offset"))
+            end = self._coerce_non_negative_int(raw_range.get("end"))
+        else:
+            offset = self._coerce_non_negative_int(readback.get("offset"))
+            end = offset + self._coerce_non_negative_int(readback.get("read_bytes"))
+        if end <= offset:
+            return
+        state = getattr(self, "_taskboard_read_progress", None)
+        if not isinstance(state, dict):
+            state = {
+                "schema_version": "agent_task_taskboard_read_progress/v1",
+                "items": {},
+            }
+            self._taskboard_read_progress = state
+        items = state.setdefault("items", {})
+        if not isinstance(items, dict):
+            return
+        identity_key = json.dumps(
+            [owner, locator, content_version],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        record = items.get(identity_key)
+        record = dict(record) if isinstance(record, Mapping) else {
+            "owner": owner,
+            "locator": locator,
+            "content_version": content_version,
+            "ranges": [],
+        }
+        ranges = record.get("ranges")
+        ranges = [dict(item) for item in ranges if isinstance(item, Mapping)] if isinstance(
+            ranges, Sequence
+        ) and not isinstance(ranges, str | bytes | bytearray) else []
+        observed_range = {"offset": offset, "end": end}
+        if observed_range not in ranges:
+            ranges.append(observed_range)
+        record["ranges"] = sorted(ranges, key=lambda item: (int(item["offset"]), int(item["end"])))
+        record["next_offset"] = self._taskboard_contiguous_read_end(record["ranges"])
+        record["total_bytes"] = max(
+            self._coerce_non_negative_int(record.get("total_bytes")),
+            self._coerce_non_negative_int(readback.get("total_bytes")),
+        )
+        record["last_card_id"] = card_id
+        items[identity_key] = DataFormatter.sanitize(record)
+
+    def _taskboard_next_read_offset(
+        self,
+        evidence_view: Mapping[str, Any],
+        *,
+        owner: str,
+        locator: str,
+        content_version: str,
+        include_task_progress: bool = True,
+    ) -> int:
+        raw_items = evidence_view.get("evidence_items")
+        if not isinstance(raw_items, Sequence) or isinstance(
+            raw_items, str | bytes | bytearray
+        ):
+            raw_items = []
+        ranges: list[Mapping[str, Any]] = []
+        if include_task_progress:
+            for progress in self._taskboard_read_progress_records(
+                owner=owner,
+                locator=locator,
+                content_version=content_version,
+            ):
+                progress_ranges = progress.get("ranges")
+                if isinstance(progress_ranges, Sequence) and not isinstance(
+                    progress_ranges,
+                    str | bytes | bytearray,
+                ):
+                    ranges.extend(
+                        item
+                        for item in progress_ranges
+                        if isinstance(item, Mapping)
+                    )
+        for item in raw_items:
+            if not isinstance(item, Mapping):
+                continue
+            identity = item.get("read_identity")
+            if not isinstance(identity, Mapping):
+                continue
+            if str(identity.get("owner") or "") != owner:
+                continue
+            if str(identity.get("locator") or "") != locator:
+                continue
+            recorded_version = str(identity.get("content_version") or "")
+            if content_version and recorded_version != content_version:
+                continue
+            if not self._taskboard_evidence_item_delivered_body(item):
+                continue
+            read_range = identity.get("range")
+            if not isinstance(read_range, Mapping):
+                continue
+            ranges.append(read_range)
+        return self._taskboard_contiguous_read_end(ranges)
+
+    @staticmethod
+    def _taskboard_evidence_item_delivered_body(item: Mapping[str, Any]) -> bool:
+        state = str(item.get("content_state") or item.get("body_state") or "").strip()
+        if state not in {"bounded", "full", "truncated"}:
+            return False
+        return any(item.get(key) not in (None, "", [], {}) for key in ("body", "content", "preview"))
+
+    def _taskboard_read_target_exhausted(
+        self,
+        ref: Mapping[str, Any],
+        evidence_view: Mapping[str, Any],
+    ) -> bool:
+        owner = str(
+            ref.get("owner")
+            or ("action_artifact" if ref.get("selection_key") else None)
+            or ("task_workspace" if ref.get("path") else None)
+            or ""
+        ).strip()
+        locator = str(
+            ref.get("locator") or ref.get("selection_key") or ref.get("path") or ""
+        ).strip()
+        content_version = str(
+            ref.get("content_version")
+            or ref.get("content_version_id")
+            or ref.get("sha256")
+            or ""
+        ).strip()
+        if not owner or not locator:
+            return False
+        total_bytes = self._coerce_non_negative_int(ref.get("bytes", ref.get("size")))
+        raw_items = evidence_view.get("evidence_items")
+        if isinstance(raw_items, Sequence) and not isinstance(
+            raw_items, str | bytes | bytearray
+        ):
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    continue
+                identity = item.get("read_identity")
+                if not isinstance(identity, Mapping):
+                    continue
+                if str(identity.get("owner") or "") != owner:
+                    continue
+                if str(identity.get("locator") or "") != locator:
+                    continue
+                recorded_version = str(identity.get("content_version") or "")
+                if content_version and recorded_version != content_version:
+                    continue
+                if not self._taskboard_evidence_item_delivered_body(item):
+                    continue
+                total_bytes = max(
+                    total_bytes,
+                    self._coerce_non_negative_int(item.get("total_bytes")),
+                )
+        if total_bytes <= 0:
+            return False
+        next_offset = self._taskboard_next_read_offset(
+            evidence_view,
+            owner=owner,
+            locator=locator,
+            content_version=content_version,
+            # An explicit consumer range asks for body delivery into this
+            # consumer and therefore requires evidence in its current view.
+            # A range-less artifact target may use task-owned physical progress
+            # to avoid rereading bytes that are already completely materialized.
+            include_task_progress=not isinstance(ref.get("range"), Mapping),
+        )
+        return next_offset >= total_bytes
+
+    def _taskboard_requested_read_range(
+        self,
+        ref: Mapping[str, Any],
+        evidence_view: Mapping[str, Any],
+        *,
+        default_max_bytes: int,
+    ) -> tuple[int, int]:
+        owner = str(
+            ref.get("owner")
+            or ("action_artifact" if ref.get("selection_key") else None)
+            or ("task_workspace" if ref.get("path") else None)
+            or ""
+        ).strip()
+        locator = str(
+            ref.get("locator") or ref.get("selection_key") or ref.get("path") or ""
+        ).strip()
+        content_version = str(
+            ref.get("content_version")
+            or ref.get("content_version_id")
+            or ref.get("sha256")
+            or ""
+        ).strip()
+        raw_range = ref.get("range")
+        raw_range = raw_range if isinstance(raw_range, Mapping) else {}
+        if "offset" in raw_range:
+            offset = self._coerce_non_negative_int(raw_range.get("offset"))
+        else:
+            offset = self._taskboard_next_read_offset(
+                evidence_view,
+                owner=owner,
+                locator=locator,
+                content_version=content_version,
+            )
+        max_bytes = self._coerce_positive_int(raw_range.get("max_bytes")) or default_max_bytes
+        return offset, max_bytes
+
     async def _run_taskboard_readback_card(
         self,
         context: Any,
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
     ) -> TaskBoardCardResult:
         evidence_card_ids = list(getattr(context.card, "depends_on", ()) or ())
         try:
@@ -35,20 +315,38 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             evidence_view = build_task_board_evidence_view(context.revision).to_dict()
         refs = self._taskboard_readback_artifact_refs(evidence_view)
         file_refs = self._taskboard_readback_file_refs(evidence_view)
-        skill_readbacks = self._taskboard_skill_context_readbacks(context.card, context_pack)
-        skill_readback_evidence_items = self._taskboard_skill_context_readback_evidence_items(
-            skill_readbacks,
-            card_id=str(getattr(context.card, "id", "") or ""),
-        )
         card_metadata = getattr(context.card, "metadata", {})
         if isinstance(card_metadata, Mapping):
             target_refs = self._normalize_taskboard_target_refs(
-                card_metadata.get("workspace_target_refs") or card_metadata.get("target_refs")
+                card_metadata.get("task_workspace_target_refs") or card_metadata.get("target_refs")
             )
+            existing_selection_keys = {
+                str(ref.get("selection_key") or "")
+                for ref in refs
+                if isinstance(ref, Mapping)
+            }
+            for ref in self._taskboard_action_target_ref_artifact_refs(target_refs):
+                selection_key = str(ref.get("selection_key") or "")
+                if selection_key and selection_key not in existing_selection_keys:
+                    existing_selection_keys.add(selection_key)
+                    refs.append(ref)
             self._merge_taskboard_file_refs(
                 file_refs,
-                self._taskboard_workspace_target_ref_file_refs(target_refs),
+                self._taskboard_task_workspace_target_ref_file_refs(target_refs),
             )
+        exhausted_artifact_refs = [
+            ref
+            for ref in refs
+            if self._taskboard_read_target_exhausted(ref, evidence_view)
+        ]
+        exhausted_file_refs = [
+            ref
+            for ref in file_refs
+            if self._taskboard_read_target_exhausted(ref, evidence_view)
+        ]
+        refs = [ref for ref in refs if ref not in exhausted_artifact_refs]
+        file_refs = [ref for ref in file_refs if ref not in exhausted_file_refs]
+        exhausted_ref_count = len(exhausted_artifact_refs) + len(exhausted_file_refs)
         hot_artifact_refs = self._compact_taskboard_artifact_refs_for_hot_payload(refs)
         hot_file_refs = self._compact_taskboard_file_refs_for_hot_payload(file_refs)
         work_unit = WorkUnitIntent(
@@ -63,7 +361,6 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "card": context.card.to_dict(),
                 "artifact_refs": hot_artifact_refs,
                 "file_refs": hot_file_refs,
-                "skill_context_readbacks": DataFormatter.sanitize(skill_readbacks),
                 "evidence_scope": evidence_card_ids or "all",
             },
             input_refs=tuple(
@@ -71,7 +368,6 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 for item in [
                     *[ref for ref in refs if isinstance(ref, Mapping)],
                     *[ref for ref in file_refs if isinstance(ref, Mapping)],
-                    *[ref.get("ref", {}) for ref in skill_readbacks if isinstance(ref, Mapping)],
                 ]
                 if isinstance(item, Mapping)
             ),
@@ -79,13 +375,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "allowed_execution_shape": "readback",
                 "artifact_ref_count": len(refs),
                 "file_ref_count": len(file_refs),
-                "skill_context_ref_count": len(skill_readbacks),
             },
             evidence_requirements=tuple(
                 [
                     {
-                        "artifact_id": str(ref.get("artifact_id") or ""),
-                        "action_call_id": str(ref.get("action_call_id") or ""),
+                        "selection_key": str(ref.get("selection_key") or ""),
                         "source": "taskboard_readback_card",
                     }
                     for ref in refs
@@ -94,18 +388,9 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 + [
                     {
                         "path": str(ref.get("path") or ""),
-                        "source": "taskboard_workspace_file_readback",
+                        "source": "taskboard_task_workspace_file_readback",
                     }
                     for ref in file_refs
-                    if isinstance(ref, Mapping)
-                ]
-                + [
-                    {
-                        "skill_id": str(ref.get("skill_id") or ""),
-                        "path": str(ref.get("path") or ""),
-                        "source": "taskboard_skill_context_readback",
-                    }
-                    for ref in skill_readbacks
                     if isinstance(ref, Mapping)
                 ]
             ),
@@ -113,6 +398,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "card": DataFormatter.sanitize(context.card.to_dict()),
                 "execution_prompt": {"output_format": "json"},
             },
+            retrieval_policy=self._task_context_retrieval_policy(),
             quality_gates=(
                 {
                     "kind": "taskboard_artifact_readback_status",
@@ -133,8 +419,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             "step_instruction": str(getattr(context.card, "objective", "") or "Read scoped cold evidence."),
             "expected_evidence": [
                 {
-                    "artifact_id": str(ref.get("artifact_id") or ""),
-                    "action_call_id": str(ref.get("action_call_id") or ""),
+                    "selection_key": str(ref.get("selection_key") or ""),
                 }
                 for ref in refs
                 if isinstance(ref, Mapping)
@@ -162,58 +447,44 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             readbacks: list[dict[str, Any]] = []
             file_readbacks: list[dict[str, Any]] = []
             effective_file_refs = [dict(ref) for ref in file_refs if isinstance(ref, Mapping)]
+            canonical_action_file_refs: list[dict[str, Any]] = []
             diagnostics: list[dict[str, Any]] = []
             readback_evidence_items: list[dict[str, Any]] = []
-            if not refs and not file_refs and skill_readbacks:
-                status = "completed"
-                success_count = 0
-                failed_count = 0
-                file_success_count = 0
-                file_failed_count = 0
-                readback_evidence_items = list(skill_readback_evidence_items)
-                diagnostics.append(
-                    {
-                        "code": "taskboard.readback.skill_context_refs",
-                        "card_id": context.card.id,
-                        "skill_context_ref_count": len(skill_readbacks),
-                    }
-                )
-                payload = {
-                    "status": status,
-                    "answer": f"Read {len(skill_readbacks)} Skill context refs from the Manager context pack.",
-                    "readbacks": readbacks,
-                    "file_readbacks": file_readbacks,
-                    "skill_context_readbacks": DataFormatter.sanitize(skill_readbacks),
-                    "evidence_items": DataFormatter.sanitize(readback_evidence_items),
-                    "evidence": [
-                        f"skill:{item.get('skill_id')}:{item.get('path')} status={item.get('status')}"
-                        for item in skill_readbacks
-                    ],
-                    "remaining_work": [],
-                    "diagnostics": diagnostics,
-                }
-            elif not refs and not file_refs:
-                status = "blocked"
+            if not refs and not file_refs:
+                status = "completed" if exhausted_ref_count else "blocked"
                 success_count = 0
                 failed_count = 0
                 file_success_count = 0
                 file_failed_count = 0
                 diagnostics.append(
                     {
-                        "code": "taskboard.readback.no_refs",
+                        "code": (
+                            "taskboard.readback.no_unread_ranges"
+                            if exhausted_ref_count
+                            else "taskboard.readback.no_refs"
+                        ),
                         "card_id": context.card.id,
                         "evidence_scope": evidence_card_ids or "all",
+                        "exhausted_ref_count": exhausted_ref_count,
                     }
                 )
                 payload = {
                     "status": status,
-                    "answer": "No Action artifact refs or Workspace file refs are available for this readback card.",
+                    "answer": (
+                        "All scoped Action artifact and TaskWorkspace target ranges were already read; no duplicate read was issued."
+                        if exhausted_ref_count
+                        else "No Action artifact refs or TaskWorkspace file refs are available for this readback card."
+                    ),
                     "readbacks": readbacks,
                     "file_readbacks": file_readbacks,
                     "evidence": [],
-                    "remaining_work": [
-                        "Upstream cards must produce Action artifact refs or Workspace file refs before readback can run."
-                    ],
+                    "remaining_work": (
+                        []
+                        if exhausted_ref_count
+                        else [
+                            "Upstream cards must produce Action artifact refs or TaskWorkspace file refs before readback can run."
+                        ]
+                    ),
                     "diagnostics": diagnostics,
                 }
             else:
@@ -232,34 +503,67 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                         }
                     )
                 elif callable(reader):
+                    artifact_manager = getattr(action, "_artifact_manager", None)
+                    bind_artifact_scope = getattr(artifact_manager, "bind_artifact_scope", None)
                     for ref in refs:
-                        artifact_id = str(ref.get("artifact_id") or "")
-                        action_call_id = str(ref.get("action_call_id") or "")
+                        selection_key = str(ref.get("selection_key") or "")
                         try:
-                            raw_readback = await self._await_taskboard_card_execution(
-                                cast(Awaitable[Any], reader(artifact_id, action_call_id or None)),
-                                card_id=context.card.id,
-                                stage="readback",
+                            if not selection_key:
+                                raise ValueError("Action artifact readback requires selection_key.")
+                            if not callable(bind_artifact_scope):
+                                raise RuntimeError("Action artifact scope binding is unavailable.")
+                            scope_context = cast(
+                                ContextManager[dict[str, str]],
+                                bind_artifact_scope({"kind": "agent_task", "id": self.id}),
                             )
+                            offset, max_bytes = self._taskboard_requested_read_range(
+                                ref,
+                                evidence_view,
+                                default_max_bytes=_TASKBOARD_READBACK_PREVIEW_CHARS,
+                            )
+                            with scope_context:
+                                read_request = reader(
+                                    selection_key=selection_key,
+                                    offset=offset,
+                                    max_bytes=max_bytes,
+                                )
+                                raw_readback = await self._await_taskboard_card_execution(
+                                    cast(Awaitable[Any], read_request),
+                                    card_id=context.card.id,
+                                    stage="readback",
+                                )
                         except Exception as error:
                             raw_readback = {
                                 "ok": False,
                                 "status": "error",
-                                "artifact_id": artifact_id,
-                                "action_call_id": action_call_id,
+                                "selection_key": selection_key,
                                 "error": (
                                     f"{error.__class__.__name__}: "
                                     + _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
                                 ),
                             }
+                        if isinstance(raw_readback, Mapping):
+                            raw_value = raw_readback.get(
+                                "value",
+                                raw_readback.get("data", raw_readback.get("result")),
+                            )
+                            self._merge_taskboard_file_refs(
+                                canonical_action_file_refs,
+                                self._taskboard_file_refs_from_action_readbacks(
+                                    [{"data": raw_value}]
+                                ),
+                            )
                         compact = self._compact_taskboard_action_artifact_readback(raw_readback, ref)
                         readbacks.append(compact)
+                        self._record_taskboard_read_progress(
+                            compact,
+                            card_id=context.card.id,
+                        )
                         if not compact.get("ok"):
                             diagnostics.append(
                                 {
                                     "code": "taskboard.readback.ref_failed",
-                                    "artifact_id": artifact_id,
-                                    "action_call_id": action_call_id,
+                                    "selection_key": selection_key,
                                     "status": compact.get("status"),
                                     "error": compact.get("error"),
                                 }
@@ -267,45 +571,54 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
 
                     success_count = sum(1 for item in readbacks if item.get("ok"))
                     failed_count = len(readbacks) - success_count
-                discovered_file_refs = self._taskboard_file_refs_from_action_readbacks(readbacks)
+                # Canonical TaskWorkspace identity is extracted from the cold
+                # Action result before model-hot preview compaction. The hot
+                # preview may intentionally replace `path` with requested_path
+                # and must not become an identity reconstruction source.
+                discovered_file_refs = canonical_action_file_refs
                 added_file_refs = self._merge_taskboard_file_refs(effective_file_refs, discovered_file_refs)
                 if added_file_refs:
                     diagnostics.append(
                         {
-                            "code": "taskboard.readback.workspace_file_refs_discovered",
+                            "code": "taskboard.readback.task_workspace_file_refs_discovered",
                             "card_id": context.card.id,
                             "file_ref_count": len(added_file_refs),
                         }
                     )
 
-                async def read_workspace_ref(ref: Mapping[str, Any]) -> Mapping[str, Any]:
+                async def read_task_workspace_ref(ref: Mapping[str, Any]) -> Mapping[str, Any]:
                     path = str(ref.get("path") or "").strip()
                     mode = str(ref.get("readback_mode") or "").strip()
-                    if mode == "workspace_content":
+                    offset, max_bytes = self._taskboard_requested_read_range(
+                        ref,
+                        evidence_view,
+                        default_max_bytes=_TASKBOARD_READBACK_PREVIEW_CHARS,
+                    )
+                    if mode == "record_store_content":
                         segment = await self._await_taskboard_card_execution(
-                            self.workspace.read_bounded(path, limit=_TASKBOARD_READBACK_PREVIEW_CHARS),
+                            self.record_store.read_bounded(path, offset=offset, limit=max_bytes),
                             card_id=context.card.id,
-                            stage="workspace_content_readback",
+                            stage="task_workspace_content_readback",
                         )
-                        return self._taskboard_workspace_content_segment_readback(segment, ref)
+                        return self._taskboard_task_workspace_content_segment_readback(segment, ref)
                     try:
                         return await self._await_taskboard_card_execution(
-                            self.workspace.read_file(path, max_bytes=_TASKBOARD_READBACK_PREVIEW_CHARS),
+                            self.task_workspace.read_file(path, max_bytes=max_bytes, offset=offset),
                             card_id=context.card.id,
-                            stage="workspace_file_readback",
+                            stage="task_workspace_file_readback",
                         )
                     except FileNotFoundError:
                         segment = await self._await_taskboard_card_execution(
-                            self.workspace.read_bounded(path, limit=_TASKBOARD_READBACK_PREVIEW_CHARS),
+                            self.record_store.read_bounded(path, offset=offset, limit=max_bytes),
                             card_id=context.card.id,
-                            stage="workspace_content_readback",
+                            stage="task_workspace_content_readback",
                         )
-                        return self._taskboard_workspace_content_segment_readback(segment, ref)
+                        return self._taskboard_task_workspace_content_segment_readback(segment, ref)
 
                 for ref in effective_file_refs:
                     path = str(ref.get("path") or "").strip()
                     try:
-                        raw_file_readback = await read_workspace_ref(ref)
+                        raw_file_readback = await read_task_workspace_ref(ref)
                     except Exception as error:
                         raw_file_readback = {
                             "ok": False,
@@ -317,8 +630,12 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                                 + _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
                             ),
                         }
-                    compact_file = self._compact_taskboard_workspace_file_readback(raw_file_readback, ref)
+                    compact_file = self._compact_taskboard_task_workspace_file_readback(raw_file_readback, ref)
                     file_readbacks.append(compact_file)
+                    self._record_taskboard_read_progress(
+                        compact_file,
+                        card_id=context.card.id,
+                    )
                     if not compact_file.get("ok"):
                         diagnostics.append(
                             {
@@ -335,44 +652,38 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 if failed_count:
                     remaining_work.append(f"{ failed_count } artifact refs could not be read.")
                 if file_failed_count:
-                    remaining_work.append(f"{ file_failed_count } Workspace file refs could not be read.")
+                    remaining_work.append(f"{ file_failed_count } TaskWorkspace file refs could not be read.")
                 readback_evidence_items = [
                     *self._taskboard_action_artifact_readback_evidence_items(
                         readbacks,
                         source="taskboard_readback_card",
                         card_id=context.card.id,
                     ),
-                    *self._taskboard_workspace_file_readback_evidence_items(
+                    *self._taskboard_task_workspace_file_readback_evidence_items(
                         file_readbacks,
                         card_id=context.card.id,
                     ),
-                    *skill_readback_evidence_items,
                 ]
                 payload = {
                     "status": status,
                     "answer": (
                         f"Read { success_count } of { len(refs) } Action artifact refs and "
-                        f"{ file_success_count } of { len(effective_file_refs) } Workspace file refs with bounded previews."
+                        f"{ file_success_count } of { len(effective_file_refs) } TaskWorkspace file refs with bounded previews."
                     ),
                     "readbacks": readbacks,
                     "file_readbacks": file_readbacks,
-                    "skill_context_readbacks": DataFormatter.sanitize(skill_readbacks),
                     "file_refs": DataFormatter.sanitize(effective_file_refs),
                     "evidence_items": DataFormatter.sanitize(readback_evidence_items),
                     "evidence": [
                         *[
-                            f"artifact:{ item.get('artifact_id') } status={ item.get('status') }"
+                            f"artifact:{ item.get('selection_key') } status={ item.get('status') }"
                             for item in readbacks
-                            if item.get("artifact_id")
+                            if item.get("selection_key")
                         ],
                         *[
                             f"file:{ item.get('path') } status={ item.get('status') }"
                             for item in file_readbacks
                             if item.get("path")
-                        ],
-                        *[
-                            f"skill:{ item.get('skill_id') }:{ item.get('path') } status={ item.get('status') }"
-                            for item in skill_readbacks
                         ],
                     ],
                     "remaining_work": remaining_work,
@@ -468,7 +779,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         file_success_count = 0
         if isinstance(file_readbacks, Sequence) and not isinstance(file_readbacks, str | bytes | bytearray):
             file_success_count = sum(1 for item in file_readbacks if isinstance(item, Mapping) and item.get("ok"))
-        file_readback_evidence_items = self._taskboard_workspace_file_readback_evidence_items(
+        file_readback_evidence_items = self._taskboard_task_workspace_file_readback_evidence_items(
             [item for item in file_readbacks if isinstance(item, Mapping)],
             card_id=context.card.id,
         )
@@ -560,29 +871,32 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         if not isinstance(raw_refs, Sequence) or isinstance(raw_refs, str | bytes | bytearray):
             return []
         refs: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         for item in raw_refs:
             if not isinstance(item, Mapping):
                 continue
-            artifact_id = str(item.get("artifact_id") or "").strip()
-            if not artifact_id:
+            selection_key = str(item.get("selection_key") or "").strip()
+            if not selection_key:
                 continue
-            action_call_id = str(item.get("action_call_id") or "").strip()
-            key = (artifact_id, action_call_id)
-            if key in seen:
+            if selection_key in seen:
                 continue
-            seen.add(key)
+            seen.add(selection_key)
             refs.append(
                 {
-                    "artifact_id": artifact_id,
-                    "action_call_id": action_call_id,
+                    "owner": str(item.get("owner") or "action_artifact"),
+                    "locator": str(item.get("locator") or selection_key),
+                    "content_version": str(
+                        item.get("content_version") or item.get("sha256") or ""
+                    ),
+                    "selection_key": selection_key,
                     "artifact_type": str(item.get("artifact_type") or ""),
                     "role": str(item.get("role") or ""),
                     "label": str(item.get("label") or ""),
                     "media_type": str(item.get("media_type") or ""),
                     "bytes": item.get("bytes", item.get("size")),
-                    "sha256": item.get("sha256"),
                     "truncated": bool(item.get("truncated")),
+                    "preview_omitted": bool(item.get("preview_omitted")),
+                    "readback_action_id": str(item.get("readback_action_id") or ""),
                     "full_value_available": bool(item.get("full_value_available", item.get("available", False))),
                 }
             )
@@ -595,206 +909,6 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "artifact_refs": refs,
             }
         ]
-
-    @classmethod
-    def _taskboard_skill_context_readbacks(
-        cls,
-        card: Any,
-        context_pack: Any,
-    ) -> list[dict[str, Any]]:
-        if not isinstance(context_pack, Mapping):
-            return []
-        skill_context_pack = context_pack.get("skills_context_pack")
-        if not isinstance(skill_context_pack, Mapping):
-            return []
-        requested_refs = cls._taskboard_card_requested_skill_refs(card)
-        raw_skills = skill_context_pack.get("skills")
-        if not isinstance(raw_skills, Sequence) or isinstance(raw_skills, str | bytes | bytearray):
-            return []
-        readbacks: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, str]] = set()
-
-        def add_entry(
-            *,
-            skill_id: str,
-            path: str,
-            citation: str,
-            content: str,
-            truncated: bool,
-            kind: str,
-            summary: str = "",
-        ) -> None:
-            aliases = cls._taskboard_skill_context_aliases(skill_id=skill_id, path=path, citation=citation)
-            if requested_refs and not any(alias in requested_refs for alias in aliases):
-                return
-            key = (skill_id, path, citation)
-            if key in seen:
-                return
-            seen.add(key)
-            readbacks.append(
-                DataFormatter.sanitize(
-                    {
-                        "ok": bool(content.strip()),
-                        "status": "completed" if content.strip() else "empty",
-                        "skill_id": skill_id,
-                        "path": path,
-                        "citation": citation,
-                        "kind": kind,
-                        "summary": summary,
-                        "content_preview": content,
-                        "truncated": bool(truncated),
-                        "ref": {
-                            "kind": "skill_context",
-                            "source": "skills_manager.context_pack",
-                            "skill_id": skill_id,
-                            "path": path,
-                            "citation": citation,
-                            "content_state": "bounded_readback_available" if content.strip() else "empty",
-                        },
-                        "aliases": aliases,
-                    }
-                )
-            )
-
-        for skill in raw_skills:
-            if not isinstance(skill, Mapping):
-                continue
-            skill_id = str(skill.get("skill_id") or skill.get("id") or "").strip()
-            if not skill_id:
-                continue
-            guidance = skill.get("guidance")
-            if isinstance(guidance, Mapping):
-                path = str(guidance.get("path") or "SKILL.md").strip() or "SKILL.md"
-                citation = str(guidance.get("citation") or f"skills/{skill_id}/{path}").strip()
-                add_entry(
-                    skill_id=skill_id,
-                    path=path,
-                    citation=citation,
-                    content=str(guidance.get("excerpt") or guidance.get("content") or ""),
-                    truncated=bool(guidance.get("truncated")),
-                    kind="guidance",
-                    summary=str(guidance.get("summary") or ""),
-                )
-            resources = skill.get("selected_resources")
-            if not isinstance(resources, Sequence) or isinstance(resources, str | bytes | bytearray):
-                continue
-            for resource in resources:
-                if not isinstance(resource, Mapping):
-                    continue
-                path = str(resource.get("path") or "").strip()
-                if not path:
-                    continue
-                citation = str(resource.get("citation") or f"skills/{skill_id}/{path}").strip()
-                add_entry(
-                    skill_id=skill_id,
-                    path=path,
-                    citation=citation,
-                    content=str(resource.get("content") or resource.get("excerpt") or ""),
-                    truncated=bool(resource.get("truncated")),
-                    kind=str(resource.get("kind") or "resource"),
-                    summary=str(resource.get("summary") or ""),
-                )
-        return readbacks
-
-    @classmethod
-    def _taskboard_card_requested_skill_refs(cls, card: Any) -> set[str]:
-        requested: set[str] = set(cls._normalize_text_ref_sequence(getattr(card, "input_refs", ()) or ()))
-        evidence_contract = getattr(card, "evidence_contract", {})
-        if isinstance(evidence_contract, Mapping):
-            requested.update(cls._normalize_text_ref_sequence(evidence_contract.get("evidence_to_use")))
-            requested.update(cls._normalize_text_ref_sequence(evidence_contract.get("requires_skill_refs")))
-        metadata = getattr(card, "metadata", {})
-        if isinstance(metadata, Mapping):
-            requested.update(cls._normalize_text_ref_sequence(metadata.get("skill_context_refs")))
-        return requested
-
-    @staticmethod
-    def _normalize_text_ref_sequence(value: Any) -> list[str]:
-        if isinstance(value, str):
-            return [value.strip()] if value.strip() else []
-        if not isinstance(value, Sequence) or isinstance(value, bytes | bytearray):
-            return []
-        refs: list[str] = []
-        for item in value:
-            text = str(item or "").strip()
-            if text and text not in refs:
-                refs.append(text)
-        return refs
-
-    @staticmethod
-    def _taskboard_skill_context_aliases(*, skill_id: str, path: str, citation: str) -> list[str]:
-        aliases: list[str] = []
-        for value in (
-            citation,
-            path,
-            f"{skill_id}/{path}" if path else "",
-            f"skills/{skill_id}/{path}" if path else "",
-            f"skills/{skill_id}/SKILL.md" if path == "SKILL.md" else "",
-        ):
-            text = str(value or "").strip()
-            if text and text not in aliases:
-                aliases.append(text)
-        return aliases
-
-    def _taskboard_skill_context_readback_evidence_items(
-        self,
-        readbacks: Sequence[Mapping[str, Any]],
-        *,
-        card_id: str,
-    ) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for index, readback in enumerate(readbacks):
-            if not isinstance(readback, Mapping):
-                continue
-            skill_id = str(readback.get("skill_id") or "").strip()
-            path = str(readback.get("path") or "").strip()
-            citation = str(readback.get("citation") or "").strip()
-            source = "skills_manager.context_pack"
-            evidence_id = self._taskboard_workspace_readback_evidence_id(
-                "skill_context_readback",
-                citation or f"{skill_id}/{path}",
-                f"agent_task.taskboard.card.{card_id}.{source}",
-            )
-            ok = bool(readback.get("ok"))
-            preview = str(readback.get("content_preview") or "")
-            truncated = bool(readback.get("truncated"))
-            item: dict[str, Any] = {
-                "id": evidence_id,
-                "kind": "skill_context.readback",
-                "status": "ok" if ok else "empty",
-                "raw_status": readback.get("status") or ("read" if ok else "empty"),
-                "body_state": "truncated" if truncated else ("full" if preview else "empty"),
-                "skill_id": skill_id,
-                "path": path,
-                "citation": citation,
-                "source": source,
-                "truncated": truncated,
-                "aliases": self._taskboard_skill_context_aliases(
-                    skill_id=skill_id,
-                    path=path,
-                    citation=citation,
-                ),
-                "provenance": {
-                    "source": source,
-                    "taskboard_card_id": card_id,
-                    "skill_id": skill_id,
-                    "path": path,
-                    "citation": citation,
-                    "readback_index": index,
-                },
-                "supports": {
-                    "content": bool(ok and preview),
-                    "unavailability": not ok,
-                    "ref_pointer": False,
-                },
-            }
-            if preview:
-                item["body"] = preview
-            summary = str(readback.get("summary") or "").strip()
-            if summary:
-                item["summary"] = summary
-            items.append(DataFormatter.sanitize(item))
-        return self._dedupe_taskboard_readback_evidence_items(items)
 
     @classmethod
     def _taskboard_readback_artifact_refs(cls, evidence_view: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -883,12 +997,9 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     item = dict(DataFormatter.sanitize(raw_ref))
                     if source_ref is not None:
                         item.setdefault("source", "taskboard_action_artifact_readback")
-                        artifact_id = str(source_ref.get("artifact_id") or "").strip()
-                        action_call_id = str(source_ref.get("action_call_id") or "").strip()
-                        if artifact_id:
-                            item.setdefault("source_artifact_id", artifact_id)
-                        if action_call_id:
-                            item.setdefault("source_action_call_id", action_call_id)
+                        selection_key = str(source_ref.get("selection_key") or "").strip()
+                        if selection_key:
+                            item.setdefault("source_selection_key", selection_key)
                     key = cls._taskboard_file_ref_key(item)
                     if key in seen:
                         continue
@@ -905,7 +1016,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         return refs
 
     @classmethod
-    def _taskboard_workspace_readback_evidence_id(cls, prefix: str, path: str, source: str) -> str:
+    def _taskboard_task_workspace_readback_evidence_id(cls, prefix: str, path: str, source: str) -> str:
         raw = f"{ prefix }:{ source }:{ path }"
         return "".join(ch if ch.isalnum() or ch in "._:-" else "_" for ch in raw)[:240]
 
@@ -919,21 +1030,32 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         for item in items:
             if not isinstance(item, Mapping):
                 continue
-            evidence_id = str(item.get("id") or "").strip()
-            if evidence_id and evidence_id in seen:
+            read_identity = item.get("read_identity")
+            if isinstance(read_identity, Mapping):
+                identity_key = json.dumps(
+                    DataFormatter.sanitize(read_identity),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            else:
+                identity_key = str(item.get("id") or "").strip()
+            if identity_key and identity_key in seen:
                 continue
-            if evidence_id:
-                seen.add(evidence_id)
+            if identity_key:
+                seen.add(identity_key)
             deduped.append(dict(DataFormatter.sanitize(item)))
         return deduped
 
-    def _taskboard_workspace_file_readback_evidence_items(
+    def _taskboard_task_workspace_file_readback_evidence_items(
         self,
         file_readbacks: Sequence[Mapping[str, Any]],
         *,
         card_id: str,
     ) -> list[dict[str, Any]]:
-        required_paths = {str(path or "").strip() for path in self._required_workspace_deliverables()}
+        required_paths = {
+            self._task_workspace_artifact_display_path(path)
+            for path in self._required_task_workspace_deliverables()
+        }
         items: list[dict[str, Any]] = []
         for index, readback in enumerate(file_readbacks):
             if not isinstance(readback, Mapping):
@@ -943,11 +1065,41 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 continue
             ref = readback.get("ref")
             ref = ref if isinstance(ref, Mapping) else {}
-            is_workspace_artifact = path in required_paths or self._is_trusted_workspace_artifact_ref(ref)
-            source_suffix = "workspace_artifact" if is_workspace_artifact else "workspace_file"
+            owner = str(readback.get("owner") or ref.get("owner") or "task_workspace").strip()
+            locator = str(
+                readback.get("locator") or ref.get("locator") or path
+            ).strip()
+            content_version = str(
+                readback.get("content_version")
+                or ref.get("content_version")
+                or ref.get("content_version_id")
+                or ""
+            ).strip()
+            offset = self._coerce_non_negative_int(readback.get("offset"))
+            read_bytes = self._coerce_non_negative_int(readback.get("read_bytes"))
+            read_range = {"offset": offset, "end": offset + read_bytes}
+            read_identity = {
+                "owner": owner,
+                "locator": locator,
+                "content_version": content_version,
+                "range": read_range,
+            }
+            logical_path = self._task_workspace_artifact_display_path(path)
+            is_task_workspace_artifact = (
+                logical_path in required_paths
+                or self._is_trusted_task_workspace_artifact_ref(ref)
+            )
+            source_suffix = "task_workspace_artifact" if is_task_workspace_artifact else "task_workspace_file"
             source = f"agent_task.taskboard.card.{ card_id }.{ source_suffix }"
-            prefix = "workspace_artifact_readback" if is_workspace_artifact else "workspace_file_readback"
-            evidence_id = self._taskboard_workspace_readback_evidence_id(prefix, path, source)
+            prefix = "task_workspace_artifact_readback" if is_task_workspace_artifact else "task_workspace_file_readback"
+            evidence_id = self._taskboard_readback_evidence_id(
+                prefix,
+                owner,
+                locator,
+                content_version,
+                str(read_range["offset"]),
+                str(read_range["end"]),
+            )
             ok = bool(readback.get("ok"))
             preview = str(readback.get("content_preview") or "")
             preview_meta = readback.get("content_preview_meta")
@@ -955,11 +1107,17 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             truncated = bool(readback.get("truncated")) or bool(preview_meta.get("truncated"))
             item: dict[str, Any] = {
                 "id": evidence_id,
-                "kind": "workspace_artifact.readback" if is_workspace_artifact else "workspace_file.readback",
+                "kind": "task_workspace_artifact.readback" if is_task_workspace_artifact else "task_workspace_file.readback",
                 "status": "ok" if ok else "failed",
                 "raw_status": readback.get("status") or ("read" if ok else "failed"),
                 "body_state": "truncated" if truncated else ("full" if preview else "ref_only"),
                 "path": path,
+                "owner": owner,
+                "locator": locator,
+                "content_version": content_version,
+                "range": read_range,
+                "read_identity": read_identity,
+                "total_bytes": readback.get("total_bytes", readback.get("bytes")),
                 "source": source,
                 "read_bytes": readback.get("read_bytes"),
                 "offset": readback.get("offset"),
@@ -993,15 +1151,15 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
 
     @staticmethod
     def _taskboard_dependency_ref_needs_readback(ref: Mapping[str, Any]) -> bool:
-        artifact_id = str(ref.get("artifact_id") or "").strip()
-        if not artifact_id:
+        selection_key = str(ref.get("selection_key") or "").strip()
+        if not selection_key:
             return False
         role = str(ref.get("role") or "").strip().lower()
         if role and role not in {"output", "result", "artifact"}:
             return False
         if not bool(ref.get("available", True)) and not bool(ref.get("full_value_available")):
             return False
-        if bool(ref.get("truncated")):
+        if bool(ref.get("truncated")) or bool(ref.get("preview_omitted")):
             return True
         try:
             size = int(ref.get("bytes", ref.get("size", 0)) or 0)
@@ -1014,23 +1172,92 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         evidence_view: Mapping[str, Any],
         *,
         card_id: str,
-        context_pack: "WorkspaceContextPackage",
+        context_pack: "TaskContextView",
     ) -> dict[str, Any]:
-        refs = [
+        candidate_refs = [
             ref
             for ref in self._taskboard_readback_artifact_refs(evidence_view)
             if self._taskboard_dependency_ref_needs_readback(ref)
+        ]
+        exhausted_refs = [
+            ref
+            for ref in candidate_refs
+            if self._taskboard_read_target_exhausted(ref, evidence_view)
+        ]
+        refs = [
+            ref for ref in candidate_refs if ref not in exhausted_refs
         ][:_TASKBOARD_DEPENDENCY_READBACK_MAX_REFS]
+        pending_ref_count = max(
+            0,
+            len(candidate_refs) - len(exhausted_refs) - len(refs),
+        )
+        frontier_projection = sorted(
+            [
+                {
+                    "owner": str(ref.get("owner") or "action_artifact"),
+                    "locator": str(
+                        ref.get("locator") or ref.get("selection_key") or ""
+                    ),
+                    "content_version": str(
+                        ref.get("content_version") or ref.get("sha256") or ""
+                    ),
+                    "total_bytes": self._coerce_non_negative_int(
+                        ref.get("total_bytes", ref.get("bytes"))
+                    ),
+                }
+                for ref in candidate_refs
+                if isinstance(ref, Mapping)
+            ],
+            key=lambda item: (
+                item["owner"],
+                item["locator"],
+                item["content_version"],
+                item["total_bytes"],
+            ),
+        )
+        frontier_digest = hashlib.sha256(
+            json.dumps(
+                frontier_projection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         hot_artifact_refs = self._compact_taskboard_artifact_refs_for_hot_payload(refs)
         payload: dict[str, Any] = {
             "schema_version": "agent_task_taskboard_dependency_readbacks/v1",
             "card_id": card_id,
             "ref_count": len(refs),
+            "exhausted_ref_count": len(exhausted_refs),
             "readbacks": [],
-            "diagnostics": [],
+            "diagnostics": (
+                [
+                    {
+                        "code": "taskboard.dependency_readback.no_unread_ranges",
+                        "exhausted_ref_count": len(exhausted_refs),
+                    }
+                ]
+                if exhausted_refs and not refs
+                else []
+            ),
             "bounded": {
                 "preview_chars": _TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS,
                 "max_refs": _TASKBOARD_DEPENDENCY_READBACK_MAX_REFS,
+            },
+            "frontier": {
+                "kind": "action_artifact_readback",
+                "plan_digest": frontier_digest,
+                "candidate_ref_count": len(candidate_refs),
+                "attempted_ref_count": len(refs),
+                "exhausted_ref_count": len(exhausted_refs),
+                "pending_ref_count": pending_ref_count,
+                "success_count": 0,
+                "failed_count": 0,
+                "integrity_complete": bool(candidate_refs)
+                and not refs
+                and pending_ref_count == 0,
+                "exhausted": bool(candidate_refs)
+                and len(exhausted_refs) == len(candidate_refs),
             },
         }
         if not refs:
@@ -1055,14 +1282,14 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             },
             evidence_requirements=tuple(
                 {
-                    "artifact_id": str(ref.get("artifact_id") or ""),
-                    "action_call_id": str(ref.get("action_call_id") or ""),
+                    "selection_key": str(ref.get("selection_key") or ""),
                     "source": "taskboard_dependency_readback",
                 }
                 for ref in refs
                 if isinstance(ref, Mapping)
             ),
             delivery_contract={"execution_prompt": {"output_format": "json"}},
+            retrieval_policy=self._task_context_retrieval_policy(),
             quality_gates=(
                 {
                     "kind": "taskboard_dependency_readback_status",
@@ -1083,8 +1310,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             "step_instruction": "Read bounded dependency Action artifact previews before executing the card.",
             "expected_evidence": [
                 {
-                    "artifact_id": str(ref.get("artifact_id") or ""),
-                    "action_call_id": str(ref.get("action_call_id") or ""),
+                    "selection_key": str(ref.get("selection_key") or ""),
                 }
                 for ref in refs
                 if isinstance(ref, Mapping)
@@ -1111,21 +1337,40 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     }
                 )
             else:
+                artifact_manager = getattr(action, "_artifact_manager", None)
+                bind_artifact_scope = getattr(artifact_manager, "bind_artifact_scope", None)
                 for ref in refs:
-                    artifact_id = str(ref.get("artifact_id") or "")
-                    action_call_id = str(ref.get("action_call_id") or "")
+                    selection_key = str(ref.get("selection_key") or "")
                     try:
-                        raw_readback = await self._await_taskboard_card_execution(
-                            cast(Awaitable[Any], reader(artifact_id, action_call_id or None)),
-                            card_id=card_id,
-                            stage="dependency_readback",
+                        if not selection_key:
+                            raise ValueError("Action artifact readback requires selection_key.")
+                        if not callable(bind_artifact_scope):
+                            raise RuntimeError("Action artifact scope binding is unavailable.")
+                        scope_context = cast(
+                            ContextManager[dict[str, str]],
+                            bind_artifact_scope({"kind": "agent_task", "id": self.id}),
                         )
+                        offset, max_bytes = self._taskboard_requested_read_range(
+                            ref,
+                            evidence_view,
+                            default_max_bytes=_TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS,
+                        )
+                        with scope_context:
+                            read_request = reader(
+                                selection_key=selection_key,
+                                offset=offset,
+                                max_bytes=max_bytes,
+                            )
+                            raw_readback = await self._await_taskboard_card_execution(
+                                cast(Awaitable[Any], read_request),
+                                card_id=card_id,
+                                stage="dependency_readback",
+                            )
                     except Exception as error:
                         raw_readback = {
                             "ok": False,
                             "status": "error",
-                            "artifact_id": artifact_id,
-                            "action_call_id": action_call_id,
+                            "selection_key": selection_key,
                             "error": (
                                 f"{error.__class__.__name__}: "
                                 + _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
@@ -1137,12 +1382,15 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                         max_chars=_TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS,
                     )
                     readbacks.append(compact)
+                    self._record_taskboard_read_progress(
+                        compact,
+                        card_id=card_id,
+                    )
                     if not compact.get("ok"):
                         diagnostics.append(
                             {
                                 "code": "taskboard.dependency_readback.ref_failed",
-                                "artifact_id": artifact_id,
-                                "action_call_id": action_call_id,
+                                "selection_key": selection_key,
                                 "status": compact.get("status"),
                                 "error": compact.get("error"),
                             }
@@ -1157,6 +1405,23 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             )
             output["success_count"] = sum(1 for item in readbacks if item.get("ok"))
             failed_count = len(readbacks) - int(output["success_count"])
+            output["frontier"] = {
+                **dict(payload["frontier"]),
+                "success_count": int(output["success_count"]),
+                "failed_count": failed_count,
+                "integrity_complete": (
+                    bool(candidate_refs)
+                    and pending_ref_count == 0
+                    and failed_count == 0
+                ),
+                "exhausted": (
+                    bool(candidate_refs)
+                    and pending_ref_count == 0
+                    and failed_count == 0
+                    and len(exhausted_refs) + int(output["success_count"])
+                    == len(candidate_refs)
+                ),
+            }
             status = "completed" if int(output["success_count"]) > 0 else "failed"
             await self._emit(
                 f"agent_task.taskboard.card.{ self._stream_path_token(card_id) }.dependency_readback.completed",
@@ -1252,6 +1517,17 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             return []
         return [dict(DataFormatter.sanitize(item)) for item in raw_items if isinstance(item, Mapping)]
 
+    @staticmethod
+    def _taskboard_dependency_readback_frontier(
+        dependency_readbacks: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(dependency_readbacks, Mapping):
+            return {}
+        frontier = dependency_readbacks.get("frontier")
+        if not isinstance(frontier, Mapping):
+            return {}
+        return dict(DataFormatter.sanitize(frontier))
+
     @classmethod
     def _taskboard_action_artifact_readback_evidence_items(
         cls,
@@ -1266,8 +1542,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         for index, readback in enumerate(readbacks):
             if not isinstance(readback, Mapping):
                 continue
-            artifact_id = str(readback.get("artifact_id") or "").strip()
-            action_call_id = str(readback.get("action_call_id") or "").strip()
+            selection_key = str(readback.get("selection_key") or "").strip()
             value_preview = readback.get("value_preview")
             body = cls._taskboard_readback_evidence_body(value_preview)
             preview_meta = readback.get("value_preview_meta")
@@ -1276,13 +1551,37 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             status = "ok" if ok and body else ("empty" if ok else "failed")
             body_state = "truncated" if ok and body and truncated else ("bounded" if ok and body else "ref_only")
             raw_status = str(readback.get("status") or status)
+            ref = readback.get("ref")
+            ref = ref if isinstance(ref, Mapping) else {}
+            owner = str(readback.get("owner") or ref.get("owner") or "action_artifact").strip()
+            locator = str(
+                readback.get("locator") or ref.get("locator") or selection_key
+            ).strip()
+            content_version = str(
+                readback.get("content_version")
+                or ref.get("content_version")
+                or ref.get("sha256")
+                or ""
+            ).strip()
+            raw_range = readback.get("range")
+            raw_range = raw_range if isinstance(raw_range, Mapping) else {}
+            read_range = {
+                "offset": cls._coerce_non_negative_int(raw_range.get("offset")),
+                "end": cls._coerce_non_negative_int(raw_range.get("end")),
+            }
+            read_identity = {
+                "owner": owner,
+                "locator": locator,
+                "content_version": content_version,
+                "range": read_range,
+            }
             evidence_id = cls._taskboard_readback_evidence_id(
                 "taskboard_action_artifact_readback",
-                source,
-                card_id,
-                artifact_id,
-                action_call_id,
-                str(index),
+                owner,
+                locator,
+                content_version,
+                str(read_range["offset"]),
+                str(read_range["end"]),
             )
             item: dict[str, Any] = {
                 "id": evidence_id,
@@ -1290,15 +1589,19 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "status": status,
                 "raw_status": raw_status,
                 "body_state": body_state,
-                "artifact_id": artifact_id,
-                "action_call_id": action_call_id,
+                "selection_key": selection_key,
                 "aliases": cls._taskboard_readback_evidence_aliases(readback),
                 "source": source,
+                "owner": owner,
+                "locator": locator,
+                "content_version": content_version,
+                "range": read_range,
+                "read_identity": read_identity,
+                "total_bytes": readback.get("total_bytes"),
                 "provenance": {
                     "source": source,
                     "taskboard_card_id": card_id,
-                    "artifact_id": artifact_id,
-                    "action_call_id": action_call_id,
+                    "selection_key": selection_key,
                 },
                 "supports": {
                     "content": status == "ok" and body_state in {"bounded", "truncated"},
@@ -1306,7 +1609,6 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                     "ref_pointer": False,
                 },
             }
-            ref = readback.get("ref")
             if isinstance(ref, Mapping):
                 item["ref"] = DataFormatter.sanitize(dict(ref))
                 for field in ("path", "label", "role", "artifact_type"):
@@ -1352,16 +1654,10 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             if text and text not in aliases:
                 aliases.append(text)
 
-        artifact_id = str(readback.get("artifact_id") or "").strip()
-        action_call_id = str(readback.get("action_call_id") or "").strip()
-        add(artifact_id)
-        add(action_call_id)
-        if action_call_id:
-            add(f"action_result_{action_call_id}")
-            add(f"action_{action_call_id}")
+        add(readback.get("selection_key"))
         ref = readback.get("ref")
         if isinstance(ref, Mapping):
-            for field in ("path", "label", "artifact_type", "role"):
+            for field in ("selection_key", "path", "label", "artifact_type", "role"):
                 add(ref.get(field))
         return aliases[:16]
 
@@ -1379,8 +1675,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "status": "invalid_result",
                 "error": f"Action artifact reader returned { type(readback).__name__ }.",
             }
-        artifact_id = str(readback.get("artifact_id") or ref.get("artifact_id") or "")
-        action_call_id = str(readback.get("action_call_id") or ref.get("action_call_id") or "")
+        selection_key = str(readback.get("selection_key") or ref.get("selection_key") or "")
         value = readback.get("value", readback.get("data", readback.get("result")))
         original_chars = cls._serialized_prompt_chars(value)
         preview = cls._compact_taskboard_action_artifact_value_preview(value, max_chars=max_chars)
@@ -1388,14 +1683,23 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         compact: dict[str, Any] = {
             "ok": bool(readback.get("ok")),
             "status": str(readback.get("status") or ""),
-            "artifact_id": artifact_id,
-            "action_call_id": action_call_id,
+            "selection_key": selection_key,
+            "owner": str(readback.get("owner") or ref.get("owner") or "action_artifact"),
+            "locator": str(readback.get("locator") or ref.get("locator") or selection_key),
+            "content_version": str(
+                readback.get("content_version")
+                or ref.get("content_version")
+                or ref.get("sha256")
+                or ""
+            ),
+            "range": DataFormatter.sanitize(readback.get("range", {})),
+            "total_bytes": readback.get("total_bytes"),
             "artifact_type": str(readback.get("artifact_type") or ref.get("artifact_type") or ""),
             "label": str(readback.get("label") or ref.get("label") or ""),
             "ref": cls._compact_artifact_ref_for_verifier(ref),
             "value_preview": preview,
             "value_preview_meta": {
-                "truncated": preview_chars < original_chars,
+                "truncated": bool(readback.get("truncated")) or preview_chars < original_chars,
             },
         }
         error = readback.get("error")
@@ -1410,7 +1714,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
     @classmethod
     def _compact_taskboard_file_refs_for_hot_payload(cls, refs: Sequence[Any]) -> list[dict[str, Any]]:
         return [
-            cls._compact_taskboard_workspace_ref_for_prompt(ref)
+            cls._compact_taskboard_task_workspace_ref_for_prompt(ref)
             for ref in refs
             if isinstance(ref, Mapping)
         ]
@@ -1422,6 +1726,22 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         *,
         max_chars: int,
     ) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    structured = json.loads(stripped)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    structured = None
+                if isinstance(structured, Mapping) or (
+                    isinstance(structured, Sequence)
+                    and not isinstance(structured, str | bytes | bytearray)
+                ):
+                    # Action artifact storage may return structured JSON as a
+                    # serialized string. Recover its structure before bounded
+                    # compaction so one very large leaf cannot hide sibling
+                    # records in a middle-truncated text preview.
+                    value = structured
         preview = cls._compact_verifier_prompt_value(value, max_chars=max_chars)
         return cls._compact_taskboard_framework_refs_in_hot_value(preview)
 
@@ -1449,7 +1769,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         return value
 
     @classmethod
-    def _compact_taskboard_workspace_file_readback(
+    def _compact_taskboard_task_workspace_file_readback(
         cls,
         readback: Any,
         ref: Mapping[str, Any],
@@ -1461,7 +1781,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "ok": False,
                 "readable": False,
                 "status": "invalid_result",
-                "error": f"Workspace file reader returned { type(readback).__name__ }.",
+                "error": f"TaskWorkspace file reader returned { type(readback).__name__ }.",
             }
         path = str(readback.get("path") or ref.get("path") or "")
         content = readback.get("content", readback.get("text", readback.get("value")))
@@ -1473,10 +1793,19 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             "ok": ok,
             "status": str(readback.get("status") or ("completed" if ok else "error")),
             "path": path,
+            "owner": str(ref.get("owner") or "task_workspace"),
+            "locator": str(ref.get("locator") or path),
+            "content_version": str(
+                ref.get("content_version")
+                or ref.get("content_version_id")
+                or readback.get("sha256")
+                or ""
+            ),
             "read_bytes": readback.get("read_bytes"),
+            "total_bytes": readback.get("total_bytes", readback.get("bytes")),
             "offset": readback.get("offset"),
             "truncated": bool(readback.get("truncated")),
-            "ref": cls._compact_taskboard_workspace_ref_for_prompt(ref),
+            "ref": cls._compact_taskboard_task_workspace_ref_for_prompt(ref),
             "content_preview": preview,
             "content_preview_meta": {
                 "truncated": preview_chars < original_chars or bool(readback.get("truncated")),
@@ -1494,7 +1823,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         return compact
 
     @classmethod
-    def _taskboard_workspace_content_segment_readback(
+    def _taskboard_task_workspace_content_segment_readback(
         cls,
         segment: Any,
         ref: Mapping[str, Any],
@@ -1505,7 +1834,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                 "readable": False,
                 "status": "invalid_result",
                 "path": str(ref.get("path") or ""),
-                "error": f"Workspace bounded reader returned { type(segment).__name__ }.",
+                "error": f"TaskWorkspace bounded reader returned { type(segment).__name__ }.",
             }
         envelope = segment.get("ref")
         if not isinstance(envelope, Mapping):
@@ -1519,9 +1848,18 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             "readable": True,
             "status": "completed",
             "path": str(envelope.get("content_ref") or ref.get("path") or ""),
+            "owner": str(ref.get("owner") or "record_store"),
+            "locator": str(ref.get("locator") or ref.get("path") or ""),
+            "content_version": str(
+                ref.get("content_version")
+                or segment.get("digest")
+                or envelope.get("digest")
+                or ""
+            ),
             "content": segment.get("content", ""),
             "media_type": str(segment.get("content_type") or ""),
             "bytes": total_size,
+            "total_bytes": total_size,
             "read_bytes": read_bytes,
             "sha256": str(segment.get("digest") or envelope.get("digest") or ""),
             "offset": offset,
@@ -1529,7 +1867,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         }
 
     @staticmethod
-    def _compact_taskboard_workspace_ref_for_prompt(ref: Mapping[str, Any]) -> dict[str, Any]:
+    def _compact_taskboard_task_workspace_ref_for_prompt(ref: Mapping[str, Any]) -> dict[str, Any]:
         keep_keys = (
             "path",
             "role",
@@ -1558,32 +1896,36 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
         return {
             "schema_version": "agent_task_taskboard_readback/v1",
             "taskboard_readback_shape": {
-                "available": bool(refs or file_refs),
+                "prior_refs_available": bool(refs or file_refs),
                 "allowed_execution_shape": "readback",
                 "artifact_refs": [cls._compact_artifact_ref_for_verifier(ref) for ref in refs],
                 "file_refs": [
-                    cls._compact_taskboard_workspace_ref_for_prompt(ref)
+                    cls._compact_taskboard_task_workspace_ref_for_prompt(ref)
                     for ref in file_refs
                     if isinstance(ref, Mapping)
                 ],
             },
             "action_artifact_readback": {
-                "available": bool(refs),
+                "capability_available": True,
+                "prior_refs_available": bool(refs),
                 "action_id": "read_action_artifact",
                 "artifact_refs": [cls._compact_artifact_ref_for_verifier(ref) for ref in refs],
             },
-            "workspace_file_readback": {
-                "available": bool(file_refs),
+            "task_workspace_file_readback": {
+                "prior_file_refs_available": bool(file_refs),
                 "file_refs": [
-                    cls._compact_taskboard_workspace_ref_for_prompt(ref)
+                    cls._compact_taskboard_task_workspace_ref_for_prompt(ref)
                     for ref in file_refs
                     if isinstance(ref, Mapping)
                 ],
             },
             "policy": (
-                "Use a TaskBoard readback card only when bounded previews are insufficient and the remaining "
-                "work is scoped cold Action artifact or Workspace file readback. Mixed tool/readback work may "
-                "still use the ActionRuntime read_action_artifact action or Workspace file actions."
+                "The listed refs come only from prior TaskBoard evidence. The read_action_artifact capability remains "
+                "available even when prior_refs_available is false; current ActionLoop records may expose new "
+                "host-issued selection_key values after an Action runs. Use a TaskBoard readback card only when "
+                "bounded previews are insufficient and the remaining work is scoped cold Action artifact or "
+                "TaskWorkspace file readback. Mixed tool/readback work may still use the ActionRuntime "
+                "read_action_artifact action or TaskWorkspace file actions."
             ),
         }
 

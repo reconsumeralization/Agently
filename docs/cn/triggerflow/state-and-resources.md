@@ -40,6 +40,11 @@ API：
 
 读取 state 是本地同步操作；写入、追加、删除有 async 版本，方便在 async chunk 里保持一致。
 
+`set_state(...)` 表示完整替换；list、mapping、set 和空集合都不会与旧值合并。只有
+确实需要 list 累加时才使用 `append_state(...)`。mapping 状态迁移应先构造完整的新
+mapping，再一次 set，旧 key 不会被保留。单次 set 的本地修改会在事件通知派发前完成，
+但跨多次调用的 read-modify-write 不是 compare-and-swap；并发写入仍需要宿主负责协调。
+
 `close()` 时 state 里的内容就是 close snapshot。
 
 ## flow_data —— 风险共享
@@ -64,12 +69,15 @@ flow.set_flow_data("counter", 0, no_warning=True)   # 静默
 snapshot。加载该 snapshot 时会清空并恢复所属 flow 对象的共享 `flow_data`，可能覆盖
 更新后的值或干扰并发 execution；save/load 不会为它增加隔离、CAS 或 merge 语义。
 不要把 `flow_data` 当作恢复边界。单次运行的数据放 execution `state`；需要持久共享的
-数据放入具有相应一致性策略的宿主或 Workspace provider。
+数据放入具有相应一致性策略的宿主或 RecordStore provider。
 
 API（不传 `no_warning=True` 都发 warning）：
 
 - `flow.get_flow_data(key)` / `flow.set_flow_data(key, value)` / `flow.append_flow_data(...)` / `flow.del_flow_data(...)`
 - async 等价加 `async_` 前缀
+
+`set_flow_data(...)` 同样完整替换目标值，append 仍是独立的显式操作；这不会让共享
+scope 获得并发安全。
 
 ## runtime_resources —— live 对象
 

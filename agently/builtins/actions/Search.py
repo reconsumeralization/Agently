@@ -232,34 +232,40 @@ class Search:
                 "search_arxiv",
             ),
         ]
-        action_ids: list[str] = []
-        for base_action_id, desc, kwargs, method_name in specs:
-            action_id = action_name(base_action_id)
-            action.register_action(
-                action_id=action_id,
-                desc=desc,
-                kwargs=kwargs,
-                executor=action.create_action_executor(
-                    "SearchActionExecutor",
-                    search=self,
-                    method_name=method_name,
-                ),
-                tags=tags,
-                default_policy=default_policy,
-                side_effect_level="read",
-                expose_to_model=expose_to_model,
-                meta={
-                    "component": "builtins.actions.Search",
-                    "legacy_tool_facade": "agently.builtins.tools.Search",
-                    "provider": "ddgs",
-                    "ddgs_min_version": "9.10.0",
-                    "ddgs_latest_recommended": True,
-                    "base_action_id": base_action_id,
-                    "backend": self.backends.get("search" if base_action_id != "search_news" else "news", "auto"),
-                    "region": self.region,
-                },
-            )
-            action_ids.append(action_id)
+        action_ids = [action_name(base_action_id) for base_action_id, *_ in specs]
+        registration_snapshot = action._snapshot_action_registration_batch(action_ids)
+        try:
+            for action_id, (base_action_id, desc, kwargs, method_name) in zip(action_ids, specs):
+                action.register_action(
+                    action_id=action_id,
+                    desc=desc,
+                    kwargs=kwargs,
+                    executor=action.create_action_executor(
+                        "SearchActionExecutor",
+                        search=self,
+                        method_name=method_name,
+                    ),
+                    tags=tags,
+                    default_policy=default_policy,
+                    side_effect_level="read",
+                    expose_to_model=expose_to_model,
+                    meta={
+                        "component": "builtins.actions.Search",
+                        "legacy_tool_facade": "agently.builtins.tools.Search",
+                        "provider": "ddgs",
+                        "ddgs_min_version": "9.10.0",
+                        "ddgs_latest_recommended": True,
+                        "base_action_id": base_action_id,
+                        "backend": self.backends.get(
+                            "search" if base_action_id != "search_news" else "news",
+                            "auto",
+                        ),
+                        "region": self.region,
+                    },
+                )
+        except BaseException:
+            action._rollback_action_registration_batch(action_ids, registration_snapshot)
+            raise
         return action_ids
 
     async def search(

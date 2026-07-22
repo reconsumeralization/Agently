@@ -9,4 +9,4 @@ This section explains how to make one model request reliable.
 5. [Model Response](model-response.md): reuse one response and read text/data/meta or streams.
 6. [Session Memory](session-memory.md): Session, multi-turn history, windowing, import/export.
 7. [Context Engineering](context-engineering.md): where session, info, KB, and tool results belong.
-8. [Workspace](workspace.md): durable records, artifacts, search, links, and checkpoints for multi-turn tasks.
+8. [Task context, files, and records](workspace.md): progressive disclosure, task files, durable records, and recovery with separate owners.

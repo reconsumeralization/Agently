@@ -15,26 +15,39 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+from agently.core.TaskWorkspace import TaskWorkspace, TaskWorkspaceContextSource
+from agently.core.context import TaskContext
+from agently.core.storage import RecordStore, RecordStoreContextSource
+
+from .LifecycleState import AgentTaskLifecycleState
+from .LifecycleFlow import AgentTaskLifecycleFlowMixin
 from .TaskShared import *
 from .StrategyRouter import AgentTaskStrategyRouterMixin
 from .TaskBoardStrategy import AgentTaskTaskBoardStrategyMixin
 from .ArtifactDelivery import AgentTaskArtifactMixin
 from .FlatStrategy import AgentTaskFlatStrategyMixin
 from .Carrier import AgentTaskCarrierMixin
+from .TerminalVerification import AgentTaskTerminalVerificationMixin
 from .AcpRecovery import AgentTaskAcpRecoveryMixin
 from .Verification import AgentTaskVerificationMixin
 from .Guidance import AgentTaskGuidanceMixin
 from .RuntimeControl import AgentTaskRuntimeMixin
 from .Resume import AgentTaskResumeMixin
 from .Observation import AgentTaskObservationMixin
+from .TaskEvidenceContextSource import TaskEvidenceContextSource
 
 
 class AgentTask(
+    AgentTaskLifecycleFlowMixin,
     AgentTaskStrategyRouterMixin,
     AgentTaskTaskBoardStrategyMixin,
     AgentTaskArtifactMixin,
     AgentTaskFlatStrategyMixin,
     AgentTaskCarrierMixin,
+    AgentTaskTerminalVerificationMixin,
     AgentTaskAcpRecoveryMixin,
     AgentTaskVerificationMixin,
     AgentTaskGuidanceMixin,
@@ -53,7 +66,9 @@ class AgentTask(
         goal: str,
         success_criteria: list[str],
         execution: AgentTaskExecutionStrategy | str | None = "auto",
-        workspace: str | os.PathLike[str] | None = None,
+        record_store: RecordStore | None = None,
+        task_context: TaskContext | None = None,
+        task_workspace: TaskWorkspace | str | os.PathLike[str] | None = None,
         max_iterations: int | None = _AGENT_TASK_DEFAULT_MAX_ITERATIONS,
         verify: Literal["before_done"] = "before_done",
         context_profile: str = "auto",
@@ -68,49 +83,139 @@ class AgentTask(
             raise ValueError("agent.create_task(...) requires at least one success criterion.")
         self.agent = agent
         self.id = task_id or f"agent_task_{uuid.uuid4().hex}"
+        agent_task_workspace = getattr(agent, "task_workspace", None)
+        if isinstance(task_workspace, TaskWorkspace):
+            # Routed AgentExecution hands AgentTask its already execution-scoped
+            # file view. Preserve that exact view so fallback artifacts and the
+            # shared TaskContext keep one identity.
+            resolved_task_workspace = task_workspace
+        else:
+            requested_root = (
+                Path(task_workspace).expanduser().resolve()
+                if task_workspace is not None
+                else None
+            )
+            if requested_root is None and isinstance(agent_task_workspace, TaskWorkspace):
+                requested_root = agent_task_workspace.root
+            if requested_root is None:
+                resolved_task_workspace = None
+            else:
+                inherited_mode = (
+                    agent_task_workspace.mode
+                    if isinstance(agent_task_workspace, TaskWorkspace)
+                    and agent_task_workspace.root == requested_root
+                    else "read_write"
+                )
+                # A standalone AgentTask owns an execution-scoped view over the
+                # selected file boundary; it must not reuse the Agent-wide
+                # fallback namespace.
+                resolved_task_workspace = TaskWorkspace(
+                    requested_root,
+                    mode=inherited_mode,
+                    execution_id=self.id,
+                )
+        if not isinstance(resolved_task_workspace, TaskWorkspace):
+            raise RuntimeError(
+                "AgentTask requires a TaskWorkspace binding; pass task_workspace=... "
+                "or call agent.use_task_workspace(...)."
+            )
+        self.task_workspace = resolved_task_workspace
+        self._task_reference_catalog = TaskReferenceCatalog(self.id)
+        owns_task_context = task_context is None
+        if owns_task_context:
+            self.task_context = TaskContext(
+                task_id=self.id,
+                context_id=f"agent_task:{self.id}:context",
+            )
+            self.task_context.attach(
+                TaskWorkspaceContextSource(self.task_workspace),
+                binding_id=f"task_workspace_binding:{self.id}",
+                scope="task",
+            )
+        else:
+            self.task_context = task_context
+        evidence_binding_id = f"task_evidence_binding:{self.id}"
+        if evidence_binding_id not in {
+            binding.binding_id for binding in self.task_context.snapshot().bindings
+        }:
+            self.task_context.attach(
+                TaskEvidenceContextSource(self._task_reference_catalog),
+                binding_id=evidence_binding_id,
+                scope="task",
+                metadata={
+                    "description": (
+                        "Canonical body-bearing evidence produced during this AgentTask."
+                    ),
+                    # This source is a retrieval surface, not an instruction to
+                    # resend every prior Action body in each ordinary context
+                    # package. Scoped ContextReader plans opt into it by kind.
+                    "disclosure_mode": "explicit_retrieval",
+                },
+            )
+        self.context_readers: dict[tuple[str, str], Any] = {}
+        self.context_packages: list[Any] = []
+        self.context_consumptions: list[Any] = []
+        self._terminal_convergence_state = TerminalConvergenceState(self.id)
         self.goal = str(goal)
         self.success_criteria = [str(item) for item in success_criteria if str(item).strip()]
         self.execution_strategy = self.normalize_execution_strategy(execution)
+        resolved_options = dict(options or {})
         self.effective_execution_strategy: AgentTaskEffectiveExecutionStrategy | None = (
             cast(AgentTaskEffectiveExecutionStrategy, self.execution_strategy)
             if self.execution_strategy in {"flat", "taskboard"}
             else None
         )
+        self._lifecycle_state = AgentTaskLifecycleState(
+            task_id=self.id,
+            requested_strategy=self.execution_strategy,
+            effective_strategy=self.effective_execution_strategy,
+            skill_bindings=(
+                {
+                    str(item.get("binding_id") or ""): dict(item)
+                    for item in resolved_options.get("skill_bindings", [])
+                    if isinstance(item, Mapping) and str(item.get("binding_id") or "").strip()
+                }
+                if isinstance(resolved_options.get("skill_bindings"), Sequence)
+                and not isinstance(
+                    resolved_options.get("skill_bindings"),
+                    str | bytes | bytearray,
+                )
+                else {}
+            ),
+        )
+        self._terminal_inline_values: dict[str, str] = {}
+        self._terminal_materialization_diagnostics: list[dict[str, Any]] = []
+        self._lifecycle_frames: dict[str, dict[str, Any]] = {}
+        self._lifecycle_error: BaseException | None = None
         self.task_shape_analysis: dict[str, Any] = {}
         self.max_iterations = _normalize_agent_task_max_iterations(max_iterations)
         self.verify = verify
         self.context_profile = context_profile
         self.context_budget = dict(context_budget or {"chars": 6000})
         self.limits = dict(limits or {})
-        self.options = dict(options or {})
-        agent_with_workspace = cast(Any, agent)
-        if workspace is not None:
-            agent_with_workspace.use_workspace(workspace)
-        if getattr(agent, "workspace", None) is None:
+        self.options = resolved_options
+        bound_record_store = record_store or getattr(agent, "record_store", None)
+        if not isinstance(bound_record_store, RecordStore):
             raise RuntimeError(
-                "AgentTask requires a Workspace binding. Standard Agents include a lazy Workspace; "
-                "pass workspace=... or call agent.use_workspace(...) only when you need an explicit "
-                "root, mode, or provider."
+                "AgentTask requires a RecordStore binding; pass record_store=... "
+                "or configure agent.use_record_store(...)."
             )
-        bound_workspace = agent_with_workspace.workspace
-        # Bind the task file root as a lineage child of the Agent scope so the
-        # task subtree (and any nested executions) lives under the Agent node and
-        # can be pruned as one contained subtree (spec section 8.2).
-        with_scope_node = getattr(bound_workspace, "with_scope_node", None)
-        if callable(with_scope_node):
-            self.workspace: Any = with_scope_node(
-                "tasks",
-                self.id,
-                scope={"task_id": self.id},
-                search_scope={"task_id": self.id},
+        self.record_store: RecordStore = bound_record_store._bind_execution(
+            self.id,
+            scope={"task_id": self.id, "execution_id": self.id},
+            search_scope={"task_id": self.id, "execution_id": self.id},
+        )
+        if owns_task_context:
+            self.task_context.attach(
+                RecordStoreContextSource(self.record_store),
+                binding_id=f"record_store_binding:{self.id}",
+                scope="task",
             )
-        else:
-            self.workspace = bound_workspace
         self.status: AgentTaskStatus = "created"
         self.result: Any = None
         self.diagnostics: dict[str, Any] = {}
         self.iterations: list[dict[str, Any]] = []
-        self.workspace_refs: dict[str, list[str]] = {
+        self.record_refs: dict[str, list[str]] = {
             "observations": [],
             "decisions": [],
             "verification": [],
@@ -152,7 +257,24 @@ class AgentTask(
         self._resumed_iteration_summaries: list[dict[str, Any]] = []
         self._resumed_taskboard_state: dict[str, Any] | None = None
         self._latest_taskboard_acceptance_index: dict[str, Any] | None = None
+        # TaskBoard read progress is operational task state, not diagnostics.
+        # It is keyed by the stable owner/locator/content-version identity so
+        # narrower evidence projections and durable resume do not reread a
+        # completed byte range or reuse progress for changed content.
+        self._taskboard_read_progress: dict[str, Any] = {
+            "schema_version": "agent_task_taskboard_read_progress/v1",
+            "items": {},
+        }
+        self._taskboard_planned_task_workspace_deliverables: list[str] = []
         self._resumed_prior_result: Any = None
+        self._terminal_deliverable_refs: list[RecordRef] = []
+        self._terminal_retained_refs: list[Any] = []
+        self._terminal_retention_deferred = False
+        # Routed AgentTask construction transfers this exact task-owned Action
+        # artifact scope to its parent AgentExecution. Standalone tasks keep the
+        # value unset and release the scope in their own terminal seam.
+        self._action_artifact_scope_transferred_to_execution_id: str | None = None
+        self._terminal_taskboard_state: dict[str, Any] | None = None
         self._stream_items: list[AgentExecutionStreamData] = []
         self._stream_queues: list[asyncio.Queue[Any]] = []
         self._background_stream_tasks: set[asyncio.Task[Any]] = set()
@@ -167,60 +289,6 @@ class AgentTask(
         self.add_guidance: Any = FunctionShifter.syncify(self.async_add_guidance)
         self.stream: Any = self.get_async_generator
         self.get_generator: Any = self._get_generator
-
-    def _build_flow(self):
-        flow = TriggerFlow(name="agent-task")
-
-        async def loop(data):
-            await data.async_set_state("task_id", self.id, emit=False)
-            try:
-                effective_strategy = await self._resolve_effective_execution_strategy()
-            except _AgentTaskDeadlineExceeded as error:
-                await self._emit("agent_task.started", self._task_summary())
-                await self._terminate_timed_out(
-                    0,
-                    stage=error.stage,
-                    reason=error.reason,
-                    limit_name=error.limit_name,
-                    timeout_seconds=error.timeout_seconds,
-                )
-                await data.async_set_state("agent_task.execution_strategy", self.execution_strategy, emit=False)
-                await data.async_set_state(
-                    "agent_task.effective_execution_strategy",
-                    self.effective_execution_strategy,
-                    emit=False,
-                )
-                await data.async_set_state("agent_task.result", self.result, emit=False)
-                await data.async_set_state("agent_task.status", self.status, emit=False)
-                return
-            await data.async_set_state("agent_task.execution_strategy", self.execution_strategy, emit=False)
-            await data.async_set_state("agent_task.effective_execution_strategy", effective_strategy, emit=False)
-            await self._emit("agent_task.started", self._task_summary())
-            start_iteration = self._resumed_from_iteration + 1
-            if start_iteration > 1:
-                await self._emit(
-                    "agent_task.resumed",
-                    {"task_id": self.id, "resumed_from_iteration": self._resumed_from_iteration},
-                )
-            if effective_strategy == "taskboard":
-                result = await self._run_taskboard()
-                await data.async_set_state("agent_task.latest_iteration", result, emit=False)
-                await data.async_set_state("agent_task.result", self.result, emit=False)
-                await data.async_set_state("agent_task.status", self.status, emit=False)
-                return
-            iteration_index = start_iteration
-            while self.max_iterations is None or iteration_index <= self.max_iterations:
-                result = await self._run_iteration(iteration_index)
-                await data.async_set_state("agent_task.latest_iteration", result, emit=False)
-                if result["terminal"]:
-                    break
-                iteration_index += 1
-            await data.async_set_state("agent_task.result", self.result, emit=False)
-            await data.async_set_state("agent_task.status", self.status, emit=False)
-
-        flow.to(loop, name="agent_task")
-        return flow
-
 
 __all__ = [
     "AgentTask",

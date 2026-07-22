@@ -441,37 +441,6 @@ class AgentlyToolManager(ToolManager):
         await self.async_use_action_mcp(transport, headers=headers, tags=tags)
         return self
 
-    def register_python_sandbox_action(
-        self,
-        *,
-        action_id: str = "python_sandbox",
-        desc: str = "Execute Python code through an explicitly trusted local Python execution resource.",
-        tags: str | list[str] | None = None,
-        default_policy: "ActionPolicy | None" = None,
-        expose_to_model: bool = False,
-        preset_objects: dict[str, object] | None = None,
-        base_vars: dict[str, Any] | None = None,
-        allowed_return_types: list[type] | None = None,
-    ):
-        self.register_action(
-            action_id=action_id,
-            desc=desc,
-            kwargs={"python_code": (str, "Python code to execute in the sandbox.")},
-            executor=self._create_executor(
-                "PythonSandboxActionExecutor",
-                preset_objects=preset_objects,
-                base_vars=base_vars,
-                allowed_return_types=allowed_return_types,
-            ),
-            tags=tags,
-            default_policy=default_policy,
-            side_effect_level="exec",
-            sandbox_required=True,
-            expose_to_model=expose_to_model,
-            meta={"host_only_input_keys": ["allow_unsafe"]},
-        )
-        return self
-
     @staticmethod
     def _format_bash_sandbox_desc(
         desc: str,
@@ -491,6 +460,8 @@ class AgentlyToolManager(ToolManager):
             else "current working directory only"
         )
         policy_desc = (
+            "Pass exactly one command: use a string, an argv token list, or a one-item list "
+            "containing the complete command; Agently parses it to argv and never invokes a shell. "
             f"Allowed command prefixes: {command_text}. "
             f"Allowed working directory roots: {roots_text}. "
             f"Timeout: {timeout} seconds."
@@ -521,7 +492,10 @@ class AgentlyToolManager(ToolManager):
             action_id=action_id,
             desc=model_desc,
             kwargs={
-                "cmd": ("str | list[str]", "Command to run inside the sandbox."),
+                "cmd": (
+                    "str | list[str]",
+                    "Exactly one command: a command string, argv tokens, or a one-item list containing the complete command.",
+                ),
                 "workdir": ("str | None", "Working directory inside allowed roots."),
             },
             executor=self._create_executor(

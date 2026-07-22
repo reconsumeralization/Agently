@@ -1,4 +1,4 @@
-"""AgentExecution lineage workspace loop with explicit Workspace observations.
+"""AgentExecution lineage loop with explicit RecordStore observations.
 
 Run:
     python examples/agent_auto_orchestration/20_agent_execution_lineage_workspace_loop.py
@@ -9,9 +9,9 @@ Environment:
 
 This example demonstrates the 4.1.3.7 AgentExecution lineage/limits contract. The host
 owns the two-step loop. Each Agent call is one bounded AgentExecution with explicit lineage and model-request limits. AgentExecution
-receives the Agent's Workspace binding; the host explicitly asks the execution
-to store observations/checkpoints in Workspace, then calls
-`workspace.build_context(...)` before the next step.
+receives the Agent's TaskContext, TaskWorkspace, and RecordStore bindings. The
+host persists observations/checkpoints in RecordStore and reads a bounded
+ContextPackage before the next step.
 
 Expected key output from one real DeepSeek run on 2026-06-01:
     provider=deepseek
@@ -52,7 +52,7 @@ ISSUE = {
     "observed": "Only route data is visible; the next step cannot cite the previous execution reliably.",
     "constraints": [
         "Do not implement AgentTaskLoop in this slice.",
-        "Workspace writes must be explicit host-owned operations.",
+        "RecordStore writes must be explicit host-owned operations.",
         "Keep route planning in AgentOrchestrator.",
     ],
 }
@@ -76,8 +76,11 @@ async def main():
     provider = configure_model(temperature=0.1)
     if RUNTIME_ROOT.exists():
         shutil.rmtree(RUNTIME_ROOT)
-    agent = Agently.create_agent("lineage-workspace-loop").use_workspace(RUNTIME_ROOT)
-    assert agent.workspace is not None
+    agent = (
+        Agently.create_agent("lineage-context-loop")
+        .use_task_workspace(RUNTIME_ROOT)
+        .use_record_store(RUNTIME_ROOT, mode="read_write")
+    )
 
     task_id = ISSUE["issue_id"]
     first = (
@@ -106,7 +109,7 @@ async def main():
     first_stream = await first_stream_task
     first_meta = await first.async_get_meta()
 
-    first_workspace_record = await first.async_record_workspace(
+    observation_ref = await first.record_store.put(
         content={
             "result": first_result,
             "diagnostics": first_meta["diagnostics"],
@@ -116,17 +119,16 @@ async def main():
         summary=f"{task_id} first bounded execution analysis",
         scope={"task_id": task_id},
         source={"step": "analyze"},
-        checkpoint=True,
     )
-    observation_ref = first_workspace_record["record"]
+    await first.record_store.checkpoint(
+        task_id,
+        {"result": first_result, "diagnostics": first_meta["diagnostics"]},
+        step_id="analyze",
+    )
 
-    context_pack = await agent.workspace.build_context(
-        # Scope owns context selection in the example; an empty goal exercises
-        # ContextPackage construction without invoking FTS query syntax.
-        goal="",
-        scope={"task_id": task_id},
-        budget={"chars": 1200},
-        profile="auto",
+    context_package = await first.async_read_task_context(
+        consumer_id="lineage-loop-next-step",
+        phase="planning",
     )
 
     second = (
@@ -135,12 +137,12 @@ async def main():
             {
                 "issue": ISSUE,
                 "previous_observation_ref": observation_ref,
-                "context_pack": DataFormatter.sanitize(context_pack),
+                "context_package": DataFormatter.sanitize(context_package.to_dict()),
             }
         )
         .instruct(
             "Use the ContextPackage as explicit prior evidence. Choose the next concrete action and "
-            "state a verification check. Do not invent Workspace writes; the host owns them."
+            "state a verification check. Do not invent RecordStore writes; the host owns them."
         )
         .output(
             {
@@ -166,7 +168,7 @@ async def main():
     second_stream = await second_stream_task
     second_meta = await second.async_get_meta()
 
-    second_workspace_record = await second.async_record_workspace(
+    decision_ref = await second.record_store.put(
         content={
             "result": second_result,
             "diagnostics": second_meta["diagnostics"],
@@ -176,13 +178,16 @@ async def main():
         summary=f"{task_id} second bounded execution decision",
         scope={"task_id": task_id},
         source={"step": "choose-next-action"},
-        checkpoint=True,
     )
-    decision_ref = second_workspace_record["record"]
-    await agent.workspace.link(decision_ref, observation_ref, relation="uses_observation")
+    await second.record_store.checkpoint(
+        task_id,
+        {"result": second_result, "diagnostics": second_meta["diagnostics"]},
+        step_id="choose-next-action",
+    )
+    await second.record_store.link(decision_ref, observation_ref, relation="uses_observation")
 
-    checkpoints = await agent.workspace.checkpoint_history(task_id)
-    context_items = context_pack.get("items", []) if isinstance(context_pack, dict) else []
+    checkpoints = await agent.record_store.checkpoint_history(task_id)
+    context_items = context_package.blocks
     stream_lineage_ok = first_stream["lineage_ok"] and second_stream["lineage_ok"]
 
     print(f"provider={provider}")

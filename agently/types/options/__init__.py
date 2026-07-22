@@ -18,12 +18,9 @@ from .execution import (
     ExecutionOptions,
     normalize_execution_options,
 )
-from .routes import SkillsRouteOptions
-
 __all__ = [
     "AgentExecutionRouteOptions",
     "AgentExecutionLifecycleOptions",
     "ExecutionOptions",
-    "SkillsRouteOptions",
     "normalize_execution_options",
 ]

@@ -7,13 +7,23 @@ import uuid
 from pathlib import Path
 
 from agently import Agently
+from agently.builtins.plugins.CodeRuntimeAdapter import get_code_runtime_adapter
+from agently.builtins.plugins.ExecutionResourceProvider._bounded_process import (
+    BoundedProcessResult,
+)
 from agently.core import (
     ExecutionResourceApprovalDenied,
     ExecutionResourceApprovalRequired,
     ExecutionResourceError,
     ExecutionResourceManager,
 )
-from agently.types.data import ExecutionResourceRequirement
+from agently.core.TaskWorkspace import TaskWorkspace
+from agently.types.data import (
+    CodeExecutionRequest,
+    ExecutionResourceHandle,
+    ExecutionResourceRequirement,
+    TaskWorkspaceAccessRequirement,
+)
 from agently.utils import Settings
 
 
@@ -26,17 +36,45 @@ def _create_manager():
     )
 
 
+async def _materialized_code_bundle(
+    tmp_path: Path,
+    *,
+    language: str,
+    source_code: str,
+    args: tuple[str, ...] = (),
+):
+    workspace = TaskWorkspace(
+        tmp_path / f"{language}-workspace",
+        execution_id=f"{language}-execution",
+    )
+    grant = workspace.issue_execution_access(
+        action_call_id=f"run-{language}",
+        requirement=TaskWorkspaceAccessRequirement(mode="snapshot"),
+    )
+    request = CodeExecutionRequest.create(
+        language=language,
+        source_code=source_code,
+        args=args,
+    )
+    bundle = get_code_runtime_adapter(language).prepare(
+        request,
+        policy={"dependency_install": "deny"},
+    )
+    manifest = await workspace.materialize_execution_bundle(grant, bundle)
+    return bundle, manifest, grant
+
+
 def test_execution_resource_declare_is_lazy():
     manager = _create_manager()
     requirement = manager.declare(
         {
-            "kind": "python",
+            "kind": "test_lazy_resource",
             "scope": "action_call",
-            "resource_key": "python_test",
+            "resource_key": "lazy_test",
         }
     )
 
-    assert requirement["kind"] == "python"
+    assert requirement["kind"] == "test_lazy_resource"
     assert manager.list() == []
 
 
@@ -44,11 +82,10 @@ def test_execution_resource_declare_is_lazy():
 async def test_execution_resource_ensure_reuses_and_releases_handle():
     manager = _create_manager()
     requirement = cast(ExecutionResourceRequirement, {
-        "kind": "python",
+        "kind": "bash",
         "scope": "session",
         "owner_id": "session-1",
-        "resource_key": "python_test",
-        "config": {"base_vars": {"value": 1}},
+        "resource_key": "bash_test",
     })
 
     handle_1 = await manager.async_ensure(requirement)
@@ -61,6 +98,63 @@ async def test_execution_resource_ensure_reuses_and_releases_handle():
     assert manager.list()[0].get("ref_count") == 1
     await manager.async_release(handle_2)
     assert manager.list() == []
+
+
+@pytest.mark.asyncio
+async def test_execution_resource_release_failure_is_structured_and_quarantined() -> None:
+    manager = _create_manager()
+
+    class FailingReleaseProvider:
+        name = "FailingReleaseProvider"
+        provider_id = "failing-release"
+        supported_kinds = ("failing_release",)
+        DEFAULT_SETTINGS: dict[str, Any] = {}
+
+        async def async_probe(self, *, requirement: Any, policy: Any) -> Any:
+            _ = requirement, policy
+            return {
+                "provider_id": self.provider_id,
+                "available": True,
+                "supported_kinds": list(self.supported_kinds),
+                "capabilities": {},
+                "reason": "fixture",
+            }
+
+        async def async_ensure(
+            self, *, requirement: Any, policy: Any, existing_handle: Any = None
+        ) -> Any:
+            _ = requirement, policy, existing_handle
+            return {
+                "handle_id": "failing-release:1",
+                "resource": object(),
+                "status": "ready",
+            }
+
+        async def async_health_check(self, handle: Any) -> Any:
+            _ = handle
+            return "ready"
+
+        async def async_release(self, handle: Any) -> None:
+            _ = handle
+            raise RuntimeError("resource is still live")
+
+    manager.register_provider(cast(Any, FailingReleaseProvider()))
+    handle = await manager.async_ensure(
+        {
+            "kind": "failing_release",
+            "provider_id": "failing-release",
+        }
+    )
+
+    with pytest.raises(ExecutionResourceError) as raised:
+        await manager.async_release(handle)
+
+    assert raised.value.code == "execution_resource.release_failed"
+    inspected = cast(ExecutionResourceHandle, manager.inspect("failing-release:1"))
+    assert inspected.get("status") == "failed"
+    assert inspected.get("meta", {}).get("cleanup_error") == (
+        "resource is still live"
+    )
 
 
 @pytest.mark.asyncio
@@ -123,9 +217,9 @@ async def test_execution_resource_default_policy_denies_and_does_not_start():
     with pytest.raises(ExecutionResourceApprovalDenied):
         await manager.async_ensure(
             {
-                "kind": "python",
+                "kind": "test_approval_resource",
                 "scope": "action_call",
-                "resource_key": "python_test",
+                "resource_key": "approval_test",
                 "approval_required": True,
             }
         )
@@ -137,11 +231,11 @@ def test_action_python_sandbox_uses_execution_resource():
     action_id = "python_env_action"
     Agently.action.register_python_sandbox_action(action_id=action_id, expose_to_model=False)
 
-    result = Agently.action.execute_action(action_id, {"python_code": "result = 40 + 2"})
+    result = Agently.action.execute_action(action_id, {"source_code": "print(40 + 2)"})
 
     assert result.get("status") == "success"
     result_data = cast(dict[str, Any], result.get("data"))
-    assert result_data["result"] == 42
+    assert result_data["stdout"] == "42\n"
     assert Agently.execution_resource.list(scope="action_call") == []
 
 
@@ -155,12 +249,12 @@ def test_default_python_docker_sandbox_fails_closed_when_docker_unavailable(monk
     agent = Agently.create_agent()
     agent.enable_python(action_id=action_id)
 
-    result = agent.action.execute_action(action_id, {"python_code": "result = 1"})
+    result = agent.action.execute_action(action_id, {"source_code": "print(1)"})
 
     assert result.get("status") == "error"
     assert result.get("success") is False
     diagnostics = result.get("diagnostics", [])
-    assert any(item.get("code") == "execution_resource.docker_unavailable" for item in diagnostics)
+    assert any(item.get("code") == "execution_resource.provider_unavailable" for item in diagnostics)
     assert Agently.execution_resource.list(scope="action_call") == []
 
 
@@ -260,94 +354,131 @@ async def test_docker_runtime_developer_profile_pulls_missing_image(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_docker_code_runtime_c_generates_fixed_build_run_script(monkeypatch):
+async def test_docker_cpp_runtime_executes_adapter_bundle_without_provider_script(
+    monkeypatch,
+    tmp_path,
+):
     docker_module = importlib.import_module(
         "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
     )
-    scripts: dict[str, str] = {}
-    run_args: list[str] = []
+    docker_calls: list[list[str]] = []
 
     def fake_run(args, **kwargs):
         _ = kwargs
         if args[:3] == ["docker", "image", "inspect"]:
             return types.SimpleNamespace(returncode=0, stdout="sha256:gcc\n", stderr="")
-        if args[:2] == ["docker", "run"]:
-            run_args.extend(str(item) for item in args)
-            mount = next(str(args[index + 1]) for index, item in enumerate(args) if item == "-v" and ":/sandbox:ro" in str(args[index + 1]))
-            host_path = Path(mount.split(":/sandbox:ro", 1)[0])
-            scripts["run.sh"] = (host_path / "run.sh").read_text(encoding="utf-8")
-            scripts["main.c"] = (host_path / "main.c").read_text(encoding="utf-8")
-            return types.SimpleNamespace(returncode=0, stdout="hello\n", stderr="")
         raise AssertionError(f"unexpected docker command: {args}")
+
+    async def fake_bounded_process(args, **kwargs):
+        _ = kwargs
+        docker_calls.append([str(item) for item in args])
+        return BoundedProcessResult(
+            returncode=0,
+            stdout=b"hello\n",
+            stderr=b"",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
 
     monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{ binary }")
     monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(docker_module, "run_bounded_process", fake_bounded_process)
 
+    bundle, manifest, grant = await _materialized_code_bundle(
+        tmp_path,
+        language="cpp",
+        source_code='#include <iostream>\nint main(){ std::cout << "hello\\n"; }\n',
+        args=("arg1",),
+    )
     resource = docker_module.DockerExecutionResource(
         runtime_profile={
-            "language": "c",
             "provisioning_profile": "strict",
             "image_pull_policy": "never",
-        }
+        },
+        workspace_grant=grant,
     )
-    result = await resource.run_code(
-        language="c",
-        source_code='#include <stdio.h>\nint main(void){ puts("hello"); }\n',
-        args=["arg1"],
+    result = await resource.async_execute_code(
+        bundle=bundle,
+        manifest=manifest,
+        grant=grant,
+        timeout=10,
     )
 
     assert result["ok"] is True
-    assert "gcc:14" in run_args
-    assert run_args[-3:] == ["sh", "/sandbox/run.sh", "arg1"]
-    assert "cc /sandbox/main.c -o /tmp/agently-code-runtime-app" in scripts["run.sh"]
-    assert 'exec /tmp/agently-code-runtime-app "$@"' in scripts["run.sh"]
-    assert "puts(\"hello\")" in scripts["main.c"]
+    assert len(docker_calls) == 2
+    build_call, run_call = docker_calls
+    build_image_index = build_call.index("gcc:14")
+    run_image_index = run_call.index("gcc:14")
+    assert build_call[build_image_index + 1 :] == [
+        "c++", "-std=c++20", "-o", "../build/app", "main.cpp"
+    ]
+    assert run_call[run_image_index + 1 :] == ["../build/app", "arg1"]
+    assert any(item.endswith(":/workspace/source:ro") for item in build_call)
+    assert (Path(grant.execution_area) / "source" / "main.cpp").is_file()
 
 
 @pytest.mark.asyncio
-async def test_docker_code_runtime_go_generates_fixed_build_run_script(monkeypatch):
+async def test_docker_go_runtime_executes_adapter_bundle_with_workspace_env(
+    monkeypatch,
+    tmp_path,
+):
     docker_module = importlib.import_module(
         "agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider"
     )
-    scripts: dict[str, str] = {}
-    run_args: list[str] = []
+    docker_calls: list[list[str]] = []
 
     def fake_run(args, **kwargs):
         _ = kwargs
         if args[:3] == ["docker", "image", "inspect"]:
             return types.SimpleNamespace(returncode=0, stdout="sha256:go\n", stderr="")
-        if args[:2] == ["docker", "run"]:
-            run_args.extend(str(item) for item in args)
-            mount = next(str(args[index + 1]) for index, item in enumerate(args) if item == "-v" and ":/sandbox:ro" in str(args[index + 1]))
-            host_path = Path(mount.split(":/sandbox:ro", 1)[0])
-            scripts["run.sh"] = (host_path / "run.sh").read_text(encoding="utf-8")
-            scripts["main.go"] = (host_path / "main.go").read_text(encoding="utf-8")
-            return types.SimpleNamespace(returncode=0, stdout="hello\n", stderr="")
         raise AssertionError(f"unexpected docker command: {args}")
+
+    async def fake_bounded_process(args, **kwargs):
+        _ = kwargs
+        docker_calls.append([str(item) for item in args])
+        return BoundedProcessResult(
+            returncode=0,
+            stdout=b"hello\n",
+            stderr=b"",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
 
     monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{ binary }")
     monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(docker_module, "run_bounded_process", fake_bounded_process)
 
-    resource = docker_module.DockerExecutionResource(
-        runtime_profile={
-            "language": "go",
-            "provisioning_profile": "strict",
-            "image_pull_policy": "never",
-        }
-    )
-    result = await resource.run_code(
+    bundle, manifest, grant = await _materialized_code_bundle(
+        tmp_path,
         language="go",
         source_code='package main\nimport "fmt"\nfunc main(){ fmt.Println("hello") }\n',
     )
+    resource = docker_module.DockerExecutionResource(
+        runtime_profile={
+            "provisioning_profile": "strict",
+            "image_pull_policy": "never",
+        },
+        workspace_grant=grant,
+    )
+    result = await resource.async_execute_code(
+        bundle=bundle,
+        manifest=manifest,
+        grant=grant,
+        timeout=10,
+    )
 
     assert result["ok"] is True
-    assert "golang:1" in run_args
-    assert run_args[-2:] == ["sh", "/sandbox/run.sh"]
-    assert "GOCACHE=/tmp/go-build" in scripts["run.sh"]
-    assert "GOMODCACHE=/tmp/go-mod" in scripts["run.sh"]
-    assert "go build -o /tmp/agently-code-runtime-app ./main.go" in scripts["run.sh"]
-    assert 'exec /tmp/agently-code-runtime-app "$@"' in scripts["run.sh"]
-    assert "fmt.Println" in scripts["main.go"]
+    assert len(docker_calls) == 2
+    build_call, run_call = docker_calls
+    build_image_index = build_call.index("golang:1")
+    run_image_index = run_call.index("golang:1")
+    assert build_call[build_image_index + 1 :] == [
+        "go", "build", "-o", "../build/app", "main.go"
+    ]
+    assert "GOCACHE=/workspace/build/go-build-cache" in build_call
+    assert "GOMODCACHE=/workspace/build/go-mod-cache" in build_call
+    assert run_call[run_image_index + 1 :] == ["../build/app"]
+    assert (Path(grant.execution_area) / "source" / "main.go").is_file()
 
 
 def test_action_bash_sandbox_uses_execution_resource(tmp_path):
@@ -368,8 +499,8 @@ def test_action_bash_sandbox_uses_execution_resource(tmp_path):
     assert Agently.execution_resource.list(scope="action_call") == []
 
 
-def test_bash_execution_resource_materializes_workspace_boundary(tmp_path):
-    # Provider-side file-boundary materialization: a Workspace-issued root that
+def test_bash_execution_resource_materializes_task_workspace_boundary(tmp_path):
+    # Provider-side file-boundary materialization: a TaskWorkspace-issued root that
     # does not yet exist is created by the provider before the executor runs
     # (spec section 8.6).
     boundary = tmp_path / "lineage" / "executions" / "exec-mat" / "files"
@@ -398,7 +529,7 @@ def test_action_environment_default_policy_denies_as_blocked_action_result():
     assert spec is not None
     spec.get("execution_resources", [])[0]["approval_required"] = True
 
-    result = Agently.action.execute_action(action_id, {"python_code": "result = 1"})
+    result = Agently.action.execute_action(action_id, {"source_code": "print(1)"})
 
     assert result.get("status") == "blocked"
     assert "non-interactive environment" in str(result.get("error", ""))
@@ -442,13 +573,13 @@ async def test_execution_resource_release_scope_cleans_handles():
     owner = "scope-test-owner"
 
     await manager.async_ensure(
-        {"kind": "python", "scope": "agent", "owner_id": owner, "resource_key": "py1"},
+        {"kind": "bash", "scope": "agent", "owner_id": owner, "resource_key": "bash1"},
     )
     await manager.async_ensure(
-        {"kind": "python", "scope": "session", "owner_id": owner, "resource_key": "py2"},
+        {"kind": "bash", "scope": "session", "owner_id": owner, "resource_key": "bash2"},
     )
     await manager.async_ensure(
-        {"kind": "python", "scope": "agent", "owner_id": "other-owner", "resource_key": "py3"},
+        {"kind": "bash", "scope": "agent", "owner_id": "other-owner", "resource_key": "bash3"},
     )
 
     assert len(manager.list(scope="agent", owner_id=owner)) == 1
@@ -494,7 +625,7 @@ async def test_execution_resource_approval_denied_returns_blocked_action_result(
     )
     Agently.configure_policy_approval(handler="deny_execution_resource_test")
     try:
-        result = Agently.action.execute_action(action_id, {"python_code": "result = 1"})
+        result = Agently.action.execute_action(action_id, {"source_code": "print(1)"})
     finally:
         Agently.configure_policy_approval(handler="input_timeout_fail")
         Agently.policy_approval.unregister_handler("deny_execution_resource_test")
@@ -517,7 +648,9 @@ async def test_execution_resource_provider_failure_does_not_poison_registry():
 
     class FailingProvider:
         name = "FailingProvider"
-        kind = "python"
+        provider_id = "FailingProvider"
+        kind = "test_failing_resource"
+        supported_kinds = ("test_failing_resource",)
         DEFAULT_SETTINGS: dict[str, Any] = {}
 
         @staticmethod
@@ -528,25 +661,41 @@ async def test_execution_resource_provider_failure_does_not_poison_registry():
         def _on_unregister():
             pass
 
-        async def async_ensure(self, *, requirement, policy, existing_handle=None):
+        async def async_probe(self, *, requirement: Any, policy: Any) -> Any:
+            _ = requirement, policy
+            return {
+                "provider_id": self.provider_id,
+                "available": True,
+                "supported_kinds": list(self.supported_kinds),
+            }
+
+        async def async_ensure(
+            self, *, requirement: Any, policy: Any, existing_handle: Any = None
+        ) -> Any:
             raise RuntimeError("Simulated provider failure")
 
-        async def async_health_check(self, handle):
+        async def async_health_check(self, handle: Any) -> Any:
             return "unhealthy"
 
-        async def async_release(self, handle):
+        async def async_release(self, handle: Any) -> None:
             pass
 
     manager.register_provider(FailingProvider())
 
     declared = manager.declare(
-        {"kind": "python", "scope": "action_call", "resource_key": "fail_test"}
+        {"kind": "test_failing_resource", "scope": "action_call", "resource_key": "fail_test"}
     )
     requirement_id = declared.get("requirement_id")
     assert requirement_id is not None
 
     with pytest.raises(RuntimeError, match="Simulated provider failure"):
-        await manager.async_ensure({"kind": "python", "scope": "action_call", "resource_key": "fail_test"})
+        await manager.async_ensure(
+            {
+                "kind": "test_failing_resource",
+                "scope": "action_call",
+                "resource_key": "fail_test",
+            }
+        )
 
     assert manager.list() == []
     assert manager.inspect(requirement_id) is not None
@@ -734,7 +883,7 @@ async def test_docker_execution_resource_requires_daemon_preflight(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_docker_python_runtime_profile_uses_isolated_defaults(monkeypatch):
+async def test_docker_python_runtime_profile_uses_isolated_defaults(monkeypatch, tmp_path):
     from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
         DockerExecutionResource,
     )
@@ -754,9 +903,26 @@ async def test_docker_python_runtime_profile_uses_isolated_defaults(monkeypatch)
         calls.append([str(item) for item in args])
         return FakeCompletedProcess()
 
+    async def fake_bounded_process(args, **kwargs):
+        _ = kwargs
+        calls.append([str(item) for item in args])
+        return BoundedProcessResult(
+            returncode=0,
+            stdout=b"ok\n",
+            stderr=b"",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
+
     monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(docker_module, "run_bounded_process", fake_bounded_process)
 
+    bundle, manifest, grant = await _materialized_code_bundle(
+        tmp_path,
+        language="python",
+        source_code="print('ok')",
+    )
     resource = DockerExecutionResource(
         docker_binary="docker",
         timeout=7,
@@ -766,9 +932,15 @@ async def test_docker_python_runtime_profile_uses_isolated_defaults(monkeypatch)
             "network_mode": "disabled",
             "dependency_policy": {"mode": "deny"},
         },
+        workspace_grant=grant,
     )
 
-    result = await resource.run_python_code(python_code="print('ok')", timeout=5)
+    result = await resource.async_execute_code(
+        bundle=bundle,
+        manifest=manifest,
+        grant=grant,
+        timeout=5,
+    )
 
     assert result["ok"] is True
     args = calls[-1]
@@ -777,14 +949,14 @@ async def test_docker_python_runtime_profile_uses_isolated_defaults(monkeypatch)
     assert args[args.index("--network") + 1] == "none"
     assert "--cpus" in args
     assert "--memory" in args
-    assert any(arg.endswith(":/sandbox:ro") for arg in args)
+    assert any(arg.endswith(":/workspace/source:ro") for arg in args)
     assert "python:3.12-slim" in args
     image_index = args.index("python:3.12-slim")
-    assert args[image_index + 1 : image_index + 3] == ["python", "/sandbox/main.py"]
+    assert args[image_index + 1 : image_index + 3] == ["python", "main.py"]
 
 
 @pytest.mark.asyncio
-async def test_docker_runtime_profile_reports_timeout(monkeypatch):
+async def test_docker_runtime_profile_reports_timeout(monkeypatch, tmp_path):
     from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
         DockerExecutionResource,
     )
@@ -796,25 +968,43 @@ async def test_docker_runtime_profile_reports_timeout(monkeypatch):
         _ = kwargs
         if args[:3] == ["docker", "image", "inspect"]:
             return types.SimpleNamespace(returncode=0, stdout="sha256:python\n", stderr="")
-        raise docker_module.subprocess.TimeoutExpired(
-            cmd=["docker", "run"],
-            timeout=3,
-            output="partial stdout",
-            stderr="partial stderr",
+        raise AssertionError(f"unexpected docker command: {args}")
+
+    async def fake_bounded_process(args, **kwargs):
+        _ = args, kwargs
+        return BoundedProcessResult(
+            returncode=124,
+            stdout=b"partial stdout",
+            stderr=b"partial stderr",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            timed_out=True,
         )
 
     monkeypatch.setattr(docker_module.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(docker_module, "run_bounded_process", fake_bounded_process)
 
+    bundle, manifest, grant = await _materialized_code_bundle(
+        tmp_path,
+        language="python",
+        source_code="import time; time.sleep(10)",
+    )
     resource = DockerExecutionResource(
         docker_binary="docker",
         runtime_profile={
             "language": "python",
             "image": "python:3.12-slim",
         },
+        workspace_grant=grant,
     )
 
-    result = await resource.run_python_code(python_code="import time; time.sleep(10)", timeout=3)
+    result = await resource.async_execute_code(
+        bundle=bundle,
+        manifest=manifest,
+        grant=grant,
+        timeout=3,
+    )
 
     assert result["ok"] is False
     assert result["status"] == "timed_out"
@@ -850,6 +1040,41 @@ async def test_docker_shell_runtime_profile_keeps_command_allowlist(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_docker_shell_runtime_normalizes_one_command_string_in_list(
+    tmp_path,
+    monkeypatch,
+):
+    from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
+        DockerExecutionResource,
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_container(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "returncode": 0, "stdout": "", "stderr": ""}
+
+    resource = DockerExecutionResource(
+        docker_binary="docker",
+        runtime_profile={
+            "language": "shell",
+            "image": "python:3.12-slim",
+            "allowed_cmd_prefixes": ["python -m compileall"],
+            "allowed_workdir_roots": [str(tmp_path)],
+        },
+    )
+    monkeypatch.setattr(resource, "_run_container", fake_run_container)
+
+    result = await resource.run_shell_command(
+        cmd=["python -m compileall ."],
+        workdir=str(tmp_path),
+    )
+
+    assert result["ok"] is True
+    assert captured["cmd"] == ["python", "-m", "compileall", "."]
+
+
+@pytest.mark.asyncio
 async def test_action_use_mcp_url_headers_passes_normalized_transport_to_fastmcp():
     import unittest.mock as mock
 
@@ -868,9 +1093,7 @@ async def test_action_use_mcp_url_headers_passes_normalized_transport_to_fastmcp
         async def list_tools(self):
             return []
 
-    registrar_module = importlib.import_module(
-        "agently.core.operation.Action.ActionResourceRegistrar"
-    )
+    registrar_module = importlib.import_module("agently.core.operation.Action.ActionResourceRegistrar")
 
     with (
         mock.patch.object(registrar_module.LazyImport, "import_package") as lazy_import,
@@ -884,3 +1107,128 @@ async def test_action_use_mcp_url_headers_passes_normalized_transport_to_fastmcp
     lazy_import.assert_called_once_with("fastmcp", version_constraint=">=3", auto_install=False)
     assert captured[-1]["mcpServers"]["default"]["url"] == "https://example.com/mcp"
     assert captured[-1]["mcpServers"]["default"]["headers"] == {"Authorization": "Bearer token"}
+
+
+@pytest.mark.asyncio
+async def test_action_use_mcp_rolls_back_batch_and_restores_host_action_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import unittest.mock as mock
+
+    tools = [
+        types.SimpleNamespace(
+            name="mcp_existing",
+            description="MCP replacement.",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {}},
+            _meta={},
+        ),
+        types.SimpleNamespace(
+            name="mcp_new",
+            description="New MCP Action.",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {}},
+            _meta={},
+        ),
+    ]
+
+    class FakeClient:
+        def __init__(self, _transport):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def list_tools(self):
+            return tools
+
+    agent = Agently.create_agent()
+    agent.action.register_action(
+        action_id="mcp_existing",
+        desc="Host-owned MCP Action.",
+        kwargs={},
+        func=lambda: {"owner": "host"},
+    )
+    original_register = agent.action.register_action
+    registration_count = 0
+
+    def fail_second_registration(**kwargs: Any):
+        nonlocal registration_count
+        registration_count += 1
+        if registration_count == 2:
+            raise RuntimeError("MCP batch registration failed")
+        return original_register(**kwargs)
+
+    monkeypatch.setattr(agent.action, "register_action", fail_second_registration)
+    registrar_module = importlib.import_module("agently.core.operation.Action.ActionResourceRegistrar")
+
+    with (
+        mock.patch.object(registrar_module.LazyImport, "import_package"),
+        mock.patch("fastmcp.Client", FakeClient),
+        pytest.raises(RuntimeError, match="MCP batch registration failed"),
+    ):
+        await agent.action.async_use_mcp("https://example.com/mcp")
+
+    restored = agent.action.action_registry.get_spec("mcp_existing")
+    assert restored is not None
+    assert restored.get("desc") == "Host-owned MCP Action."
+    assert not agent.action.action_registry.has("mcp_new")
+
+
+@pytest.mark.asyncio
+async def test_action_use_mcp_rolls_back_when_client_exit_fails():
+    import unittest.mock as mock
+
+    tools = [
+        types.SimpleNamespace(
+            name="mcp_exit_existing",
+            description="MCP replacement.",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {}},
+            _meta={},
+        ),
+        types.SimpleNamespace(
+            name="mcp_exit_new",
+            description="New MCP Action.",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {}},
+            _meta={},
+        ),
+    ]
+
+    class FailingExitClient:
+        def __init__(self, _transport):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            raise RuntimeError("MCP client exit failed")
+
+        async def list_tools(self):
+            return tools
+
+    agent = Agently.create_agent()
+    agent.action.register_action(
+        action_id="mcp_exit_existing",
+        desc="Host-owned MCP exit Action.",
+        kwargs={},
+        func=lambda: {"owner": "host"},
+    )
+    registrar_module = importlib.import_module("agently.core.operation.Action.ActionResourceRegistrar")
+
+    with (
+        mock.patch.object(registrar_module.LazyImport, "import_package"),
+        mock.patch("fastmcp.Client", FailingExitClient),
+        pytest.raises(RuntimeError, match="MCP client exit failed"),
+    ):
+        await agent.action.async_use_mcp("https://example.com/mcp")
+
+    restored = agent.action.action_registry.get_spec("mcp_exit_existing")
+    assert restored is not None
+    assert restored.get("desc") == "Host-owned MCP exit Action."
+    assert not agent.action.action_registry.has("mcp_exit_new")

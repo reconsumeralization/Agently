@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable, Literal
 from typing_extensions import TypedDict
 
-from .workspace import WorkspaceFileRef
+from .task_workspace import TaskWorkspaceFileRef
 from .tool import KwargsType, ReturnType
 from .execution_resource import ExecutionResourceRequirement
 
@@ -31,7 +31,7 @@ class ActionPolicy(TypedDict, total=False):
     policy_approval_granted: bool
     policy_approval_handler: str
     policy_approval_decision: dict[str, Any]
-    workspace_roots: list[str]
+    task_workspace_roots: list[str]
     path_allowlist: list[str]
     path_denylist: list[str]
     allowed_cmd_prefixes: list[str]
@@ -55,6 +55,10 @@ class ActionApproval(TypedDict, total=False):
 
 
 class ActionArtifact(TypedDict, total=False):
+    owner: Literal["action_artifact"]
+    locator: str
+    content_version: str
+    selection_key: str
     artifact_id: str
     action_call_id: str
     label: str
@@ -94,6 +98,7 @@ class ActionSpec(TypedDict, total=False):
     name: str
     desc: str
     kwargs: KwargsType
+    required_input_keys: list[str]
     returns: ReturnType
     tags: list[str]
     default_policy: ActionPolicy
@@ -108,6 +113,7 @@ class ActionSpec(TypedDict, total=False):
 
 
 class ActionCall(TypedDict, total=False):
+    action_call_id: str
     purpose: str
     action_id: str
     action_input: dict[str, Any]
@@ -119,6 +125,8 @@ class ActionCall(TypedDict, total=False):
     tool_kwargs: dict[str, Any]
     execution_resource_handles: dict[str, Any]
     execution_resource_resources: dict[str, Any]
+    task_workspace: Any
+    task_workspace_access_grants: dict[str, Any]
     diagnostics: list[ActionDiagnostic]
 
 
@@ -150,7 +158,7 @@ class ActionResult(TypedDict, total=False):
     data: Any
     model_digest: dict[str, Any]
     artifact_refs: list[ActionArtifact]
-    file_refs: list[WorkspaceFileRef]
+    file_refs: list[TaskWorkspaceFileRef]
     artifacts: list[ActionArtifact]
     diagnostics: list[ActionDiagnostic]
     approval: ActionApproval
@@ -175,6 +183,7 @@ class ActionRunContext(_ActionRunContextRequired, total=False):
     done_plans: list[ActionResult]
     last_round_records: list[ActionResult]
     parent_run_context: Any
+    artifact_scope: dict[str, str]
     action: Any
     runtime: Any
 

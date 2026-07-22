@@ -14,185 +14,167 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from pathlib import PurePosixPath
+from types import MappingProxyType
 from typing import Any, Literal
-from typing_extensions import TypedDict
+from urllib.parse import urlsplit, urlunsplit
 
 
 SkillMode = Literal["model_decision", "required"]
-SkillExecutionStatus = Literal["created", "running", "success", "no_match", "blocked", "error"]
-ExecutionStrategy = Literal["single_shot", "staged", "react"]
 SkillRuntimeStreamItem = dict[str, Any]
 SkillRuntimeStreamHandler = Callable[[SkillRuntimeStreamItem], Awaitable[None] | None]
-SkillContextPackIntent = Literal["auto", "generate_code", "research", "plan", "execute", "verify", "document"]
-SkillContextPackIncludeMode = bool | Literal["auto"]
 
 
-class SkillCard(TypedDict, total=False):
-    skill_id: str
-    name: str
-    display_name: str
-    description: str
-    purpose: str
-    activation_hints: dict[str, Any]
-    content_refs: list[str]
+@dataclass(frozen=True)
+class SkillScriptAuthorization:
+    auto_allow: bool = False
+    expected_outputs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "auto_allow", bool(self.auto_allow))
+        object.__setattr__(
+            self,
+            "expected_outputs",
+            tuple(str(item) for item in self.expected_outputs),
+        )
 
 
-class SkillDecisionCard(TypedDict, total=False):
-    skill_id: str
-    name: str
-    description: str
-    keywords: list[str]
-    guidance_excerpt: str
-    resource_summary: list[dict[str, Any]]
-    checksum: str
+def _freeze_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    return MappingProxyType({str(key): item for key, item in dict(value or {}).items()})
 
 
-class SkillContract(TypedDict, total=False):
-    skill_id: str
-    version: str
-    source: dict[str, Any]
-    trust_level: str
-    card: SkillCard
-    guidance: dict[str, Any]
-    assets: dict[str, Any]
-    install_metadata: dict[str, Any]
-    decision_card: SkillDecisionCard
-    resource_index: dict[str, Any]
-    checksums: dict[str, Any]
-    diagnostics: list[dict[str, Any]]
-    metadata: dict[str, Any]
+def _required_text(value: Any, *, name: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"{name} cannot be empty.")
+    return normalized
 
 
-class SkillsPackRecord(TypedDict, total=False):
-    skills_pack_id: str
-    name: str
-    source: str
+def _safe_skill_source_subpath(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().replace("\\", "/")
+    if not normalized:
+        return None
+    path = PurePosixPath(normalized)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or not path.parts
+        or path.parts[0] == ".agently"
+    ):
+        raise ValueError(f"Skill source subpath is unsafe: {value!r}.")
+    return path.as_posix()
+
+
+def redact_skill_source(value: str) -> str:
+    """Return public provenance without URL credentials or query secrets."""
+
+    source = str(value or "")
+    parsed = urlsplit(source)
+    if not parsed.scheme or not parsed.netloc:
+        return source
+    hostname = parsed.hostname or ""
+    if parsed.port is not None:
+        hostname = f"{hostname}:{parsed.port}"
+    return urlunsplit((parsed.scheme, hostname, parsed.path, "", ""))
+
+
+@dataclass(frozen=True)
+class SkillSourceRequest:
+    source: str = field(repr=False)
+    source_type: str = "auto"
+    ref: str | None = None
+    subpath: str | None = None
+    update: bool = False
+    options: Mapping[str, Any] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source", _required_text(self.source, name="source"))
+        object.__setattr__(
+            self,
+            "source_type",
+            _required_text(self.source_type, name="source_type").lower(),
+        )
+        object.__setattr__(self, "ref", str(self.ref).strip() if self.ref else None)
+        object.__setattr__(self, "subpath", _safe_skill_source_subpath(self.subpath))
+        object.__setattr__(self, "update", bool(self.update))
+        object.__setattr__(self, "options", _freeze_mapping(self.options))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": redact_skill_source(self.source),
+            "source_type": self.source_type,
+            "ref": self.ref,
+            "subpath": self.subpath,
+            "update": self.update,
+        }
+
+
+@dataclass(frozen=True)
+class SkillSourceSnapshot:
+    provider_id: str
     source_type: str
-    source_url: str
-    source_ref: str
-    source_commit: str
-    source_subpath: str
-    source_package: str
-    installed_skills: list[str]
-    failed_skills: list[dict[str, Any]]
-    status: str
+    requested_source: str = field(repr=False)
+    requested_ref: str | None
+    resolved_revision: str
+    subpath: str | None
+    materialized_path: str = field(repr=False)
+    source_digest: str
+    metadata: Mapping[str, Any] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider_id", _required_text(self.provider_id, name="provider_id"))
+        source_type = _required_text(self.source_type, name="source_type").lower()
+        object.__setattr__(self, "source_type", source_type)
+        object.__setattr__(
+            self,
+            "requested_source",
+            _required_text(self.requested_source, name="requested_source"),
+        )
+        object.__setattr__(
+            self,
+            "requested_ref",
+            str(self.requested_ref).strip() if self.requested_ref else None,
+        )
+        resolved = _required_text(self.resolved_revision, name="resolved_revision")
+        if source_type == "git" and re.fullmatch(r"[0-9a-fA-F]{40}", resolved) is None:
+            raise ValueError("Git Skill source resolved_revision must be an exact 40-character commit.")
+        object.__setattr__(self, "resolved_revision", resolved.lower() if source_type == "git" else resolved)
+        object.__setattr__(self, "subpath", _safe_skill_source_subpath(self.subpath))
+        object.__setattr__(
+            self,
+            "materialized_path",
+            _required_text(self.materialized_path, name="materialized_path"),
+        )
+        digest = _required_text(self.source_digest, name="source_digest")
+        if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) is None:
+            raise ValueError("Skill source source_digest must be a sha256 digest.")
+        object.__setattr__(self, "source_digest", digest.lower())
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider_id": self.provider_id,
+            "source_type": self.source_type,
+            "requested_source": redact_skill_source(self.requested_source),
+            "requested_ref": self.requested_ref,
+            "resolved_revision": self.resolved_revision,
+            "subpath": self.subpath,
+            "source_digest": self.source_digest,
+            "metadata": dict(self.metadata),
+        }
 
 
-class SkillPlanSelection(TypedDict, total=False):
-    skill_id: str
-    skills_pack_id: str
-    skills_pack_name: str
-    version: str
-    display_name: str
-    reason: str
-    selected_by: str
-    required: bool
-    card: SkillCard
-    decision_card: SkillDecisionCard
-    guidance: dict[str, Any]
-    resource_index: dict[str, Any]
-    source: dict[str, Any]
-    metadata: dict[str, Any]
-
-
-class SkillPlanRejection(TypedDict, total=False):
-    skill_id: str
-    reason_code: str
-    reason: str
-
-
-class SkillCapabilityNeed(TypedDict, total=False):
-    skill_id: str
-    need: Literal[
-        "web_search",
-        "web_browse",
-        "workspace_write",
-        "workspace_read",
-        "script_run",
-        "mcp",
-        "http_request",
-        "shell",
-        "python",
-        "unknown",
-    ]
-    source: Literal["body", "resource_index", "compatibility", "metadata", "model_inference"]
-    evidence: str
-    risk: Literal["read_only", "local_exec", "filesystem_write", "network", "external_side_effect"]
-    confidence: float
-    resource_path: str
-    capability_config: dict[str, Any]
-
-
-class SkillContextPackResource(TypedDict, total=False):
-    skill_id: str
-    path: str
-    kind: str
-    content: str
-    summary: str
-    reason: str
-    sha256: str
-    size: int
-    score: float
-    truncated: bool
-    citation: str
-
-
-class SkillContextPackSkill(TypedDict, total=False):
-    skill_id: str
-    display_name: str
-    source: dict[str, Any]
-    guidance: dict[str, Any]
-    selected_resources: list[SkillContextPackResource]
-    resource_index: dict[str, Any]
-    action_candidates: list[dict[str, Any]]
-
-
-class SkillContextPack(TypedDict, total=False):
-    schema_version: str
-    task: str
-    intent: str
-    budget_chars: int
-    used_chars: int
-    truncated: bool
-    skills: list[SkillContextPackSkill]
-    public_sources: list[dict[str, Any]]
-    citations: list[str]
-    diagnostics: list[dict[str, Any]]
-
-
-class SkillExecutionPlan(TypedDict, total=False):
-    plan_id: str
-    mode: SkillMode
-    status: str
-    task_summary: str
-    selected_skills: list[SkillPlanSelection]
-    selected_skills_packs: list[SkillsPackRecord]
-    rejected_skills: list[SkillPlanRejection]
-    rejected_skills_packs: list[dict[str, Any]]
-    decision_cards: list[SkillDecisionCard]
-    prompt_bindings: list[dict[str, Any]]
-    resource_bindings: list[dict[str, Any]]
-    capability_needs: list[SkillCapabilityNeed]
-    expected_result_shape: dict[str, Any]
-    expected_result_format: str
-    capability_policy: dict[str, Any]
-    stage_model_keys: dict[str, str]
-    execution_strategy: ExecutionStrategy
-    execution_stages: list[dict[str, Any]]
-    diagnostics: list[dict[str, Any]]
-
-
-class SkillExecutionDict(TypedDict, total=False):
-    execution_id: str
-    plan_id: str
-    status: SkillExecutionStatus
-    output: Any
-    result: Any
-    plan: SkillExecutionPlan
-    runtime_stream: list[dict[str, Any]]
-    skill_logs: list[dict[str, Any]]
-    action_logs: list[dict[str, Any]]
-    intervention_records: list[dict[str, Any]]
-    close_snapshot: dict[str, Any]
-    effort: str | None
+__all__ = [
+    "SkillMode",
+    "SkillRuntimeStreamHandler",
+    "SkillRuntimeStreamItem",
+    "SkillScriptAuthorization",
+    "SkillSourceRequest",
+    "SkillSourceSnapshot",
+    "redact_skill_source",
+]

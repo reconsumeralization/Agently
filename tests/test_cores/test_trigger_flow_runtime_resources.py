@@ -7,11 +7,49 @@ import pytest
 
 from agently import Agently, TriggerFlow, TriggerFlowEventData, TriggerFlowRuntimeData
 from agently.base import execution_resource
-from agently.core.workspace._defaults import script_scope
+from agently.core.storage import RecordStore
 from agently.types.data import RunContext
+from agently.types.data.event import normalize_triggerflow_event_type
 from agently.types.plugins import ExecutionSnapshotStore, RuntimeEventStore
 from agently.types.trigger_flow import AGGREGATION_SCOPE_META_KEY
 from agently.types.trigger_flow import TRIGGER_FLOW_EXECUTION_SNAPSHOT_KIND
+
+
+class _TriggerFlowManagedCounter:
+    def __init__(self, value: int):
+        self.value = value
+
+    def increment(self) -> int:
+        return self.value + 1
+
+
+class _TriggerFlowManagedCounterProvider:
+    provider_id = "triggerflow_test_managed_counter"
+    supported_kinds = ("triggerflow_test_managed_counter",)
+
+    async def async_ensure(self, *, requirement, policy, existing_handle=None):
+        _ = (policy, existing_handle)
+        config = dict(requirement.get("config", {}))
+        return {
+            "handle_id": f"managed-counter:{requirement.get('owner_id', 'execution')}",
+            "resource": _TriggerFlowManagedCounter(int(config.get("value", 0))),
+            "status": "ready",
+            "meta": {"provider_id": self.provider_id},
+        }
+
+    async def async_health_check(self, handle):
+        _ = handle
+        return "healthy"
+
+    async def async_release(self, handle):
+        _ = handle
+
+
+@pytest.fixture(scope="module")
+def trigger_flow_managed_counter_provider():
+    provider = _TriggerFlowManagedCounterProvider()
+    execution_resource.register_provider(cast(Any, provider))
+    return provider
 
 
 def test_trigger_flow_runtime_data_alias_is_exported():
@@ -67,122 +105,667 @@ async def test_trigger_flow_auto_close_waits_for_in_flight_start(monkeypatch):
     assert result == {"draft": {"topic": "pricing"}}
 
 
-def test_trigger_flow_execution_binds_lazy_default_workspace(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    flow = TriggerFlow(name="execution-workspace-default")
-
-    execution = flow.create_execution()
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
-    state = execution.save()
-    expected_root = tmp_path / ".agently" / "workspaces" / "scripts" / script_scope()
-
-    assert getattr(workspace, "is_materialized") is False
-    assert workspace.root == expected_root.resolve()
-    assert workspace.files_root == (
-        expected_root / "files" / "lineage" / "executions" / execution.id / "files"
-    ).resolve()
-    assert not workspace.root.exists()
-    assert "workspace" in state["resource_keys"]
-
-
 @pytest.mark.asyncio
-async def test_trigger_flow_default_executions_share_physical_workspace_db_and_isolate_files(tmp_path, monkeypatch):
+async def test_trigger_flow_default_record_store_stays_persistence_free_after_finite_lifecycle(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.chdir(tmp_path)
-    flow = TriggerFlow(name="execution-workspace-shared-default")
-
-    first = flow.create_execution()
-    second = flow.create_execution()
-    first_workspace = cast(Any, first.require_runtime_resource("workspace"))
-    second_workspace = cast(Any, second.require_runtime_resource("workspace"))
-
-    assert first_workspace.root == second_workspace.root
-    assert first_workspace.files_root != second_workspace.files_root
-    assert first_workspace.files_root.parent.name == first.id
-    assert second_workspace.files_root.parent.name == second.id
-
-    await first_workspace.put("first execution", collection="observations", kind="execution_probe")
-    await second_workspace.put("second execution", collection="observations", kind="execution_probe")
-
-    assert len(list((tmp_path / ".agently" / "workspaces" / "scripts").glob("**/workspace.db"))) == 1
-
-
-@pytest.mark.asyncio
-async def test_trigger_flow_default_execution_search_is_execution_isolated(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    flow = TriggerFlow(name="execution-workspace-search-isolation")
-
-    first = flow.create_execution()
-    second = flow.create_execution()
-    first_workspace = cast(Any, first.require_runtime_resource("workspace"))
-    second_workspace = cast(Any, second.require_runtime_resource("workspace"))
-
-    await first_workspace.put("record from first execution", collection="observations", kind="iso_probe")
-    await second_workspace.put("record from second execution", collection="observations", kind="iso_probe")
-
-    # Default search is execution-isolated even though both executions share the
-    # same physical workspace.db (spec: explicit cross-scope search).
-    first_hits = await first_workspace.search("record")
-    assert [hit.get("summary") for hit in first_hits] == ["record from first execution"]
-    second_hits = await second_workspace.search("record")
-    assert [hit.get("summary") for hit in second_hits] == ["record from second execution"]
-
-    # Explicit cross-execution scope can still reach the sibling execution.
-    cross_hits = await first_workspace.search("record", filters={"scope.execution_id": second.id})
-    assert [hit.get("summary") for hit in cross_hits] == ["record from second execution"]
-
-
-def test_trigger_flow_default_workspace_uses_parent_session_scope(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    flow = TriggerFlow(name="execution-workspace-session-default")
-    parent = RunContext.create(run_kind="agent_execution", session_id="issue-123")
-
-    execution = flow.create_execution(parent_run_context=parent)
-    workspace = cast(Any, execution.require_runtime_resource("workspace"))
-
-    assert workspace.root == (tmp_path / ".agently" / "workspaces" / "sessions" / "issue-123").resolve()
-    assert workspace.files_root == (
-        workspace.root / "files" / "lineage" / "executions" / execution.id / "files"
-    ).resolve()
-
-
-def test_trigger_flow_execution_can_disable_default_workspace(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    flow = TriggerFlow(name="execution-workspace-disabled")
-
-    execution = flow.create_execution(
-        runtime_resources={
-            "workspace": object(),
-            "tool": "kept",
-        },
-        workspace=False,
+    monkeypatch.setattr(
+        __import__("sys").modules["__main__"],
+        "__file__",
+        str(tmp_path / "main.py"),
+        raising=False,
     )
-    state = execution.save()
-
-    assert execution.require_runtime_resource("tool") == "kept"
-    assert "workspace" not in execution.get_runtime_resources()
-    assert "workspace" not in state["resource_keys"]
-
-
-@pytest.mark.asyncio
-async def test_trigger_flow_execution_workspace_argument_uses_shared_provider(tmp_path):
-    shared_workspace = Agently.create_workspace(tmp_path / "shared-execution-workspace")
-    flow = TriggerFlow(name="execution-workspace-shared")
+    flow = TriggerFlow(name="execution-record_store-default")
 
     async def remember(data: TriggerFlowRuntimeData):
         await data.async_set_state("value", data.value)
 
     flow.to(remember)
-    execution = flow.create_execution(workspace=shared_workspace)
+    captured_event_types: list[str] = []
+
+    async def capture(event):
+        event_type = normalize_triggerflow_event_type(event.event_type)
+        if event_type is not None and event_type.startswith("triggerflow."):
+            captured_event_types.append(event_type)
+
+    hook_name = "test_trigger_flow_default_record_store_stays_persistence_free_after_finite_lifecycle.capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    execution = flow.create_execution(auto_close=True, auto_close_timeout=0.0)
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+    try:
+        assert record_store._backend is None
+        assert execution._snapshot_store is None
+        assert execution._runtime_event_store is None
+
+        snapshot = await execution.async_start("hello")
+        await Agently.event_center.async_flush(hook_name)
+
+        assert snapshot["value"] == "hello"
+        assert record_store._backend is None
+        assert execution._snapshot_store is None
+        assert execution._runtime_event_store is None
+        assert record_store.root == tmp_path.resolve()
+        assert record_store.root.exists()
+        assert "record_store" in execution.get_runtime_resources()
+        assert await record_store.search(None) == []
+        assert await record_store.query_runtime_events(execution.id) == []
+        assert await record_store.latest_snapshot(execution.id) is None
+        assert not (tmp_path / ".agently").exists()
+        assert {
+            "triggerflow.definition_declared",
+            "triggerflow.execution_started",
+            "triggerflow.execution_completed",
+            "triggerflow.execution_closed",
+            "triggerflow.execution_retention_applied",
+        }.issubset(captured_event_types)
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_pending_interrupt_rejects_close_before_recovery_cleanup(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    execution = TriggerFlow(name="pending-retention-guard").create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+
+    await execution.async_pause_for(
+        type="approval",
+        interrupt_id="approval",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="pending interrupts"):
+            await execution.async_close()
+
+        assert await record_store.latest_snapshot(execution.run_context.run_id) is not None
+        assert execution.get_status() == "waiting"
+    finally:
+        await execution.async_close(pending_interrupts="cancel")
+    assert await record_store.latest_snapshot(execution.run_context.run_id) is None
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_resumed_execution_discards_recovery_state_at_terminal_close(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="resumed-terminal-retention")
+
+    async def pause(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finish(data: TriggerFlowRuntimeData):
+        await data.async_set_state("approved", data.value)
+
+    flow.to(pause).to(finish)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+
+    await execution.async_start("draft")
+    assert await record_store.latest_snapshot(execution.run_context.run_id) is not None
+    await execution.async_continue_with(
+        "approval",
+        "approved",
+        resume_request_id="approval-1",
+    )
+    close_result = await execution.async_close()
+
+    assert close_result["approved"] == "approved"
+    assert await record_store.latest_snapshot(execution.run_context.run_id) is None
+    assert await record_store.query_runtime_events(execution.id) == []
+    assert await record_store.search(None) == []
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_recovery_cleanup_failure_preserves_recovery_data(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    large_body = "cleanup-failure-" + ("x" * 5000)
+    captured_event_types: list[str] = []
+
+    async def capture(event):
+        event_type = normalize_triggerflow_event_type(event.event_type)
+        if event_type is not None:
+            captured_event_types.append(event_type)
+
+    hook_name = "test_trigger_flow_recovery_cleanup_failure_preserves_recovery_data.capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    flow = TriggerFlow(name="terminal-retention-failure")
+
+    async def produce(data: TriggerFlowRuntimeData):
+        return large_body
+
+    flow.to(produce).end()
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+
+    try:
+        await execution.async_start("start")
+        await execution.async_save(step_id="before-terminal-retention")
+
+        async def fail_snapshot_cleanup(*args, **kwargs):
+            raise OSError("injected recovery cleanup failure")
+
+        monkeypatch.setattr(record_store, "delete_snapshot", fail_snapshot_cleanup)
+        close_result = await execution.async_close()
+        await Agently.event_center.async_flush(hook_name)
+
+        assert close_result["$final_result"] == large_body
+        assert await record_store.latest_snapshot(execution.run_context.run_id) is not None
+        assert await record_store.query_runtime_events(execution.id) == []
+        assert len(await record_store.search(None, filters={"kind": "snapshot"})) == 1
+        assert "triggerflow.execution_retention_deferred" in captured_event_types
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_cleanup_cancellation_finalizes_close_then_propagates(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="terminal-retention-cancellation")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+    await execution.async_start("ok")
+    await execution.async_save(step_id="before-cancelled-cleanup")
+
+    async def cancel_cleanup(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(record_store, "delete_snapshot", cancel_cleanup)
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() == "closed"
+    assert execution._closed_event.is_set()
+    assert execution.id not in flow._executions
+    assert execution._close_reason == "manual"
+    assert await execution.async_close() == {"value": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_cleanup_base_exception_finalizes_close_then_propagates(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+
+    class FatalRetentionError(BaseException):
+        pass
+
+    flow = TriggerFlow(name="terminal-retention-base-exception")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+    await execution.async_start("ok")
+    await execution.async_save(step_id="before-fatal-cleanup")
+
+    async def fail_cleanup(*args, **kwargs):
+        raise FatalRetentionError("injected fatal retention failure")
+
+    monkeypatch.setattr(record_store, "delete_snapshot", fail_cleanup)
+
+    with pytest.raises(FatalRetentionError, match="injected fatal retention failure"):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() == "closed"
+    assert execution._closed_event.is_set()
+    assert execution.id not in flow._executions
+    assert execution._close_reason == "manual"
+    assert await execution.async_close() == {"value": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_closed_event_failure_can_retry_terminal_close(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+
+    class FailClosedOnce:
+        def __init__(self):
+            self.failed = False
+
+        async def append_runtime_event(self, execution_id, event, **kwargs):
+            if event.event_type == "triggerflow.execution_closed" and not self.failed:
+                self.failed = True
+                raise OSError("injected closed event failure")
+            return {"id": event.event_id, "event_type": event.event_type}
+
+    flow = TriggerFlow(name="terminal-closed-event-retry")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"runtime_event_store": FailClosedOnce()},
+    )
+
+    await execution.async_start("ok")
+    with pytest.raises(OSError, match="injected closed event failure"):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() != "closed"
+    assert not execution._closed_event.is_set()
+    assert execution.id in flow._executions
+
+    assert await execution.async_close() == {"value": "ok"}
+    assert execution.get_lifecycle_state() == "closed"
+    assert execution._closed_event.is_set()
+    assert execution.id not in flow._executions
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_close_retry_reuses_large_terminal_carrier(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    large_body = "retry-terminal-" + ("x" * 5000)
+
+    class FailCompletedOnce:
+        def __init__(self):
+            self.failed = False
+
+        async def append_runtime_event(self, execution_id, event, **kwargs):
+            if event.event_type == "triggerflow.execution_completed" and not self.failed:
+                self.failed = True
+                raise OSError("injected completed event failure")
+            return {"id": event.event_id, "event_type": event.event_type}
+
+    flow = TriggerFlow(name="terminal-carrier-retry")
+
+    async def produce(data: TriggerFlowRuntimeData):
+        return large_body
+
+    flow.to(produce).end()
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"runtime_event_store": FailCompletedOnce()},
+    )
+    await execution.async_start("start")
+
+    with pytest.raises(OSError, match="injected completed event failure"):
+        await execution.async_close()
+    assert not (tmp_path / ".agently").exists()
+
+    # Once a terminal carrier exists, the sealed snapshot is immutable.
+    assert execution.get_lifecycle_state() == "sealed"
+    with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+        await execution.async_unseal(reason="late-unseal")
+    with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+        await execution.async_set_state("$final_result", "late-mutated-result", emit=False)
+
+    close_result = await execution.async_close()
+    assert close_result["$final_result"] == large_body
+    assert not (tmp_path / ".agently").exists()
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_terminal_promotion_freezes_state_before_first_await(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    large_body = "promotion-freeze-" + ("x" * 5000)
+    flow = TriggerFlow(name="terminal-promotion-freeze")
+
+    async def produce(data: TriggerFlowRuntimeData):
+        return large_body
+
+    flow.to(produce).end()
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("start")
+    original_emit_runtime_event = execution._emit_runtime_event
+    completed_event_started = asyncio.Event()
+    allow_completed_event = asyncio.Event()
+
+    async def block_completed_event(event_type, *args, **kwargs):
+        if event_type == "triggerflow.execution_completed":
+            completed_event_started.set()
+            await allow_completed_event.wait()
+        return await original_emit_runtime_event(event_type, *args, **kwargs)
+
+    monkeypatch.setattr(execution, "_emit_runtime_event", block_completed_event)
+    close_task = asyncio.create_task(execution.async_close())
+    await completed_event_started.wait()
+    try:
+        with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+            await execution.async_set_state("late", "mutation", emit=False)
+        with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+            execution.set_result("late-result")
+    finally:
+        allow_completed_event.set()
+
+    close_result = await close_task
+    assert close_result["$final_result"] == large_body
+    assert "late" not in close_result
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_completed_event_cancellation_reuses_terminal_event_id(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    completed_events: list[tuple[str, int, dict[str, Any], int | None]] = []
+
+    class CaptureRuntimeEvents:
+        async def append_runtime_event(self, execution_id, event, **kwargs):
+            if event.event_type == "triggerflow.execution_completed":
+                completed_events.append(
+                    (
+                        event.event_id,
+                        event.timestamp,
+                        dict(event.payload),
+                        kwargs.get("state_version"),
+                    )
+                )
+            return {"id": event.event_id, "event_type": event.event_type}
+
+    flow = TriggerFlow(name="terminal-completed-event-cancellation")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"runtime_event_store": CaptureRuntimeEvents()},
+    )
+    await execution.async_start("ok")
+    original_emit = execution._emit_runtime_event
+    cancelled = False
+
+    async def cancel_after_completed_event(event_type, **kwargs):
+        nonlocal cancelled
+        await original_emit(event_type, **kwargs)
+        if event_type == "triggerflow.execution_completed" and not cancelled:
+            cancelled = True
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(execution, "_emit_runtime_event", cancel_after_completed_event)
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() == "sealed"
+    with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+        await execution.async_set_state("late", "mutation", emit=False)
+    assert await execution.async_close() == {"value": "ok"}
+    assert len(completed_events) == 2
+    assert completed_events[0] == completed_events[1]
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_closed_event_retry_reuses_terminal_event_body(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    closed_events: list[tuple[str, int, dict[str, Any], int | None]] = []
+
+    class CaptureRuntimeEvents:
+        async def append_runtime_event(self, execution_id, event, **kwargs):
+            if event.event_type == "triggerflow.execution_closed":
+                closed_events.append(
+                    (
+                        event.event_id,
+                        event.timestamp,
+                        dict(event.payload),
+                        kwargs.get("state_version"),
+                    )
+                )
+            return {"id": event.event_id, "event_type": event.event_type}
+
+    flow = TriggerFlow(name="terminal-closed-event-body-retry")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"runtime_event_store": CaptureRuntimeEvents()},
+    )
+    await execution.async_start("ok")
+    original_emit = execution._emit_runtime_event
+    failed = False
+
+    async def fail_after_closed_event(event_type, **kwargs):
+        nonlocal failed
+        await original_emit(event_type, **kwargs)
+        if event_type == "triggerflow.execution_closed" and not failed:
+            failed = True
+            await asyncio.sleep(0.01)
+            raise OSError("injected postcommit closed failure")
+
+    monkeypatch.setattr(execution, "_emit_runtime_event", fail_after_closed_event)
+
+    with pytest.raises(OSError, match="injected postcommit closed failure"):
+        await execution.async_close(reason="first-reason")
+
+    assert execution.get_lifecycle_state() == "sealed"
+    with pytest.raises(RuntimeError, match="terminal close snapshot is frozen"):
+        await execution.async_set_state("late", "mutation", emit=False)
+    assert await execution.async_close(reason="second-reason") == {"value": "ok"}
+    assert len(closed_events) == 2
+    assert closed_events[0] == closed_events[1]
+    assert closed_events[0][2]["reason"] == "first-reason"
+    assert execution._close_reason == "first-reason"
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_closed_event_cancellation_finishes_terminal_bookkeeping(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="terminal-closed-event-cancellation")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(auto_close=False)
+    await execution.async_start("ok")
+    original_emit = execution._emit_runtime_event
+    cancelled = False
+
+    async def cancel_after_closed_event(event_type, **kwargs):
+        nonlocal cancelled
+        await original_emit(event_type, **kwargs)
+        if event_type == "triggerflow.execution_closed" and not cancelled:
+            cancelled = True
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(execution, "_emit_runtime_event", cancel_after_closed_event)
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution.async_close()
+
+    assert execution.get_lifecycle_state() == "closed"
+    assert execution._closed_event.is_set()
+    assert execution.id not in flow._executions
+    assert await execution.async_close() == {"value": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_default_executions_share_physical_record_store_and_isolate_scopes(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-record_store-shared-default")
+
+    first = flow.create_execution()
+    second = flow.create_execution()
+    first_record_store = cast(Any, first.require_runtime_resource("record_store"))
+    second_record_store = cast(Any, second.require_runtime_resource("record_store"))
+
+    assert first_record_store.root == second_record_store.root
+    assert first_record_store.root == tmp_path.resolve()
+    assert first_record_store.execution_id == first.id
+    assert second_record_store.execution_id == second.id
+
+    await first_record_store.put("first execution", collection="observations", kind="execution_probe")
+    await second_record_store.put("second execution", collection="observations", kind="execution_probe")
+
+    assert (tmp_path / ".agently" / "records" / "records.db").is_file()
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_default_execution_search_is_execution_isolated(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-record_store-search-isolation")
+
+    first = flow.create_execution()
+    second = flow.create_execution()
+    first_record_store = cast(Any, first.require_runtime_resource("record_store"))
+    second_record_store = cast(Any, second.require_runtime_resource("record_store"))
+
+    await first_record_store.put("record from first execution", collection="observations", kind="iso_probe")
+    await second_record_store.put("record from second execution", collection="observations", kind="iso_probe")
+
+    # Default search is execution-isolated even though both executions share the
+    # same physical records.db (spec: explicit cross-scope search).
+    first_hits = await first_record_store.search("record")
+    assert [await first_record_store.get_data(hit) for hit in first_hits] == ["record from first execution"]
+    second_hits = await second_record_store.search("record")
+    assert [await second_record_store.get_data(hit) for hit in second_hits] == ["record from second execution"]
+
+    # Explicit cross-execution scope can still reach the sibling execution.
+    cross_hits = await first_record_store.search("record", filters={"scope.execution_id": second.id})
+    assert [await first_record_store.get_data(hit) for hit in cross_hits] == ["record from second execution"]
+
+
+def test_trigger_flow_default_record_store_uses_parent_session_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-record_store-session-default")
+    parent = RunContext.create(run_kind="agent_execution", session_id="issue-123")
+
+    execution = flow.create_execution(parent_run_context=parent)
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+
+    assert record_store.root == tmp_path.resolve()
+    assert record_store.default_scope["session_id"] == "issue-123"
+    assert record_store.default_scope["execution_id"] == execution.id
+    assert not (tmp_path / ".agently").exists()
+
+
+def test_trigger_flow_execution_can_disable_default_record_store(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="execution-record_store-disabled")
+
+    execution = flow.create_execution(
+        runtime_resources={
+            "record_store": object(),
+            "tool": "kept",
+        },
+        record_store=False,
+    )
+    state = execution.save()
+
+    assert execution.require_runtime_resource("tool") == "kept"
+    assert "record_store" not in execution.get_runtime_resources()
+    assert "record_store" not in state["resource_keys"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_execution_record_store_argument_uses_shared_resource_without_durability(
+    tmp_path,
+):
+    shared_record_store = RecordStore(tmp_path / "shared-execution-record_store", mode="read_write")
+    flow = TriggerFlow(name="execution-record_store-shared")
+
+    async def remember(data: TriggerFlowRuntimeData):
+        await data.async_set_state("value", data.value)
+
+    flow.to(remember)
+    execution = flow.create_execution(record_store=shared_record_store)
 
     snapshot = await execution.async_start("hello")
-    snapshot_ref = await execution.async_save(step_id="shared-bound")
-    runtime_events = await shared_workspace.query_runtime_events(execution.id)
+    runtime_events = await shared_record_store.query_runtime_events(execution.id)
 
-    assert execution.require_runtime_resource("workspace") is shared_workspace
+    bound_record_store = execution.require_runtime_resource("record_store")
+    assert bound_record_store is not shared_record_store
+    assert bound_record_store.root == shared_record_store.root
+    assert bound_record_store.execution_id == execution.id
     assert snapshot["value"] == "hello"
-    assert snapshot_ref["collection"] == "checkpoints"
-    assert snapshot_ref["scope"]["step_id"] == "shared-bound"
-    assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
+    assert execution._snapshot_store is None
+    assert execution._runtime_event_store is None
+    assert runtime_events == []
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_event_center_receives_event_when_persistence_fails():
+    class FailingEventStore:
+        async def append_runtime_event(self, execution_id: str, event: Any, **kwargs):
+            raise RuntimeError("injected runtime event persistence failure")
+
+    captured: list[str] = []
+
+    async def capture(event):
+        event_type = normalize_triggerflow_event_type(event.event_type)
+        if event_type is not None:
+            captured.append(event_type)
+
+    hook_name = "test_trigger_flow_event_center_receives_event_when_persistence_fails.capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    execution = TriggerFlow().create_execution(
+        record_store=False,
+        runtime_resources={"runtime_event_store": FailingEventStore()},
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="injected runtime event persistence failure",
+        ):
+            await execution._emit_runtime_event("triggerflow.persistence_failed_probe")
+        await Agently.event_center.async_flush(hook_name)
+        assert captured == ["triggerflow.persistence_failed_probe"]
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
 
 
 @pytest.mark.asyncio
@@ -239,7 +822,7 @@ async def test_trigger_flow_execution_save_records_resource_keys_only():
     await execution.async_start("ok", wait_for_result=False)
     state = execution.save()
 
-    assert sorted(state["resource_keys"]) == ["execution_logger", "flow_tool", "workspace"]
+    assert sorted(state["resource_keys"]) == ["execution_logger", "flow_tool", "record_store"]
     assert state["kind"] == TRIGGER_FLOW_EXECUTION_SNAPSHOT_KIND
     requirements = {
         requirement["key"]: requirement
@@ -500,7 +1083,7 @@ async def test_trigger_flow_pause_for_persists_connected_and_disconnected_wait_m
 
 @pytest.mark.asyncio
 async def test_trigger_flow_execution_exchange_provider_publishes_external_wait_request(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "exchange-provider")
+    record_store = RecordStore(tmp_path / "exchange-provider", mode="read_write")
     published: list[dict[str, Any]] = []
 
     class ExchangeProvider:
@@ -534,7 +1117,9 @@ async def test_trigger_flow_execution_exchange_provider_publishes_external_wait_
     execution = flow.create_execution(
         auto_close=False,
         runtime_resources={
-            "workspace": workspace,
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
             "execution_exchange_provider": ExchangeProvider(),
         },
     )
@@ -544,7 +1129,7 @@ async def test_trigger_flow_execution_exchange_provider_publishes_external_wait_
         pending = execution.get_pending_interrupts()["approval"]
         request = copy.deepcopy(pending["external_wait_request"])
         snapshot_state = execution.save()
-        runtime_events = await workspace.query_runtime_events(execution.id)
+        runtime_events = await record_store.query_runtime_events(execution.id)
     finally:
         await execution.async_close(pending_interrupts="cancel")
 
@@ -635,13 +1220,16 @@ async def test_trigger_flow_config_round_trip_with_runtime_resources():
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_execution_resource_injects_managed_resource():
+async def test_trigger_flow_execution_resource_injects_managed_resource(
+    trigger_flow_managed_counter_provider,
+):
+    _ = trigger_flow_managed_counter_provider
     flow = TriggerFlow()
 
     async def calculate(data: TriggerFlowRuntimeData):
-        sandbox = data.require_resource("managed_python")
-        assert sandbox is not None
-        data.state.set("calculated", sandbox.run("result = value + 1")["result"])
+        counter = data.require_resource("managed_counter")
+        assert counter is not None
+        data.state.set("calculated", counter.increment())
 
     flow.to(calculate)
 
@@ -649,10 +1237,11 @@ async def test_trigger_flow_execution_resource_injects_managed_resource():
         41,
         execution_resources=[
             {
-                "kind": "python",
+                "kind": "triggerflow_test_managed_counter",
+                "provider_id": "triggerflow_test_managed_counter",
                 "scope": "execution",
-                "resource_key": "managed_python",
-                "config": {"base_vars": {"value": 41}},
+                "resource_key": "managed_counter",
+                "config": {"value": 41},
             }
         ],
     )
@@ -662,11 +1251,14 @@ async def test_trigger_flow_execution_resource_injects_managed_resource():
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_save_records_managed_execution_resource_keys():
+async def test_trigger_flow_save_records_managed_execution_resource_keys(
+    trigger_flow_managed_counter_provider,
+):
+    _ = trigger_flow_managed_counter_provider
     flow = TriggerFlow()
 
     async def hold_resource(data: TriggerFlowRuntimeData):
-        data.state.set("has_resource", data.require_resource("managed_python") is not None)
+        data.state.set("has_resource", data.require_resource("managed_counter") is not None)
 
     flow.to(hold_resource).end()
 
@@ -674,53 +1266,58 @@ async def test_trigger_flow_save_records_managed_execution_resource_keys():
         auto_close=False,
         execution_resources=[
             {
-                "requirement_id": "managed-python-save-test",
-                "kind": "python",
+                "requirement_id": "managed-counter-save-test",
+                "kind": "triggerflow_test_managed_counter",
+                "provider_id": "triggerflow_test_managed_counter",
                 "scope": "execution",
-                "resource_key": "managed_python",
+                "resource_key": "managed_counter",
             }
         ],
     )
     await execution.async_start("start", wait_for_result=False)
     state = execution.save()
 
-    assert "managed_python" in state["managed_resource_keys"]
-    assert "managed-python-save-test" in state["execution_resource_requirement_ids"]
+    assert "managed_counter" in state["managed_resource_keys"]
+    assert "managed-counter-save-test" in state["execution_resource_requirement_ids"]
     requirements = state["resource_requirements"]
     environment_requirements = [
         requirement
         for requirement in requirements
         if requirement["kind"] == "execution_resource_requirement"
     ]
-    assert environment_requirements[0]["metadata"]["resource_key"] == "managed_python"
-    assert environment_requirements[0]["metadata"]["requirement"]["requirement_id"] == "managed-python-save-test"
+    assert environment_requirements[0]["metadata"]["resource_key"] == "managed_counter"
+    assert environment_requirements[0]["metadata"]["requirement"]["requirement_id"] == "managed-counter-save-test"
 
     await execution.async_close()
     assert execution_resource.list(scope="execution") == []
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_async_load_restores_managed_execution_resource():
+async def test_trigger_flow_async_load_restores_managed_execution_resource(
+    trigger_flow_managed_counter_provider,
+):
+    _ = trigger_flow_managed_counter_provider
     flow = TriggerFlow()
 
     async def pause(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(type="exchange", exchange_kind="approval", interrupt_id="approval", resume_to="next")
 
     async def use_environment(data: TriggerFlowRuntimeData):
-        sandbox = data.require_resource("managed_python")
-        assert sandbox is not None
-        data.state.set("answer", sandbox.run("result = value + 1")["result"])
+        counter = data.require_resource("managed_counter")
+        assert counter is not None
+        data.state.set("answer", counter.increment())
 
     flow.to(pause).to(use_environment)
     execution = flow.create_execution(
         auto_close=False,
         execution_resources=[
             {
-                "requirement_id": "managed-python-load-test",
-                "kind": "python",
+                "requirement_id": "managed-counter-load-test",
+                "kind": "triggerflow_test_managed_counter",
+                "provider_id": "triggerflow_test_managed_counter",
                 "scope": "execution",
-                "resource_key": "managed_python",
-                "config": {"base_vars": {"value": 41}},
+                "resource_key": "managed_counter",
+                "config": {"value": 41},
             }
         ],
     )
@@ -767,64 +1364,511 @@ async def test_trigger_flow_execution_async_save_uses_snapshot_store():
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_runtime_workspace_resource_binds_durable_provider_ports(tmp_path):
-    agent = Agently.create_agent("runtime-workspace-provider").use_workspace(tmp_path / "run")
-    workspace = agent.workspace
-    assert workspace is not None
+async def test_trigger_flow_explicit_durable_provider_binds_recovery_without_audit(tmp_path):
+    agent = Agently.create_agent("runtime-record-store-provider").use_record_store(
+        tmp_path / "run",
+        mode="read_write",
+    )
+    record_store = agent.record_store
+    assert record_store is not None
 
-    flow = TriggerFlow(name="runtime-workspace-provider")
+    flow = TriggerFlow(name="runtime-record_store-provider")
 
     async def remember(data: TriggerFlowRuntimeData):
         await data.async_set_state("value", data.value)
 
     flow.to(remember)
-    execution = flow.create_execution(runtime_resources={"workspace": workspace})
+    execution = flow.create_execution(
+        auto_close=False,
+        record_store=record_store,
+        runtime_resources={"durable_provider": record_store},
+    )
 
-    snapshot = await execution.async_start("hello")
+    bound_record_store = execution.require_runtime_resource("record_store")
+    assert bound_record_store is not record_store
+    assert bound_record_store.root == record_store.root
+    assert bound_record_store.execution_id == execution.id
+    assert execution.require_runtime_resource("durable_provider") is record_store
+    assert execution._snapshot_store is record_store
+    assert execution._runtime_event_store is None
+
+    await execution.async_start("hello")
     snapshot_ref = await execution.async_save(step_id="auto-bound")
-    runtime_events = await workspace.query_runtime_events(execution.id)
+    runtime_events = await record_store.query_runtime_events(execution.id)
 
-    assert snapshot["value"] == "hello"
+    assert execution.get_state("value") == "hello"
     assert snapshot_ref["collection"] == "checkpoints"
     assert snapshot_ref["scope"]["step_id"] == "auto-bound"
-    assert runtime_events
-    assert runtime_events[0]["event_type"] == "triggerflow.definition_declared"
-    assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
+    assert runtime_events == []
+    close_result = await execution.async_close()
+    assert close_result["value"] == "hello"
+    assert await record_store.latest_snapshot(execution.run_context.run_id) is None
+
+
+def test_trigger_flow_explicit_snapshot_and_runtime_event_store_ports_are_independent():
+    class SnapshotStore:
+        async def put_snapshot(
+            self,
+            run_id: str,
+            state: dict[str, Any],
+            *,
+            step_id: str | None = None,
+        ):
+            return {"run_id": run_id, "state": state, "step_id": step_id}
+
+    class EventStore:
+        async def append_runtime_event(self, execution_id: str, event: Any, **kwargs):
+            return {"execution_id": execution_id, "event": event, "kwargs": kwargs}
+
+    snapshot_store = SnapshotStore()
+    runtime_event_store = EventStore()
+
+    snapshot_execution = TriggerFlow().create_execution(
+        record_store=False,
+        runtime_resources={"snapshot_store": snapshot_store},
+    )
+    event_execution = TriggerFlow().create_execution(
+        record_store=False,
+        runtime_resources={"runtime_event_store": runtime_event_store},
+    )
+
+    assert snapshot_execution._snapshot_store is snapshot_store
+    assert snapshot_execution._runtime_event_store is None
+    assert event_execution._snapshot_store is None
+    assert event_execution._runtime_event_store is runtime_event_store
+
+
+def test_trigger_flow_explicit_ports_override_durable_fallback_regardless_of_order():
+    class DurableProvider:
+        async def put_snapshot(self, *args, **kwargs):
+            return None
+
+        async def append_runtime_event(self, *args, **kwargs):
+            return None
+
+    class SnapshotStore:
+        async def put_snapshot(self, *args, **kwargs):
+            return None
+
+    class EventStore:
+        async def append_runtime_event(self, *args, **kwargs):
+            return None
+
+    durable_provider = DurableProvider()
+    snapshot_store = SnapshotStore()
+    runtime_event_store = EventStore()
+    mappings = [
+        {
+            "snapshot_store": snapshot_store,
+            "runtime_event_store": runtime_event_store,
+            "durable_provider": durable_provider,
+        },
+        {
+            "durable_provider": durable_provider,
+            "snapshot_store": snapshot_store,
+            "runtime_event_store": runtime_event_store,
+        },
+    ]
+
+    for mapping in mappings:
+        execution = TriggerFlow().create_execution(
+            record_store=False,
+            runtime_resources=mapping,
+        )
+        assert execution._snapshot_store is snapshot_store
+        assert execution._runtime_event_store is runtime_event_store
+
+
+def test_trigger_flow_execution_binds_inherited_explicit_durability_ports():
+    class DurableProvider:
+        async def put_snapshot(self, *args, **kwargs):
+            return None
+
+        async def append_runtime_event(self, *args, **kwargs):
+            return None
+
+    class SnapshotStore:
+        async def put_snapshot(self, *args, **kwargs):
+            return None
+
+    class EventStore:
+        async def append_runtime_event(self, *args, **kwargs):
+            return None
+
+    durable_provider = DurableProvider()
+    snapshot_store = SnapshotStore()
+    runtime_event_store = EventStore()
+    flow = TriggerFlow()
+    flow.update_runtime_resources(
+        durable_provider=durable_provider,
+        snapshot_store=snapshot_store,
+        runtime_event_store=runtime_event_store,
+    )
+
+    execution = flow.create_execution(record_store=False)
+
+    assert execution._snapshot_store is snapshot_store
+    assert execution._runtime_event_store is runtime_event_store
+
+
+def test_trigger_flow_ignores_noncallable_durable_provider_ports():
+    class InvalidProvider:
+        put_snapshot = None
+        append_runtime_event = None
+
+    provider = InvalidProvider()
+    execution = TriggerFlow().create_execution(
+        record_store=False,
+        runtime_resources={"durable_provider": provider},
+        intervention_mode="planned",
+    )
+
+    assert execution._snapshot_store is None
+    assert execution._runtime_event_store is None
+    assert execution._system_runtime_data.get(
+        "recovery_durability_activation",
+        None,
+        inherit=False,
+    ) is None
+
+
+@pytest.mark.parametrize("intervention_mode", ["planned", "auto"])
+def test_trigger_flow_recovery_lifecycle_activates_lazy_record_store_ports(
+    tmp_path,
+    monkeypatch,
+    intervention_mode,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name=f"runtime-recovery-{ intervention_mode }")
+
+    execution = flow.create_execution(
+        intervention_mode=intervention_mode,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+    activation = execution._system_runtime_data.get(
+        "recovery_durability_activation",
+        None,
+        inherit=False,
+    )
+
+    assert execution._snapshot_store is record_store
+    assert execution._runtime_event_store is None
+    assert activation == {
+        "reason": f"intervention_mode:{ intervention_mode }",
+        "activated_at_state_version": 0,
+    }
+    assert record_store._backend is None
+
+
+def test_trigger_flow_declared_intervention_point_activates_recovery_durability(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="runtime-declared-recovery")
+    flow.intervention_point(name="before_start")
+
+    execution = flow.create_execution(
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+
+    assert execution._snapshot_store is record_store
+    assert execution._runtime_event_store is None
+    assert execution._system_runtime_data.get(
+        "recovery_durability_activation",
+        None,
+        inherit=False,
+    ) == {
+        "reason": "intervention_mode:planned",
+        "activated_at_state_version": 0,
+    }
+    assert record_store._backend is None
+
+
+def test_trigger_flow_planned_lifecycle_records_explicit_provider_activation():
+    class DurableProvider:
+        async def put_snapshot(
+            self,
+            run_id: str,
+            state: dict[str, Any],
+            *,
+            step_id: str | None = None,
+        ):
+            return {"run_id": run_id, "state": state, "step_id": step_id}
+
+        async def append_runtime_event(self, execution_id: str, event: Any, **kwargs):
+            return {"execution_id": execution_id, "event": event, "kwargs": kwargs}
+
+    provider = DurableProvider()
+    execution = TriggerFlow(name="runtime-explicit-planned-recovery").create_execution(
+        record_store=False,
+        runtime_resources={"durable_provider": provider},
+        intervention_mode="planned",
+    )
+
+    assert execution._snapshot_store is provider
+    assert execution._runtime_event_store is None
+    assert execution._system_runtime_data.get(
+        "recovery_durability_activation",
+        None,
+        inherit=False,
+    ) == {
+        "reason": "intervention_mode:planned",
+        "activated_at_state_version": 0,
+    }
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_runtime_workspace_resource_materializes_lazy_provider(tmp_path, monkeypatch):
+async def test_async_recovery_activation_persists_boundary_without_enabling_audit(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.chdir(tmp_path)
-    agent = Agently.create_agent("runtime-lazy-workspace-provider")
-    workspace = agent.workspace
-    assert getattr(workspace, "is_materialized") is False
-
-    flow = TriggerFlow(name="runtime-lazy-workspace-provider")
+    flow = TriggerFlow(name="runtime-dynamic-recovery-boundary")
 
     async def remember(data: TriggerFlowRuntimeData):
-        await data.async_set_state("value", data.value)
+        await data.async_set_state("value", data.value, emit=False)
 
     flow.to(remember)
-    execution = flow.create_execution(runtime_resources={"workspace": workspace})
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+    try:
+        await execution.async_start("hello")
+        assert record_store._backend is None
 
-    snapshot = await execution.async_start("hello")
-    snapshot_ref = await execution.async_save(step_id="lazy-bound")
-    runtime_events = await workspace.query_runtime_events(execution.id)
+        provider = await execution._async_activate_recovery_durability(
+            reason="test_recovery_boundary",
+            persist_snapshot=True,
+            step_id="recovery-boundary",
+        )
+        latest = await record_store.latest_snapshot(execution.run_context.run_id)
+        before_new_event = await record_store.query_runtime_events(execution.id)
 
-    assert snapshot["value"] == "hello"
-    assert getattr(workspace, "is_materialized") is True
-    assert snapshot_ref["collection"] == "checkpoints"
-    assert snapshot_ref["scope"]["step_id"] == "lazy-bound"
-    assert runtime_events[-1]["event_type"] == "triggerflow.execution_closed"
+        assert provider is record_store
+        assert latest is not None
+        assert latest["scope"]["step_id"] == "recovery-boundary"
+        assert before_new_event == []
+
+        await execution._emit_runtime_event("triggerflow.test_after_activation")
+        after_new_event = await record_store.query_runtime_events(execution.id)
+        assert after_new_event == []
+    finally:
+        await execution.async_close()
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_workspace_snapshot_restores_pause_continue_provider_path(tmp_path):
-    agent = Agently.create_agent("runtime-workspace-provider-pause").use_workspace(tmp_path / "run")
-    workspace = agent.workspace
-    assert workspace is not None
+async def test_async_recovery_activation_requires_provider_for_snapshot():
+    execution = TriggerFlow(name="runtime-recovery-without-provider").create_execution(
+        record_store=False,
+        auto_close=False,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="requires a snapshot store"):
+            await execution._async_activate_recovery_durability(
+                reason="test_missing_provider",
+                persist_snapshot=True,
+            )
+    finally:
+        await execution.async_close()
 
-    flow = TriggerFlow(name="runtime-workspace-provider-pause")
+
+@pytest.mark.asyncio
+async def test_async_recovery_activation_uses_independent_snapshot_store():
+    class SnapshotStore:
+        def __init__(self):
+            self.calls: list[dict[str, Any]] = []
+
+        async def put_snapshot(
+            self,
+            run_id: str,
+            state: dict[str, Any],
+            *,
+            step_id: str | None = None,
+        ):
+            self.calls.append({"run_id": run_id, "state": state, "step_id": step_id})
+            return {"run_id": run_id, "step_id": step_id}
+
+    snapshot_store = SnapshotStore()
+    execution = TriggerFlow().create_execution(
+        record_store=False,
+        auto_close=False,
+        runtime_resources={"snapshot_store": snapshot_store},
+    )
+    try:
+        provider = await execution._async_activate_recovery_durability(
+            reason="explicit_snapshot_boundary",
+            persist_snapshot=True,
+            step_id="explicit-snapshot",
+        )
+        assert provider is None
+        assert snapshot_store.calls[0]["step_id"] == "explicit-snapshot"
+        assert execution._system_runtime_data.get(
+            "recovery_durability_activation",
+            None,
+            inherit=False,
+        ) == {
+            "reason": "explicit_snapshot_boundary",
+            "activated_at_state_version": 0,
+        }
+    finally:
+        await execution.async_close()
+
+
+@pytest.mark.asyncio
+async def test_public_async_save_activates_default_record_store_without_backfill(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    execution = TriggerFlow(name="runtime-public-async-save").create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+    try:
+        await execution.async_set_state("value", 1, emit=False)
+        assert execution._snapshot_store is None
+        assert execution._runtime_event_store is None
+
+        snapshot_ref = await execution.async_save(step_id="public-async-save")
+        before_new_event = await record_store.query_runtime_events(execution.id)
+
+        assert snapshot_ref["scope"]["step_id"] == "public-async-save"
+        assert execution._snapshot_store is record_store
+        assert execution._runtime_event_store is None
+        assert before_new_event == []
+
+        await execution._emit_runtime_event("triggerflow.after_public_async_save")
+        after_new_event = await record_store.query_runtime_events(execution.id)
+        assert after_new_event == []
+    finally:
+        await execution.async_close()
+
+
+@pytest.mark.asyncio
+async def test_public_sync_save_binds_recovery_without_materializing_or_enabling_audit(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    execution = TriggerFlow(name="runtime-public-sync-save").create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, execution.require_runtime_resource("record_store"))
+    try:
+        saved_state = execution.save()
+
+        assert saved_state["execution_id"] == execution.id
+        assert execution._snapshot_store is record_store
+        assert execution._runtime_event_store is None
+        assert record_store._backend is None
+
+        await execution._emit_runtime_event("triggerflow.after_public_sync_save")
+        events = await record_store.query_runtime_events(execution.id)
+        assert events == []
+    finally:
+        await execution.async_close()
+
+
+@pytest.mark.asyncio
+async def test_public_sync_load_binds_recovery_without_enabling_audit(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    flow = TriggerFlow(name="runtime-public-sync-load")
+    source = flow.create_execution(record_store=False, auto_close=False)
+    source_state = source.save()
+    restored = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": RecordStore(tmp_path, mode="read_write")},
+    )
+    record_store = cast(Any, restored.require_runtime_resource("record_store"))
+    try:
+        restored.load(source_state)
+
+        assert restored._snapshot_store is record_store
+        assert restored._runtime_event_store is None
+        await restored._emit_runtime_event("triggerflow.after_public_sync_load")
+        events = await record_store.query_runtime_events(restored.id)
+        assert events == []
+    finally:
+        await restored.async_close()
+        await source.async_close()
+
+
+@pytest.mark.asyncio
+async def test_async_load_activates_record_store_and_keeps_duplicate_resume_idempotent(
+    tmp_path,
+):
+    record_store = RecordStore(tmp_path / "async-load-recovery", mode="read_write")
+    flow = TriggerFlow(name="runtime-async-load-recovery")
+
+    async def gate(data: TriggerFlowRuntimeData):
+        return await data.async_pause_for(
+            type="approval",
+            interrupt_id="approval",
+            resume_to="next",
+        )
+
+    async def finalize(data: TriggerFlowRuntimeData):
+        resumes = list(data.get_state("resumes", []) or [])
+        resumes.append(data.value)
+        await data.async_set_state("resumes", resumes, emit=False)
+
+    flow.to(gate).to(finalize)
+    source = flow.create_execution(
+        auto_close=False,
+        runtime_resources={"record_store": record_store, "durable_provider": record_store},
+    )
+    restored = flow.create_execution(auto_close=False, record_store=record_store)
+    try:
+        await source.async_start("start")
+        source_state = source.save()
+        load = await restored.async_load(
+            source_state,
+            runtime_resources={"record_store": record_store},
+        )
+
+        assert load["ready"] is True
+        assert restored._snapshot_store is record_store
+        assert restored._runtime_event_store is None
+
+        await restored.async_continue_with(
+            "approval",
+            {"approved": True},
+            resume_request_id="stable-resume-1",
+        )
+        repeated = await restored.async_continue_with(
+            "approval",
+            {"approved": True},
+            resume_request_id="stable-resume-1",
+        )
+
+        assert repeated is not None
+        assert repeated["resume_request_id"] == "stable-resume-1"
+        assert restored.get_state("resumes") == [{"approved": True}]
+    finally:
+        await restored.async_close(pending_interrupts="cancel")
+        await source.async_close(pending_interrupts="cancel")
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_record_store_snapshot_restores_pause_continue_provider_path(tmp_path):
+    agent = Agently.create_agent("runtime-record-store-provider-pause").use_record_store(
+        tmp_path / "run",
+        mode="read_write",
+    )
+    record_store = agent.record_store
+    assert record_store is not None
+
+    flow = TriggerFlow(name="runtime-record_store-provider-pause")
 
     async def ask_for_approval(data: TriggerFlowRuntimeData):
         await data.async_set_state("draft", {"topic": data.value}, emit=False)
@@ -854,15 +1898,22 @@ async def test_trigger_flow_workspace_snapshot_restores_pause_continue_provider_
         )
 
     flow.to(ask_for_approval).to(finalize)
-    execution = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
+    )
     await execution.async_start("pricing")
     assert "approval" in execution.get_pending_interrupts()
 
     snapshot_ref = await execution.async_save(step_id="waiting-approval")
-    latest_ref = await workspace.latest_snapshot(execution.run_context.run_id)
+    latest_ref = await record_store.latest_snapshot(execution.run_context.run_id)
     assert latest_ref is not None
     assert latest_ref["id"] == snapshot_ref["id"]
-    snapshot_state = await workspace.get_data(latest_ref)
+    snapshot_state = await record_store.get_data(latest_ref)
     assert snapshot_state["interrupts"]["approval"]["status"] == "waiting"
     pending_wait = snapshot_state["interrupts"]["approval"]["external_wait_request"]
     assert pending_wait["request_id"] == "approval"
@@ -879,10 +1930,21 @@ async def test_trigger_flow_workspace_snapshot_restores_pause_continue_provider_
     assert pending_wait["audit_metadata"]["type"] == "exchange"
     assert pending_wait["audit_metadata"]["exchange_kind"] == "approval"
 
-    restored = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    restored = flow.create_execution(
+        auto_close=False,
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
+    )
     load = await restored.async_load(
         snapshot_state,
-        runtime_resources={"workspace": workspace},
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
     )
     assert load["ready"] is True
     assert restored.id == execution.id
@@ -893,11 +1955,11 @@ async def test_trigger_flow_workspace_snapshot_restores_pause_continue_provider_
         resume_request_id="approval-webhook-1",
         actor="reviewer",
     )
-    snapshot = await restored.async_close()
     resumed_ref = await restored.async_save(step_id="after-approval")
-    resumed_state = await workspace.get_data(resumed_ref)
-    runtime_events = await workspace.query_runtime_events(restored.id)
+    resumed_state = await record_store.get_data(resumed_ref)
+    runtime_events = await record_store.query_runtime_events(restored.id)
     event_types = [event["event_type"] for event in runtime_events]
+    snapshot = await restored.async_close()
 
     assert snapshot["final"] == {
         "draft": {"topic": "pricing"},
@@ -938,7 +2000,7 @@ async def test_trigger_flow_workspace_snapshot_restores_pause_continue_provider_
 
 @pytest.mark.asyncio
 async def test_trigger_flow_compaction_metadata_loads_and_diagnoses_mismatches(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "compacted")
+    record_store = RecordStore(tmp_path / "compacted", mode="read_write")
     flow = TriggerFlow(name="runtime-compaction-snapshot")
 
     async def gate(data: TriggerFlowRuntimeData):
@@ -949,9 +2011,16 @@ async def test_trigger_flow_compaction_metadata_loads_and_diagnoses_mismatches(t
         await data.async_set_state("final", {"approval": data.value}, emit=False)
 
     flow.to(gate).to(finalize)
-    execution = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
+    )
     await execution.async_start("pricing")
-    artifact_ref = await workspace.put_artifact_ref(
+    artifact_ref = await record_store.put_artifact_ref(
         execution.id,
         {"summary": "large snapshot payload"},
         metadata={"kind": "snapshot_payload", "summary": "large snapshot payload"},
@@ -993,15 +2062,30 @@ async def test_trigger_flow_compaction_metadata_loads_and_diagnoses_mismatches(t
 
     report = flow.create_execution().inspect_load(
         saved_state,
-        runtime_resources={"workspace": workspace},
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
     )
     assert report["ready"] is True
     assert report["compaction"]["segments"][0]["segment_id"] == "segment-1"
 
-    restored = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    restored = flow.create_execution(
+        auto_close=False,
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
+    )
     load = await restored.async_load(
         saved_state,
-        runtime_resources={"workspace": workspace},
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
     )
     assert load["ready"] is True
     assert restored.save()["compaction"]["segments"][0]["segment_id"] == "segment-1"
@@ -1031,7 +2115,7 @@ async def test_trigger_flow_compaction_metadata_loads_and_diagnoses_mismatches(t
 
 @pytest.mark.asyncio
 async def test_trigger_flow_save_snapshot_runs_compaction_policy_reducer(tmp_path):
-    workspace = Agently.create_workspace(tmp_path / "auto-compacted")
+    record_store = RecordStore(tmp_path / "auto-compacted", mode="read_write")
     flow = TriggerFlow(name="runtime-auto-compaction-snapshot")
 
     async def prepare(data: TriggerFlowRuntimeData):
@@ -1059,7 +2143,14 @@ async def test_trigger_flow_save_snapshot_runs_compaction_policy_reducer(tmp_pat
         }
 
     flow.to(prepare)
-    execution = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
+    )
     execution.set_compaction_policy(
         min_runtime_events=1,
         reducer=reducer,
@@ -1069,7 +2160,7 @@ async def test_trigger_flow_save_snapshot_runs_compaction_policy_reducer(tmp_pat
 
     await execution.async_start("pricing")
     snapshot_ref = await execution.async_save(step_id="auto-compacted")
-    snapshot_state = await workspace.get_data(snapshot_ref)
+    snapshot_state = await record_store.get_data(snapshot_ref)
     compaction = snapshot_state["compaction"]
 
     assert compaction["segments"][0]["summary"].startswith("compacted ")
@@ -1080,22 +2171,21 @@ async def test_trigger_flow_save_snapshot_runs_compaction_policy_reducer(tmp_pat
     assert compaction["policy"]["reducer_kind"] == "callable"
     assert compaction["load_policy"]["runtime_event_read_limit"] == 1
 
-    anchors = await workspace.retention_anchors(execution.id, anchor_type="compaction")
-    assert len(anchors) == 1
-    assert anchors[0]["preserved_event_ids"]
-
     second_ref = await execution.async_save(step_id="auto-compacted-again")
-    second_state = await workspace.get_data(second_ref)
+    second_state = await record_store.get_data(second_ref)
     assert len(second_state["compaction"]["segments"]) == 1
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_workspace_snapshot_restores_when_join_provider_path(tmp_path):
-    agent = Agently.create_agent("runtime-workspace-provider-join").use_workspace(tmp_path / "run")
-    workspace = agent.workspace
-    assert workspace is not None
+async def test_trigger_flow_record_store_snapshot_restores_when_join_provider_path(tmp_path):
+    agent = Agently.create_agent("runtime-record-store-provider-join").use_record_store(
+        tmp_path / "run",
+        mode="read_write",
+    )
+    record_store = agent.record_store
+    assert record_store is not None
 
-    flow = TriggerFlow(name="runtime-workspace-provider-join")
+    flow = TriggerFlow(name="runtime-record_store-provider-join")
 
     async def emit_left(data: TriggerFlowRuntimeData):
         await data.async_emit("A", {"left": data.value})
@@ -1106,10 +2196,17 @@ async def test_trigger_flow_workspace_snapshot_restores_when_join_provider_path(
     flow.when("Run").to(emit_left)
     flow.when(["A", "B"], mode="and").to(joined)
 
-    execution = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    execution = flow.create_execution(
+        auto_close=False,
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
+    )
     await execution.async_emit("Run", "task-1")
     snapshot_ref = await execution.async_save(step_id="after-left")
-    snapshot_state = await workspace.get_data(snapshot_ref)
+    snapshot_state = await record_store.get_data(snapshot_ref)
     durable_when_states = snapshot_state["durable_system_state"]["when_states"]
     signal_scope_keys = [
         scope_key
@@ -1120,10 +2217,21 @@ async def test_trigger_flow_workspace_snapshot_restores_when_join_provider_path(
     assert len(signal_scope_keys) == 1
     aggregation_scope = signal_scope_keys[0].removeprefix("signal:")
 
-    restored = flow.create_execution(auto_close=False, runtime_resources={"workspace": workspace})
+    restored = flow.create_execution(
+        auto_close=False,
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
+    )
     load = await restored.async_load(
         snapshot_state,
-        runtime_resources={"workspace": workspace},
+        runtime_resources={
+            "record_store": record_store,
+            "durable_provider": record_store,
+            "runtime_event_store": record_store,
+        },
     )
     assert load["ready"] is True
     await restored.async_emit(
@@ -1132,8 +2240,8 @@ async def test_trigger_flow_workspace_snapshot_restores_when_join_provider_path(
         _meta={AGGREGATION_SCOPE_META_KEY: aggregation_scope},
     )
     joined_ref = await restored.async_save(step_id="after-join")
-    joined_state = await workspace.get_data(joined_ref)
-    runtime_events = await workspace.query_runtime_events(restored.id)
+    joined_state = await record_store.get_data(joined_ref)
+    runtime_events = await record_store.query_runtime_events(restored.id)
 
     assert restored.get_state("joined") == {
         "event": {
@@ -1153,24 +2261,24 @@ async def test_trigger_flow_workspace_snapshot_restores_when_join_provider_path(
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_distributed_snapshot_accepts_workspace_provider(tmp_path):
-    agent = Agently.create_agent("distributed-workspace-provider").use_workspace(tmp_path / "run")
-    workspace = agent.workspace
-    assert workspace is not None
+async def test_trigger_flow_distributed_snapshot_rejects_local_record_store_provider(tmp_path):
+    agent = Agently.create_agent("distributed-record-store-provider").use_record_store(
+        tmp_path / "run",
+        mode="read_write",
+    )
+    record_store = agent.record_store
+    assert record_store is not None
 
     flow = TriggerFlow(name="distributed-provider-check")
     execution = flow.create_execution(
         runtime_resources={
-            "snapshot_store": cast(ExecutionSnapshotStore, workspace),
-            "runtime_event_store": cast(RuntimeEventStore, workspace),
+            "snapshot_store": cast(ExecutionSnapshotStore, record_store),
+            "runtime_event_store": cast(RuntimeEventStore, record_store),
         }
     )
 
-    ref = await execution.async_save(require_distributed_provider=True)
-
-    assert ref["collection"] == "checkpoints"
-    assert workspace.capabilities()["features"]["supports_cas"] is True
-    assert workspace.capabilities()["features"]["supports_lease"] is True
+    with pytest.raises(RuntimeError, match="missing capabilities"):
+        await execution.async_save(require_distributed_provider=True)
 
 
 @pytest.mark.asyncio
@@ -1196,7 +2304,7 @@ async def test_trigger_flow_distributed_snapshot_fails_closed_for_missing_provid
     store = MissingLeaseMethodsStore()
     flow = TriggerFlow(name="distributed-provider-method-check")
     execution = flow.create_execution(
-        workspace=False,
+        record_store=False,
         runtime_resources={"runtime_event_store": cast(Any, store)},
     )
 
@@ -1304,7 +2412,7 @@ async def test_trigger_flow_runtime_event_store_keeps_legacy_append_signature():
 
     flow.to(keep_result)
     execution = flow.create_execution(
-        workspace=False,
+        record_store=False,
         runtime_resources={"runtime_event_store": cast(Any, store)},
     )
 

@@ -9,4 +9,4 @@
 5. [模型响应](model-response.md)：复用同一次响应，读取 text/data/meta 和流式结果。
 6. [会话记忆](session-memory.md)：Session、多轮历史、窗口裁剪和导入导出。
 7. [Context Engineering](context-engineering.md)：session、info、KB 和工具结果该放哪里。
-8. [Workspace](workspace.md)：多轮任务的持久 records、artifacts、search、links 和 checkpoints。
+8. [任务上下文、文件与记录](workspace.md)：用独立 owner 处理渐进式披露、任务文件、持久 records 与 recovery。

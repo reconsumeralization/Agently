@@ -84,7 +84,8 @@ Agently supports both direct constructors and factory helpers for first-class
 core instances:
 
 ```python
-from agently import Agent, Agently, TriggerFlow
+from agently import Agent, Agently, TaskWorkspace, TriggerFlow
+from agently.core.storage import RecordStore
 
 agent = Agent("repo-worker")
 factory_agent = Agently.create_agent("repo-worker")
@@ -92,7 +93,8 @@ factory_agent = Agently.create_agent("repo-worker")
 flow = TriggerFlow(name="review-flow")
 factory_flow = Agently.create_trigger_flow("review-flow")
 
-workspace = Agently.create_workspace("./.agently/runs/review-flow")
+task_workspace = TaskWorkspace("./project", mode="read_only")
+record_store = RecordStore("./project-state", mode="read_write")
 ```
 
 ## What to read next

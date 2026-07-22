@@ -39,7 +39,7 @@ Live object 由宿主系统重新创建、恢复和校验。
 | Resource 形态 | 例子 | Load 期望 |
 |---|---|---|
 | 无状态或等价可重建 | HTTP client、DB client、logger | 从配置重建，并在 load 前挂载，或通过 resolver 重建。 |
-| 外部 durable state 的 adapter | Snapshot store、exchange provider、Workspace | 重建 adapter，但通过 provider 校验外部 state ref、version 和 lease。 |
+| 外部 durable state 的 adapter | Snapshot store、exchange provider、RecordStore | 重建 adapter，但通过 provider 校验外部 state ref、version 和 lease。 |
 | 有状态 execution session | Browser page、sandbox process、tool session、remote task handle | Snapshot 必须携带 durable session/ref requirement；provider 必须在 load ready 前恢复并校验。 |
 | 不可恢复 transient state | 本地 lock、内存 queue item、打开的 transaction、coroutine frame | 不要带着这种状态跨 durable pause boundary；先完成、abort，或让 load fail。 |
 
