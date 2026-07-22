@@ -41,3 +41,19 @@ def test_release_pinned_usage_readme_records_confirmation_policy() -> None:
     assert "must not be edited, replaced, or removed without explicit" in readme
     assert "ask whether the release should accept that usage update" in readme
     assert "all-allowed test capability policy" in readme
+
+
+def test_release_pinned_skill_usage_tracks_current_owner_boundaries() -> None:
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    skill_gate = next(
+        script
+        for script in manifest["selected_scripts"]
+        if script["path"].endswith("03_skill_library_agent_binding.py")
+    )
+    source = (ROOT / skill_gate["path"]).read_text(encoding="utf-8")
+
+    assert "Agently.skill_library.resolve(...)" in skill_gate["protected_usage"]
+    assert "agent.require_skills(exact_revision_ref)" in skill_gate["protected_usage"]
+    assert "resolve_skills_plan" not in source
+    assert "prompt_bindings" not in source
+    assert "guidance_injected" not in source

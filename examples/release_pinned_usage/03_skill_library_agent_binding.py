@@ -1,19 +1,20 @@
-"""Pinned SkillsExecutor compatibility-facade usage.
+"""Pinned SkillLibrary installation and AgentExecution binding usage.
 
 Run:
-    python examples/release_pinned_usage/03_skills_executor_compatibility_facade.py
+    python examples/release_pinned_usage/03_skill_library_agent_binding.py
 
 Expected key output:
     install_status=ok
     skill_id=pinned-release-checklist
     inspected_has_guidance=True
-    plan_status=resolved
-    selected=pinned-release-checklist
-    guidance_injected=True
+    binding_mode=required
+    exact_revision_bound=True
+    task_context_has_skill_library=True
 """
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,13 +23,13 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agently import Agently
+from agently import Agently  # noqa: E402
 
 
 SKILL_SOURCE = Path(__file__).resolve().parent / "skills" / "pinned-release-checklist"
 
 
-def main() -> None:
+async def async_main() -> None:
     with TemporaryDirectory() as temp_dir:
         registry_root = Path(temp_dir) / "registry"
         Agently.skills_executor.configure(
@@ -39,19 +40,23 @@ def main() -> None:
         skill_id = str(contract["skill_id"])
         inspected = Agently.skills_executor.inspect_skills(skill_id)
         guidance = str(inspected.get("guidance", {}).get("content", ""))
+        package = Agently.skill_library.resolve(skill_id)
 
-        agent = Agently.create_agent("release-pinned-skills-executor")
-        plan = agent.resolve_skills_plan("prepare release readiness notes", skills=[skill_id], mode="required")
-        selected = [str(skill.get("skill_id")) for skill in plan.get("selected_skills", [])]
-        bindings = plan.get("prompt_bindings", [])
+        agent = Agently.create_agent("release-pinned-skill-binding")
+        execution = agent.input("prepare release readiness notes").require_skills(
+            package.revision_ref
+        )
+        await execution.async_prepare_task_context()
+        binding = execution.skill_bindings[0]
+        source_catalog = execution.task_context.source_catalog()
 
         print("install_status=ok")
         print(f"skill_id={skill_id}")
         print(f"inspected_has_guidance={bool(guidance)}")
-        print(f"plan_status={plan.get('status')}")
-        print(f"selected={','.join(selected)}")
-        print(f"guidance_injected={bool(guidance) and any(binding.get('content') for binding in bindings)}")
+        print(f"binding_mode={binding.mode}")
+        print(f"exact_revision_bound={binding.revision_ref == package.revision_ref}")
+        print(f"task_context_has_skill_library={'skill_library' in source_catalog}")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(async_main())

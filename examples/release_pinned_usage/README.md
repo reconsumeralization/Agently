@@ -17,7 +17,8 @@ Policy:
 - Additive scripts may be proposed for new release claims, but selection should
   be recorded in the manifest before the script becomes a release gate.
 
-The first pinned set for 4.1.4.1 covers AgentExecution result readers,
-AgentExecution stream/key reader facades, and the legacy SkillsExecutor
-compatibility facade. Model-owned business behavior is still checked by the
-model-backed examples named in the manifest.
+The current pinned set covers AgentExecution result readers, AgentExecution
+stream/key reader facades, and SkillLibrary-backed installation followed by
+AgentExecution exact-revision binding. It does not preserve the removed
+SkillsExecutor planning or prompt-injection engine. Model-owned business
+behavior is still checked by the model-backed examples named in the manifest.

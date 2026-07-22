@@ -37,16 +37,18 @@
       "release_gate_reason": "4.1.4.1 restores AgentExecution key reader and stream facade compatibility."
     },
     {
-      "path": "examples/release_pinned_usage/03_skills_executor_compatibility_facade.py",
+      "path": "examples/release_pinned_usage/03_skill_library_agent_binding.py",
       "protected_usage": [
         "Agently.skills_executor.configure(...)",
         "Agently.skills_executor.install_skills(...)",
         "Agently.skills_executor.inspect_skills(...)",
-        "agent.resolve_skills_plan(..., mode=\"required\")"
+        "Agently.skill_library.resolve(...)",
+        "agent.require_skills(exact_revision_ref)",
+        "AgentExecution TaskContext binds the exact Skill revision"
       ],
-      "model_dependency": "none; standard SKILL.md registry and planner probe",
+      "model_dependency": "none; SkillLibrary installation and required AgentExecution binding probe",
       "requires_human_confirmation_for_edits": true,
-      "release_gate_reason": "4.1.4.1 keeps SkillsExecutor as a legacy compatibility facade while SkillsManager is the internal owner."
+      "release_gate_reason": "4.1.4.2 keeps management-shaped compatibility installation thin over SkillLibrary while AgentExecution owns task-scoped exact-revision binding."
     }
   ],
   "model_backed_release_examples": [
