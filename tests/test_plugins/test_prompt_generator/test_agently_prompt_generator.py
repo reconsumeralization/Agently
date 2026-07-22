@@ -337,6 +337,33 @@ def test_output_model():
     assert list(output_from_raw_list)[0] == 456
 
 
+def test_pydantic_output_model_preserves_declared_type_and_exposes_structural_prompt():
+    from pydantic import BaseModel, Field
+
+    class ActionItem(BaseModel):
+        task: str
+
+    class Ticket(BaseModel):
+        title: str = Field(description="Ticket title")
+        priority: int
+        action_items: list[ActionItem]
+
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.set("output", Ticket)
+
+    prompt_object = prompt.to_prompt_object()
+
+    assert isinstance(prompt_object.output, Mapping)
+    assert list(prompt_object.output) == ["title", "priority", "action_items"]
+    action_items_schema = prompt_object.output["action_items"][0]
+    assert isinstance(action_items_schema, list)
+    assert isinstance(action_items_schema[0], Mapping)
+    assert list(action_items_schema[0]) == ["task"]
+    assert prompt_object.output_format == "json"
+    assert prompt.to_output_model() is Ticket
+
+
 def test_serializable_output_prompt_preserves_not_null_ensure_marker():
     Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
     prompt = Prompt(Agently.plugin_manager, Agently.settings)

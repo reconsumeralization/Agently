@@ -26,6 +26,7 @@ from typing import (
     Sequence,
     Annotated,
     TYPE_CHECKING,
+    TypeGuard,
     get_origin,
     get_args,
     cast,
@@ -141,6 +142,56 @@ class AgentlyPromptGenerator(PromptGenerator):
             if isinstance(arg, type) and issubclass(arg, Enum):
                 return arg
         return None
+
+    @staticmethod
+    def _is_pydantic_model_type(value: Any) -> TypeGuard[type[BaseModel]]:
+        return isinstance(value, type) and issubclass(value, BaseModel)
+
+    @classmethod
+    def _pydantic_model_to_output_schema(
+        cls,
+        model_type: type[BaseModel],
+        *,
+        model_stack: frozenset[type[BaseModel]] = frozenset(),
+    ) -> dict[str, Any]:
+        next_stack = model_stack | {model_type}
+        schema: dict[str, Any] = {}
+        for field_name, field in model_type.model_fields.items():
+            output_name = field.alias if isinstance(field.alias, str) else field_name
+            annotation = field.annotation
+            while get_origin(annotation) is Annotated:
+                annotation = get_args(annotation)[0]
+
+            if cls._is_pydantic_model_type(annotation):
+                field_schema: Any = (
+                    annotation.__name__
+                    if annotation in next_stack
+                    else cls._pydantic_model_to_output_schema(annotation, model_stack=next_stack)
+                )
+            elif get_origin(annotation) in (list, set, tuple):
+                item_args = get_args(annotation)
+                item_type = item_args[0] if item_args else Any
+                while get_origin(item_type) is Annotated:
+                    item_type = get_args(item_type)[0]
+                if cls._is_pydantic_model_type(item_type):
+                    item_schema = (
+                        item_type.__name__
+                        if item_type in next_stack
+                        else cls._pydantic_model_to_output_schema(item_type, model_stack=next_stack)
+                    )
+                else:
+                    item_schema = item_type
+                field_schema = [item_schema]
+            else:
+                field_schema = annotation
+
+            description = field.description or ("Required field." if field.is_required() else "")
+            if field.is_required():
+                field_schema = (field_schema, description, True)
+            elif description:
+                field_schema = (field_schema, description)
+            schema[output_name] = field_schema
+        return schema
 
     @staticmethod
     def _is_ensure_marker(value: Any) -> bool:
@@ -704,6 +755,8 @@ class AgentlyPromptGenerator(PromptGenerator):
         if "output" in prompt_data and "output_format" not in prompt_data:
             prompt_data["output_format"] = self.settings.get("prompt.default_output_format", "json")
         prompt_object = PromptModel(**prompt_data)
+        if self._is_pydantic_model_type(prompt_object.output):
+            prompt_object.output = self._pydantic_model_to_output_schema(prompt_object.output)
         return prompt_object
 
     def to_text(
@@ -1221,6 +1274,10 @@ class AgentlyPromptGenerator(PromptGenerator):
             ]
 
     def to_output_model(self, *args, strict_output: bool | None = None, **kwargs) -> type["BaseModel"]:
+        declared_output = self.prompt.get("output")
+        if self._is_pydantic_model_type(declared_output):
+            return cast(type["BaseModel"], declared_output)
+
         prompt_object = self.to_prompt_object()
         output_prompt = prompt_object.output
 
