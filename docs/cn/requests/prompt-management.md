@@ -22,8 +22,9 @@ Agently 把 prompt 拆成命名槽位。槽位可组合，所以 agent 级持久
 
 ## 单次请求契约就近聚合
 
-一次性请求的相关信息应尽量集中在同一条 review 路径中。`input`、权威 `info`、
-`instruct`、`output` schema 与结果消费通常应组成一个可直接阅读的 execution block：
+一次性的 Agently fluent request 应保持为一条可直接阅读的请求链：`input`、权威
+`info`、`instruct`、`output` schema，以及 `get_result()`、`get_data()`、
+`async_get_data()` 等终结结果调用都应在这条链上清晰可见：
 
 ```python
 result = (
@@ -40,15 +41,10 @@ result = (
 triage = await result.async_get_data()
 ```
 
-Prompt 行为需要在 Python 外独立演进时，一份 YAML/JSON Prompt Configure 文件配合
-显式 `mappings` 也是聚合后的完整契约。只有 schema 或 prompt 片段会被原样复用、由
-另一接口/模块独立拥有和版本化、需要独立 review 或产品编辑，或者确实是动态生成、
-条件组装时，才应抽取；调用点必须能直接定位到该 owner。
-
-仅仅为了缩短链式调用，把只使用一次的 schema 搬到远处常量、微型 getter、request
-builder 或只转发的 wrapper，会增加 review 时的信息检索次数与深度，却没有增加真实
-owner，这不是有效抽象。反过来也不要把无关职责塞进一个大函数或大文件：应聚合的是
-一起变化、服务同一 consumer 的相关信息。
+一份 YAML/JSON Prompt Configure 文件配合显式 `mappings` 是等价的声明式表达。只有
+schema 或 prompt 片段会被原样复用、由另一 owner 独立版本化或产品编辑，或者确实是
+动态生成、条件组装时，才拆开这条请求链。不要仅仅为了让 Agently 请求链看起来更短，
+就把只使用一次的 schema 或 prompt 步骤搬到别处。
 
 ## 严格的外部接口契约
 
