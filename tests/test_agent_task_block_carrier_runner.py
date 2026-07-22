@@ -826,6 +826,14 @@ def test_real_sample_runner_exposes_structured_action_data_without_artifact_refs
 
 def test_real_sample_runner_reads_terminal_evidence_projection_from_close_snapshot():
     runner = _load_real_samples_runner()
+    synthetic_quote = {
+        "ticker": "AVGO",
+        "last_sale_price": "SYNTHETIC_AVGO_PRICE",
+        "net_change": "SYNTHETIC_AVGO_NET_CHANGE",
+        "percentage_change": "SYNTHETIC_AVGO_PERCENTAGE_CHANGE",
+        "last_trade_timestamp": "SYNTHETIC_AVGO_TIMESTAMP",
+        "source": "synthetic_quote_source",
+    }
     meta = {
         "close_snapshot": {
             "task": {
@@ -842,12 +850,7 @@ def test_real_sample_runner_reads_terminal_evidence_projection_from_close_snapsh
                                 "status": "ok",
                                 "body_state": "bounded",
                                 "body_preview": {
-                                    "companies": [
-                                        {
-                                            "ticker": "AVGO",
-                                            "last_sale_price": "$384.885",
-                                        }
-                                    ]
+                                    "companies": [synthetic_quote]
                                 },
                             },
                             {
@@ -878,6 +881,7 @@ def test_real_sample_runner_reads_terminal_evidence_projection_from_close_snapsh
     ]
     assert readbacks[1]["kind"] == "taskboard_action_artifact.readback"
     assert readbacks[1]["preview"][0]["title"].startswith("Microsoft to Deploy")
+    assert readbacks[0]["preview"]["companies"][0] == synthetic_quote
 
     metrics = runner.Metrics(route="taskboard", case_id="stock_risk_outlook")
     candidate = runner.framework_final_candidate(
@@ -897,6 +901,18 @@ def test_real_sample_runner_reads_terminal_evidence_projection_from_close_snapsh
     ]
     assert action_items[1]["kind"] == "taskboard_action_artifact.readback"
 
+
+def test_framework_action_event_count_includes_nested_agent_task_actions():
+    runner = _load_real_samples_runner()
+    stream_summary = {
+        "path_counts": {
+            "agent_task.action.started": 16,
+            "agent_task.action.completed": 16,
+            "runtime.progress.actions.market_quotes.started": 1,
+        }
+    }
+
+    assert runner.count_framework_action_events(stream_summary) == 16
 
 def test_real_sample_runner_prioritizes_action_readbacks_before_ref_limit():
     runner = _load_real_samples_runner()

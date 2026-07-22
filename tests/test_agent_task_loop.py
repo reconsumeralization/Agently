@@ -503,11 +503,31 @@ def test_model_evidence_projection_preserves_complete_structured_action_siblings
         success_criteria=["Every ticker uses the available quote fields."],
         execution="taskboard",
     )
+    synthetic_avgo = {
+        "last_sale_price": "SYNTHETIC_AVGO_PRICE",
+        "net_change": "SYNTHETIC_AVGO_NET_CHANGE",
+        "percentage_change": "SYNTHETIC_AVGO_PERCENTAGE_CHANGE",
+    }
     companies = []
     for ticker, price, net_change, percentage_change in (
-        ("NVDA", "$206.489", "-0.801", "-0.39%"),
-        ("AMD", "$544.21", "-0.22", "-0.04%"),
-        ("AVGO", "$385.28", "-1.22", "-0.32%"),
+        (
+            "NVDA",
+            "SYNTHETIC_NVDA_PRICE",
+            "SYNTHETIC_NVDA_NET_CHANGE",
+            "SYNTHETIC_NVDA_PERCENTAGE_CHANGE",
+        ),
+        (
+            "AMD",
+            "SYNTHETIC_AMD_PRICE",
+            "SYNTHETIC_AMD_NET_CHANGE",
+            "SYNTHETIC_AMD_PERCENTAGE_CHANGE",
+        ),
+        (
+            "AVGO",
+            synthetic_avgo["last_sale_price"],
+            synthetic_avgo["net_change"],
+            synthetic_avgo["percentage_change"],
+        ),
     ):
         companies.append(
             {
@@ -571,9 +591,10 @@ def test_model_evidence_projection_preserves_complete_structured_action_siblings
     avgo = next(
         item for item in body_preview["companies"] if item["ticker"] == "AVGO"
     )
-    assert avgo["last_sale_price"] == "$385.28"
-    assert avgo["net_change"] == "-1.22"
-    assert avgo["percentage_change"] == "-0.32%"
+    assert {
+        key: avgo[key]
+        for key in ("last_sale_price", "net_change", "percentage_change")
+    } == synthetic_avgo
 
 
 def test_cumulative_evidence_prefers_complete_prior_body_for_same_required_identity():
