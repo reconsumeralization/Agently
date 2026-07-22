@@ -153,6 +153,9 @@ await start_task
 
 同步对应方法是 `emit_to_sub_flow(...)` 和 `cancel_sub_flow(...)`。
 
+可以运行 [`examples/trigger_flow/active_sub_flow_control.py`](../../../examples/trigger_flow/active_sub_flow_control.py)
+查看可确定复现的取消与 fencing 示例。
+
 只有当前调用赢得 active/waiting frame 的取消转换时，
 `async_cancel_sub_flow(...)` 才返回 `True`；过晚或重复取消返回 `False`。
 取消会让 frame 从 `cancel_requested` 进入 `cancelled`，取消框架管理的协作式

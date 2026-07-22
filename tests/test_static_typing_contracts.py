@@ -43,7 +43,11 @@ from agently.types.data import (
     TaskBoardGraph,
     TaskBoardRevision,
 )
-from agently.types.plugins import AgentExecution
+from agently.types.plugins import (
+    ActionExecutor,
+    AgentExecution,
+    ExecutionResourceProvider,
+)
 
 
 def test_agent_execution_and_model_response_streaming_type_contracts():
@@ -99,6 +103,15 @@ def test_public_handler_type_aliases():
 
         model_handler: ModelStreamingHandler = model_stream_handler
         skills_handler: SkillRuntimeStreamHandler = skills_stream_handler
+
+
+def test_changed_runtime_protocols_are_publicly_typed():
+    if TYPE_CHECKING:
+        action_executor = cast(ActionExecutor, object())
+        resource_provider = cast(ExecutionResourceProvider, object())
+
+        assert_type(action_executor, ActionExecutor)
+        assert_type(resource_provider, ExecutionResourceProvider)
 
 
 def test_agent_execution_stream_protocol_contract():

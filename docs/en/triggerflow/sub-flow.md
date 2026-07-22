@@ -155,6 +155,9 @@ await start_task
 The synchronous counterparts are `emit_to_sub_flow(...)` and
 `cancel_sub_flow(...)`.
 
+Run [`examples/trigger_flow/active_sub_flow_control.py`](../../../examples/trigger_flow/active_sub_flow_control.py)
+for a deterministic cancellation-and-fencing example.
+
 `async_cancel_sub_flow(...)` returns `True` only when that call wins the active
 or waiting frame's cancellation transition. A late or duplicate cancellation
 returns `False`. Cancellation changes the frame through `cancel_requested` to

@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
   "framework": "agently",
-  "target_version": "4.1.4.2",
-  "release_train": "2026-07-4.1.4.2-dev",
-  "notes": "4.1.4.2 breaking development line: TaskContext owns progressive disclosure and one internal derived ContextIndex lifecycle; ContextReader owns consumer-bound exact readback and ContextPackage construction. TaskWorkspace owns task files and code-execution grants, including verifier-gated atomic terminal promotion; RecordStore owns records and durability; SkillLibrary owns immutable installed Skill revisions and authorized remote-source snapshots; SessionMemory recall enters through a TaskContext source; AgentExecution owns task-scoped Skill binding. Workspace-backed code execution selects provider-neutral ExecutionResource providers after immutable bundle materialization. AgentTask process state stays in memory/logs by default and record_store_recovery is opt-in. The former combined Workspace, ContextBuilder, SkillsManager, Skills execution route/strategies, skill_activation, and workspace_operation are removed without shims.",
+  "framework_version": "4.1.4.2",
+  "release_train": "2026-07-4.1.4.2",
+  "released_at": "2026-07-22",
+  "notes": "Version-scoped companion compatibility manifest for Agently 4.1.4.2. This breaking owner-boundary release assigns task information to TaskContext and ContextReader, task files to TaskWorkspace, durable records to RecordStore, immutable Skill revisions to SkillLibrary, and task-scoped Skill binding to AgentExecution. It also adds frame-scoped active sub-flow signaling and cancellation, aligns release-pinned Skill usage with current owners, and makes directly registered action/resource providers depend only on their runtime protocols while PluginManager retains plugin lifecycle ownership.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",

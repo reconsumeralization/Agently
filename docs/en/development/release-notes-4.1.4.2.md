@@ -1,14 +1,24 @@
 ---
-title: Agently 4.1.4.2 development notes
+title: Agently 4.1.4.2 Release Notes
 description: Breaking TaskContext, TaskWorkspace, RecordStore, and SkillLibrary ownership convergence.
 keywords: Agently, 4.1.4.2, TaskContext, TaskWorkspace, RecordStore, SkillLibrary
 ---
 
-# Agently 4.1.4.2 development notes
+# Agently 4.1.4.2 Release Notes
 
-4.1.4.2 is a breaking development-line architecture update. The former
+4.1.4.2 is a breaking architecture release. The former
 combined Workspace and Skills execution ownership is replaced rather than
 deprecated through aliases.
+
+## Core changes
+
+| Area | What changed | Recommended usage | Compatibility / risk | Evidence |
+|---|---|---|---|---|
+| Task information | `TaskContext` owns sources and derived indexes; `ContextReader` owns consumer-bound progressive readback | Bind sources to TaskContext and read through a scoped ContextReader | Breaking owner split; no combined Workspace shim | Context, AgentTask, recovery, and typing suites |
+| Files and records | `TaskWorkspace` owns task files; `RecordStore` owns durable records, snapshots, events, and memory persistence | Bind each owner explicitly with `use_task_workspace(...)` and `use_record_store(...)` | Breaking replacement of the former combined Workspace surface | Workspace/code-runtime and RecordStore suites |
+| Skills | `SkillLibrary` owns immutable revisions; AgentExecution owns exact-revision selection and binding | Install with the management facade when needed, resolve through `Agently.skill_library`, and bind with `agent.require_skills(...)` | Removed Skills route/strategy and prompt-injection ownership | Companion validators and release-pinned Skill example |
+| TriggerFlow sub-flows | Active frames are visible while running and accept frame-scoped signal/cancel control | Use explicit executions plus `get_sub_flow_frames()`, `async_emit_to_sub_flow(...)`, and `async_cancel_sub_flow(...)` | Additive API; cancellation fences write-back and continuation | Issue [#320](https://github.com/AgentEra/Agently/issues/320) and dedicated regression suite |
+| Execution providers | Direct runtime provider/executor protocols no longer require PluginManager lifecycle hooks | Implement the runtime protocol; implement plugin lifecycle only when loading through PluginManager | Structural typing correction; runtime dispatch is unchanged | Full pyright gate and provider/action tests |
 
 ## New owner boundaries
 
@@ -190,3 +200,11 @@ agent = (
 This development-line change intentionally provides no shim for the removed
 combined owner. The rollback baseline for this refactor is recorded in the
 local development history and spec evidence.
+
+## Compatibility
+
+- Package version: `4.1.4.2`.
+- Release manifest: `compatibility/releases/4.1.4.2.json`.
+- Agently-Skills catalog generation `v2` is aligned with framework `4.1.4.2`.
+- Recommended DevTools version remains `agently-devtools >=0.1.10,<0.2.0`;
+  unknown `triggerflow.*` RuntimeEvents remain fail-open compatible.

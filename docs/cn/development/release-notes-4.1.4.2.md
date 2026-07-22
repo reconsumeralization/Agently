@@ -1,13 +1,23 @@
 ---
-title: Agently 4.1.4.2 开发说明
-description: TaskContext、TaskWorkspace、RecordStore 与 SkillLibrary 所有权收敛的破坏式更新。
+title: Agently 4.1.4.2 Release Notes
+description: TaskContext、TaskWorkspace、RecordStore 与 SkillLibrary 所有权收敛的破坏式发布说明。
 keywords: Agently, 4.1.4.2, TaskContext, TaskWorkspace, RecordStore, SkillLibrary
 ---
 
-# Agently 4.1.4.2 开发说明
+# Agently 4.1.4.2 Release Notes
 
-4.1.4.2 是开发线破坏式架构更新。过去合并式 Workspace 与 Skills execution
+4.1.4.2 是破坏式架构 release。过去合并式 Workspace 与 Skills execution
 ownership 被直接替换，不通过 alias 走废弃兼容。
+
+## 核心变动
+
+| 领域 | 变动内容 | 推荐用法 | 兼容性 / 风险 | 证据 |
+|---|---|---|---|---|
+| 任务信息 | `TaskContext` 负责 sources 与派生 index；`ContextReader` 负责 consumer-bound 渐进 readback | 把 source 绑定到 TaskContext，通过 scoped ContextReader 读取 | 破坏式 owner 拆分；不提供 combined Workspace shim | Context、AgentTask、恢复与 typing 测试 |
+| 文件与记录 | `TaskWorkspace` 负责任务文件；`RecordStore` 负责 records、snapshot、event 与 memory durability | 分别通过 `use_task_workspace(...)` 和 `use_record_store(...)` 显式绑定 | 破坏式替换旧 combined Workspace surface | Workspace/code-runtime 与 RecordStore 测试 |
+| Skills | `SkillLibrary` 负责不可变 revision；AgentExecution 负责精确 revision selection/binding | 必要时用 management facade 安装，通过 `Agently.skill_library` 解析，再用 `agent.require_skills(...)` 绑定 | 移除 Skills route/strategy 与 prompt-injection owner | companion validators 与 release-pinned Skill example |
+| TriggerFlow sub-flow | active frame 在运行时可见，并支持 frame-scoped signal/cancel | 使用显式 execution，以及 `get_sub_flow_frames()`、`async_emit_to_sub_flow(...)`、`async_cancel_sub_flow(...)` | 增量 API；取消会 fence write-back 与 continuation | Issue [#320](https://github.com/AgentEra/Agently/issues/320) 与专项回归测试 |
+| Execution provider | 直接注册的 runtime provider/executor protocol 不再要求 PluginManager lifecycle hooks | 实现 runtime protocol；只有经 PluginManager 加载时才实现 plugin lifecycle | structural typing 修正；runtime dispatch 不变 | 完整 pyright gate 与 provider/action 测试 |
 
 ## 新所有者边界
 
@@ -158,3 +168,11 @@ agent = (
 
 本开发线更新不为被移除的合并式 owner 提供 shim。该重构的回退 baseline 已记录
 在本地开发历史与 spec evidence 中。
+
+## 兼容性
+
+- Package version：`4.1.4.2`。
+- Release manifest：`compatibility/releases/4.1.4.2.json`。
+- Agently-Skills catalog generation `v2` 已与框架 `4.1.4.2` 对齐。
+- 推荐 DevTools 版本仍为 `agently-devtools >=0.1.10,<0.2.0`；未知
+  `triggerflow.*` RuntimeEvent 保持 fail-open 兼容。
