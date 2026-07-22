@@ -8,7 +8,7 @@ keywords: Agently, 项目结构, settings, prompt, 工作流, FastAPI
 
 > 语言：[English](../../en/start/project-framework.md) · **中文**
 
-一旦超出单脚本，关注点分离的收益就很大：
+一旦超出单脚本，拆分真实关注点通常会有帮助：
 
 - 设置放在文件，不需要为不同环境改代码。
 - Prompt 放在 YAML / JSON，可被非工程同事 review。
@@ -35,7 +35,19 @@ my-agently-app/
     test_triage_flow.py
 ```
 
-只需 `settings.yaml` 与 `prompts/*` 这条主线就能跑起来，其余是可扩展骨架。
+只需 `settings.yaml` 与 `prompts/*` 这条主线就能跑起来，其余是可扩展骨架，
+不是必须逐项完成的目录清单。
+
+## 相关信息就近聚合
+
+一起变化、服务同一 consumer 的信息应尽量就近聚合。无论人还是 Coding Agent，理解
+一个请求、不变量或副作用所需的跨文件检索次数与嵌套深度都应尽量降低。不要只为了
+缩短当前代码或让目录形式看起来分层完整，就把只使用一次的 schema、常量、helper、
+class 或请求步骤搬到别处。
+
+这不意味着创建 god module。无关职责仍应拆分；只有新边界真正拥有复用、独立版本或
+review、policy/lifecycle、非平凡表示转换或动态组装时才抽取，并让调用点可以直接定位
+到该 owner。目标是可读的内聚，而不是最大程度内联。
 
 ## settings.yaml
 
@@ -86,9 +98,9 @@ result = agent.input(article_text).start()
 
 `$ensure: true` 是 `(type, "desc", True)` 元组第三槽的 YAML 形式——见 [Schema as Prompt](../requests/schema-as-prompt.md)。Legacy `$default` 已不再支持。
 
-## Agent 工厂
+## 多处复用时使用 Agent 工厂
 
-集中创建逻辑，避免调用点重复配置：
+多个调用点复用同一份有 owner 的配置时，可以集中创建：
 
 ```python
 # app/agents.py
@@ -98,6 +110,9 @@ from agently import Agently
 def make_summarizer():
     return Agently.create_agent().load_yaml_prompt("prompts/summarize.yaml")
 ```
+
+如果只有一个调用点，不要仅仅为了隐藏一次 `load_yaml_prompt(...)` 调用就创建 factory；
+等到它确实拥有复用、policy、lifecycle 或其他稳定边界时再抽取。
 
 ## Flow 放在哪里
 

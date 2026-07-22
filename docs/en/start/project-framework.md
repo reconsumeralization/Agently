@@ -6,7 +6,7 @@ keywords: Agently, project layout, settings, prompts, workflow, FastAPI
 
 # Project Framework
 
-Once you go past one script, the wins from separating concerns are large:
+Once you go past one script, separating real concerns can help:
 
 - Settings live in files, not in code that has to be edited per environment.
 - Prompts live in YAML / JSON and can be reviewed by non-engineers.
@@ -33,7 +33,22 @@ my-agently-app/
     test_triage_flow.py
 ```
 
-Only `settings.yaml` and `prompts/*` are required for this layout to be useful — the rest is a starting shape.
+Only `settings.yaml` and `prompts/*` are required for this layout to be useful —
+the rest is a starting shape, not a required checklist.
+
+## Keep related information local
+
+Co-locate information that changes together and serves the same consumer. For
+both people and coding agents, minimize the cross-file lookup count and nesting
+depth required to understand one request, invariant, or side effect. Do not
+move a one-use schema, constant, helper, class, or request step elsewhere merely
+to make the local code shorter or the directory tree look formally layered.
+
+This is not a reason to create a god module. Split unrelated responsibilities,
+and extract a boundary when it owns real reuse, independent versioning/review,
+policy or lifecycle, non-trivial representation translation, or dynamic
+composition. Keep an extracted owner directly discoverable from its call site.
+Readable cohesion is the goal, not maximum inlining.
 
 ## settings.yaml
 
@@ -84,9 +99,9 @@ result = agent.input(article_text).start()
 
 `$ensure: true` is the YAML form of the `(type, "desc", True)` tuple's third slot — see [Schema as Prompt](../requests/schema-as-prompt.md). Legacy `$default` is no longer supported.
 
-## Agent factories
+## Agent factories, when reused
 
-Centralize creation so call sites don't repeat configuration:
+Centralize creation when multiple call sites reuse the same owned configuration:
 
 ```python
 # app/agents.py
@@ -96,6 +111,10 @@ from agently import Agently
 def make_summarizer():
     return Agently.create_agent().load_yaml_prompt("prompts/summarize.yaml")
 ```
+
+Do not create this factory for a single call site merely to hide one
+`load_yaml_prompt(...)` call. Inline it until the factory owns real reuse,
+policy, lifecycle, or another stable boundary.
 
 ## Where flows live
 

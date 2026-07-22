@@ -20,6 +20,36 @@ Agently 把 prompt 拆成命名槽位。槽位可组合，所以 agent 级持久
 | `input` | user 消息 | 实际问题或 payload |
 | `output` | user 消息 + parser | 期望的返回结构 |
 
+## 单次请求契约就近聚合
+
+一次性请求的相关信息应尽量集中在同一条 review 路径中。`input`、权威 `info`、
+`instruct`、`output` schema 与结果消费通常应组成一个可直接阅读的 execution block：
+
+```python
+result = (
+    agent
+    .input({"ticket_text": ticket_text})
+    .info({"allowed_queues": allowed_queues})
+    .instruct("选择最合适的队列，并给出一条简洁说明。")
+    .output({
+        "queue": (str, "allowed_queues 中的一个值。", True),
+        "explanation": (str, "用户可见的简洁说明。", True),
+    })
+    .get_result()
+)
+triage = await result.async_get_data()
+```
+
+Prompt 行为需要在 Python 外独立演进时，一份 YAML/JSON Prompt Configure 文件配合
+显式 `mappings` 也是聚合后的完整契约。只有 schema 或 prompt 片段会被原样复用、由
+另一接口/模块独立拥有和版本化、需要独立 review 或产品编辑，或者确实是动态生成、
+条件组装时，才应抽取；调用点必须能直接定位到该 owner。
+
+仅仅为了缩短链式调用，把只使用一次的 schema 搬到远处常量、微型 getter、request
+builder 或只转发的 wrapper，会增加 review 时的信息检索次数与深度，却没有增加真实
+owner，这不是有效抽象。反过来也不要把无关职责塞进一个大函数或大文件：应聚合的是
+一起变化、服务同一 consumer 的相关信息。
+
 ## 严格的外部接口契约
 
 当模型输出会直接作为已定义 API 请求、模块接口或函数调用的参数时，模型必须
