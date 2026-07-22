@@ -19,7 +19,11 @@ from typing import Any
 import pytest
 
 from agently import Agently
-from agently.builtins.plugins.Blocks.AgentlyBlocks import ExecutionBlockRegistry, PlanBlockRegistry
+from agently.builtins.plugins.Blocks.AgentlyBlocks import (
+    ExecutionBlockRegistry,
+    PlanBlockRegistry,
+    _ledger_items_from_context_read,
+)
 from agently.core import TaskDAGExecutor
 from agently.core.context import TaskContext
 from agently.types.data import BlockCompileRequest, ContextBudget, ContextConsumer
@@ -340,6 +344,47 @@ async def test_blocks_context_read_uses_bound_context_reader():
     assert output["context_package"]["blocks"][0]["content"] == "The task deadline is 2026-07-01."
     assert output["locator_refs"][0]["source_ref"] == "task/deadline"
     assert output["evidence_snippets"][0]["content"] == "The task deadline is 2026-07-01."
+    for field in (
+        "execution_block_id",
+        "block_id",
+        "source_id",
+        "source_revision",
+        "source_ref",
+        "binding_id",
+    ):
+        assert output["locator_refs"][0][field]
+        assert output["evidence_snippets"][0][field]
+        assert output["locator_refs"][0][field] == output["evidence_snippets"][0][field]
+    assert output["bounded"]["source_coverage"] == {}
+    assert output["bounded"]["continuation_available"] is False
+
+
+def test_blocks_context_read_ledger_keeps_ref_only_snippet_state():
+    items = _ledger_items_from_context_read(
+        {"id": "read:media", "execution_block_id": "read:media"},
+        {
+            "query": "diagram",
+            "locator_refs": [],
+            "evidence_snippets": [
+                {
+                    "content_state": "ref_only",
+                    "content": None,
+                    "execution_block_id": "read:media",
+                    "block_id": "context-block:media",
+                    "source_id": "source:media",
+                    "source_revision": "revision:1",
+                    "source_ref": "assets/diagram.png",
+                    "binding_id": "binding:media",
+                }
+            ],
+            "diagnostics": [],
+        },
+        start_index=0,
+    )
+
+    assert len(items) == 1
+    assert items[0]["body_state"] == "ref_only"
+    assert "body" not in items[0]
 
 
 @pytest.mark.asyncio

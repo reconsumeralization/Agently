@@ -411,7 +411,11 @@ async def test_simulated_taskboard_protocol_retry_preserves_work_and_artifact(
                 assert protocol_repair["repair_contract"]["gate_kind"] == "output_contract"
                 assert protocol_repair["repair_contract"]["issue_code"] == "terminal_verifier_output_invalid"
                 assert protocol_repair["current_offered_reference_ids"] == []
-            evidence_ids = ["ref_not_offered"] if calls["verifier"] == 1 else []
+            criterion_id = (
+                "criterion:not-offered"
+                if calls["verifier"] == 1
+                else "criterion:1"
+            )
             return {
                 "is_complete": True,
                 "requires_block": False,
@@ -426,10 +430,10 @@ async def test_simulated_taskboard_protocol_retry_preserves_work_and_artifact(
                 "final_result": "final.md",
                 "criterion_checks": [
                     {
-                        "criterion_id": "criterion:1",
+                        "criterion_id": criterion_id,
                         "satisfied": True,
                         "summary": "The declared artifact exists at final.md.",
-                        "evidence_ids": evidence_ids,
+                        "evidence_ids": [],
                     }
                 ],
                 "material_claim_coverage_complete": True,

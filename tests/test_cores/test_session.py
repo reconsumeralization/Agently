@@ -1,5 +1,4 @@
 import pytest
-import asyncio
 from textwrap import indent
 from typing import Any, cast
 
@@ -188,102 +187,142 @@ async def test_session_memory_stores_record_store_records_with_fixed_fields(tmp_
 
 
 @pytest.mark.asyncio
-async def test_session_memory_empty_rerank_falls_back_to_candidates(tmp_path):
-    record_store = RecordStore(tmp_path / "session-memory-empty-rerank", mode="read_write")
-    await record_store.put(
-        {"memory": "Nimbus Retail prefers exactly two bullets plus one risk line."},
-        collection="memory",
-        kind="global_memory",
-        summary="Nimbus Retail update style",
-        scope={"memory_scope": "GLOBAL_MEMORY"},
-        meta={"tags": ["nimbus", "style"]},
-    )
-    session = Session(
-        id="memory-restart",
-        plugin_manager=Agently.plugin_manager,
-        settings={"session": {"memory": {"AgentlyMemory": {"retrieve": {"rerank_min_candidates": 1}}}}},
-        memory_store=record_store,
-    )
-    session.use_memory(mode="AgentlyMemory")
-
-    async def fake_plan(*, prompt, session):
-        _ = (prompt, session)
-        return {
-            "query": "customer delivery style",
-            "tags": ["customer"],
-            "include_global": True,
-            "include_session": False,
-        }
-
-    async def drop_everything(*, query, candidates):
-        _ = query
-        return {
-            "decisions": [
-                {
-                    "id": candidate["id"],
-                    "useful": False,
-                    "score": 0.0,
-                    "reason": "model judged too narrow",
-                }
-                for candidate in candidates
-            ]
-        }
-
-    session.memory._plan_retrieval = fake_plan
-    session.memory._rerank_candidates = drop_everything
-
-    request = Agently.create_agent("memory-empty-rerank").create_temp_request()
-    diagnostics = await session.async_prepare_memory(request.prompt, session.settings)
-    global_diagnostics = diagnostics["packages"]["GLOBAL_MEMORY"]
-
-    assert global_diagnostics["selected_count"] == 1
-    assert global_diagnostics["rerank"]["enabled"] is False
-    assert global_diagnostics["memory_rerank_empty_fallback"]["reason"] == (
-        "rerank_dropped_all_memory_candidates"
-    )
-    assert "Nimbus Retail update style" in str(request.prompt.to_serializable_prompt_data(inherit=True))
-
-
-@pytest.mark.asyncio
-async def test_session_memory_skips_rerank_for_single_candidate(tmp_path):
-    record_store = RecordStore(tmp_path / "session-memory-skip-rerank", mode="read_write")
-    await record_store.put(
-        {"memory": "Nimbus Retail escalation owner is Maya Chen."},
+async def test_session_memory_recall_uses_task_context_without_prompt_slots(tmp_path):
+    record_store = RecordStore(tmp_path / "session-memory-task-context", mode="read_write")
+    ref = await record_store.put(
+        {"memory": "Delivery updates must contain exactly two bullets and one risk line."},
         collection="memory",
         kind="session_memory",
-        summary="Nimbus escalation owner",
-        scope={"memory_scope": "SESSION_MEMORY", "session_id": "memory-restart"},
-        meta={"tags": ["nimbus", "owner"]},
+        summary="Saved delivery update promise",
+        scope={"memory_scope": "SESSION_MEMORY", "session_id": "memory-context"},
+        meta={"tags": ["delivery", "promise"]},
     )
     session = Session(
-        id="memory-restart",
+        id="memory-context",
         plugin_manager=Agently.plugin_manager,
         settings=Agently.settings,
         memory_store=record_store,
     )
     session.use_memory(mode="AgentlyMemory")
 
-    async def fake_plan(*, prompt, session):
-        _ = (prompt, session)
-        return {
-            "query": "escalation owner",
-            "tags": ["owner"],
-            "include_global": False,
-            "include_session": True,
-        }
+    class SelectOfferedMemory:
+        def __init__(self):
+            self.cards = []
 
-    async def should_not_rerank(*, query, candidates):
-        _ = (query, candidates)
-        raise AssertionError("single memory candidate should skip model rerank")
+        def input(self, _value):
+            return self
 
-    session.memory._plan_retrieval = fake_plan
-    session.memory._rerank_candidates = should_not_rerank
+        def info(self, value):
+            self.cards = list(value["offered_context_blocks"])
+            return self
 
-    request = Agently.create_agent("memory-skip-rerank").create_temp_request()
+        def instruct(self, _value):
+            return self
+
+        def output(self, _value, *, format):
+            assert format == "json"
+            return self
+
+        async def async_get_data(self):
+            return {"selected_keys": [item["block_key"] for item in self.cards]}
+
+    session.memory._create_model_request = lambda _phase: SelectOfferedMemory()
+    request = Agently.create_agent("memory-task-context-request").create_temp_request()
+    request.input("What delivery promise did we save?")
+
     diagnostics = await session.async_prepare_memory(request.prompt, session.settings)
-    session_diagnostics = diagnostics["packages"]["SESSION_MEMORY"]
+    prompt_data = request.prompt.get()
+    info = prompt_data.get("info", {})
 
-    assert session_diagnostics["selected_count"] == 1
-    assert session_diagnostics["rerank"]["enabled"] is False
-    assert session_diagnostics["memory_rerank_skipped"]["reason"] == "candidate_count_below_min"
-    assert "Nimbus escalation owner" in str(request.prompt.to_serializable_prompt_data(inherit=True))
+    assert "GLOBAL_MEMORY" not in prompt_data
+    assert "SESSION_MEMORY" not in prompt_data
+    assert set(info["session_memory_context"]) == {"blocks"}
+    assert set(info["session_memory_context"]["blocks"][0]) == {
+        "content",
+        "role",
+        "source_ref",
+        "completeness",
+    }
+    assert info["session_memory_context"]["blocks"][0]["source_ref"] == ref["id"]
+    assert session.memory.diagnostics[-1]["path"] == "task_context"
+    assert diagnostics["path"] == "task_context"
+
+
+@pytest.mark.asyncio
+async def test_session_memory_recall_fails_closed_when_semantic_selection_fails(tmp_path):
+    record_store = RecordStore(tmp_path / "session-memory-selection-failure", mode="read_write")
+    await record_store.put(
+        {"memory": "Do not expose this without semantic selection."},
+        collection="memory",
+        kind="session_memory",
+        summary="Protected optional memory",
+        scope={"memory_scope": "SESSION_MEMORY", "session_id": "selection-failure"},
+    )
+    session = Session(
+        id="selection-failure",
+        plugin_manager=Agently.plugin_manager,
+        settings=Agently.settings,
+        memory_store=record_store,
+    )
+    session.use_memory(mode="AgentlyMemory")
+    session.memory._create_model_request = lambda _phase: (_ for _ in ()).throw(
+        RuntimeError("selector unavailable")
+    )
+    request = Agently.create_agent("memory-selection-failure").create_temp_request()
+    request.input("Recall relevant memory")
+
+    diagnostics = await session.async_prepare_memory(request.prompt, session.settings)
+
+    assert request.prompt.get("info.session_memory_context") == {"blocks": []}
+    assert any(
+        item["code"] == "context.selection_failed"
+        for item in diagnostics["diagnostics"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_memory_context_source_is_fixed_to_global_and_active_session(tmp_path):
+    record_store = RecordStore(tmp_path / "session-memory-source-scope", mode="read_write")
+    global_ref = await record_store.put(
+        {"memory": "Global delivery policy."},
+        collection="memory",
+        kind="global_memory",
+        summary="Global policy",
+        scope={"memory_scope": "GLOBAL_MEMORY"},
+    )
+    active_ref = await record_store.put(
+        {"memory": "Active session promise."},
+        collection="memory",
+        kind="session_memory",
+        summary="Active promise",
+        scope={"memory_scope": "SESSION_MEMORY", "session_id": "active"},
+    )
+    other_ref = await record_store.put(
+        {"memory": "Other session secret."},
+        collection="memory",
+        kind="session_memory",
+        summary="Other secret",
+        scope={"memory_scope": "SESSION_MEMORY", "session_id": "other"},
+    )
+    session = Session(
+        id="active",
+        plugin_manager=Agently.plugin_manager,
+        settings=Agently.settings,
+        memory_store=record_store,
+    )
+    session.use_memory(mode="AgentlyMemory")
+
+    source = session.memory.create_context_source(session=session, settings=session.settings)
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=100,
+    )
+
+    assert source.source_kind == "session_memory"
+    assert {item.source_ref for item in page.descriptors} == {
+        global_ref["id"],
+        active_ref["id"],
+    }
+    with pytest.raises(PermissionError, match="not authorized"):
+        await source.async_read_exact(other_ref["id"], max_chars=1000)

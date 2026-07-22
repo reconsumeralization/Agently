@@ -222,6 +222,7 @@ class MockSlowCancelableRequester:
     name = "MockSlowCancelableRequester"
     DEFAULT_SETTINGS: dict[str, Any] = {}
     canceled_attempts = 0
+    started: asyncio.Event | None = None
 
     def __init__(self, prompt, settings):
         self.prompt = prompt
@@ -230,6 +231,7 @@ class MockSlowCancelableRequester:
     @classmethod
     def reset(cls):
         cls.canceled_attempts = 0
+        cls.started = asyncio.Event()
 
     @staticmethod
     def _on_register():
@@ -255,6 +257,8 @@ class MockSlowCancelableRequester:
 
     async def request_model(self, request_data: AgentlyRequestData):
         del request_data
+        if type(self).started is not None:
+            type(self).started.set()
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
@@ -1529,7 +1533,11 @@ async def test_trigger_flow_failure_cancels_sibling_model_request_and_emits_canc
 
         async def fail_branch(data: TriggerFlowRuntimeData):
             del data
-            await asyncio.sleep(0.05)
+            assert MockSlowCancelableRequester.started is not None
+            await asyncio.wait_for(
+                MockSlowCancelableRequester.started.wait(),
+                timeout=1,
+            )
             raise RuntimeError("branch boom")
 
         flow.batch(slow_branch, fail_branch)
@@ -1584,7 +1592,11 @@ async def test_trigger_flow_for_each_failure_waits_for_sibling_cleanup():
                 agent = _create_slow_agent()
                 execution = agent.input("Wait for for_each sibling cancellation.")
                 return await execution.async_get_text()
-            await asyncio.sleep(0.05)
+            assert MockSlowCancelableRequester.started is not None
+            await asyncio.wait_for(
+                MockSlowCancelableRequester.started.wait(),
+                timeout=1,
+            )
             raise RuntimeError("for_each branch boom")
 
         flow.to(prepare_items).for_each(concurrency=2).to(analyze_item).end_for_each()

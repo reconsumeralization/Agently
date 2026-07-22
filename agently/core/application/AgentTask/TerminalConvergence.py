@@ -81,13 +81,21 @@ class TerminalConvergenceState:
         if previous is not None and previous.get("terminal") is True:
             raise RuntimeError("Terminal convergence issue is already terminal; no further repair may be scheduled.")
         previous_digest = str(previous.get("last_state_digest") or "") if previous else ""
-        occurrence = int(previous.get("occurrence") or 0) + 1 if previous else 1
-        repair_count = int(previous.get("repair_count") or 0) if previous else 0
+        state_changed = previous is None or previous_digest != normalized_digest
+        occurrence = (
+            int(previous.get("occurrence") or 0) + 1
+            if previous is not None and not state_changed
+            else 1
+        )
+        repair_count = (
+            int(previous.get("repair_count") or 0)
+            if previous is not None and not state_changed
+            else 0
+        )
         terminal = bool(unrecoverable or occurrence >= 3)
         should_repair = not terminal and repair_count < 2
         if should_repair:
             repair_count += 1
-        state_changed = previous_digest != normalized_digest
         skip_verifier = (not verifier_called) and (not state_changed)
         record = {
             "issue": {

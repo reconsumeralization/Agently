@@ -253,6 +253,170 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
         }
 
     @classmethod
+    def _compact_taskboard_dependency_results_for_control(
+        cls,
+        dependency_results: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Project dependency state without duplicating ledger-owned bodies."""
+        compact: dict[str, Any] = {}
+        for card_id, result in dict(dependency_results).items():
+            try:
+                effective = TaskBoardCardResult.from_value(result)
+            except Exception:
+                compact[str(card_id)] = {"status": "unknown"}
+                continue
+            artifact_refs = [
+                cls._compact_artifact_ref_for_verifier(ref)
+                for ref in list(effective.artifact_refs)[:2]
+            ]
+            file_refs = [
+                cls._compact_artifact_ref_for_verifier(ref)
+                for ref in list(effective.file_refs)[:2]
+            ]
+            diagnostics = []
+            for diagnostic in list(effective.diagnostics)[:4]:
+                if not isinstance(diagnostic, Mapping):
+                    continue
+                item = {
+                    key: diagnostic.get(key)
+                    for key in ("kind", "type", "code", "status", "card_id", "stage")
+                    if diagnostic.get(key) not in (None, "", [], {})
+                }
+                if item:
+                    diagnostics.append(item)
+            metadata = {
+                key: effective.metadata.get(key)
+                for key in (
+                    "execution_kind",
+                    "execution_strategy",
+                    "next_board_action",
+                    "attempt_index",
+                    "max_attempts",
+                )
+                if effective.metadata.get(key) not in (None, "", [], {})
+            }
+            compact[str(card_id)] = DataFormatter.sanitize(
+                {
+                    "card_id": effective.card_id,
+                    "status": effective.status,
+                    "output_digest": effective.output_digest,
+                    "artifact_refs": artifact_refs,
+                    "artifact_refs_omitted": max(0, len(effective.artifact_refs) - 2),
+                    "file_refs": file_refs,
+                    "file_refs_omitted": max(0, len(effective.file_refs) - 2),
+                    "diagnostics": diagnostics,
+                    "diagnostics_omitted": max(0, len(effective.diagnostics) - 4),
+                    "metadata": metadata,
+                }
+            )
+        return compact
+
+    @classmethod
+    def _compact_taskboard_evidence_state_for_control(
+        cls,
+        evidence_view: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Keep lifecycle identity while the EvidenceLedger owns evidence data."""
+        cards = []
+        for card in list(cls._prompt_sequence(evidence_view.get("cards")))[:64]:
+            if not isinstance(card, Mapping):
+                continue
+            cards.append(
+                {
+                    key: card.get(key)
+                    for key in ("card_id", "status", "output_digest")
+                    if card.get(key) not in (None, "", [], {})
+                }
+            )
+        return DataFormatter.sanitize(
+            {
+                "schema_version": evidence_view.get("schema_version"),
+                "revision_id": evidence_view.get("revision_id"),
+                "status_counts": evidence_view.get("status_counts") or {},
+                "cards": cards,
+                "cards_omitted": max(
+                    0,
+                    len(cls._prompt_sequence(evidence_view.get("cards"))) - len(cards),
+                ),
+            }
+        )
+
+    @classmethod
+    def _compact_taskboard_acceptance_index_for_control(
+        cls,
+        acceptance_index: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        items = []
+        raw_items = cls._prompt_sequence(acceptance_index.get("items"))
+        for item in list(raw_items)[:32]:
+            if not isinstance(item, Mapping):
+                continue
+            items.append(
+                {
+                    "id": item.get("id"),
+                    "criterion": cls._truncate_prompt_text(item.get("criterion"), 500),
+                    "status": item.get("status"),
+                    "status_reason": cls._truncate_prompt_text(item.get("status_reason"), 320),
+                    "requirement_level": item.get("requirement_level"),
+                    "linked_card_ids": cls._normalize_string_list(item.get("linked_card_ids"))[:8],
+                    "linked_evidence_ids": cls._normalize_string_list(
+                        item.get("linked_evidence_ids")
+                    )[:8],
+                    "linked_locator_ids": cls._normalize_string_list(
+                        item.get("linked_locator_ids")
+                    )[:8],
+                    "cache_status": item.get("cache_status"),
+                }
+            )
+        return DataFormatter.sanitize(
+            {
+                "schema_version": acceptance_index.get("schema_version"),
+                "board_id": acceptance_index.get("board_id"),
+                "revision_id": acceptance_index.get("revision_id"),
+                "items": items,
+                "items_omitted": max(0, len(raw_items) - len(items)),
+                "status_counts": acceptance_index.get("status_counts") or {},
+            }
+        )
+
+    @classmethod
+    def _compact_taskboard_scoped_evidence_state_for_control(
+        cls,
+        scoped_evidence_view: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        identities = []
+        raw_items = cls._prompt_sequence(scoped_evidence_view.get("evidence_items"))
+        for item in list(raw_items)[:32]:
+            if not isinstance(item, Mapping):
+                continue
+            identities.append(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "reference_id",
+                        "id",
+                        "kind",
+                        "status",
+                        "body_state",
+                        "source_role",
+                    )
+                    if item.get(key) not in (None, "", [], {})
+                }
+            )
+        return DataFormatter.sanitize(
+            {
+                "schema_version": scoped_evidence_view.get("schema_version"),
+                "revision_id": scoped_evidence_view.get("revision_id"),
+                "selected_acceptance_item_ids": scoped_evidence_view.get(
+                    "selected_acceptance_item_ids"
+                )
+                or [],
+                "evidence_identities": identities,
+                "evidence_items_omitted": max(0, len(raw_items) - len(identities)),
+            }
+        )
+
+    @classmethod
     def _compact_taskboard_revision_for_prompt(
         cls,
         revision: Any,
@@ -671,14 +835,14 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
                     cls._compact_taskboard_context_read(item)
                     for item in execution_results
                     if str(item.get("kind") or "") == "context_read"
-                ][:8]
+                ]
                 if operations:
                     return operations
         direct_operations = block_carrier.get("context_reads")
         if isinstance(direct_operations, Sequence) and not isinstance(direct_operations, (str, bytes, bytearray)):
             return [
                 cls._compact_taskboard_context_read(item)
-                for item in list(direct_operations)[:8]
+                for item in direct_operations
                 if isinstance(item, Mapping)
             ]
         return []
@@ -749,6 +913,7 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "retrieval_selected_count",
             "retrieval_omitted",
             "returned_results",
+            "continuation_available",
             "file_returned_results",
             "index_returned_results",
             "index_total_matches",
@@ -763,6 +928,23 @@ class AgentTaskTaskBoardProjectionMixin(AgentTaskMixinBase):
             "truncated",
         )
         compact = {key: bounded.get(key) for key in keep_keys if key in bounded}
+        raw_coverage = bounded.get("source_coverage")
+        if isinstance(raw_coverage, Mapping):
+            compact["source_coverage"] = {
+                str(binding_id): {
+                    "scope": cls._compact_verifier_prompt_value(
+                        record.get("scope", {}),
+                        max_chars=700,
+                    ),
+                    "returned_candidates": record.get("returned_candidates", 0),
+                    "exhaustive": bool(record.get("exhaustive")),
+                    "continuation_available": bool(
+                        record.get("continuation_available")
+                    ),
+                }
+                for binding_id, record in list(raw_coverage.items())[:16]
+                if isinstance(record, Mapping)
+            }
         diagnostics = bounded.get("diagnostics")
         if isinstance(diagnostics, Sequence) and not isinstance(diagnostics, str | bytes | bytearray):
             compact["diagnostics"] = cls._model_hot_diagnostics(list(diagnostics)[:4])

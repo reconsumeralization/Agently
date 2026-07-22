@@ -37,6 +37,7 @@ from .Guidance import AgentTaskGuidanceMixin
 from .RuntimeControl import AgentTaskRuntimeMixin
 from .Resume import AgentTaskResumeMixin
 from .Observation import AgentTaskObservationMixin
+from .TaskEvidenceContextSource import TaskEvidenceContextSource
 
 
 class AgentTask(
@@ -119,6 +120,7 @@ class AgentTask(
                 "or call agent.use_task_workspace(...)."
             )
         self.task_workspace = resolved_task_workspace
+        self._task_reference_catalog = TaskReferenceCatalog(self.id)
         owns_task_context = task_context is None
         if owns_task_context:
             self.task_context = TaskContext(
@@ -132,10 +134,27 @@ class AgentTask(
             )
         else:
             self.task_context = task_context
+        evidence_binding_id = f"task_evidence_binding:{self.id}"
+        if evidence_binding_id not in {
+            binding.binding_id for binding in self.task_context.snapshot().bindings
+        }:
+            self.task_context.attach(
+                TaskEvidenceContextSource(self._task_reference_catalog),
+                binding_id=evidence_binding_id,
+                scope="task",
+                metadata={
+                    "description": (
+                        "Canonical body-bearing evidence produced during this AgentTask."
+                    ),
+                    # This source is a retrieval surface, not an instruction to
+                    # resend every prior Action body in each ordinary context
+                    # package. Scoped ContextReader plans opt into it by kind.
+                    "disclosure_mode": "explicit_retrieval",
+                },
+            )
         self.context_readers: dict[tuple[str, str], Any] = {}
         self.context_packages: list[Any] = []
         self.context_consumptions: list[Any] = []
-        self._task_reference_catalog = TaskReferenceCatalog(self.id)
         self._terminal_convergence_state = TerminalConvergenceState(self.id)
         self.goal = str(goal)
         self.success_criteria = [str(item) for item in success_criteria if str(item).strip()]
@@ -238,6 +257,14 @@ class AgentTask(
         self._resumed_iteration_summaries: list[dict[str, Any]] = []
         self._resumed_taskboard_state: dict[str, Any] | None = None
         self._latest_taskboard_acceptance_index: dict[str, Any] | None = None
+        # TaskBoard read progress is operational task state, not diagnostics.
+        # It is keyed by the stable owner/locator/content-version identity so
+        # narrower evidence projections and durable resume do not reread a
+        # completed byte range or reuse progress for changed content.
+        self._taskboard_read_progress: dict[str, Any] = {
+            "schema_version": "agent_task_taskboard_read_progress/v1",
+            "items": {},
+        }
         self._taskboard_planned_task_workspace_deliverables: list[str] = []
         self._resumed_prior_result: Any = None
         self._terminal_deliverable_refs: list[RecordRef] = []

@@ -17,16 +17,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
-import json
-import re
-import shutil
-import subprocess
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Concatenate, Literal, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Concatenate, ParamSpec, TypeVar, cast
 
 from agently.types.data.event import RuntimeEvent, RuntimeEventDict
 from agently.types.data.record_store import (
@@ -42,13 +38,10 @@ from agently.types.data.record_store import (
     StoredRuntimeEvent,
 )
 from agently.types.plugins import RecordStoreBackend
-from .Errors import RecordStorePolicyError
 from .Retrieval import RerankHandler, retrieve_records
 from ._defaults import default_record_store_root, merge_scope
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from .Registry import RecordStoreRegistry
 
 

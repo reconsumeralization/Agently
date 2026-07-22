@@ -60,8 +60,10 @@ execution = Agently.blocks.bind_runtime(graph).create_execution(
 ```
 
 `context_read` 只接受 `read`、`search`、`scoped_search`。它返回
-ContextPackage projection、locator refs 与 bounded evidence snippets。写入、
-links、checkpoints 和其他副作用 fail closed。
+ContextPackage projection、locator refs、bounded evidence snippets、逐 source
+coverage 与紧凑的 `continuation_available` 事实。source cursor 仍是
+TaskContext-owned reader 的私有状态，不由 block 暴露。写入、links、checkpoints
+和其他副作用 fail closed。
 
 `source_kinds`、`path`、`pattern`、`method`、`top_n` 等 source-specific
 filters 会转发给绑定的 reader。它们约束 candidate collection，不代替语义

@@ -10,14 +10,21 @@ Agently 把过去混在 Workspace 里的职责拆成四个所有者。
 
 | 所有者 | 负责 | 不负责 |
 |---|---|---|
-| `TaskContext` | 任务信息聚合、直接信息块、source binding、不可变读取快照 | 文件、持久化、语义执行路由 |
+| `TaskContext` | 任务信息聚合、直接信息块、source binding 与一套内部派生索引生命周期 | 文件、持久化、语义执行路由 |
 | `ContextReader` | 绑定 consumer/phase 的检索与渐进式披露；返回 `ContextPackage` | source 存储、写入、副作用 |
 | `TaskWorkspace` | 明确的任务文件边界：路径约束、写入策略、格式化 readback、digest 与 file refs | records、memory、snapshot、Skill 选择 |
 | `RecordStore` | 持久 records、检索索引、links、checkpoints、TriggerFlow snapshots/events、memory 持久化 | 任务文件、prompt 组装、语义相关性判断 |
 
-`ContextSource` adapter 让不同来源的信息可被读取，但不会把来源所有权
-搬进 `TaskContext`。内置 adapter 覆盖 SkillLibrary、TaskWorkspace 和
-RecordStore；应用也可以挂载自己的 source。
+`ContextSource` adapter 让不同来源的信息可被读取，但不会把 source truth
+搬进 `TaskContext`。source 通过 `async_enumerate_descriptors(...)` 暴露结构描述，
+通过 `async_read_exact(...)` 返回有界 canonical 内容；它不判断跨 source 相关性。
+内置 adapter 覆盖 SkillLibrary、TaskWorkspace、RecordStore 与 SessionMemory
+recall；应用也可以挂载自己的 source kind，例如经授权的固定仓库 adapter。
+
+source 还可以实现可选的 `ContextSourceScopedRead` protocol。ContextReader 只在
+canonical ref 已经选定并通过授权后使用它，在该 ref 内定位一个确定性的有界范围。
+这是 source mechanism，不是第二套 index 或语义相关性 owner；未实现时仍回退
+`async_read_exact(...)`。
 
 ## 文件边界：TaskWorkspace
 
@@ -51,9 +58,22 @@ agent.enable_task_workspace_file_actions(
 )
 ```
 
+文件格式扩展仍由同一个 owner 承担。把 `TaskWorkspaceFileIOHandler` 直接注册到
+已绑定的 `TaskWorkspace`；不存在另一套可能与实际文件边界发生 registry 漂移的
+Workspace manager 或 factory：
+
+```python
+task_workspace.register_file_io_handler(custom_file_handler)
+```
+
 TaskWorkspace 为宿主 readback 提供稳定的 locator 与 content-version facts。
 `[[ref:ref_1]]` 这类短引用只是请求内显示别名，不是持久身份；宿主必须校验
 它，再映射回 canonical reference 身份。
+
+AgentTask 的 required 最终交付会先写成暂存候选，并在 terminal verification
+前完成全文读回。只有 verifier 验收后，TaskWorkspace 才按 digest 对声明目标执行
+原子提升，并再次完整读取提升后的 bytes。verification 拒绝不会覆盖旧目标；提升
+或提升后读回失败会把任务转为 blocked，而不是声称已经交付。
 
 ## 持久化边界：RecordStore
 
@@ -123,14 +143,102 @@ package = await reader.async_read(
 )
 ```
 
-每个 reader 固定一份 TaskContext/source revision 快照；快照过期后应显式
-refresh 或创建新 reader。required 和显式请求的信息块不能被静默丢弃。多个可选 prose
+`TaskContext` 是唯一的任务信息 aggregate。TaskContext 负责 source bindings 与
+一套内部 `ContextIndex`：构造、同步、失效并复用派生 source partition；它不是公开
+manager，也不是 canonical source truth。TaskContext 通过
+`task_context.reader(...)` 创建 reader，并通过
+`task_context.restore_reader(...)` 恢复已导出的 reader state；不支持脱离
+TaskContext 独立构造或恢复 `ContextReader`。reader 是公开的、绑定
+consumer/phase 的句柄，类似由 aggregate 持有的 execution handle；
+`ContextPackage` 是跨 ModelRequest、AgentTask、Blocks 或持久化边界传递的不可变值，
+不是另一个 context owner。
+
+每个 reader 固定一份 TaskContext/source revision 快照；读取开始前已经过期时应显式
+refresh 或创建新 reader。如果列举候选本身推进了 source revision、但 TaskContext 结构
+未变化（例如 source 首次建立惰性读视图），ContextReader 会重新固定新 revision 并重取
+一次；持续或并发变化仍然 fail closed。required 和显式请求的信息块不能被静默丢弃。多个可选 prose
 candidate 需要相关性判断时，使用 Agently `ModelRequest` semantic selector；
 模型只返回宿主发放的 selection key，宿主校验后再重建 canonical record。
 
-`source_kinds` 是结构性来源过滤，不是语义路由。内置值包括
-`task_workspace` 与 `record_store`；Skill source 已由安装 revision 和
-execution binding 限定。
+ContextIndex 把 source descriptor 枚举成以 revision/profile/provider 为 key 的
+partition，可使用 `structural`、`lexical` 或宿主配置的 `hybrid` 候选检索；精确 bytes
+仍由 source 的 `async_read_exact(...)` 返回，或在 ref 选定后由可选的确定性 scoped-read
+端口返回。可复用 partition 可以避免重复构建未变化
+的 embedding；只有 policy 允许时 vector failure 才降级，并写入 package diagnostic。
+ContextReader 负责 consumer-local offset、去重、可选 ModelRequest selection、精确
+readback 与 package budget。返回 package 暴露逐 binding 的 `source_coverage` 与 index
+diagnostic，不暴露内部 cache key 或 provider vector。
+
+不可变 ContextPackage 保留完整 omission 与 diagnostic 事实用于审计。AgentTask 的
+model-hot view 会限制重复的可选 omission 明细并增加原因计数；required delivery 仍在
+该投影之前 fail closed。
+
+Context 交付会区分媒体类型。纯文本以及由来源解析出的文本可以进入 package；内置
+TaskWorkspace source 会先解析受支持的 PDF、DOCX、XLSX 与 PPTX 文件。若解析器或
+可选依赖不可用，该文档只交付引用。PDF 或 Office 的 descriptor 与 exact read 必须
+同时保持 `context_representation=parsed_text`，且精确读取结果必须是文本；调用方提供但
+没有解析来源证明的字符串不能进入上下文。已知的非文本 MIME 或文件后缀不能被冲突的
+`content_kind="text"` 声明覆盖；类型信号冲突时按非文本或 unknown 保守关闭。Python、
+Node.js、Go、C 与 C++ 的主流源码后缀按文本处理，包括空源码文件。
+
+图片、压缩包、可执行文件、音视频、未知格式和任意二进制字节都不会被强制转换为猜测
+文本；模型侧投影只包含规范文件名/引用。来源提供的摘要、OCR 文本和推测内容会被移除；
+MIME、摘要哈希和大小等事实只能在宿主侧作为审计元数据保留。
+
+图片只有在具体 consumer 显式声明支持图片附件时才会进入附件通道，否则只交付引用：
+
+```python
+from agently.types.data import ContextConsumer
+
+reader = task_context.reader(
+    consumer=ContextConsumer(
+        "visual-reviewer",
+        capabilities={"attachments": {"image": True}},
+    ),
+)
+```
+
+AgentTask 使用同一能力声明：
+
+```python
+execution = agent.goal("Review the attached chart").strategy(
+    "taskboard",
+    context_consumer_capabilities={"attachments": {"image": True}},
+)
+```
+
+Agently 不根据模型名推断视觉能力，通用的 `attachments=True` 也不代表支持图片理解。
+显式支持时，ContextReader 生成经过校验的图片附件块，AgentTask 通过 ModelRequest
+附件通道绑定；data URL 不会序列化进文本 context pack。没有该显式能力时，模型只会
+收到文件名/引用，不会收到生成的摘要或 OCR 替代内容。图片理解仍由模型负责。附件为空
+或格式非法时，本次读取失败，不会退化为根据文件名猜测内容。
+
+required 内容超出预算时默认仍然 fail closed。只有 Skill 或调用方显式接受有损投影
+时，才可设置 `metadata={"required_overflow": "lossy_digest"}`。此时 Skill source
+返回有界、`completeness="lossy"` 的结构化纲要，并保留不可变全文 ref、有序 section
+refs、原始长度与省略事实；不会把静默截断伪装成完整权威指令。可选 section 仍由语义
+selector 选择。只需要 required core、明确不做可选选择的 host preflight 还可以设置
+`optional_selection="none"`。
+
+AgentTask 通过同一份 context budget 传递该策略：
+
+```python
+execution = agent.goal(goal, success_criteria=criteria).strategy(
+    "taskboard",
+    context_budget={
+        "chars": 12_000,
+        "required_overflow": "lossy_digest",
+    },
+)
+```
+
+只有明确接受有损披露时才使用该设置；否则应换用更大/更聚焦的 consumer，或让
+required Skill 在业务执行前失败。
+
+`source_kinds` 是结构性来源过滤，不是语义路由，也不是封闭枚举。有效值来自当前
+TaskContext 实际挂载的 source kind；存在相应 adapter 时可以包括
+`task_workspace`、`record_store`、`skill_library`、`session_memory`、`pinned_repository` 等。
+未知 kind 会在 source 枚举前失败。
 
 AgentTask 为每个实际 planner、worker、control card 与 verifier 请求创建独立的
 reader/package。只有响应成功后才记录 `ContextConsumption`，其中保留精确的

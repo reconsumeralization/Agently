@@ -15,10 +15,94 @@
 
 from __future__ import annotations
 
+from agently.types.data import RunContext
+
 from .TaskShared import *
 
 
 class AgentTaskCarrierMixin(AgentTaskMixinBase):
+    def _bounded_action_result_refs(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Project only trusted cold-reference identities across a work-unit boundary."""
+
+        artifact_refs: list[dict[str, Any]] = []
+        file_refs: list[dict[str, Any]] = []
+        artifact_seen: set[tuple[str, str, str]] = set()
+        file_seen: set[tuple[str, str, str]] = set()
+        for record in records:
+            raw_artifact_refs = record.get("artifact_refs")
+            if isinstance(raw_artifact_refs, Sequence) and not isinstance(
+                raw_artifact_refs, str | bytes | bytearray
+            ):
+                for raw_ref in raw_artifact_refs:
+                    if not isinstance(raw_ref, Mapping):
+                        continue
+                    ref = dict(DataFormatter.sanitize(raw_ref))
+                    selection_key = str(ref.get("selection_key") or "").strip()
+                    if not selection_key:
+                        continue
+                    ref.setdefault("owner", "action_artifact")
+                    ref.setdefault("locator", selection_key)
+                    content_version = str(
+                        ref.get("content_version") or ref.get("sha256") or ""
+                    ).strip()
+                    if not content_version:
+                        manager = getattr(getattr(self.agent, "action", None), "_artifact_manager", None)
+                        get_artifact_id = getattr(manager, "get_artifact_id_for_selection", None)
+                        get_artifact = getattr(manager, "get_artifact", None)
+                        artifact_id = (
+                            get_artifact_id(selection_key)
+                            if callable(get_artifact_id)
+                            else None
+                        )
+                        artifact = get_artifact(artifact_id) if artifact_id and callable(get_artifact) else None
+                        if isinstance(artifact, Mapping):
+                            content_version = str(artifact.get("sha256") or "").strip()
+                    if content_version:
+                        ref["content_version"] = content_version
+                    key = (
+                        str(ref.get("owner") or ""),
+                        str(ref.get("locator") or ""),
+                        content_version,
+                    )
+                    if key in artifact_seen:
+                        continue
+                    artifact_seen.add(key)
+                    artifact_refs.append(ref)
+            raw_file_refs = record.get("file_refs")
+            if isinstance(raw_file_refs, Sequence) and not isinstance(
+                raw_file_refs, str | bytes | bytearray
+            ):
+                for raw_ref in raw_file_refs:
+                    if not isinstance(raw_ref, Mapping):
+                        continue
+                    ref = dict(DataFormatter.sanitize(raw_ref))
+                    path = str(ref.get("path") or "").strip()
+                    if not path:
+                        continue
+                    ref.setdefault("owner", "task_workspace")
+                    ref.setdefault("locator", path)
+                    content_version = str(
+                        ref.get("content_version")
+                        or ref.get("content_version_id")
+                        or ref.get("sha256")
+                        or ""
+                    ).strip()
+                    if content_version:
+                        ref["content_version"] = content_version
+                    key = (
+                        str(ref.get("owner") or ""),
+                        str(ref.get("locator") or ""),
+                        content_version,
+                    )
+                    if key in file_seen:
+                        continue
+                    file_seen.add(key)
+                    file_refs.append(ref)
+        return artifact_refs, file_refs
+
     def _normalize_bounded_action_commands(
         self,
         *,
@@ -60,8 +144,9 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 )
 
             spec = get_spec(action_id) if callable(get_spec) else None
-            kwargs = spec.get("kwargs") if isinstance(spec, Mapping) else None
-            meta = spec.get("meta") if isinstance(spec, Mapping) else None
+            spec_mapping: Mapping[str, Any] = spec if isinstance(spec, Mapping) else {}
+            kwargs = spec_mapping.get("kwargs")
+            meta = spec_mapping.get("meta")
             if isinstance(kwargs, Mapping):
                 declared_keys = {str(key) for key in kwargs}
                 host_only_keys = set(
@@ -79,6 +164,16 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         "invalid_input_keys",
                         f"{unit_label} action command '{action_id}' includes undeclared or host-only "
                         f"input keys: {', '.join(unexpected_keys)}.",
+                    )
+                required_input_keys = set(
+                    self._normalize_string_list(spec_mapping.get("required_input_keys"))
+                )
+                missing_input_keys = sorted(required_input_keys - set(action_input))
+                if missing_input_keys:
+                    return [], (
+                        "missing_input_keys",
+                        f"{unit_label} action command '{action_id}' is missing required "
+                        f"input keys: {', '.join(missing_input_keys)}.",
                     )
 
             commands.append(
@@ -214,14 +309,22 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                     posthoc_projection=False,
                 )
 
+        parent_run_context = RunContext.create(
+            run_kind="agent_execution",
+            execution_id=execution_id,
+            agent_name=self.agent.name,
+            meta={"task_id": self.id, "execution_kind": execution_kind},
+        )
+        raw_action_logs = await self.agent.action._async_execute_action_calls(
+            action_calls=commands,
+            settings=self.agent.settings,
+            agent_name=self.agent.name,
+            parent_run_context=parent_run_context,
+            concurrency=concurrency,
+        )
         action_logs = [
             dict(record)
-            for record in await self.agent.action._async_execute_action_calls(
-                action_calls=commands,
-                settings=self.agent.settings,
-                agent_name=self.agent.name,
-                concurrency=concurrency,
-            )
+            for record in raw_action_logs
             if isinstance(record, Mapping)
         ]
         if project_flat_action_batch:
@@ -238,6 +341,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         all_succeeded = len(action_logs) == len(commands) and all(
             self._bounded_action_command_succeeded(record) for record in action_logs
         )
+        artifact_refs, file_refs = self._bounded_action_result_refs(action_logs)
         diagnostic = {
             "execution_kind": execution_kind,
             "command_source": command_source,
@@ -263,6 +367,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 ],
                 "remaining_work": [] if all_succeeded else ["Inspect failed Action diagnostics."],
                 "diagnostics": [] if all_succeeded else [diagnostic],
+                "artifact_refs": DataFormatter.sanitize(artifact_refs),
+                "file_refs": DataFormatter.sanitize(file_refs),
             },
             {
                 "execution_id": execution_id,
@@ -270,6 +376,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "route": {"selected_route": "action_call", "status": status},
                 "logs": {
                     "action_logs": action_logs,
+                    "artifact_refs": DataFormatter.sanitize(artifact_refs),
+                    "file_refs": DataFormatter.sanitize(file_refs),
                     "route_logs": {},
                     "errors": [] if all_succeeded else [diagnostic],
                 },
@@ -308,6 +416,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         "name",
                         "desc",
                         "kwargs",
+                        "required_input_keys",
                         "returns",
                         "side_effect_level",
                         "read_only",
@@ -359,7 +468,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "plan": DataFormatter.sanitize(plan),
                 "execution_prompt": self._execution_prompt_context(),
                 "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
-                "retrieval_policy": scoped_retrieval_policy(),
+                "retrieval_policy": self._task_context_retrieval_policy(),
                 "context_summary": {
                     "item_count": len(context_pack.get("items", [])),
                     "profile": context_pack.get("profile"),
@@ -391,6 +500,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 for capability_id in scoped_ids
             ),
             delivery_contract=delivery_contract,
+            retrieval_policy=self._task_context_retrieval_policy(),
             runtime_preferences={
                 "handler": (
                     "agent_task_material_claim_patch"
@@ -586,6 +696,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             resolved_info_payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
         else:
             payload["context_pack"] = DataFormatter.sanitize(request_context_pack)
+        self._bind_task_context_attachments(execution, context_package)
         execution.input(payload)
         if resolved_info_payload:
             execution.info(resolved_info_payload)
@@ -831,12 +942,31 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         if not isinstance(query_groups, Sequence) or isinstance(query_groups, (str, bytes, bytearray)):
             return ()
         blocks: list[PlanBlockInstance] = []
-        for index, raw_group in enumerate(query_groups[:8]):
+        reserved_results = 0
+        for index, raw_group in enumerate(query_groups):
             if not isinstance(raw_group, Mapping):
                 continue
             query = str(raw_group.get("query") or "").strip()
             if not query:
                 continue
+            raw_max_results = raw_group.get("max_results", 8)
+            try:
+                max_results = int(raw_max_results)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "Scoped retrieval max_results must be a positive integer."
+                ) from error
+            if max_results <= 0:
+                raise ValueError(
+                    "Scoped retrieval max_results must be a positive integer."
+                )
+            reserved_results += max_results
+            if reserved_results > SCOPED_RETRIEVAL_RESULT_CAPACITY:
+                raise ValueError(
+                    "Scoped retrieval exceeds the model-visible evidence capacity "
+                    f"of {SCOPED_RETRIEVAL_RESULT_CAPACITY} results; split the work "
+                    "into consumer-owned continuation batches."
+                )
             expected_role = str(raw_group.get("expected_role") or "evidence_snippet").strip()
             filters = cls._scoped_retrieval_filters(raw_group)
             include_snippets = expected_role != "locator_ref"
@@ -844,7 +974,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "operation": "read",
                 "query": query,
                 "filters": filters,
-                "max_results": raw_group.get("max_results", 8),
+                "max_results": max_results,
                 "include_snippets": include_snippets,
                 "snippet_limit": raw_group.get("snippet_limit", 1200),
                 "snippet_offset": raw_group.get("snippet_offset", 0),
@@ -859,13 +989,7 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "source_kinds",
                 "include_hidden",
                 "max_file_bytes",
-                "context_lines",
                 "tags",
-                "method",
-                "selection",
-                "top_n",
-                "rerank",
-                "max_candidates",
             ):
                 value = raw_group.get(key)
                 if value is not None:
@@ -882,11 +1006,11 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                         "evidence_snippets": "bounded source text when requested",
                     },
                     evidence_contract={
-                        "role_policy": scoped_retrieval_policy(),
+                        "role_policy": dict(work_unit.retrieval_policy),
                         "semantic_acceptance_owner": "planner_or_verifier",
                     },
                     runtime_preferences={
-                        "retrieval_policy": scoped_retrieval_policy(),
+                        "retrieval_policy": dict(work_unit.retrieval_policy),
                         "query_group_index": index,
                     },
                 )
@@ -929,7 +1053,12 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return value
 
     @classmethod
-    def _scoped_retrieval_results_from_block_context(cls, block_context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _scoped_retrieval_results_from_block_context(
+        cls,
+        block_context: Mapping[str, Any],
+        *,
+        include_host_identity: bool = False,
+    ) -> list[dict[str, Any]]:
         state = block_context.get("state")
         if not isinstance(state, Mapping):
             return []
@@ -952,22 +1081,38 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                     "query": output.get("query"),
                     "filters": DataFormatter.sanitize(output.get("filters") or {}),
                     "bounded": cls._model_hot_scoped_retrieval_bounded(output.get("bounded")),
-                    "locator_refs": cls._model_hot_locator_refs(output.get("locator_refs")),
-                    "evidence_snippets": cls._model_hot_evidence_snippets(output.get("evidence_snippets")),
+                    "locator_refs": cls._model_hot_locator_refs(
+                        output.get("locator_refs"),
+                        include_host_identity=include_host_identity,
+                    ),
+                    "evidence_snippets": cls._model_hot_evidence_snippets(
+                        output.get("evidence_snippets"),
+                        include_host_identity=include_host_identity,
+                    ),
                     "diagnostics": cls._model_hot_diagnostics(output.get("diagnostics")),
                 }
             )
         return scoped_results
 
-    def _evidence_ledger_from_block_context(self, block_context: Mapping[str, Any]) -> dict[str, Any]:
+    def _evidence_ledger_from_block_context(
+        self,
+        block_context: Mapping[str, Any],
+        *,
+        include_host_identity: bool = False,
+    ) -> dict[str, Any]:
         def project(value: Mapping[str, Any]) -> dict[str, Any]:
             stable_ledger = self._stable_evidence_ledger_view(
                 value,
                 max_items=64,
                 include_body=True,
                 body_chars=1200,
+                budget_selection="content_first",
             )
-            return self._model_evidence_ledger_projection(stable_ledger, max_items=64)
+            return self._model_evidence_ledger_projection(
+                stable_ledger,
+                max_items=64,
+                include_host_identity=include_host_identity,
+            )
 
         state = block_context.get("state")
         if not isinstance(state, Mapping):
@@ -1077,17 +1222,32 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize({key: value.get(key) for key in allowed_keys if key in value})
 
     @classmethod
-    def _model_hot_locator_refs(cls, value: Any) -> list[dict[str, Any]]:
+    def _model_hot_locator_refs(
+        cls,
+        value: Any,
+        *,
+        include_host_identity: bool = False,
+    ) -> list[dict[str, Any]]:
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             return []
         refs: list[dict[str, Any]] = []
         for item in value:
             if isinstance(item, Mapping):
-                refs.append(cls._model_hot_locator_ref(item))
+                refs.append(
+                    cls._model_hot_locator_ref(
+                        item,
+                        include_host_identity=include_host_identity,
+                    )
+                )
         return refs
 
     @classmethod
-    def _model_hot_evidence_snippets(cls, value: Any) -> list[dict[str, Any]]:
+    def _model_hot_evidence_snippets(
+        cls,
+        value: Any,
+        *,
+        include_host_identity: bool = False,
+    ) -> list[dict[str, Any]]:
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             return []
         snippets: list[dict[str, Any]] = []
@@ -1099,6 +1259,8 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "role",
                 "content_state",
                 "source",
+                "source_ref",
+                "source_revision",
                 "task_workspace_source",
                 "path",
                 "record_id",
@@ -1108,12 +1270,22 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 "line_start",
                 "line_end",
                 "offset",
+                "range_start",
+                "query_match",
                 "truncated",
                 "body_state",
                 "raw_chars",
                 "projected_chars",
             ):
                 cls._copy_model_hot_field(snippet, item, key)
+            if include_host_identity:
+                for key in (
+                    "execution_block_id",
+                    "block_id",
+                    "source_id",
+                    "binding_id",
+                ):
+                    cls._copy_model_hot_field(snippet, item, key)
             content = item.get("content")
             if content is None:
                 content = item.get("snippet", item.get("text"))
@@ -1121,7 +1293,10 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
                 snippet["content"] = str(content)
             locator_ref = item.get("locator_ref")
             if isinstance(locator_ref, Mapping):
-                snippet["locator_ref"] = cls._model_hot_locator_ref(locator_ref)
+                snippet["locator_ref"] = cls._model_hot_locator_ref(
+                    locator_ref,
+                    include_host_identity=include_host_identity,
+                )
             projection = item.get("projection")
             if isinstance(projection, Mapping):
                 snippet["projection"] = cls._model_hot_projection(projection)
@@ -1155,12 +1330,19 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
         return DataFormatter.sanitize(ref)
 
     @classmethod
-    def _model_hot_locator_ref(cls, value: Mapping[str, Any]) -> dict[str, Any]:
+    def _model_hot_locator_ref(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        include_host_identity: bool = False,
+    ) -> dict[str, Any]:
         ref: dict[str, Any] = {}
         for key in (
             "role",
             "content_state",
             "source",
+            "source_ref",
+            "source_revision",
             "task_workspace_source",
             "rank",
             "index",
@@ -1180,9 +1362,18 @@ class AgentTaskCarrierMixin(AgentTaskMixinBase):
             "line",
             "line_start",
             "line_end",
+            "range_start",
             "truncated",
         ):
             cls._copy_model_hot_field(ref, value, key)
+        if include_host_identity:
+            for key in (
+                "execution_block_id",
+                "block_id",
+                "source_id",
+                "binding_id",
+            ):
+                cls._copy_model_hot_field(ref, value, key)
         raw_ref = value.get("ref")
         if isinstance(raw_ref, Mapping):
             compact_ref: dict[str, Any] = {}

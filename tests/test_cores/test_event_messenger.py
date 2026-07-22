@@ -346,6 +346,31 @@ async def test_event_center_idle_flush_releases_summary_buffer():
 
 
 @pytest.mark.asyncio
+async def test_event_center_emit_uses_hook_snapshot_when_hook_unregisters_during_flush():
+    ec = EventCenter(idle_flush_seconds=None)
+    victim_events: list[str] = []
+
+    async def unregistering_hook(event: RuntimeEvent):
+        ec.unregister_hook("victim")
+
+    async def victim_hook(event: RuntimeEvent):
+        victim_events.append(event.event_type)
+
+    ec.register_hook(
+        unregistering_hook,
+        hook_name="unregistering",
+        delivery_policy={"mode": "summary"},
+    )
+    ec.register_hook(victim_hook, hook_name="victim")
+
+    await ec.async_emit({"event_type": "model.response.delta", "payload": {"delta": "A"}})
+    await ec.async_emit({"event_type": "request.completed", "message": "done"})
+
+    assert victim_events == ["model.response.delta", "request.completed"]
+    assert "victim" not in ec._hooks
+
+
+@pytest.mark.asyncio
 async def test_event_center_default_hook_dispatch_awaits_completion():
     ec = EventCenter()
     completed: list[str] = []

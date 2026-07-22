@@ -70,7 +70,16 @@ async def test_model_request_selector_uses_prompt_lanes_and_host_keys_only() -> 
     selector = ModelRequestContextSelector(lambda: request)
 
     result = await selector.async_select(
-        intent=ContextReadIntent(query="Prepare the acceptance report"),
+        intent=ContextReadIntent(
+            query="Prepare the acceptance report",
+            metadata={
+                "selection_budget": {
+                    "available_chars": 1200,
+                    "available_blocks": 2,
+                    "max_block_chars": 900,
+                }
+            },
+        ),
         candidates=_candidates(),
         consumer=ContextConsumer("planner", model="test-model"),
         phase="planning",
@@ -81,6 +90,11 @@ async def test_model_request_selector_uses_prompt_lanes_and_host_keys_only() -> 
         "intent": "Prepare the acceptance report",
         "consumer_id": "planner",
         "phase": "planning",
+        "selection_budget": {
+            "available_chars": 1200,
+            "available_blocks": 2,
+            "max_block_chars": 900,
+        },
     }
     cards = request.slots["info"]["offered_context_blocks"]
     assert [card["block_key"] for card in cards] == ["context-block:1", "context-block:2"]
@@ -90,6 +104,7 @@ async def test_model_request_selector_uses_prompt_lanes_and_host_keys_only() -> 
     assert "source_ref" not in cards[0]
     assert "binding_id" not in cards[0]
     assert "Return only offered block_key values" in request.slots["instruct"]
+    assert "descending task relevance" in request.slots["instruct"]
     assert request.slots["output"] == {
         "selected_keys": ([str], "Ordered subset of offered block_key values.", True),
     }

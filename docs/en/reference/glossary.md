@@ -22,6 +22,52 @@ Settings on a TriggerFlow execution. With `auto_close=True` (the default), the e
 
 The dict returned by `execution.close()` / `execution.async_close()`. It captures the final state of the execution. If a compatibility result was written via the deprecated `set_result()` or `.end()`, it appears as the `"$final_result"` key inside the snapshot. See [Lifecycle](../triggerflow/lifecycle.md).
 
+## CodeExecution
+
+The provider-neutral Action contract for running source code. A
+`CodeRuntimeAdapter` validates language inputs and creates an immutable
+`CodeExecutionBundle`; `TaskWorkspace` materializes that bundle and issues a
+scoped access grant; `ExecutionResource` selects and binds an eligible provider
+such as Docker or explicitly authorized `trusted_local`. Providers do not own
+source preparation or TaskWorkspace policy. See
+[Execution Environment](../actions/execution-environment.md).
+
+## ContextReader
+
+A public consumer-, model-, and phase-bound read handle created and restored by
+one `TaskContext`. It performs candidate-window collection, structural
+filtering through the TaskContext-owned internal ContextIndex, optional
+structured semantic selection, exact source readback, progressive disclosure,
+budgeting, deduplication, and immutable `ContextPackage` construction. Its
+consumer-local offsets are private; it has no lifecycle independent from
+TaskContext. It does not mutate sources, install Skills, execute Actions, or
+decide task completion.
+
+After selecting one canonical ref, it may use an optional
+`ContextSourceScopedRead` mechanism for deterministic bounded location inside
+that ref. The mechanism does not own semantic relevance and falls back to the
+source's ordinary exact-read port when absent.
+
+## ContextPackage
+
+The immutable delivery value produced by a `ContextReader` for one exact
+intent, consumer, phase, and TaskContext snapshot. It contains bounded blocks,
+diagnostics, disclosure facts, and per-binding source coverage, but never a
+source cursor. It is not canonical task state and does not own sources. Full
+omission facts remain in this value even when an application projects only a
+bounded omission summary into a model-hot request.
+
+## ContextIndex
+
+The internal derived-index subordinate owned by `TaskContext`. It builds and
+reuses revision/profile/embedding-provider-keyed descriptor partitions and
+supports structural, lexical, or optional hybrid candidate retrieval. It is
+not independently constructed, exported as a public manager, or treated as
+source truth; canonical content still comes from each ContextSource exact-read
+port. Applications configure its mechanism through
+`TaskContext.configure_index(...)`; hybrid ranking only narrows the candidate
+window, while ContextReader/ModelRequest retains semantic selection.
+
 ## ensure (third tuple slot)
 
 In `(TypeExpr, "description", True)` the third slot is the `ensure` flag — it marks a leaf path/key as required. Ensure-marked leaves are compiled into `ensure_keys` (with array wildcards like `resources[*].url`). YAML / JSON form: `$ensure: true`. Use `(TypeExpr, "description", "not_null")` or `$ensure: "not_null"` only when the path must also contain a meaningful value.
@@ -31,6 +77,14 @@ This is **not** a default value. The older "default value as third slot" convent
 ## Execution
 
 A single run of a TriggerFlow. Created by `flow.create_execution(...)`. Has lifecycle states `open → sealed → closed`.
+
+## ExecutionResource
+
+A managed live dependency used by an operation or execution, identified by a
+resource `kind` and satisfied by a concrete provider with a stable
+`provider_id`. The manager owns probe, policy, ensure, health, reuse, release,
+and ordered provider selection. It is not a synonym for sandbox: isolation is
+one capability that some providers may supply.
 
 ## flow_data
 
@@ -54,6 +108,15 @@ This is a distinct concept from `state` and `flow_data`. See [State and Resource
 
 A per-execution stream of items emitted by chunks via `data.put_into_stream(...)` / `data.async_put_into_stream(...)`. Consumed by `execution.get_runtime_stream(...)` / `execution.get_async_runtime_stream(...)`. The stream is closed as part of `execution.close()`.
 
+## SkillLibrary
+
+The owner of installed real-world Skill packages: discovery, validation,
+immutable revisions, trust state, resource graphs, and exact resource reads.
+Skill guidance reaches a task through a `TaskContext` source; authorized Skill
+scripts bind as ordinary Workspace-backed CodeExecution Actions. SkillLibrary
+does not select task routes or execute Skills. See
+[SkillsExecutor Migration](../development/skills-executor.md).
+
 ## seal / sealed
 
 The middle lifecycle state. `execution.seal()` / `execution.async_seal()` stops the execution from accepting new external events but lets already-accepted events, internal emit chains, and registered tasks finish. It does **not** close the runtime stream and does **not** freeze the close snapshot — that happens on `close()`.
@@ -65,6 +128,26 @@ The current name for Agently's prompt-side structured authoring style: nested di
 ## state
 
 Execution-local, serializable, snapshot-safe data. The recommended state surface is `data.async_set_state(...)` for writes and `data.get_state(...)` for reads. State is what populates close snapshots and what `save()` / `load()` round-trip.
+
+## TaskContext
+
+The revisioned aggregate of information available to one task. It binds direct
+entries and source adapters such as SkillLibrary, TaskWorkspace, RecordStore,
+memory, evidence, and authorized external sources. `ContextReader` produces
+consumer-specific ContextPackages from it. TaskContext is the sole public
+lifecycle owner for those read handles and packages and owns one internal
+ContextIndex lifecycle over its bound sources. TaskContext does not own source
+storage, file mutation, execution, or task continuation.
+
+## TaskWorkspace
+
+The task's ordinary file boundary. It owns contained file operations, mutable
+working copies, artifacts, source-local search, physical readback, stable file
+identity, and scoped execution grants. It is distinct from TaskContext
+information management and RecordStore durability. Required AgentTask terminal
+artifacts are verified from staged bytes, atomically promoted only after
+acceptance, and completely read back again. See
+[TaskWorkspace and RecordStore](../requests/workspace.md).
 
 ## TriggerFlow
 

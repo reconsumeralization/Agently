@@ -66,6 +66,7 @@ class TerminalCarrier:
     content_digest: str
     source_work_result_id: str
     state_version: int
+    target_path: str = ""
     status: str = "proposed"
 
     def __post_init__(self) -> None:
@@ -89,6 +90,12 @@ class TerminalCarrier:
         if kind == "inline_final_result" and not content_version_id.startswith("inline:"):
             raise ValueError("Inline terminal carriers require an inline: content_version_id.")
         object.__setattr__(self, "path", path)
+        target_path = str(self.target_path or "").strip()
+        if kind == "task_workspace_artifact":
+            target_path = target_path or path
+        elif target_path:
+            raise ValueError("Inline terminal carriers cannot own a TaskWorkspace target path.")
+        object.__setattr__(self, "target_path", target_path)
         object.__setattr__(self, "content_digest", _content_digest(self.content_digest))
         object.__setattr__(
             self,
@@ -124,6 +131,7 @@ class TerminalCarrier:
             required=required,
             content_version_id=str(value.get("content_version_id") or ""),
             path=str(value.get("path") or ""),
+            target_path=str(value.get("target_path") or ""),
             content_digest=str(value.get("content_digest") or ""),
             source_work_result_id=str(value.get("source_work_result_id") or ""),
             state_version=effective_state_version,
@@ -137,6 +145,7 @@ class TerminalCarrier:
             "required": self.required,
             "content_version_id": self.content_version_id,
             "path": self.path,
+            "target_path": self.target_path,
             "content_digest": self.content_digest,
             "source_work_result_id": self.source_work_result_id,
             "state_version": self.state_version,
@@ -494,8 +503,97 @@ class AgentTaskLifecycleState:
             carriers=next_carriers,
         )
         self.state_version = next_state_version
-        self.phase = "outputs.materialized"
+        self.phase = "candidate_ready"
         self.carrier_inventory = next_inventory
+        return next_inventory
+
+    def advance_terminal_carrier_version(
+        self,
+        *,
+        carrier_id: str,
+        expected_content_version_id: str,
+        content_version_id: str,
+        content_digest: str,
+        source_work_result_id: str,
+        expected_version: int,
+    ) -> TerminalCarrierInventory:
+        """Atomically replace one repaired carrier snapshot and invalidate its old contract."""
+
+        self.require_version(expected_version)
+        current_inventory = self.carrier_inventory
+        if current_inventory is None:
+            raise ValueError("AgentTask lifecycle state has no terminal carrier inventory.")
+        canonical_carrier_id = _required_text(carrier_id, field_name="carrier_id")
+        expected_content_version = _required_text(
+            expected_content_version_id,
+            field_name="expected_content_version_id",
+        )
+        current = next(
+            (
+                carrier
+                for carrier in current_inventory.carriers
+                if carrier.carrier_id == canonical_carrier_id
+            ),
+            None,
+        )
+        if current is None:
+            raise ValueError(f"Unknown terminal carrier id: {canonical_carrier_id}.")
+        if current.content_version_id != expected_content_version:
+            raise ValueError(
+                "stale terminal carrier content version: "
+                f"expected {expected_content_version}, current {current.content_version_id}."
+            )
+
+        next_state_version = self.state_version + 1
+        next_content_version = _required_text(
+            content_version_id,
+            field_name="content_version_id",
+        )
+        next_digest = _content_digest(content_digest)
+        next_source_work_result_id = _required_text(
+            source_work_result_id,
+            field_name="source_work_result_id",
+        )
+        next_carriers = tuple(
+            replace(
+                carrier,
+                state_version=next_state_version,
+                content_version_id=(
+                    next_content_version
+                    if carrier.carrier_id == canonical_carrier_id
+                    else carrier.content_version_id
+                ),
+                content_digest=(
+                    next_digest
+                    if carrier.carrier_id == canonical_carrier_id
+                    else carrier.content_digest
+                ),
+                source_work_result_id=(
+                    next_source_work_result_id
+                    if carrier.carrier_id == canonical_carrier_id
+                    else carrier.source_work_result_id
+                ),
+                status="materialized",
+            )
+            for carrier in current_inventory.carriers
+        )
+        next_inventory = TerminalCarrierInventory(
+            inventory_version=current_inventory.inventory_version + 1,
+            state_version=next_state_version,
+            carriers=next_carriers,
+        )
+        self.state_version = next_state_version
+        self.phase = "post_patch_reverifying"
+        self.carrier_inventory = next_inventory
+        self.active_issue = {}
+        self.repair_contract = {}
+        self.terminal_decision = {
+            "transition": "verification_retry",
+            "carrier_id": canonical_carrier_id,
+            "superseded_content_version_id": expected_content_version,
+            "content_version_id": next_content_version,
+            "state_version": next_state_version,
+        }
         return next_inventory
 
     def record_terminal_transition(
@@ -572,12 +670,25 @@ class AgentTaskLifecycleState:
             carriers=next_carriers,
         )
         self.state_version = next_state_version
-        self.phase = "transition.decide"
+        pending_promotion = transition_name == "accepted" and any(
+            carrier.kind == "task_workspace_artifact"
+            and carrier.target_path
+            and carrier.path != carrier.target_path
+            for carrier in next_carriers
+        )
+        self.phase = {
+            "accepted": "promotion_ready" if pending_promotion else "terminal",
+            "repair": "grounding_repairing",
+            "verification_retry": "post_patch_reverifying",
+            "blocked": "terminal_blocked",
+            "continue": "candidate_ready",
+        }[transition_name]
         self.carrier_inventory = next_inventory
         self.active_issue = deepcopy(dict(issue or {}))
         self.repair_contract = deepcopy(dict(repair_contract or {}))
         self.terminal_decision = {
-            "transition": transition_name,
+            "transition": "promotion_ready" if pending_promotion else transition_name,
+            "semantic_transition": transition_name,
             "accepted_carrier_ids": sorted(accepted_ids),
             "rejected_carrier_ids": sorted(rejected_ids),
             "state_version": next_state_version,

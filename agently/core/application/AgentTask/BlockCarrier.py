@@ -21,13 +21,24 @@ from typing import Any, Literal, cast
 
 WorkUnitOrigin = Literal["flat_step", "taskboard_card"]
 CarrierControlFormat = Literal["json", "hybrid", "xml_field", "flat_markdown", "yaml_literal"]
+SCOPED_RETRIEVAL_RESULT_CAPACITY = 64
 
 
-def scoped_retrieval_policy() -> dict[str, Any]:
+def scoped_retrieval_policy(
+    source_catalog: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Compact policy shared by Flat and TaskBoard work-unit carriers."""
 
+    source_kinds = {
+        str(source_kind): {
+            "binding_ids": tuple(str(item) for item in details.get("binding_ids", ())),
+            "required": bool(details.get("required", False)),
+            "description": str(details.get("description") or source_kind),
+        }
+        for source_kind, details in dict(source_catalog or {}).items()
+    }
     return {
-        "schema_version": "agent_task_scoped_retrieval/v1",
+        "schema_version": "agent_task_scoped_retrieval/v2",
         "query_owner": "planner_or_control_model",
         "executor_owner": "ContextReader through Blocks context_read",
         "optimization_goal": "reduce hot prompt input by retrieving scoped refs before bulk reads",
@@ -35,22 +46,30 @@ def scoped_retrieval_policy() -> dict[str, Any]:
             "locator_ref": "discovered target; content not read",
             "evidence_snippet": "bounded readable excerpt",
         },
-        "source_kinds": {
-            "record_store": "Durable structured records exposed through a RecordStore ContextSource",
-            "task_workspace": "Contained task files exposed through a TaskWorkspace ContextSource",
-        },
+        "source_kinds": source_kinds,
         "rules": [
             "Use scoped retrieval before full file/resource reads when it can reduce input volume.",
+            "Return only source kinds offered in source_kinds.",
+            "Express business filters and exact refs; do not choose lexical, vector, rerank, or source-native search mechanisms.",
             "Treat locator_ref as discovery only until a bounded readback/snippet is available.",
             "Treat truncated evidence snippets as factual partial context; downstream consumers decide whether to request wider scoped retrieval or readback.",
             "Do not let retrieval hits decide semantic usefulness or task acceptance.",
             "For record_store records, put record collection in filters.collection; path is only for file search or exact record paths; use filters.kind only when the exact record kind is provided, never infer a generic kind such as note.",
-            "Use tags, method, rerank, selection, top_n, and max_candidates only when they are explicit retrieval requirements; otherwise keep the query group small.",
+            "For file-backed sources, pattern is a file-name glob only. Use filters.content_contains for an exact code symbol or text locator; ContextReader turns each exact locator into its own bounded query group.",
         ],
         "bounded_defaults": {
             "max_results": 8,
             "snippet_limit": 1200,
             "file_context_lines": 3,
+        },
+        "result_capacity": {
+            "max_model_visible_results": SCOPED_RETRIEVAL_RESULT_CAPACITY,
+            "overflow_behavior": {
+                "taskboard": (
+                    "split_into_bounded_context_batches_before_graph_compilation"
+                ),
+                "flat": "reject_before_block_graph_compilation",
+            },
         },
     }
 

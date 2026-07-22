@@ -239,6 +239,7 @@ def test_prompt_tools_are_converted_and_explicit_tools_override_by_name():
                     "name": "lookup_issue",
                     "desc": "Lookup a GitHub issue.",
                     "kwargs": {"issue_id": (str, "Issue id")},
+                    "required_input_keys": ["issue_id"],
                 },
             ],
         },
@@ -253,6 +254,7 @@ def test_prompt_tools_are_converted_and_explicit_tools_override_by_name():
     assert search_docs["strict"] is True
     assert lookup_issue["strict"] is False
     assert lookup_issue["parameters"]["properties"]["issue_id"]["type"] == "string"
+    assert lookup_issue["parameters"]["required"] == ["issue_id"]
     assert lookup_issue["parameters"]["additionalProperties"] is False
     assert web_search == {"type": "web_search_preview"}
 

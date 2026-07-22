@@ -442,12 +442,21 @@ returns every offered `criterion_id` exactly once in `criterion_checks`, plus
 request, the host structurally divides the visible current carriers into exact
 text spans and assigns each span one request-local `claim_key`. Each material
 claim check returns only one offered `claim_key`, a `claim_kind`, a semantic
-state, and offered evidence `reference_id` values. Direct facts may be
+state, offered evidence `reference_id` values, and
+`required_for_criterion_ids`. The last field contains only exact offered
+criterion ids and is empty for optional or extraneous claims. Direct facts may be
 `supported`, while bounded analysis or a
 recommendation may be `reasonable_derived` when its visible premises support a
 conservative conclusion; support does not require source wording to repeat the
 conclusion verbatim. `unsupported`, `contradicted`, and `unverifiable` checks
 cannot be accepted.
+
+An unsupported optional claim may produce a `delete_only` local patch. A claim
+required by a success criterion cannot: the host preserves that relationship
+and requires `replan_segment` evidence reacquisition. If no new authorized
+source, locator, or capability path remains, or the planner repeats an exhausted
+canonical retrieval plan, TaskBoard closes blocked or asks for clarification
+instead of replaying the same evidence/repair cards until a safety limit.
 
 Host code validates criterion ids, claim keys, evidence ids, and evidence
 eligibility, then reconstructs the canonical carrier id, exact quote, path, and
@@ -482,6 +491,11 @@ without parsing verifier prose. For a trusted file carrier, the repair path uses
 one bounded structured patch request and a host-validated exact replacement.
 It does not open a general AgentExecution/ActionRuntime round or authorize a
 whole-file rewrite merely because `write_file` is mounted.
+That patch request contains only the authorized carrier identity, exact dirty
+claim contract, bounded carrier quote, and output schema. Unrelated dependency
+results, board history, evidence-ledger bodies, and acceptance projections stay
+cold; request sizing is therefore a consequence of the dirty scope rather than
+an arbitrary token cap.
 
 TaskBoard evidence binding is repaired at the boundary that produced the
 structured `evidence_use`. Card, control, finalizer, and binding-repair prompt
@@ -689,9 +703,16 @@ relying on a buried JSON preview. When a non-final
 TaskBoard card proposes a required final path such as `final.md`, AgentTask
 relocates that intermediate artifact to `working/taskboard/<card-id>/...` and
 keeps the declared final path for the final synthesis or finalization card.
-Framework-generated final repair or continuation cards that are marked with the
-required final deliverable path are authorized to write that path, so repair
-does not loop by repeatedly producing only working evidence files.
+Framework-generated final repair cards stage the declared deliverable under a
+card-scoped terminal-candidate path. They do not overwrite the root path during
+repair. During terminal verification, a host-validated delivery contract maps
+that completely read candidate to its required target. The verifier judges the
+candidate's content and evidence as the provisional carrier for the target; it
+must not reject the candidate merely because the target does not exist before
+acceptance. Only a successful semantic verdict can trigger the host-owned,
+digest-pinned promotion of those exact bytes to the declared root path. The host
+then performs complete target readback and digest/byte-count checks before the
+task can complete.
 Flat source refs carry the same boundary: repository clone/list manifest paths
 are `ref_only` until a file read, artifact readback, or bounded content preview
 is visible. A verifier or repair planner can reuse exact paths as retrieval
@@ -708,6 +729,23 @@ the intended business date or source timestamp explicitly when it matters. The
 contract is context for model decisions, planning, evidence selection, and
 source-boundary handling; it must not be used as a business fact by itself and
 does not set model-call, tool-call, node-count, iteration, or wall-clock caps.
+
+When a model-authored TaskBoard card contains an otherwise valid scoped
+TaskContext retrieval plan whose reserved `max_results` total exceeds 64, the
+host preserves its Context source kinds and splits it into bounded retrieval
+cards plus one dependent continuation. It does not silently truncate the plan
+or rewrite pinned repositories, Skills, Memory, or other Context sources as
+TaskWorkspace Actions. The normalization is observable through
+`agent_task.taskboard.plan.normalized`. A single query group larger than the
+capacity, invalid result counts, or unknown source kinds still fail closed for
+structured replanning.
+
+Inside a scoped query group, `path` selects a file or directory scope and
+`pattern` is only a file-name glob such as `*.py` or `**`. To position a
+bounded read at an exact code symbol or text fragment inside the selected
+source, use `filters.content_contains`; each exact locator is normalized into
+its own bounded query group. Keep semantic intent in `query`. Do not put code
+symbols or content phrases in `pattern`.
 
 TaskBoard readback cards can inspect both Action artifact refs and trusted
 TaskWorkspace file refs with bounded cold readback previews. Framework-generated
@@ -767,6 +805,21 @@ This keeps exact `acceptance_delta`, repair constraints, next-step
 requirements, and available evidence anchors visible to the consumer that
 actually rewrites or reads the artifact, without putting cold integrity metadata
 back into the model-hot path.
+
+If terminal verification requests a new evidence segment rather than a mounted
+capability repair, a dedicated ModelRequest selects bounded semantic queries
+from the TaskContext source kinds actually offered by the host. The resulting
+evidence card continues to execute through ContextReader. Completion requires
+the card's `evidence_use` bindings to name the exact new body-bearing reference
+identities added to EvidenceLedger; prose claiming that evidence was acquired
+cannot satisfy this guard.
+
+Source adapters may expose small authoritative descriptor facts, such as a
+canonical repository URL and pinned commit, as ordinary typed `information`
+descriptors with exact reads. Once ContextReader discloses such a block,
+AgentTask gives it the same host-issued evidence binding as other eligible
+ContextPackage information; undisclosed adapter metadata does not become
+evidence automatically.
 
 For TaskBoard, an authored required `action_succeeded` capability requirement
 also owns repair dispatch. If that exact Action evidence is missing and the
@@ -1056,6 +1109,10 @@ execution = agent.input("Try one bounded fix step.").create_execution(
 This is still one AgentExecution, not a multi-turn loop. `lineage` provides
 stable correlation, while `limits` provides shared model-request budget counting
 across direct model and AgentTask requests.
+Nested AgentExecution contexts consume the same ancestor budget atomically;
+creating a child does not reset the root allowance. A child may additionally
+set a smaller local allowance for its own subtree without lowering a sibling's
+local allowance.
 Use `None` for an unlimited budget.
 
 If a bounded execution exceeds its model-request budget, Agently raises

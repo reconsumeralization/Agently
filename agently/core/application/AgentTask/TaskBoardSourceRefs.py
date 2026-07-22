@@ -31,8 +31,7 @@ _TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION = (
 class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
     """TaskBoard source-ref policy, content-state tagging, and hot ref collection."""
 
-    @classmethod
-    def _taskboard_source_ref_policy(cls) -> dict[str, Any]:
+    def _taskboard_source_ref_policy(self) -> dict[str, Any]:
         return {
             "schema_version": "agent_task_taskboard_source_refs/v1",
             "content_states": {
@@ -46,19 +45,17 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
                 ),
             },
             "rules": [
-                "Keep downloads, webpage snapshots, notes, generated code, and extracted text as cold refs unless "
-                "a later block needs scoped content.",
+                "Keep materialized resources as cold refs until a later block needs scoped content.",
                 "Do not claim source contents from ref_only records.",
-                "Use scoped retrieval query groups for TaskWorkspace/repository/file evidence before broad reads when it can reduce prompt input.",
-                "Use source_kinds=['record_store'] for durable structured records, source_kinds=['task_workspace'] for bounded task-file search, or list both when both sources are justified. For record_store records, put collection names in filters.collection, do not put collection names in path, and use filters.kind only when the exact record kind is provided; never infer a generic kind such as note. For task_workspace files, query is content text or an exact phrase, path is the directory/file scope, and pattern is one file glob such as *.md, * or **. Do not put list/read/search commands in query.",
+                "Use only source kinds offered by scoped_retrieval_policy.source_kinds.",
+                "Keep source-specific business filters in separate query groups unless every selected source kind shares the same descriptor field.",
+                "Use query for task intent or exact source text and path/pattern for structural file scope; never select lexical, vector, rerank, or source-native retrieval mechanisms.",
                 "Treat truncated evidence snippets as partial facts; downstream consumers decide whether to request wider scoped retrieval, readback, or continuation.",
-                "Treat local search results as bounded facts, not as semantic acceptance.",
-                "When unread source content is required, return next_board_action=readback with concrete "
-                "target_refs or use an available readback action.",
-                "If a ref remains unread but is still useful, label it as discovered-only in the deliverable or "
-                "diagnostics.",
+                "Treat ContextIndex matches as bounded facts, not as semantic acceptance.",
+                "When unread source content is required, return next_board_action=readback with concrete target_refs or use an available readback action.",
+                "If a ref remains unread but is useful, label it as discovered-only.",
             ],
-            "scoped_retrieval_policy": scoped_retrieval_policy(),
+            "scoped_retrieval_policy": self._task_context_retrieval_policy(),
         }
 
     @classmethod
@@ -69,7 +66,11 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
             or candidate.get("materialization_state")
             or ""
         ).strip()
-        if raw_state in {"bounded_readback_available", "bounded_preview_available", "content_read"}:
+        if raw_state in {
+            "bounded_readback_available",
+            "bounded_preview_available",
+            "content_read",
+        }:
             return "bounded_readback_available"
         if raw_state in {"ref_only", "discovered_only", "unread"}:
             return "ref_only"
@@ -96,7 +97,11 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
                 return "bounded_readback_available"
             if isinstance(value, Mapping) and value:
                 return "bounded_readback_available"
-            if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray) and value:
+            if (
+                isinstance(value, Sequence)
+                and not isinstance(value, str | bytes | bytearray)
+                and value
+            ):
                 return "bounded_readback_available"
         return "ref_only"
 
@@ -165,7 +170,7 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
                 item = candidate.get(key)
                 if item is None:
                     continue
-                if isinstance(item, (str, int, float, bool)):
+                if isinstance(item, str | int | float | bool):
                     text = str(item).strip()
                     if text:
                         record[key] = text[:500]
@@ -217,10 +222,13 @@ class AgentTaskTaskBoardSourceRefsMixin(AgentTaskMixinBase):
             if isinstance(value, Mapping):
                 add(value)
                 for item in value.values():
-                    if isinstance(item, (Mapping, list, tuple)):
+                    if isinstance(item, Mapping | list | tuple):
                         visit(item, depth=depth + 1)
                 return
-            if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            if isinstance(value, Sequence) and not isinstance(
+                value,
+                str | bytes | bytearray,
+            ):
                 for item in value:
                     visit(item, depth=depth + 1)
                     if len(refs) >= max_refs:

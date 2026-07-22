@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, cast
 from agently.types.data import (
     ExecutionResourceHandle,
     ExecutionResourcePolicy,
+    ExecutionResourceProviderCandidate,
+    ExecutionResourceProviderProbe,
     ExecutionResourceRequirement,
     ExecutionResourceScope,
     ExecutionResourceStatus,
@@ -85,19 +87,54 @@ class ExecutionResourceManager:
         self._requirements: dict[str, ExecutionResourceRequirement] = {}
         self._handles: dict[str, ExecutionResourceHandle] = {}
         self._handles_by_reuse_key: dict[str, str] = {}
-        self._providers: dict[str, "ExecutionResourceProvider"] = {}
+        self._providers: dict[str, dict[str, "ExecutionResourceProvider"]] = {}
+        self._providers_by_id: dict[str, "ExecutionResourceProvider"] = {}
+        self._plugins_loaded = False
 
         self.ensure = FunctionShifter.syncify(self.async_ensure)
         self.release = FunctionShifter.syncify(self.async_release)
         self.release_scope = FunctionShifter.syncify(self.async_release_scope)
 
+    @staticmethod
+    def _provider_id(provider: "ExecutionResourceProvider") -> str:
+        provider_id = str(
+            getattr(provider, "provider_id", "")
+            or getattr(provider, "name", "")
+            or getattr(provider, "kind", "")
+        ).strip()
+        if not provider_id:
+            raise ValueError("ExecutionResourceProvider.provider_id is required.")
+        return provider_id
+
+    @staticmethod
+    def _supported_kinds(provider: "ExecutionResourceProvider") -> tuple[str, ...]:
+        raw_kinds = getattr(provider, "supported_kinds", None)
+        if raw_kinds is None:
+            legacy_kind = str(getattr(provider, "kind", "")).strip()
+            raw_kinds = (legacy_kind,) if legacy_kind else ()
+        if isinstance(raw_kinds, str):
+            raw_kinds = (raw_kinds,)
+        kinds = tuple(dict.fromkeys(str(item).strip() for item in raw_kinds if str(item).strip()))
+        if not kinds:
+            raise ValueError("ExecutionResourceProvider.supported_kinds is required.")
+        return kinds
+
     def register_provider(self, provider: "ExecutionResourceProvider"):
-        self._providers[str(provider.kind)] = provider
+        provider_id = self._provider_id(provider)
+        existing = self._providers_by_id.get(provider_id)
+        if existing is not None and existing is not provider:
+            raise ValueError(f"duplicate ExecutionResourceProvider.provider_id: {provider_id!r}")
+        if existing is provider:
+            return self
+        self._providers_by_id[provider_id] = provider
+        for kind in self._supported_kinds(provider):
+            self._providers.setdefault(kind, {})[provider_id] = provider
         return self
 
-    def _get_provider(self, kind: str):
-        if kind in self._providers:
-            return self._providers[kind]
+    def _load_plugin_providers(self) -> None:
+        if self._plugins_loaded:
+            return
+        self._plugins_loaded = True
         try:
             plugin_names = self.plugin_manager.get_plugin_list("ExecutionResourceProvider")
         except Exception:
@@ -106,12 +143,357 @@ class ExecutionResourceManager:
             plugin_class = cast(Any, self.plugin_manager.get_plugin("ExecutionResourceProvider", plugin_name))
             provider = plugin_class()
             self.register_provider(provider)
-            if provider.kind == kind:
+
+    def _get_provider(self, kind: str, *, provider_id: str | None = None):
+        if provider_id and provider_id in self._providers_by_id:
+            provider = self._providers_by_id[provider_id]
+            if kind in self._supported_kinds(provider):
                 return provider
+        if kind in self._providers and self._providers[kind]:
+            return next(iter(self._providers[kind].values()))
+        self._load_plugin_providers()
+        if provider_id and provider_id in self._providers_by_id:
+            provider = self._providers_by_id[provider_id]
+            if kind in self._supported_kinds(provider):
+                return provider
+        if kind in self._providers and self._providers[kind]:
+            return next(iter(self._providers[kind].values()))
         raise ExecutionResourceError(
             f"Can not find ExecutionResourceProvider for kind '{ kind }'.",
             code="execution_resource.provider_missing",
-            payload={"kind": kind},
+            payload={"kind": kind, "provider_id": provider_id or ""},
+        )
+
+    @staticmethod
+    def _capability_matches(key: str, expected: Any, capabilities: dict[str, Any]) -> bool:
+        aliases = {
+            "language": "languages",
+            "workspace_access_mode": "workspace_access_modes",
+            "toolchain": "toolchains",
+        }
+        actual = capabilities.get(key)
+        if actual is None and key in aliases:
+            actual = capabilities.get(aliases[key])
+        if actual is None:
+            return False
+        if key == "toolchains":
+            return ExecutionResourceManager._toolchains_match(expected, actual)
+        if key == "isolation" and isinstance(expected, str) and isinstance(actual, str):
+            levels = {"none": 0, "preferred": 1, "required": 2}
+            if expected in levels and actual in levels:
+                return levels[actual] >= levels[expected]
+        if isinstance(expected, dict):
+            return isinstance(actual, dict) and all(
+                ExecutionResourceManager._capability_matches(
+                    nested_key,
+                    nested_expected,
+                    actual,
+                )
+                for nested_key, nested_expected in expected.items()
+            )
+        if isinstance(actual, (list, tuple, set)):
+            if isinstance(expected, (list, tuple, set)):
+                return set(expected).issubset(set(actual))
+            return expected in actual
+        if isinstance(expected, (list, tuple, set)):
+            return actual in expected
+        return actual == expected
+
+    @staticmethod
+    def _version_parts(value: Any) -> tuple[int, ...] | None:
+        from agently.types.data.code_execution import extract_code_toolchain_version
+
+        version = extract_code_toolchain_version(str(value or ""))
+        if not version:
+            return None
+        return tuple(int(part) for part in version.split("."))
+
+    @classmethod
+    def _toolchains_match(cls, expected: Any, actual: Any) -> bool:
+        if not isinstance(expected, dict) or not isinstance(actual, dict):
+            return False
+        for tool, raw_constraint in expected.items():
+            fact = actual.get(str(tool))
+            if not isinstance(fact, dict):
+                return False
+            if fact.get("available", True) is not True:
+                return False
+            constraint = raw_constraint if isinstance(raw_constraint, dict) else {}
+            actual_parts = cls._version_parts(fact.get("version") or fact.get("raw_version"))
+            minimum = constraint.get("minimum_version")
+            if minimum is not None:
+                minimum_parts = cls._version_parts(minimum)
+                if actual_parts is None or minimum_parts is None:
+                    return False
+                width = max(len(actual_parts), len(minimum_parts))
+                if actual_parts + (0,) * (width - len(actual_parts)) < minimum_parts + (0,) * (width - len(minimum_parts)):
+                    return False
+            exact = constraint.get("exact_version")
+            if exact is not None:
+                exact_parts = cls._version_parts(exact)
+                if actual_parts is None or exact_parts is None:
+                    return False
+                width = max(len(actual_parts), len(exact_parts))
+                if actual_parts + (0,) * (width - len(actual_parts)) != exact_parts + (0,) * (width - len(exact_parts)):
+                    return False
+        return True
+
+    @classmethod
+    def _probe_is_eligible(
+        cls,
+        probe: ExecutionResourceProviderProbe,
+        *,
+        kind: str,
+        required_capabilities: dict[str, Any],
+    ) -> bool:
+        if not probe.get("available", False):
+            return False
+        if kind not in probe.get("supported_kinds", []):
+            return False
+        capabilities = dict(probe.get("capabilities", {}))
+        return all(
+            cls._capability_matches(key, expected, capabilities)
+            for key, expected in required_capabilities.items()
+        )
+
+    async def _probe_provider(
+        self,
+        provider: "ExecutionResourceProvider",
+        *,
+        requirement: ExecutionResourceRequirement,
+        policy: ExecutionResourcePolicy,
+    ) -> ExecutionResourceProviderProbe:
+        provider_id = self._provider_id(provider)
+        supported_kinds = list(self._supported_kinds(provider))
+        probe_method = getattr(provider, "async_probe", None)
+        if probe_method is None:
+            return {
+                "provider_id": provider_id,
+                "available": True,
+                "supported_kinds": supported_kinds,
+                "capabilities": dict(getattr(provider, "capabilities", {}) or {}),
+                "reason": "legacy provider has no explicit probe",
+            }
+        try:
+            raw_probe = await probe_method(requirement=requirement, policy=policy)
+            probe = dict(raw_probe or {})
+        except Exception as error:
+            return {
+                "provider_id": provider_id,
+                "available": False,
+                "supported_kinds": supported_kinds,
+                "capabilities": {},
+                "reason": f"probe failed: {str(error)[:500]}",
+            }
+        return {
+            "provider_id": provider_id,
+            "available": bool(probe.get("available", False)),
+            "supported_kinds": supported_kinds,
+            "capabilities": dict(probe.get("capabilities", {}) or {}),
+            "reason": str(probe.get("reason", ""))[:500],
+            "diagnostics": list(probe.get("diagnostics", []) or [])[:20],
+            "meta": dict(probe.get("meta", {}) or {}),
+        }
+
+    async def _select_provider(
+        self,
+        *,
+        requirement: ExecutionResourceRequirement,
+        policy: ExecutionResourcePolicy,
+    ) -> tuple[
+        "ExecutionResourceProvider",
+        list[ExecutionResourceProviderProbe],
+        ExecutionResourceRequirement,
+        dict[str, Any],
+    ]:
+        kind = str(requirement.get("kind", ""))
+        explicit_id = str(requirement.get("provider_id", "")).strip()
+        configured = cast(
+            list[ExecutionResourceProviderCandidate],
+            list(requirement.get("provider_candidates", [])),
+        )
+        if not self._providers.get(kind) or explicit_id or configured:
+            self._load_plugin_providers()
+        if explicit_id:
+            candidates = [
+                cast(
+                    ExecutionResourceProviderCandidate,
+                    {"provider_id": explicit_id, "config": {}},
+                )
+            ]
+        elif configured:
+            candidates = configured
+        else:
+            candidates = [
+                cast(
+                    ExecutionResourceProviderCandidate,
+                    {"provider_id": provider_id, "config": {}},
+                )
+                for provider_id in self._providers.get(kind, {})
+            ]
+        if not candidates:
+            raise ExecutionResourceError(
+                f"Can not find ExecutionResourceProvider for kind '{kind}'.",
+                code="execution_resource.provider_missing",
+                payload={"kind": kind},
+            )
+
+        required_capabilities = dict(requirement.get("required_capabilities", {}) or {})
+        preferred_capabilities = dict(
+            requirement.get("preferred_capabilities", {}) or {}
+        )
+        probes: list[ExecutionResourceProviderProbe] = []
+        eligible: list[
+            tuple[
+                int,
+                str,
+                "ExecutionResourceProvider",
+                ExecutionResourceRequirement,
+                bool,
+            ]
+        ] = []
+        for candidate_index, candidate in enumerate(candidates):
+            provider_id = str(candidate.get("provider_id", ""))
+            candidate_requirement = cast(ExecutionResourceRequirement, dict(requirement))
+            candidate_requirement["provider_id"] = provider_id
+            candidate_requirement["config"] = {
+                **dict(requirement.get("config", {})),
+                **dict(candidate.get("config", {})),
+            }
+            provider = self._providers_by_id.get(provider_id)
+            if provider is None or kind not in self._supported_kinds(provider):
+                probes.append(
+                    {
+                        "provider_id": provider_id,
+                        "available": False,
+                        "supported_kinds": [],
+                        "capabilities": {},
+                        "reason": "provider is not registered for the requested kind",
+                        "meta": {"candidate_index": candidate_index},
+                    }
+                )
+                continue
+            probe = await self._probe_provider(
+                provider,
+                requirement=candidate_requirement,
+                policy=policy,
+            )
+            probe["meta"] = {
+                **dict(probe.get("meta", {})),
+                "candidate_index": candidate_index,
+            }
+            probes.append(probe)
+            if not self._probe_is_eligible(
+                probe,
+                kind=kind,
+                required_capabilities=required_capabilities,
+            ):
+                continue
+            preference_satisfied = not preferred_capabilities or self._probe_is_eligible(
+                probe,
+                kind=kind,
+                required_capabilities=preferred_capabilities,
+            )
+            eligible.append(
+                (
+                    candidate_index,
+                    provider_id,
+                    provider,
+                    candidate_requirement,
+                    preference_satisfied,
+                )
+            )
+
+        if not eligible:
+            raise ExecutionResourceError(
+                f"No eligible ExecutionResourceProvider is available for kind '{kind}'.",
+                code="execution_resource.provider_unavailable",
+                payload={
+                    "kind": kind,
+                    "required_capabilities": required_capabilities,
+                    "preferred_capabilities": preferred_capabilities,
+                    "provider_probes": probes,
+                },
+            )
+
+        preferred_eligible = [item for item in eligible if item[4]]
+        selection_order = (
+            [*preferred_eligible, *[item for item in eligible if not item[4]]]
+            if preferred_capabilities
+            else eligible
+        )
+        for (
+            candidate_index,
+            provider_id,
+            provider,
+            candidate_requirement,
+            initially_preferred,
+        ) in selection_order:
+            ensure_probe = await self._probe_provider(
+                provider,
+                requirement=candidate_requirement,
+                policy=policy,
+            )
+            for recorded_probe in probes:
+                if (
+                    str(recorded_probe.get("provider_id", "")) == provider_id
+                    and int(dict(recorded_probe.get("meta", {})).get("candidate_index", -1))
+                    == candidate_index
+                ):
+                    recorded_probe["meta"] = {
+                        **dict(recorded_probe.get("meta", {})),
+                        "ensure_probe_available": bool(
+                            ensure_probe.get("available", False)
+                        ),
+                        "ensure_probe_reason": str(
+                            ensure_probe.get("reason", "")
+                        ),
+                    }
+                    break
+            ensure_preference_satisfied = (
+                not preferred_capabilities
+                or self._probe_is_eligible(
+                    ensure_probe,
+                    kind=kind,
+                    required_capabilities=preferred_capabilities,
+                )
+            )
+            if initially_preferred and not ensure_preference_satisfied:
+                continue
+            if not self._probe_is_eligible(
+                ensure_probe,
+                kind=kind,
+                required_capabilities=required_capabilities,
+            ):
+                continue
+            selected: dict[str, Any] = {
+                "index": candidate_index,
+                "provider_id": provider_id,
+            }
+            if preferred_capabilities:
+                selected.update(
+                    preferred_capabilities_satisfied=(
+                        initially_preferred and ensure_preference_satisfied
+                    ),
+                    preference_fallback=not (
+                        initially_preferred and ensure_preference_satisfied
+                    ),
+                )
+            return (
+                provider,
+                probes,
+                candidate_requirement,
+                selected,
+            )
+        raise ExecutionResourceError(
+            f"No eligible ExecutionResourceProvider is available for kind '{kind}'.",
+            code="execution_resource.provider_unavailable",
+            payload={
+                "kind": kind,
+                "required_capabilities": required_capabilities,
+                "preferred_capabilities": preferred_capabilities,
+                "provider_probes": probes,
+            },
         )
 
     @staticmethod
@@ -127,6 +509,15 @@ class ExecutionResourceManager:
             "owner_id": requirement.get("owner_id", ""),
             "resource_key": requirement.get("resource_key", ""),
             "config": requirement.get("config", {}),
+            "provider_id": requirement.get("provider_id", ""),
+            "provider_candidates": requirement.get("provider_candidates", []),
+            "required_capabilities": requirement.get("required_capabilities", {}),
+            "preferred_capabilities": requirement.get("preferred_capabilities", {}),
+            "task_workspace_access_grant_id": getattr(
+                requirement.get("task_workspace_access_grant"),
+                "grant_id",
+                "",
+            ),
         }
         return self._stable_json(stable_parts)
 
@@ -146,6 +537,54 @@ class ExecutionResourceManager:
         normalized["owner_id"] = str(owner_id or normalized.get("owner_id", "Agently"))
         normalized["resource_key"] = str(normalized.get("resource_key", kind))
         normalized["config"] = dict(normalized.get("config", {}))
+        provider_candidates: list[ExecutionResourceProviderCandidate] = []
+        for index, item in enumerate(normalized.get("provider_candidates", [])):
+            if isinstance(item, str):
+                provider_id = item.strip()
+                config: dict[str, Any] = {}
+            elif isinstance(item, dict):
+                provider_id = str(item.get("provider_id", "")).strip()
+                raw_config = item.get("config", {})
+                if not isinstance(raw_config, dict):
+                    raise TypeError(
+                        f"ExecutionResourceRequirement.provider_candidates[{index}].config must be a mapping."
+                    )
+                config = dict(raw_config)
+            else:
+                raise TypeError(
+                    f"ExecutionResourceRequirement.provider_candidates[{index}] must be a provider id or descriptor."
+                )
+            if not provider_id:
+                raise ValueError(
+                    f"ExecutionResourceRequirement.provider_candidates[{index}].provider_id is required."
+                )
+            provider_candidates.append(
+                cast(
+                    ExecutionResourceProviderCandidate,
+                    {"provider_id": provider_id, "config": config},
+                )
+            )
+        normalized["provider_candidates"] = cast(
+            list[str | ExecutionResourceProviderCandidate],
+            provider_candidates,
+        )
+        normalized["required_capabilities"] = dict(
+            normalized.get("required_capabilities", {})
+        )
+        normalized["preferred_capabilities"] = dict(
+            normalized.get("preferred_capabilities", {})
+        )
+        if normalized["kind"] == "code_execution":
+            for capability_group in (
+                "required_capabilities",
+                "preferred_capabilities",
+            ):
+                isolation = normalized[capability_group].get("isolation")
+                if isolation is not None and not isinstance(isolation, dict):
+                    raise ValueError(
+                        "code_execution isolation capability must be a mapping of "
+                        "verifiable isolation axes, not a policy label"
+                    )
         normalized["policy"] = cast(ExecutionResourcePolicy, dict(normalized.get("policy", {})))
         normalized["meta"] = dict(normalized.get("meta", {}))
         if not normalized.get("requirement_id"):
@@ -169,6 +608,7 @@ class ExecutionResourceManager:
             "scope": source.get("scope", ""),
             "owner_id": source.get("owner_id", ""),
             "resource_key": source.get("resource_key", ""),
+            "provider_id": source.get("provider_id", ""),
             "status": status or source.get("status", ""),
             "reuse_key": source.get("reuse_key", "") or source.get("meta", {}).get("reuse_key", ""),
         }
@@ -277,8 +717,17 @@ class ExecutionResourceManager:
             self._requirements[str(requirement.get("requirement_id", ""))] = requirement
         policy = cast(ExecutionResourcePolicy, merge_access_control_policy(requirement.get("policy", {}), self.settings))
         policy = await self._resolve_approval(requirement, policy)
-        reuse_key = str(requirement.get("reuse_key", ""))
-        provider = self._get_provider(str(requirement["kind"]))
+        provider, provider_probes, selected_requirement, selected_candidate = await self._select_provider(
+            requirement=requirement,
+            policy=policy,
+        )
+        provider_id = self._provider_id(provider)
+        reuse_key = self._stable_json(
+            {
+                "requirement": str(requirement.get("reuse_key", "")),
+                "provider_id": provider_id,
+            }
+        )
         existing_id = self._handles_by_reuse_key.get(reuse_key)
         if existing_id and existing_id in self._handles:
             existing_handle = self._handles[existing_id]
@@ -312,7 +761,7 @@ class ExecutionResourceManager:
         )
         try:
             handle = await provider.async_ensure(
-                requirement=requirement,
+                requirement=selected_requirement,
                 policy=policy,
                 existing_handle=None,
             )
@@ -332,12 +781,16 @@ class ExecutionResourceManager:
         normalized_handle.setdefault("scope", requirement.get("scope", "action_call"))
         normalized_handle.setdefault("owner_id", requirement.get("owner_id", ""))
         normalized_handle.setdefault("resource_key", requirement.get("resource_key", ""))
+        normalized_handle.setdefault("action_call_id", requirement.get("action_call_id", ""))
+        normalized_handle["provider_id"] = provider_id
         normalized_handle.setdefault("status", "ready")
         normalized_handle.setdefault("policy", policy)
         normalized_handle.setdefault("ref_count", 1)
         normalized_handle.setdefault("meta", {})
         normalized_handle["meta"] = dict(normalized_handle.get("meta", {}))
         normalized_handle["meta"]["reuse_key"] = reuse_key
+        normalized_handle["meta"]["provider_probes"] = provider_probes
+        normalized_handle["meta"]["selected_provider_candidate"] = selected_candidate
         handle_id = str(normalized_handle.get("handle_id", ""))
         self._handles[handle_id] = normalized_handle
         self._handles_by_reuse_key[reuse_key] = handle_id
@@ -357,7 +810,10 @@ class ExecutionResourceManager:
         if ref_count > 1 and not force:
             handle["ref_count"] = ref_count - 1
             return None
-        provider = self._get_provider(str(handle.get("kind", "")))
+        provider = self._get_provider(
+            str(handle.get("kind", "")),
+            provider_id=str(handle.get("provider_id", "")) or None,
+        )
         handle["status"] = "releasing"
         await self._emit(
             "execution_resource.releasing",
@@ -369,6 +825,9 @@ class ExecutionResourceManager:
             await provider.async_release(handle)
         except Exception as error:
             handle["status"] = "failed"
+            handle.setdefault("meta", {})
+            handle["meta"] = dict(handle.get("meta", {}))
+            handle["meta"]["cleanup_error"] = str(error)
             await self._emit(
                 "execution_resource.failed",
                 handle=handle,
@@ -376,7 +835,15 @@ class ExecutionResourceManager:
                 message="Execution environment release failed.",
                 error=str(error),
             )
-            return None
+            raise ExecutionResourceError(
+                "Execution environment release failed; the resource remains quarantined.",
+                code="execution_resource.release_failed",
+                payload={
+                    "handle_id": handle_id,
+                    "provider_id": str(handle.get("provider_id", "")),
+                    "cleanup_error": str(error),
+                },
+            ) from error
         handle["status"] = "released"
         reuse_key = str(handle.get("meta", {}).get("reuse_key", ""))
         if reuse_key and self._handles_by_reuse_key.get(reuse_key) == handle_id:

@@ -198,7 +198,8 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                     str,
                     "Optional handler-defined execution shape. Use control for synthesis/finalization/verification "
                     "cards that should run as one structured model request; use readback for scoped cold artifact "
-                    "readback; use auto or actions for tool, TaskWorkspace, side-effect, or mixed action/readback cards. "
+                    "readback; keep auto for cards that use scoped_retrieval without Actions; use actions only for "
+                    "mounted Actions, TaskWorkspace side effects, or mixed Action/readback cards. "
                     "Avoid serial control-only chains when one control card can synthesize, verify, and decide continuation.",
                     False,
                 ),
@@ -209,7 +210,7 @@ def task_board_planning_output_schema() -> dict[str, Any]:
                 ),
                 "scoped_retrieval": (
                     dict,
-                    "Optional bounded retrieval plan: {query_groups: [{query, expected_role, source_kinds?: ['record_store'|'task_workspace'], path?, pattern?, filters?, max_results?, snippet_limit?}]}. query is content text or an exact phrase to search, not a list/read/search command. For record_store records, put collection names in filters.collection, do not put collection names in path, and use filters.kind only when the exact record kind is provided; never infer a generic kind such as note. For task_workspace files, path is the directory/file scope and pattern is one file glob such as *.md, * or **. Use filters.content_contains only for explicit content keyword lists. The executor returns factual locator_ref/evidence_snippet records only.",
+                    "Optional bounded TaskContext retrieval plan: {query_groups: [{query, expected_role, source_kinds?: [exact values offered by input.retrieval_policy.source_kinds], path?, pattern?, filters?, max_results?, snippet_limit?}]}. query is content text or an exact phrase to search, not a list/read/search Action command. Do not invent or hardcode source kinds. For record_store records, put collection names in filters.collection, do not put collection names in path, and use filters.kind only when the exact record kind is provided; never infer a generic kind such as note. For task_workspace files, path is the directory/file scope and pattern is one file glob such as *.md, * or **. Other source kinds define their descriptor/ref scope through the offered policy. Use filters.content_contains only for explicit content keyword lists. ContextReader returns factual locator_ref/evidence_snippet records only.",
                     False,
                 ),
                 "preflight_kind": (

@@ -48,6 +48,14 @@ agent.set_settings(
 agent.set_settings("record_store.vector_index.enabled", True)
 ```
 
+SessionMemory remains responsible for extraction/compression policy and
+accepted RecordStore writes. It exposes active recall as an
+`AgentlyMemoryContextSource` with source kind `session_memory`; AgentExecution
+binds that TaskContext source alongside other task information. ContextIndex
+then handles structural/vector candidate reuse, and ContextReader performs the
+consumer-bound exact read and `ContextPackage` delivery. SessionMemory does not
+run a second retrieval-to-prompt pipeline.
+
 Memory extraction, prose relevance, rerank, and summarization are model-owned
 semantic work. Host code validates schemas, applies RecordStore filters,
 persists accepted records, and enforces budgets. The plugin does not use
@@ -56,4 +64,4 @@ keyword tables as the semantic owner.
 Use session chat history for immediate conversational continuity. Use
 `session.use_memory(...)` for durable RecordStore-backed recall. Use
 TaskContext/ContextReader when an execution needs a broader package assembled
-from Skills, files, records, and direct task entries.
+from Skills, files, records, memory, and direct task entries.

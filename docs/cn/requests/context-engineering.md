@@ -21,6 +21,7 @@ keywords: Agently, context, info, session, KB, retrieval, instruct
 | Session chat history | user/assistant 消息 | 跨请求累积 |
 | Session memo | system 消息 | 持久，由自定义 resize handler 写入 |
 | 知识库检索 | 检索代码注入 | 单次按需 |
+| `TaskContext` sources | 有界 `ContextPackage` 信息块 | 按 task、consumer 与 phase |
 | 工具 / MCP 结果 | tool 消息 | 单次工具循环内累积 |
 
 按职责选槽：
@@ -46,6 +47,58 @@ keywords: Agently, context, info, session, KB, retrieval, instruct
 | 上几轮对话 | session chat history |
 | 100k tokens 公司文档 | KB + 检索，**不**放进 prompt |
 | 当前轮检索到的相关事实 | 仅本次请求的 `info` |
+
+## 用 TaskContext 做任务级渐进式披露
+
+prompt slot 负责模型可见材料，不拥有任务 source catalog。当一个任务可能需要
+Skills、files、records、SessionMemory recall、evidence 或固定仓库时，把这些 source
+绑定到 `TaskContext`，再由 `ContextReader` 按 consumer/phase 读取一份
+`ContextPackage`。
+
+TaskContext 拥有内部 `ContextIndex`。source 提供结构 descriptor 与有界精确读取；
+内部 index 构建可复用、带 revision 的 structural、lexical 或可选 hybrid partition。
+ContextReader 查询 index，完成由 ModelRequest 负责的可选相关性选择，读取 canonical
+source 内容并执行披露预算。模型只收到最终 blocks、refs、omissions、coverage 与
+diagnostics，不接收完整 source tree 或内部 vector。
+
+派生索引应通过其公开聚合 owner 配置。embedding provider 只提供机制能力；绑定具体
+consumer 的 ModelRequest selector 仍负责语义相关性判断：
+
+```python
+task_context.configure_index(
+    strategy="hybrid",
+    embedding_provider=embedding_provider,
+)
+```
+
+hybrid 模式会先通过 vector/lexical 排序，把可选 descriptor 窗口缩到 reader 的
+`max_blocks`，再交给语义选择，而不是把候选窗口扩成四倍。selector 仍可全部省略，
+或在交付预算内返回有序子集。当结构 filter 已经只留下一个 canonical candidate 时，
+index 不再请求 query embedding，因为此时不存在需要优化的候选顺序。
+
+当一个 canonical ref 已经通过结构过滤选定后，source 可以选择支持在该 ref 内进行
+确定性、有界定位。这个 source-scoped read 不判断相关性，也不验收 evidence；
+`ContextReader` 仍拥有读取会话，source 未提供该可选端口时回退普通有界 exact read。
+一个无通配符的精确 path 若只剩一个已授权 candidate，不需要再发一次模型请求来选择
+同一个 candidate。
+
+完整 `ContextPackage` 继续保留作审计。AgentTask 的 model-hot 投影会限制重复的可选
+omission 明细并携带原因计数，避免未选择的 source catalog 反而占满 prompt。已有 scoped
+evidence snippet 时，每段 snippet 直接带一个宿主发放的 `reference_id`；重复 locator
+与正文副本不进入热 prompt，canonical provenance 仍保留在宿主侧。宿主会在披露前，
+把每段正文与 execution block、ContextBlock、source revision、binding 和 canonical ref
+做一对一连接；缺失或歧义连接会排除正文并产生 diagnostic。execution/block/binding
+等不透明身份留在宿主侧，模型只选择 `reference_id` 和任务相关的 source label。
+
+一份 scoped-retrieval plan 的全部 query group 最多预留 64 个模型可见结果（即各组
+`max_results` 之和）。超出容量时会在 Blocks graph 编译前拒绝，绝不静默截断；更大
+读取应拆成由 consumer 负责的 continuation batch。
+
+Embedding usage 与模型 prompt usage 是两类独立事实。cache hit 或更小的
+ContextPackage 可以解释效率变化，但只有可比请求的完整 provider-observed prompt
+token 才能证明模型输入 token 下降；不得把字符数换算成计费 token。
+
+source contract 与 owner 边界见[任务上下文、文件与记录](workspace.md)。
 
 ## 让 info 可 diff
 
@@ -77,7 +130,8 @@ agent.info({
 上下文窗口快满时：
 
 - 默认 session 只按 `session.max_length` 做窗口裁剪；需要摘要时，注册自定义 resize handler，把摘要写入 session `memo`。详见 [会话记忆](session-memory.md)。
-- 一次性长输入，先摘要再请求，不要中间截断。
+- 任务 source 优先使用有界 TaskContext read 与可复用 ref。真正一次性的长输入，
+  先摘要再请求，不要中间截断。
 
 ## 单次 info 而不污染 agent
 

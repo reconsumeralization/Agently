@@ -126,3 +126,78 @@ async def test_docker_shell_uses_declared_mount_modes(tmp_path: Path) -> None:
         f"{root}:/workspace:ro",
         f"{fallback}:/workspace/.agently/files/execution-1:rw",
     ]
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_shell_executes_in_its_declared_container_mount(
+    tmp_path: Path,
+) -> None:
+    agent = Agently.create_agent("task-workspace-docker-workdir").use_task_workspace(
+        tmp_path,
+        mode="read_write",
+    )
+    agent.enable_shell(
+        sandbox="docker",
+        action_id="task_workspace_shell",
+        commands=["pwd"],
+    )
+    spec = agent.action.action_registry.get_spec("task_workspace_shell")
+    assert spec is not None
+    profile = spec["execution_resources"][0]["config"]["runtime_profile"]
+    captured: dict[str, Any] = {}
+    resource = DockerExecutionResource(runtime_profile=profile)
+
+    async def capture_run_container(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"ok": True, "stdout": ""}
+
+    resource._run_container = capture_run_container  # type: ignore[method-assign]
+
+    result = await resource.run_shell_command(cmd="pwd", workdir=tmp_path)
+
+    assert result["ok"] is True
+    assert captured["workdir"] == "/task_workspace"
+    assert captured["extra_mounts"] == [
+        f"{tmp_path.resolve()}:/task_workspace:rw",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_shell_resolves_relative_workdir_from_authorized_root(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    project_root = workspace_root / "project"
+    project_root.mkdir(parents=True)
+    resource = DockerExecutionResource(
+        runtime_profile={
+            "language": "shell",
+            "image": "python:3.12-slim",
+            "allowed_cmd_prefixes": ["pwd"],
+            "allowed_workdir_roots": [str(workspace_root)],
+            "task_workspace_mounts": [
+                {
+                    "host_path": str(workspace_root),
+                    "container_path": "/task_workspace",
+                    "mode": "rw",
+                }
+            ],
+        }
+    )
+    captured: list[dict[str, Any]] = []
+
+    async def capture_run_container(**kwargs: Any) -> dict[str, Any]:
+        captured.append(kwargs)
+        return {"ok": True, "stdout": ""}
+
+    resource._run_container = capture_run_container  # type: ignore[method-assign]
+
+    root_result = await resource.run_shell_command(cmd="pwd", workdir=".")
+    child_result = await resource.run_shell_command(cmd="pwd", workdir="project")
+
+    assert root_result["ok"] is True
+    assert child_result["ok"] is True
+    assert [item["workdir"] for item in captured] == [
+        "/task_workspace",
+        "/task_workspace/project",
+    ]

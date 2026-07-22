@@ -1,3 +1,4 @@
+import copy
 import json
 import sqlite3
 from typing import Any, cast
@@ -119,13 +120,13 @@ def test_v2_default_plugins_are_registered():
     assert {
         "SearchActionExecutor",
         "BrowseActionExecutor",
-        "NodeJSActionExecutor",
+        "CodeExecutionActionExecutor",
         "DockerActionExecutor",
         "SQLiteActionExecutor",
     }.issubset(action_executors)
     assert {
         "ACPExecutionResourceProvider",
-        "NodeExecutionResourceProvider",
+        "TrustedLocalExecutionResourceProvider",
         "DockerExecutionResourceProvider",
         "BrowserExecutionResourceProvider",
         "SQLiteExecutionResourceProvider",
@@ -912,6 +913,67 @@ async def test_action_runtime_default_planning_uses_configured_model_key(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_action_runtime_default_planning_discloses_single_action_id_round_policy(monkeypatch):
+    import agently.core as agently_core
+
+    agent = Agently.create_agent()
+    agent.settings.set("action.loop.round_dispatch_policy", "single_action_id_cohort")
+    captured_info: list[dict[str, Any]] = []
+    captured_instructions: list[list[str]] = []
+
+    class FakeResult:
+        async def async_get_data(self):
+            return {"next_action": "response", "execution_commands": []}
+
+    class FakeResponse:
+        result = FakeResult()
+
+    class FakeModelRequest:
+        def __init__(self, *_, **__):
+            pass
+
+        def input(self, *_args, **_kwargs):
+            return self
+
+        def info(self, value):
+            captured_info.append(value)
+            return self
+
+        def instruct(self, value):
+            captured_instructions.append(value)
+            return self
+
+        def output(self, *_args, **_kwargs):
+            return self
+
+        def get_response(self, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(agently_core, "ModelRequest", FakeModelRequest)
+    prompt = Agently.create_prompt()
+    prompt.set("input", "search, then read a selected match")
+
+    await agent.action.action_runtime._default_structured_planning_handler(
+        {
+            "prompt": prompt,
+            "settings": agent.settings,
+            "agent_name": agent.name,
+            "round_index": 0,
+            "max_rounds": None,
+            "done_plans": [],
+            "last_round_records": [],
+        },
+        {"action_list": [{"name": "search"}, {"name": "read"}]},
+    )
+
+    assert captured_info[0]["round_dispatch_policy"] == "single_action_id_cohort"
+    assert any(
+        "same action_id" in instruction and "next round" in instruction
+        for instruction in captured_instructions[0]
+    )
+
+
+@pytest.mark.asyncio
 async def test_browse_recovers_http_to_https_and_returns_link_diagnostics():
     browse = Browse(
         fallback_order=("bs4",),
@@ -1341,6 +1403,59 @@ async def test_action_loop_exposes_live_recall_then_returns_historical_refs(tmp_
 
 
 @pytest.mark.asyncio
+async def test_action_loop_preserves_blocked_executor_reason_for_model_repair(tmp_path):
+    agent = Agently.create_agent()
+    tag = f"blocked-reason-{agent.name}"
+    action_id = "test_blocked_reason_bash"
+    agent.action.register_bash_sandbox_action(
+        action_id=action_id,
+        tags=[tag],
+        allowed_cmd_prefixes=["pwd"],
+        allowed_workdir_roots=[str(tmp_path)],
+        expose_to_model=True,
+    )
+    prompt = Agently.create_prompt()
+    prompt.set("input", "try one blocked command")
+    seen_records: list[list[dict[str, Any]]] = []
+
+    async def planning_handler(context, request):
+        _ = request
+        seen_records.append(context.get("last_round_records", []))
+        if context.get("round_index") == 0:
+            return {
+                "next_action": "execute",
+                "action_calls": [
+                    {
+                        "purpose": "Run a disallowed command",
+                        "action_id": action_id,
+                        "action_input": {
+                            "cmd": ["python -c 'print(1)'"],
+                            "workdir": str(tmp_path),
+                        },
+                    }
+                ],
+            }
+        return {"next_action": "response", "action_calls": []}
+
+    await agent.action.async_plan_and_execute(
+        prompt=prompt,
+        settings=agent.settings,
+        action_list=agent.action.get_action_list(tags=[tag]),
+        agent_name=agent.name,
+        planning_handler=planning_handler,
+        max_rounds=2,
+    )
+
+    blocked = seen_records[1][0]
+    digest = blocked.get("data", {})
+    assert blocked.get("status") == "blocked"
+    assert blocked.get("error") == "cmd_not_allowed"
+    assert digest.get("error") == "cmd_not_allowed"
+    assert digest.get("result_preview", {}).get("reason") == "cmd_not_allowed"
+    assert digest.get("diagnostics", [{}])[0].get("code") == "shell.cmd_not_allowed"
+
+
+@pytest.mark.asyncio
 async def test_action_loop_keeps_large_outputs_cold_then_releases_standalone_scope():
     agent = Agently.create_agent()
     marker = "RAW_OUTPUT_SHOULD_STAY_COLD"
@@ -1422,6 +1537,88 @@ async def test_action_loop_keeps_large_outputs_cold_then_releases_standalone_sco
     assert visible_digest["artifact_refs"]
     assert "preview" not in visible_digest["artifact_refs"][0]
     assert visible_record["artifacts"] == visible_record["artifact_refs"]
+
+
+@pytest.mark.asyncio
+async def test_action_loop_explicit_recall_returns_bounded_hot_page_without_recursive_ref():
+    agent = Agently.create_agent()
+    expected_path = "ultralytics/nn/modules/moe/routers.py"
+
+    @agent.action_func
+    def produce_large_repository_listing() -> dict[str, Any]:
+        return {
+            "a_path": expected_path,
+            "body": "x" * 12000,
+        }
+
+    prompt = Agently.create_prompt()
+    prompt.set("input", "discover and read the exact repository path")
+    seen_rounds: list[dict[str, Any]] = []
+
+    async def planning_handler(context, _request):
+        round_index = int(context.get("round_index", 0))
+        last_round_records = context.get("last_round_records", [])
+        seen_rounds.append(
+            {
+                "round_index": round_index,
+                "last_round_records": copy.deepcopy(last_round_records),
+            }
+        )
+        if round_index == 0:
+            return {
+                "next_action": "execute",
+                "action_calls": [
+                    {
+                        "purpose": "List repository paths",
+                        "action_id": "produce_large_repository_listing",
+                        "action_input": {},
+                    }
+                ],
+            }
+        if round_index == 1:
+            output_ref = next(
+                ref
+                for ref in last_round_records[0].get("artifact_refs", [])
+                if ref.get("artifact_type") == "action_output"
+            )
+            return {
+                "next_action": "execute",
+                "action_calls": [
+                    {
+                        "purpose": "Read the bounded repository listing page",
+                        "action_id": "read_action_artifact",
+                        "action_input": {
+                            "selection_key": output_ref["selection_key"],
+                            "offset": 0,
+                            "max_bytes": 4096,
+                        },
+                    }
+                ],
+            }
+        return {"next_action": "response", "action_calls": []}
+
+    records = await agent.action.async_plan_and_execute(
+        prompt=prompt,
+        settings=agent.settings,
+        action_list=agent.action.get_action_list(tags=[f"agent-{agent.name}"]),
+        agent_name=agent.name,
+        planning_handler=planning_handler,
+    )
+
+    assert len(seen_rounds) == 3
+    recalled_record = seen_rounds[2]["last_round_records"][0]
+    recall_digest = recalled_record["result"]
+    assert recall_digest["transfer_kind"] == "explicit_action_artifact_readback"
+    assert expected_path in recall_digest["result_preview"]["value"]
+    assert recalled_record["artifact_refs"] == []
+    assert recalled_record["artifacts"] == []
+    assert sum(
+        1
+        for record in records
+        for ref in record.get("artifact_refs", [])
+        if ref.get("artifact_type") == "action_output"
+    ) == 1
+    assert agent.action._artifact_manager._artifacts == {}
 
 
 def test_search_package_does_not_load_backend_during_registration(monkeypatch):

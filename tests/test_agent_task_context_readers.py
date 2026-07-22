@@ -8,7 +8,9 @@ import pytest
 from agently import Agently
 from agently.core import AgentTask, SkillLibrary
 from agently.core.application.SkillLibrary import SkillBinding, SkillContextSource
+from agently.core.application.AgentTask.BlockCarrier import scoped_retrieval_policy
 from agently.core.context import TaskContext
+from agently.types.data import ContextBlock, ContextOmission, ContextPackage
 
 
 def _write_skill(root: Path) -> Path:
@@ -22,6 +24,135 @@ def _write_skill(root: Path) -> Path:
         encoding="utf-8",
     )
     return root
+
+
+class _FailingRequiredContextSource:
+    source_id = "source:failing-required"
+    source_kind = "failing_required"
+    source_revision = "rev:1"
+
+    async def async_enumerate_descriptors(
+        self,
+        *,
+        profile,
+        cursor,
+        limit: int,
+    ):
+        del profile, cursor, limit
+        raise RuntimeError("required source unavailable")
+
+    async def async_read_exact(self, *_args, **_kwargs):
+        raise AssertionError("exact reads must not start after enumeration failure")
+
+
+def test_scoped_retrieval_policy_projects_task_context_source_catalog() -> None:
+    context = TaskContext("catalog-task")
+    source = _FailingRequiredContextSource()
+    source.source_kind = "pinned_repository"
+    context.attach(source, binding_id="binding:repo", required=True)
+
+    policy = scoped_retrieval_policy(context.source_catalog())
+
+    assert policy["schema_version"] == "agent_task_scoped_retrieval/v2"
+    assert tuple(policy["source_kinds"]) == ("pinned_repository",)
+    assert policy["source_kinds"]["pinned_repository"]["binding_ids"] == (
+        "binding:repo",
+    )
+
+
+def test_agent_task_context_reader_uses_explicit_model_attachment_capability(
+    tmp_path: Path,
+) -> None:
+    agent = Agently.create_agent("task-context-vlm-capability").use_task_workspace(
+        tmp_path / "work"
+    )
+    task = AgentTask(
+        agent,
+        goal="Inspect an image.",
+        success_criteria=["The image is interpreted only when supported."],
+        options={
+            "agent_task": {
+                "context_consumer_capabilities": {
+                    "attachments": {"image": True}
+                }
+            }
+        },
+    )
+
+    reader = task._task_context_reader(
+        phase="planning",
+        consumer_id="agent_task:test:planner",
+    )
+
+    assert reader.consumer.capabilities["attachments"]["image"] is True
+
+
+def test_agent_task_binds_context_image_as_attachment_without_serializing_data_url(
+    tmp_path: Path,
+) -> None:
+    attachment = {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    }
+    block = ContextBlock(
+        block_id="context-block:image",
+        block_key="image-key",
+        source_id="source:image",
+        source_revision="rev:1",
+        source_ref="assets/chart.png",
+        binding_id="binding:image",
+        role="information",
+        content=[attachment],
+        completeness="complete",
+        content_chars=0,
+        refs=("assets/chart.png",),
+        metadata={"context_representation": "image_attachment"},
+    )
+    package = ContextPackage(
+        package_id="package:image",
+        task_context_id="task-context:image",
+        context_revision=1,
+        consumer_id="agent_task:test:planner",
+        phase="planning",
+        source_revisions={"binding:image": "rev:1"},
+        source_coverage={},
+        blocks=(block,),
+    )
+    agent = Agently.create_agent("task-context-vlm-binding").use_task_workspace(
+        tmp_path / "work"
+    )
+    task = AgentTask(
+        agent,
+        goal="Inspect an image.",
+        success_criteria=["The image is interpreted."],
+    )
+    request = agent.create_temp_request()
+
+    projected = task._project_task_context_package(package)
+    task._bind_task_context_attachments(request, package)
+
+    assert projected["items"][0]["content"] is None
+    assert "data:image/png;base64" not in str(projected)
+    prompt = request.prompt.get(inherit=False)
+    assert prompt["attachment"][0]["type"] == "text"
+    assert prompt["attachment"][1] == attachment
+
+
+def test_flat_scoped_retrieval_normalization_preserves_open_source_kind() -> None:
+    normalized = AgentTask._normalize_scoped_retrieval_plan(
+        {
+            "query_groups": [
+                {
+                    "query": "entrypoint",
+                    "source_kinds": ["pinned_repository"],
+                }
+            ]
+        }
+    )
+
+    assert normalized["query_groups"][0]["source_kinds"] == [
+        "pinned_repository"
+    ]
 
 
 @pytest.mark.asyncio
@@ -65,6 +196,125 @@ async def test_agent_task_phase_readers_share_context_but_not_disclosure_history
         block.content for block in verification.blocks if block.role == "instruction"
     ] == ["Apply this instruction in every governed model phase."]
     assert planning.source_revisions == verification.source_revisions
+
+
+@pytest.mark.asyncio
+async def test_agent_task_fails_closed_when_required_source_cannot_list_candidates(
+    tmp_path: Path,
+) -> None:
+    task_context = TaskContext("required-source-task")
+    task_context.attach(
+        _FailingRequiredContextSource(),
+        binding_id="binding:failing-required",
+        required=True,
+    )
+    agent = Agently.create_agent("required-source-task").use_task_workspace(
+        tmp_path / "work"
+    )
+    task = AgentTask(
+        agent,
+        task_id="required-source-task",
+        goal="Use required context",
+        success_criteria=["Required context is used."],
+        task_context=task_context,
+        task_workspace=agent.task_workspace,
+    )
+
+    with pytest.raises(RuntimeError, match="Required TaskContext content"):
+        await task._read_task_context_package(
+            phase="planning",
+            consumer_id="agent_task:required-source-task:planner",
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_task_context_budget_can_explicitly_allow_lossy_required_digest(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "large-skill"
+    skill_root.mkdir()
+    (skill_root / "SKILL.md").write_text(
+        "---\n"
+        "name: Large Governed Work\n"
+        "description: Large protected procedure.\n"
+        "---\n\n"
+        + ("Preserve this protected instruction.\n" * 500),
+        encoding="utf-8",
+    )
+    library = SkillLibrary(tmp_path / "library")
+    installed = library.install(skill_root, trust="trusted")
+    binding = SkillBinding.create(installed, task_id="large-task", mode="required")
+    task_context = TaskContext("large-task")
+    task_context.attach(SkillContextSource(library, bindings=(binding,)), required=True)
+    agent = Agently.create_agent("large-task-reader").use_task_workspace(tmp_path / "work")
+    task = AgentTask(
+        agent,
+        task_id="large-task",
+        goal="Apply the large procedure",
+        success_criteria=["The procedure remains traceable."],
+        task_context=task_context,
+        task_workspace=agent.task_workspace,
+        context_budget={"chars": 800, "required_overflow": "lossy_digest"},
+    )
+
+    package = await task._read_task_context_package(
+        phase="planning",
+        consumer_id="agent_task:large-task:planner",
+    )
+
+    assert len(package.blocks) == 1
+    assert package.blocks[0].completeness == "lossy"
+    assert package.blocks[0].metadata["original_chars"] == len(installed.instruction_body)
+    assert not any(item.required for item in package.omissions)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_child_model_read_inherits_required_overflow_policy(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "large-child-skill"
+    skill_root.mkdir()
+    (skill_root / "SKILL.md").write_text(
+        "---\n"
+        "name: Large Child Work\n"
+        "description: Large child execution procedure.\n"
+        "---\n\n"
+        + ("Preserve this child instruction.\n" * 500),
+        encoding="utf-8",
+    )
+    library = SkillLibrary(tmp_path / "library")
+    installed = library.install(skill_root, trust="trusted")
+    agent = Agently.create_agent("large-child-reader").use_task_workspace(
+        tmp_path / "work"
+    )
+    agent.skill_library = library
+    agent.require_skills(installed.revision_ref, always=True)
+    task = AgentTask(
+        agent,
+        goal="Apply the large child procedure",
+        success_criteria=["The child read remains traceable."],
+        context_budget={"chars": 800, "required_overflow": "lossy_digest"},
+    )
+
+    child = task._create_bounded_child_execution(
+        lineage={
+            "task_id": task.id,
+            "iteration_id": "iteration-1",
+            "step_id": "child-read",
+        }
+    )
+    package = await child.async_read_task_context(
+        consumer_id=f"model_request:{child.id}",
+        phase="direct",
+    )
+
+    assert child.options["context_budget"] == {
+        "chars": 800,
+        "required_overflow": "lossy_digest",
+    }
+    assert len(package.blocks) == 1
+    assert package.blocks[0].completeness == "lossy"
+    assert not any(item.required for item in package.omissions)
 
 
 @pytest.mark.asyncio
@@ -119,9 +369,44 @@ async def test_agent_task_skill_projection_uses_skill_domain_binding_and_mode(
     projected = AgentTask._project_task_context_package(package)
     skill = projected["skill_projection"]["skills"][0]
 
+    assert projected["source_coverage"] == package.to_dict()["source_coverage"]
+    assert projected["continuation_available"] is False
     assert skill["binding_id"] == binding.binding_id
     assert skill["mode"] == "model_decision"
     assert projected["skill_projection"]["required_skill_ids"] == []
+
+
+def test_agent_task_context_projection_bounds_optional_omission_details() -> None:
+    omissions = tuple(
+        ContextOmission(
+            block_key=f"block:{index}",
+            source_ref=f"src/file_{index}.py",
+            reason="explicitly_skipped",
+        )
+        for index in range(120)
+    )
+    package = ContextPackage(
+        package_id="package:bounded-omissions",
+        task_context_id="task-context:bounded-omissions",
+        context_revision=1,
+        consumer_id="agent_task:test:control",
+        phase="card",
+        source_revisions={"binding:repo": "rev:1"},
+        source_coverage={},
+        blocks=(),
+        omissions=omissions,
+    )
+
+    projected = AgentTask._project_task_context_package(package)
+
+    assert len(projected["omitted"]) == 8
+    assert projected["omission_summary"] == {
+        "total": 120,
+        "required": 0,
+        "details_returned": 8,
+        "details_omitted": 112,
+        "reason_counts": {"explicitly_skipped": 120},
+    }
 
 
 @pytest.mark.asyncio
@@ -424,6 +709,7 @@ async def test_agent_task_resume_restores_skill_context_and_context_audit(
     restored_package = next(
         item for item in resumed.context_packages if item.package_id == package.package_id
     )
+    assert restored_package.source_coverage == package.source_coverage
     restored_skill = resumed._project_task_context_package(restored_package)["skill_projection"]["skills"][0]
     assert restored_skill["binding_id"] == skill_binding.binding_id
     assert restored_skill["revision_ref"] == skill_binding.revision_ref

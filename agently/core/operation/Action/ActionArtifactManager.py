@@ -42,6 +42,7 @@ class ActionArtifactManager:
     _MODEL_VISIBLE_RECORD_MAX_BYTES = 6000
     _MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES = 2400
     _MODEL_VISIBLE_INSTRUCTION_MAX_BYTES = 1200
+    _MODEL_VISIBLE_RECALL_VALUE_MAX_BYTES = 8000
     _ACTION_CARRIER_MAX_BYTES = 16000
     _INSTRUCTION_HEAVY_EXECUTOR_TYPES = {
         "bash_sandbox",
@@ -465,6 +466,9 @@ class ActionArtifactManager:
             self._artifact_scopes[artifact_id] = (resolved_scope["kind"], resolved_scope["id"])
             self._selection_index[selection_key] = artifact_id
         return {
+            "owner": "action_artifact",
+            "locator": selection_key,
+            "content_version": hashlib.sha256(raw_bytes).hexdigest(),
             "artifact_id": artifact_id,
             "selection_key": selection_key,
             "action_call_id": action_call_id,
@@ -531,6 +535,8 @@ class ActionArtifactManager:
             self._selection_index[selection_key] = artifact_id
 
         artifact_ref: ActionArtifact = {
+            "owner": "action_artifact",
+            "locator": selection_key,
             "artifact_id": artifact_id,
             "selection_key": selection_key,
             "action_call_id": action_call_id,
@@ -551,6 +557,7 @@ class ActionArtifactManager:
             artifact_ref["path"] = str(path)
         if stored["sha256"]:
             artifact_ref["sha256"] = stored["sha256"]
+            artifact_ref["content_version"] = stored["sha256"]
         return artifact_ref
 
     def _normalize_explicit_artifacts(
@@ -630,12 +637,13 @@ class ActionArtifactManager:
 
     # ── instruction-heavy detection ────────────────────────────────────────
 
-    def _is_instruction_heavy_record(self, record: ActionResult) -> bool:
+    @classmethod
+    def _is_instruction_heavy_record(cls, record: ActionResult) -> bool:
         executor_type = str(record.get("executor_type", ""))
-        if executor_type in self._INSTRUCTION_HEAVY_EXECUTOR_TYPES:
+        if executor_type in cls._INSTRUCTION_HEAVY_EXECUTOR_TYPES:
             return True
         kwargs = record.get("kwargs", {})
-        if isinstance(kwargs, dict) and any(key in kwargs for key in self._INSTRUCTION_HEAVY_KWARGS):
+        if isinstance(kwargs, dict) and any(key in kwargs for key in cls._INSTRUCTION_HEAVY_KWARGS):
             return True
         action_id = str(record.get("action_id", ""))
         return action_id in {
@@ -695,9 +703,81 @@ class ActionArtifactManager:
         error = record.get("error", "")
         if isinstance(error, str) and error:
             digest["error"] = self._compact_text(error, limit=4000)
+        diagnostics = record.get("diagnostics", [])
+        if isinstance(diagnostics, list) and diagnostics:
+            digest["diagnostics"] = self._compact_value(diagnostics, limit=4000)
         if redaction_report:
             digest["redaction_report"] = redaction_report
         return digest
+
+    @classmethod
+    def _build_execution_recall_digest(cls, record: ActionResult) -> dict[str, Any]:
+        """Project one explicit artifact page without artifactizing it again."""
+
+        value = record.get("value", record.get("data", record.get("result")))
+        # ``read_action_artifact(max_bytes=...)`` already returns an explicitly
+        # bounded serialized page.  Running that string through the generic
+        # mapping/list compactor applies its per-string half-budget and can
+        # silently discard the latter half of a successful read.  Preserve one
+        # string page up to the recall boundary; use structural compaction only
+        # for unpaged/non-string recall values.
+        bounded_value = (
+            cls._bounded_runtime_text(
+                value,
+                max_bytes=cls._MODEL_VISIBLE_RECALL_VALUE_MAX_BYTES,
+            )
+            if isinstance(value, str)
+            else cls._compact_hot_path_field(
+                value,
+                max_bytes=cls._MODEL_VISIBLE_RECALL_VALUE_MAX_BYTES,
+            )
+        )
+        transfer = {
+            key: deepcopy(record.get(key))
+            for key in (
+                "ok",
+                "status",
+                "owner",
+                "locator",
+                "content_version",
+                "selection_key",
+                "artifact_type",
+                "label",
+                "media_type",
+                "serialized_media_type",
+                "total_bytes",
+                "range",
+                "truncated",
+                "next_offset",
+            )
+            if record.get(key) is not None
+        }
+        transfer["value"] = bounded_value
+        original_size = cls._safe_json_size(value)
+        preview_size = cls._safe_json_size(bounded_value)
+        return {
+            "action_call_id": record.get("action_call_id", ""),
+            "action_id": cls._RECALL_ACTION_ID,
+            "purpose": record.get("purpose", ""),
+            "status": record.get("status", ""),
+            "success": bool(record.get("success", record.get("ok", False))),
+            "executor_type": record.get("executor_type", ""),
+            "instruction": {
+                "kind": "artifact_selection",
+                "selection_key": str(record.get("locator") or record.get("selection_key") or ""),
+                "range": deepcopy(record.get("range")),
+            },
+            "result_preview": transfer,
+            "result_preview_meta": {
+                "truncated": bool(record.get("truncated")) or preview_size < original_size,
+                "original_size": original_size,
+                "preview_size": preview_size,
+                "explicit_recall_transfer": True,
+            },
+            "artifact_refs": [],
+            "file_refs": [],
+            "transfer_kind": "explicit_action_artifact_readback",
+        }
 
     # ── result finalization ────────────────────────────────────────────────
 
@@ -717,6 +797,28 @@ class ActionArtifactManager:
 
         action_call_id = str(record.get("action_call_id", "") or f"act_call_{uuid.uuid4().hex}")
         record["action_call_id"] = action_call_id
+
+        if (
+            str(record.get("action_id") or "") == self._RECALL_ACTION_ID
+            and str(record.get("owner") or "") == "action_artifact"
+            and str(record.get("locator") or record.get("selection_key") or "").strip()
+        ):
+            # An explicit recall is already the progressive-disclosure transfer.
+            # Re-registering that page as a fresh action_output creates an
+            # unbounded selection-key chain and removes the requested body from
+            # the next planning round. Keep the authoritative host result intact
+            # and attach one bounded, model-visible transfer digest instead.
+            meta["execution_recall"] = {
+                "finalized": True,
+                "digest_version": 1,
+                "artifact_count": 0,
+                "transfer": True,
+            }
+            record["meta"] = meta
+            record["artifact_refs"] = []
+            record["artifacts"] = []
+            record["model_digest"] = self._build_execution_recall_digest(record)
+            return record
 
         data = record.get("data", record.get("result"))
         meta = record.get("meta", {})
@@ -1213,7 +1315,14 @@ class ActionArtifactManager:
             return cls._project_model_artifact_refs(record)
         if digest.get("same_as") == "result" and isinstance(record.get("result"), dict):
             return cls._project_model_artifact_refs(record)
-        visible_digest = cls._to_hot_path_digest(digest)
+        visible_digest = (
+            dict(digest)
+            if (
+                str(record.get("action_id") or "") == cls._RECALL_ACTION_ID
+                and digest.get("transfer_kind") == "explicit_action_artifact_readback"
+            )
+            else cls._to_hot_path_digest(digest)
+        )
         visible = cast(ActionResult, {
             "action_call_id": record.get("action_call_id", visible_digest.get("action_call_id", "")),
             "action_id": record.get("action_id", visible_digest.get("action_id", "")),
@@ -1271,12 +1380,31 @@ class ActionArtifactManager:
 
         if not isinstance(records, list):
             return []
-        return [
-            cls._to_action_carrier_record(record)
-            if cls._safe_json_size(record) > cls._ACTION_CARRIER_MAX_BYTES
-            else record
-            for record in records
-        ]
+        projected: list[ActionResult] = []
+        for record in records:
+            record_size = cls._safe_json_size(record)
+            result_value = record.get("data", record.get("result")) if isinstance(record, dict) else None
+            result_size = cls._safe_json_size(result_value)
+            model_digest = record.get("model_digest") if isinstance(record, dict) else None
+            explicit_recall_transfer = (
+                str(record.get("action_id") or "") == cls._RECALL_ACTION_ID
+                and isinstance(model_digest, dict)
+                and model_digest.get("transfer_kind") == "explicit_action_artifact_readback"
+            )
+            # Normalization deliberately retains host aliases (`data`,
+            # `result`, `artifact_refs`, `artifacts`). Those aliases can push a
+            # modest authoritative result just above the carrier threshold even
+            # though no large value is crossing the boundary. Preserve such a
+            # host result; compact only when the value itself is large (or the
+            # action carries instruction-heavy material).
+            should_compact = explicit_recall_transfer or (
+                record_size > cls._ACTION_CARRIER_MAX_BYTES
+                and (result_size > 8000 or cls._is_instruction_heavy_record(record))
+            )
+            projected.append(
+                cls._to_action_carrier_record(record) if should_compact else record
+            )
+        return projected
 
     @classmethod
     def _to_action_carrier_record(cls, record: ActionResult) -> ActionResult:
@@ -1292,15 +1420,24 @@ class ActionArtifactManager:
         digest = visible.get("result")
         if isinstance(digest, dict):
             compact_digest = dict(digest)
-            if "instruction" in compact_digest:
-                compact_digest["instruction"] = {"omitted": True}
-            if "result_preview" in compact_digest:
-                compact_digest["result_preview"] = {"omitted": True}
+            explicit_recall_transfer = (
+                str(visible.get("action_id") or "") == cls._RECALL_ACTION_ID
+                and compact_digest.get("transfer_kind") == "explicit_action_artifact_readback"
+            )
+            if not explicit_recall_transfer:
+                if "instruction" in compact_digest:
+                    compact_digest["instruction"] = {"omitted": True}
+                if "result_preview" in compact_digest:
+                    compact_digest["result_preview"] = {"omitted": True}
             visible["result"] = compact_digest
             visible["data"] = {
                 "same_as": "result",
                 "action_call_id": compact_digest.get("action_call_id", ""),
-                "carrier_compacted": True,
+                (
+                    "explicit_recall_transfer"
+                    if explicit_recall_transfer
+                    else "carrier_compacted"
+                ): True,
             }
             visible["model_digest"] = dict(visible["data"])
         return visible

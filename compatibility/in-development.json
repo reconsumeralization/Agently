@@ -3,7 +3,7 @@
   "framework": "agently",
   "target_version": "4.1.4.2",
   "release_train": "2026-07-4.1.4.2-dev",
-  "notes": "4.1.4.2 breaking development line: TaskContext and ContextReader own progressive disclosure; TaskWorkspace owns task files; RecordStore owns records and durability; SkillLibrary owns immutable installed Skill revisions; AgentExecution owns task-scoped Skill binding. AgentTask process state stays in memory/logs by default and record_store_recovery is opt-in. The former combined Workspace, ContextBuilder, SkillsManager, Skills execution route/strategies, skill_activation, and workspace_operation are removed without shims.",
+  "notes": "4.1.4.2 breaking development line: TaskContext owns progressive disclosure and one internal derived ContextIndex lifecycle; ContextReader owns consumer-bound exact readback and ContextPackage construction. TaskWorkspace owns task files and code-execution grants, including verifier-gated atomic terminal promotion; RecordStore owns records and durability; SkillLibrary owns immutable installed Skill revisions and authorized remote-source snapshots; SessionMemory recall enters through a TaskContext source; AgentExecution owns task-scoped Skill binding. Workspace-backed code execution selects provider-neutral ExecutionResource providers after immutable bundle materialization. AgentTask process state stays in memory/logs by default and record_store_recovery is opt-in. The former combined Workspace, ContextBuilder, SkillsManager, Skills execution route/strategies, skill_activation, and workspace_operation are removed without shims.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",
@@ -74,10 +74,10 @@
         "selection_and_binding_owner": "AgentExecution structured semantic selection with host-issued keys and fail-closed validation",
         "disclosure_owner": "TaskContext plus SkillContextSource plus consumer-bound ContextReader",
         "compatibility_facade": "Agently.skills_executor supports local configure/install/list/inspect/read/context-pack/TaskDAG helpers only",
-        "execution_policy": "No Skills route, Skill-local strategy, stage engine, script actionization, capability inference, or capability mounting",
+        "execution_policy": "No Skills route, Skill-local strategy, stage engine, implicit script actionization, capability inference, or capability mounting; trusted exact-revision scripts require explicit host authorization and bind as ordinary Workspace-backed code_execution Actions",
         "revision_binding_event": "skills.revisions.bound records exact revision availability without claiming activation",
         "context_consumption_event": "skills.context.bound records concrete ModelRequest response-bound context consumption; availability alone is not consumption or Action evidence",
-        "remote_source_policy": "Authorized host code materializes remote sources before local SkillLibrary installation"
+        "remote_source_policy": "Registered SkillSourceProvider plugins materialize authorized local or Git sources to immutable local snapshots; SkillLibrary installs exact snapshots and records redacted provenance; remote compatibility installs default to untrusted and selected subpaths reject symlink escape"
       },
       "devtools_guidance_protocol": "agently-skills.devtools-guidance.v1",
       "catalog_generation": "v2",
@@ -107,7 +107,19 @@
     },
     "action_runtime": {
       "task_workspace_contract": "TaskWorkspace Actions own bounded file read/search/write/edit/patch/export operations.",
-      "record_store_contract": "Action persistence is explicit and does not follow from a TaskWorkspace binding."
+      "record_store_contract": "Action persistence is explicit and does not follow from a TaskWorkspace binding.",
+      "code_execution_contract": "TaskWorkspace grant -> ordered provider selection/binding -> immutable CodeExecutionBundle materialization -> adapter-owned argv execution -> declared-output readback -> provider release -> grant close",
+      "code_execution_languages": [
+        "python>=3.10",
+        "nodejs>=18",
+        "go>=1.25",
+        "cpp20"
+      ],
+      "provider_selection_contract": "code_execution is the resource kind; provider candidates have stable provider_id values and optional candidate-local config; actual availability, normalized toolchain-version, Workspace, safety, and typed isolation-axis probes select an eligible candidate; preferred capabilities are satisfied across the ordered set before an explicit fallback and selected facts remain in Action result metadata",
+      "code_execution_output_contract": "expected_outputs contains at most 128 bounded normalized output/ paths; missing declared outputs fail the Action; retained stdout/stderr is bounded and timeout/cancellation stops the owned process or container",
+      "release_failure_contract": "provider release failures quarantine the handle and turn an otherwise successful Action into an error",
+      "unsafe_fallback_contract": "trusted_local is explicit unsafe host execution, requires allow_unsafe_local authorization and snapshot access, and cannot satisfy isolation=required",
+      "community_provider_contract": "PR #325 and #327 retain contributor ownership of concrete gVisor and Seatbelt implementations; the base branch provides only provider-neutral contracts, synthetic conformance fixtures, and migration guidance"
     },
     "triggerflow": {
       "record_store_resource": "flow.create_execution(record_store=...); record_store=False opts out",
@@ -118,22 +130,28 @@
       "owner": "TaskContext",
       "reader": "ContextReader",
       "package": "ContextPackage",
+      "derived_index_owner": "TaskContext internal ContextIndex",
+      "source_protocol": "ContextSource async_enumerate_descriptors plus async_read_exact, with optional ContextSourceScopedRead for deterministic bounded location only after one canonical ref is selected; sources own canonical truth while TaskContext owns disposable derived partitions",
+      "source_kinds": "open adapter vocabulary",
       "source_adapters": [
         "SkillContextSource",
         "TaskWorkspaceContextSource",
-        "RecordStoreContextSource"
+        "RecordStoreContextSource",
+        "AgentlyMemoryContextSource"
       ],
-      "selection_contract": "Required and explicit blocks cannot be dropped; optional prose relevance uses ModelRequest structured output and host-issued keys."
+      "selection_contract": "ContextIndex owns structural, lexical, and optional hybrid candidate retrieval; ContextReader owns consumer-local offsets, exact or selected-ref scoped readback, budgets, and optional ModelRequest structured selection with host-issued keys. An exact non-wildcard path with one authorized candidate is host-selected without another semantic request. Required and explicit blocks cannot be silently dropped; unknown source kinds fail before enumeration.",
+      "model_hot_projection_contract": "ContextPackage retains full omission and diagnostic facts for audit. AgentTask joins every scoped body one-to-one against host-side execution-block, ContextBlock, source-revision, binding, and canonical-ref identity before disclosure; missing or ambiguous joins exclude the body with diagnostics. Model-hot projections expose one host-issued reference_id plus task-relevant source labels, omit opaque host identities, bound repetitive optional omission details with aggregate reason counts, and do not duplicate the same body in the evidence ledger. A scoped plan may reserve at most 64 model-visible results per execution batch across query-group max_results; an otherwise valid larger TaskBoard plan is deterministically split into bounded Context-owned batches plus a dependent continuation without changing source kinds or silently truncating, while an individually over-capacity or invalid group fails closed for structured replanning."
     },
     "task_workspace": {
       "surface": [
         "TaskWorkspace",
-        "TaskWorkspaceManager",
+        "TaskWorkspace.register_file_io_handler",
         "Agent.use_task_workspace",
         "Agent.enable_task_workspace_file_actions"
       ],
       "default_root": "<entry-directory>/.agently/task_workspaces/<agent-id>",
-      "ownership": "Task files, path policy, physical readback, digest, and file refs"
+      "ownership": "Task files, path policy, physical readback, digest, file refs, scoped execution grants, immutable bundle materialization, and declared-output collection",
+      "terminal_artifact_contract": "Required AgentTask deliverables remain digest-pinned staged candidates through verifier acceptance, then use atomic target promotion and complete post-promotion readback; failure blocks delivery without overwriting the prior accepted target"
     },
     "record_store": {
       "surface": [
@@ -148,6 +166,7 @@
     "session_memory": {
       "storage_owner": "RecordStore",
       "strategy_owner": "SessionMemory plugin",
+      "recall_owner": "TaskContext via AgentlyMemoryContextSource",
       "task_file_dependency": false
     }
   },
@@ -169,7 +188,9 @@
         "AgentExecution.strategy(\"auto\"|\"direct\"|\"flat\"|\"taskboard\")"
       ],
       "context_contract": "AgentExecution and AgentTask share one TaskContext and one execution-scoped TaskWorkspace view.",
-      "durability_contract": "Process state stays in memory/logs by default; record_store_recovery is opt-in."
+      "durability_contract": "Process state stays in memory/logs by default; record_store_recovery is opt-in.",
+      "evidence_replan_contract": "A material-evidence replan_segment without an unresolved mounted capability first uses a dedicated ModelRequest to choose bounded semantic queries from host-offered TaskContext source kinds, then creates one or more Context-owned evidence-reacquisition cards before a dependent artifact-repair card. The host requires evidence_use to bind the exact new body-bearing owner/locator/content_version/range identities added to EvidenceLedger, excludes final-artifact self-readback from progress, and permits another repair only when a newly acquired reference is consumed by the original failed criterion or stable exact material-claim subject.",
+      "taskboard_live_evidence_contract": "Dependency readback evidence is canonicalized before prompt construction; prompt projection, host binding validation, acceptance indexing, and result persistence share one live ledger identity domain. A control result with sufficient=false cannot become completed through next_board_action=finalize."
     },
     "skills": {
       "surface": [

@@ -33,6 +33,7 @@ from agently.types.data import (
 
 from .LifecycleState import AgentTaskLifecycleState
 from .TaskShared import *
+from .TaskEvidenceContextSource import TaskEvidenceContextSource
 
 
 def _context_package_from_dict(value: Mapping[str, Any]) -> ContextPackage:
@@ -89,6 +90,10 @@ def _context_package_from_dict(value: Mapping[str, Any]) -> ContextPackage:
         consumer_id=str(value.get("consumer_id") or ""),
         phase=str(value.get("phase") or ""),
         source_revisions=cast(Mapping[str, str], value.get("source_revisions") or {}),
+        source_coverage=cast(
+            Mapping[str, Mapping[str, Any]],
+            value.get("source_coverage") or {},
+        ),
         blocks=blocks,
         omissions=omissions,
         diagnostics=diagnostics,
@@ -146,6 +151,8 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                 )
             elif isinstance(source, RecordStoreContextSource):
                 descriptor["kind"] = "record_store"
+            elif isinstance(source, TaskEvidenceContextSource):
+                descriptor["kind"] = "task_evidence"
             elif isinstance(source, SkillContextSource):
                 descriptor.update(
                     {
@@ -222,6 +229,7 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         *,
         task_workspace: TaskWorkspace,
         record_store: RecordStore,
+        task_references: TaskReferenceCatalog,
     ) -> TaskContext:
         raw_snapshot = context_state.get("task_context")
         raw_sources = context_state.get("sources")
@@ -254,6 +262,8 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                 source: Any = TaskWorkspaceContextSource(task_workspace)
             elif kind == "record_store":
                 source = RecordStoreContextSource(record_store)
+            elif kind == "task_evidence":
+                source = TaskEvidenceContextSource(task_references)
             elif kind == "skill_library":
                 library = getattr(agent, "skill_library", None)
                 if not isinstance(library, SkillLibrary):
@@ -350,11 +360,12 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                 continue
             consumer_id = str(raw_consumer.get("consumer_id") or "")
             phase = str(state.get("phase") or "")
-            reader = self._task_context_reader(
-                phase=phase,
-                consumer_id=consumer_id,
+            reader = self.task_context.restore_reader(
+                state,
+                packages=self.context_packages,
+                semantic_selector=self._task_context_semantic_selector(),
             )
-            reader._restore_state(state, packages=self.context_packages)
+            self.context_readers[(consumer_id, phase)] = reader
 
     async def _write_resume_snapshot(self, iteration_index: int, verification: dict[str, Any]) -> None:
         """Persist a resumable snapshot keyed by task_id after an iteration.
@@ -486,6 +497,9 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
                             "acceptance_index": dict(acceptance_index or {}),
                             "handoff_projection": dict(handoff_projection or {}),
                             "runtime_topology": dict(runtime_topology),
+                            "read_progress": DataFormatter.sanitize(
+                                self._taskboard_read_progress
+                            ),
                             "record_refs": DataFormatter.sanitize(self.record_refs),
                             "final_result": dict(final_result),
                         },
@@ -567,11 +581,21 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
             scope={"task_id": str(task_id), "execution_id": str(task_id)},
             search_scope={"task_id": str(task_id), "execution_id": str(task_id)},
         )
+        raw_task_reference_catalog = state.get("task_reference_catalog")
+        restored_task_references = (
+            TaskReferenceCatalog.from_snapshot(
+                str(task_id),
+                raw_task_reference_catalog,
+            )
+            if isinstance(raw_task_reference_catalog, Mapping)
+            else TaskReferenceCatalog(str(task_id))
+        )
         restored_task_context = cls._restore_task_context(
             agent,
             context_state,
             task_workspace=restored_task_workspace,
             record_store=restored_record_store,
+            task_references=restored_task_references,
         )
         task = cast(
             _AgentTaskT,
@@ -593,13 +617,11 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
             ),
         )
         task_any = cast(Any, task)
+        # The restored TaskEvidenceContextSource already points at this exact
+        # catalog object.  Keep the task identity owner and retrieval adapter
+        # joined instead of replacing either side after Task construction.
+        task_any._task_reference_catalog = restored_task_references
         task_any._restore_context_history(context_state)
-        task_reference_catalog = state.get("task_reference_catalog")
-        if isinstance(task_reference_catalog, Mapping):
-            task_any._task_reference_catalog = TaskReferenceCatalog.from_snapshot(
-                str(task_id),
-                task_reference_catalog,
-            )
         terminal_convergence = state.get("terminal_convergence")
         if isinstance(terminal_convergence, Mapping):
             task_any._terminal_convergence_state = TerminalConvergenceState.from_snapshot(
@@ -624,6 +646,16 @@ class AgentTaskResumeMixin(AgentTaskMixinBase):
         taskboard_state = state.get("taskboard_state")
         if isinstance(taskboard_state, dict):
             task_any._resumed_taskboard_state = DataFormatter.sanitize(taskboard_state)
+            read_progress = taskboard_state.get("read_progress")
+            if (
+                isinstance(read_progress, Mapping)
+                and read_progress.get("schema_version")
+                == "agent_task_taskboard_read_progress/v1"
+                and isinstance(read_progress.get("items"), Mapping)
+            ):
+                task_any._taskboard_read_progress = DataFormatter.sanitize(
+                    read_progress
+                )
             try:
                 task_any._resumed_from_iteration = int(
                     taskboard_state.get("tick_index") or task_any._resumed_from_iteration or 0

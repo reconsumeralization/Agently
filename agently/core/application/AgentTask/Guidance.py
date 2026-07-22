@@ -14,8 +14,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from agently.core.context import ModelRequestContextSelector
-from agently.types.data import ContextBudget, ContextConsumption, ContextReadIntent
+from agently.types.data import (
+    ContextBudget,
+    ContextConsumer,
+    ContextConsumption,
+    ContextReadIntent,
+)
 
 from .TaskShared import *
 
@@ -23,34 +31,138 @@ _GUIDANCE_PREVIEW_CHARS = 800
 
 
 class AgentTaskGuidanceMixin(AgentTaskMixinBase):
-    def _task_context_reader(self, *, phase: str, consumer_id: str) -> Any:
-        key = (str(consumer_id), str(phase))
-        reader = self.context_readers.get(key)
-        if reader is not None:
-            return reader
+    _TASK_CONTEXT_EVIDENCE_ROLES = frozenset(
+        {"information", "state", "artifact"}
+    )
+
+    def _task_context_semantic_selector(self) -> Any:
         request_factory = getattr(self.agent, "create_temp_request", None)
-        selector = (
+        return (
             ModelRequestContextSelector(request_factory)
             if callable(request_factory)
             else None
         )
+
+    def _task_context_reader(self, *, phase: str, consumer_id: str) -> Any:
+        key = (str(consumer_id), str(phase))
+        reader = self.context_readers.get(key)
+        if reader is not None:
+            if not reader.is_current:
+                reader.refresh()
+            return reader
         raw_chars = self.context_budget.get("chars", 6000)
         try:
             max_chars = max(1, int(raw_chars))
         except (TypeError, ValueError):
             max_chars = 6000
         reader = self.task_context.reader(
-            consumer=consumer_id,
+            consumer=ContextConsumer(
+                consumer_id=str(consumer_id),
+                model=str(getattr(self.agent, "_active_model_key", "") or "")
+                or None,
+                capabilities=self._task_context_consumer_capabilities(),
+            ),
             phase=phase,
             budget=ContextBudget(
                 max_chars=max_chars,
                 max_blocks=64,
                 max_block_chars=min(max_chars, 6000),
             ),
-            semantic_selector=selector,
+            semantic_selector=self._task_context_semantic_selector(),
         )
         self.context_readers[key] = reader
         return reader
+
+    def _task_context_consumer_capabilities(self) -> dict[str, Any]:
+        """Resolve explicit model-input capabilities without guessing by name."""
+
+        candidates: list[Any] = []
+        candidates.append(self.options.get("context_consumer_capabilities"))
+        agent_task_options = self.options.get("agent_task")
+        if isinstance(agent_task_options, Mapping):
+            candidates.append(
+                agent_task_options.get("context_consumer_capabilities")
+            )
+        settings = getattr(self.agent, "settings", None)
+        get_setting = getattr(settings, "get", None)
+        if callable(get_setting):
+            candidates.append(get_setting("model_capabilities", None))
+            provider = str(
+                get_setting(
+                    "plugins.ModelRequester.activate",
+                    "",
+                )
+                or ""
+            ).strip()
+            if provider:
+                candidates.append(
+                    get_setting(
+                        f"plugins.ModelRequester.{provider}.capabilities",
+                        None,
+                    )
+                )
+        for candidate in candidates:
+            if isinstance(candidate, Mapping):
+                return DataFormatter.sanitize(dict(candidate))
+        return {}
+
+    @staticmethod
+    def _bind_task_context_attachments(request: Any, package: Any) -> None:
+        """Bind disclosed image blocks through ModelRequest rich content only."""
+
+        def plain(value: Any) -> Any:
+            if isinstance(value, Mapping):
+                return {str(key): plain(item) for key, item in value.items()}
+            if isinstance(value, Sequence) and not isinstance(
+                value,
+                str | bytes | bytearray,
+            ):
+                return [plain(item) for item in value]
+            return value
+
+        attachments: list[dict[str, Any]] = []
+        for block in getattr(package, "blocks", ()):
+            if (
+                str(block.metadata.get("context_representation") or "")
+                != "image_attachment"
+            ):
+                continue
+            content = block.content
+            if not isinstance(content, Sequence) or isinstance(
+                content,
+                str | bytes | bytearray,
+            ):
+                continue
+            for item in content:
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("type") or "") != "image_url":
+                    continue
+                attachments.append(cast(dict[str, Any], plain(item)))
+        if not attachments:
+            return
+        prompt = getattr(request, "prompt", None)
+        current = prompt.get("attachment") if prompt is not None else None
+        rich_content = (
+            [dict(item) for item in current if isinstance(item, Mapping)]
+            if isinstance(current, Sequence)
+            and not isinstance(current, str | bytes | bytearray)
+            else []
+        )
+        rich_content.extend(
+            [
+                {
+                    "type": "text",
+                    "text": (
+                        "The following image inputs were disclosed by TaskContext. "
+                        "Use their source_ref entries in the accompanying context pack; "
+                        "do not infer content from filenames."
+                    ),
+                },
+                *attachments,
+            ]
+        )
+        request.attachment(rich_content)
 
     async def _context_pack_with_task_context(self, context_pack: Any) -> "TaskContextView":
         projected, _package = await self._read_task_context_view(
@@ -92,18 +204,181 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
         reader = self._task_context_reader(phase=phase, consumer_id=consumer_id)
         if not reader.is_current:
             reader.refresh()
+        intent_metadata: dict[str, Any] = {"exclude_already_in_prompt": True}
+        required_overflow = str(
+            self.context_budget.get("required_overflow") or "fail"
+        ).strip()
+        if required_overflow == "lossy_digest":
+            intent_metadata["required_overflow"] = required_overflow
+        optional_selection = str(
+            self.context_budget.get("optional_selection") or ""
+        ).strip()
+        if optional_selection == "none":
+            intent_metadata["optional_selection"] = optional_selection
+        implicit_source_kinds = tuple(
+            binding.source_kind
+            for binding in self.task_context.snapshot().bindings
+            if str(binding.metadata.get("disclosure_mode") or "implicit").strip()
+            != "explicit_retrieval"
+        )
         package = await reader.async_read(
             ContextReadIntent(
                 query=str(intent or self.goal),
-                metadata={"exclude_already_in_prompt": True},
+                filters=(
+                    {"source_kinds": implicit_source_kinds}
+                    if implicit_source_kinds
+                    else {}
+                ),
+                metadata=intent_metadata,
             )
         )
-        if any(omission.required for omission in package.omissions):
-            raise RuntimeError(
-                f"Required TaskContext content is incompatible with {consumer_id!r}."
-            )
+        reader.ensure_required_delivery(package)
         self.context_packages.append(package)
         return package
+
+    @staticmethod
+    def _task_context_block_content_version(block: Any) -> tuple[str, Any]:
+        representation = str(
+            getattr(block, "metadata", {}).get("context_representation") or ""
+        ).strip()
+        content = (
+            None
+            if representation == "image_attachment"
+            else DataFormatter.sanitize(getattr(block, "content", None))
+        )
+        encoded = json.dumps(
+            content,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest(), content
+
+    @classmethod
+    def _task_context_package_evidence_items(cls, package: Any) -> list[dict[str, Any]]:
+        """Project model-visible source facts into the canonical evidence domain.
+
+        ContextPackage remains the disclosure/read owner.  AgentTask only adds
+        host-issued evidence identity for body-bearing information, state, and
+        artifact blocks; procedural instruction/example/capability/index blocks
+        remain context and cannot silently become business evidence.
+        """
+
+        items: list[dict[str, Any]] = []
+        for block in getattr(package, "blocks", ()):
+            role = str(getattr(block, "role", "") or "").strip()
+            if role not in cls._TASK_CONTEXT_EVIDENCE_ROLES:
+                continue
+            completeness = str(
+                getattr(block, "completeness", "") or ""
+            ).strip()
+            status = (
+                "failed"
+                if completeness == "failed"
+                else "empty"
+                if completeness == "empty"
+                else "ok"
+            )
+            content_digest, content = cls._task_context_block_content_version(
+                block
+            )
+            body_state = (
+                "full"
+                if completeness == "complete" and content not in (None, "", [], {})
+                else "truncated"
+                if completeness in {"truncated", "lossy"}
+                and content not in (None, "", [], {})
+                else "ref_only"
+            )
+            identity_payload = {
+                "task_context_id": str(getattr(package, "task_context_id", "") or ""),
+                "block_key": str(getattr(block, "block_key", "") or ""),
+                "source_id": str(getattr(block, "source_id", "") or ""),
+                "source_revision": str(
+                    getattr(block, "source_revision", "") or ""
+                ),
+                "source_ref": str(getattr(block, "source_ref", "") or ""),
+                "binding_id": str(getattr(block, "binding_id", "") or ""),
+                "content_digest": content_digest,
+                "completeness": completeness,
+            }
+            identity_digest = hashlib.sha256(
+                json.dumps(
+                    identity_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            metadata = getattr(block, "metadata", {})
+            item: dict[str, Any] = {
+                "id": f"task_context:{identity_digest}",
+                "kind": "task_context.content",
+                "status": status,
+                "body_state": body_state,
+                "block_id": str(getattr(block, "block_id", "") or ""),
+                "source_id": identity_payload["source_id"],
+                "source_revision": identity_payload["source_revision"],
+                "source_ref": identity_payload["source_ref"],
+                "binding_id": identity_payload["binding_id"],
+                "evidence_role": role,
+                "content_version_id": f"context_content:{content_digest}",
+                "locator": identity_payload["source_ref"],
+                "provenance": {
+                    "source": "task_context",
+                    "package_id": str(getattr(package, "package_id", "") or ""),
+                    "task_context_id": identity_payload["task_context_id"],
+                    "context_revision": getattr(package, "context_revision", None),
+                    "consumer_id": str(getattr(package, "consumer_id", "") or ""),
+                    "phase": str(getattr(package, "phase", "") or ""),
+                    "block_key": identity_payload["block_key"],
+                },
+                "aliases": [
+                    str(value)
+                    for value in (
+                        identity_payload["source_ref"],
+                        *tuple(getattr(block, "refs", ()) or ()),
+                    )
+                    if str(value or "").strip()
+                ],
+            }
+            if body_state != "ref_only":
+                item["body"] = content
+            if isinstance(metadata, Mapping):
+                for field in (
+                    "path",
+                    "record_id",
+                    "collection",
+                    "source_url",
+                    "selected_url",
+                    "requested_url",
+                    "canonical_url",
+                    "url",
+                    "href",
+                ):
+                    if metadata.get(field) not in (None, "", [], {}):
+                        item[field] = DataFormatter.sanitize(metadata.get(field))
+            items.append(DataFormatter.sanitize(item))
+        return items
+
+    def _task_context_package_evidence_ledger(
+        self,
+        package: Any,
+        *,
+        max_items: int = 64,
+        body_chars: int = 1800,
+    ) -> dict[str, Any]:
+        return self._stable_evidence_ledger_view(
+            {
+                "evidence_items": self._task_context_package_evidence_items(
+                    package
+                )
+            },
+            max_items=max_items,
+            body_chars=body_chars,
+            budget_selection="content_first",
+        )
 
     def _record_task_context_consumption(
         self,
@@ -124,11 +399,24 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
 
     @staticmethod
     def _project_task_context_package(package: Any) -> dict[str, Any]:
+        source_coverage = package.to_dict().get("source_coverage", {})
+        continuation_available = any(
+            bool(record.get("continuation_available"))
+            for record in source_coverage.values()
+            if isinstance(record, Mapping)
+        )
         items = [
             {
                 "id": block.block_id,
                 "role": block.role,
-                "content": DataFormatter.sanitize(block.content),
+                "content": (
+                    None
+                    if str(
+                        block.metadata.get("context_representation") or ""
+                    )
+                    == "image_attachment"
+                    else DataFormatter.sanitize(block.content)
+                ),
                 "source_ref": block.source_ref,
                 "completeness": block.completeness,
                 "required": block.required,
@@ -167,6 +455,19 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
                         "source_ref": block.source_ref,
                     }
                 )
+        omission_records = [item.to_dict() for item in package.omissions]
+        reason_counts: dict[str, int] = {}
+        for item in omission_records:
+            reason = str(item.get("reason") or "unspecified")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        omission_details = sorted(
+            enumerate(omission_records),
+            key=lambda pair: (
+                not bool(pair[1].get("required")),
+                pair[0],
+            ),
+        )[:8]
+        projected_omissions = [item for _index, item in omission_details]
         return {
             "schema_version": "agently.context_package.agent_task.v2",
             "package_id": package.package_id,
@@ -174,9 +475,23 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
             "context_revision": package.context_revision,
             "profile": "task_context",
             "items": items,
-            "omitted": [item.to_dict() for item in package.omissions],
+            # ContextPackage retains the complete audit record.  Model-hot
+            # projections carry bounded details plus counts so a large source
+            # catalog cannot consume the request merely by being unselected.
+            "omitted": projected_omissions,
+            "omission_summary": {
+                "total": len(omission_records),
+                "required": sum(
+                    bool(item.get("required")) for item in omission_records
+                ),
+                "details_returned": len(projected_omissions),
+                "details_omitted": len(omission_records) - len(projected_omissions),
+                "reason_counts": reason_counts,
+            },
             "diagnostics": [item.to_dict() for item in package.diagnostics],
             "used_chars": package.used_chars,
+            "source_coverage": source_coverage,
+            "continuation_available": continuation_available,
             "skill_projection": {
                 "schema_version": "agently.context_package.skill_projection.v2",
                 "skills": list(skills.values()),

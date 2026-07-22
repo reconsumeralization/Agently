@@ -272,6 +272,163 @@ async def test_standalone_action_flows_release_success_scope(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("flow_name", ["TriggerFlowActionFlow", "DAGActionFlow"])
+async def test_action_flow_single_action_id_cohort_preserves_cross_round_value_dependency(
+    flow_name: str,
+) -> None:
+    agent: Any = Agently.create_agent(f"action-round-cohort-{flow_name}")
+    search_action_id = f"repository_search_{flow_name}"
+    read_action_id = f"repository_read_{flow_name}"
+    executed_calls: list[tuple[str, dict[str, Any]]] = []
+    observations: list[dict[str, Any]] = []
+
+    def search_repository(query: str) -> dict[str, Any]:
+        executed_calls.append((search_action_id, {"query": query}))
+        return {"matches": [f"src/{query}.py"]}
+
+    def read_repository(path: str) -> dict[str, Any]:
+        executed_calls.append((read_action_id, {"path": path}))
+        return {"path": path, "content": "bounded source"}
+
+    agent.action.register_action(
+        action_id=search_action_id,
+        desc="Search repository files before selecting a path to read.",
+        kwargs={"query": (str, "Search query.")},
+        func=search_repository,
+    )
+    agent.action.register_action(
+        action_id=read_action_id,
+        desc="Read a path selected from repository search results.",
+        kwargs={"path": (str, "Selected repository path.")},
+        func=read_repository,
+    )
+    agent.settings.set("action.loop.round_dispatch_policy", "single_action_id_cohort")
+    flow = agent.action._flow_controller.create_named_action_flow(flow_name)
+
+    async def planning_handler(context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        round_index = context.get("round_index")
+        if round_index == 0:
+            return {
+                "next_action": "execute",
+                "action_calls": [
+                    {
+                        "action_id": search_action_id,
+                        "action_input": {"query": "selected"},
+                        "purpose": "find the selected source",
+                    },
+                    {
+                        "action_id": read_action_id,
+                        "action_input": {"path": "guessed/path.py"},
+                        "purpose": "stale read that must be deferred and replanned",
+                    },
+                    {
+                        "action_id": search_action_id,
+                        "action_input": {"query": "secondary"},
+                        "purpose": "parallel search in the same capability cohort",
+                    },
+                ],
+            }
+        if round_index == 1:
+            last_round_records = context.get("last_round_records")
+            assert isinstance(last_round_records, list)
+            assert [record.get("action_id") for record in last_round_records] == [
+                search_action_id,
+                search_action_id,
+            ]
+            search_value = last_round_records[0].get("data") or last_round_records[0].get("result")
+            assert isinstance(search_value, dict)
+            result_preview = search_value.get("result_preview", search_value)
+            assert isinstance(result_preview, dict), json.dumps(
+                last_round_records[0], ensure_ascii=False, default=str
+            )
+            selected_path = result_preview["matches"][0]
+            return {
+                "next_action": "execute",
+                "action_calls": [
+                    {
+                        "action_id": read_action_id,
+                        "action_input": {"path": selected_path},
+                        "purpose": "read the path supplied by the previous round",
+                    }
+                ],
+            }
+        return {"next_action": "response", "action_calls": []}
+
+    async def execution_handler(context: dict[str, Any], request: dict[str, Any]) -> list[Any]:
+        records: list[Any] = []
+        for command in request["action_calls"]:
+            action_id = str(command["action_id"])
+            action_input = dict(command.get("action_input") or {})
+            records.append(
+                await agent.action.async_execute_action(
+                    action_id,
+                    action_input,
+                    purpose=str(command.get("purpose") or ""),
+                    artifact_scope=context["artifact_scope"],
+                )
+            )
+        return records
+
+    records = await flow.async_run(
+        action=agent.action,
+        prompt=agent.request.prompt,
+        settings=agent.settings,
+        action_list=agent.action.get_action_list(),
+        planning_handler=planning_handler,
+        execution_handler=execution_handler,
+        max_rounds=4,
+        runtime_observation_handler=lambda observation: observations.append(copy.deepcopy(observation)),
+    )
+
+    assert [action_id for action_id, _ in executed_calls] == [
+        search_action_id,
+        search_action_id,
+        read_action_id,
+    ]
+    assert executed_calls[-1][1] == {"path": "src/selected.py"}
+    assert all(action_input.get("path") != "guessed/path.py" for _, action_input in executed_calls)
+    assert [record.get("action_id") for record in records] == [
+        search_action_id,
+        search_action_id,
+        read_action_id,
+    ]
+    first_plan = next(
+        observation
+        for observation in observations
+        if observation.get("kind") == "plan_ready"
+        and observation.get("payload", {}).get("round_index") == 0
+    )
+    first_decision = first_plan["payload"]["decision"]
+    assert [call["action_id"] for call in first_decision["action_calls"]] == [
+        search_action_id,
+        search_action_id,
+    ]
+    assert first_decision["diagnostics"][-1]["code"] == (
+        "action_loop.round_dispatch.deferred_distinct_actions"
+    )
+    raw_decision = agent.action._apply_action_decision_round_dispatch_policy(
+        agent.action._normalize_action_decision(
+            {
+                "next_action": "execute",
+                "action_calls": [
+                    {"action_id": search_action_id, "action_input": {"query": "one"}},
+                    {"action_id": read_action_id, "action_input": {"path": "stale"}},
+                    {"action_id": search_action_id, "action_input": {"query": "two"}},
+                ],
+            }
+        ),
+        agent.settings,
+    )
+    assert raw_decision["diagnostics"][-1]["meta"] == {
+        "policy": "single_action_id_cohort",
+        "selected_action_id": search_action_id,
+        "selected_call_count": 2,
+        "deferred_action_ids": [read_action_id],
+        "deferred_call_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flow_name", ["TriggerFlowActionFlow", "DAGActionFlow"])
 async def test_standalone_action_flows_bound_large_instruction_before_state_and_storage(
     flow_name: str,
     tmp_path,
@@ -562,7 +719,41 @@ def test_small_explicit_artifact_model_projection_hides_canonical_identity() -> 
 def test_public_action_artifact_readback_selector_is_selection_key_only() -> None:
     signature = inspect.signature(Agently.create_agent("action-readback-signature").action.async_read_action_artifact)
 
-    assert list(signature.parameters) == ["selection_key"]
+    assert list(signature.parameters) == ["selection_key", "offset", "max_bytes"]
+
+
+@pytest.mark.asyncio
+async def test_action_artifact_readback_returns_stable_bounded_ranges() -> None:
+    agent: Any = Agently.create_agent("action-readback-bounded-ranges")
+    scope = {"kind": "agent_task", "id": "bounded-range-task"}
+    artifact = agent.action._artifact_manager.register_execution_artifact(
+        action_call_id="bounded-range-call",
+        artifact_type="action_output",
+        label="Large search result",
+        value="0123456789" * 100,
+        artifact_scope=scope,
+    )
+
+    with agent.action._artifact_manager.bind_artifact_scope(scope):
+        first = await agent.action.async_read_action_artifact(
+            selection_key=artifact["selection_key"],
+            offset=0,
+            max_bytes=64,
+        )
+        second = await agent.action.async_read_action_artifact(
+            selection_key=artifact["selection_key"],
+            offset=first["range"]["end"],
+            max_bytes=64,
+        )
+
+    assert first["ok"] is True
+    assert first["owner"] == "action_artifact"
+    assert first["locator"] == artifact["selection_key"]
+    assert first["content_version"] == artifact["sha256"]
+    assert first["range"] == {"offset": 0, "end": 64, "read_bytes": 64}
+    assert first["truncated"] is True
+    assert second["range"] == {"offset": 64, "end": 128, "read_bytes": 64}
+    assert second["value"] != first["value"] or second["range"] != first["range"]
 
 
 @pytest.mark.asyncio
@@ -605,6 +796,131 @@ async def test_action_artifact_readback_fails_closed_without_scope_or_across_exe
     assert "value" not in cross_scope
     assert own_scope["ok"] is True
     assert own_scope["value"] == {"private": "execution-a-only"}
+
+
+@pytest.mark.asyncio
+async def test_explicit_task_run_context_owns_bounded_action_artifacts_over_ambient_execution() -> None:
+    from agently.core.runtime import bind_runtime_context
+    from agently.types.data import RunContext
+
+    agent: Any = Agently.create_agent("action-artifact-explicit-task-owner")
+
+    @agent.action_func
+    def produce_task_evidence() -> dict[str, Any]:
+        return {"records": [f"record-{index}" for index in range(2000)]}
+
+    task_scope = {"kind": "agent_task", "id": "taskboard-task-owner"}
+    parent_run_context = RunContext.create(
+        run_kind="agent_execution",
+        execution_id="taskboard-bounded-action",
+        meta={"task_id": task_scope["id"]},
+    )
+    ambient_context = SimpleNamespace(
+        execution_id="outer-agent-execution",
+        lineage={},
+    )
+
+    with bind_runtime_context(agent_execution_context=ambient_context):
+        records = await agent.action._async_execute_action_calls(
+            action_calls=[
+                {
+                    "action_id": "produce_task_evidence",
+                    "action_input": {},
+                    "purpose": "Produce exact evidence for a later TaskBoard card.",
+                }
+            ],
+            settings=agent.settings,
+            agent_name=agent.name,
+            parent_run_context=parent_run_context,
+        )
+
+    output_ref = next(
+        ref
+        for ref in records[0]["artifact_refs"]
+        if ref.get("role") == "output"
+    )
+    artifact_id = agent.action._artifact_manager.get_artifact_id_for_selection(
+        output_ref["selection_key"]
+    )
+    assert artifact_id is not None
+    assert agent.action._artifact_manager.get_artifact_scope(artifact_id) == task_scope
+    with agent.action._artifact_manager.bind_artifact_scope(task_scope):
+        readback = await agent.action.async_read_action_artifact(
+            selection_key=output_ref["selection_key"],
+            max_bytes=128,
+        )
+    assert readback["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_explicit_task_run_context_owns_action_loop_artifacts_over_ambient_execution() -> None:
+    from agently.core.runtime import bind_runtime_context
+    from agently.types.data import RunContext
+
+    agent: Any = Agently.create_agent("action-loop-artifact-explicit-task-owner")
+
+    @agent.action_func
+    def search_task_evidence(query: str) -> dict[str, Any]:
+        return {
+            "query": query,
+            "matches": [f"src/module_{index}.py" for index in range(2000)],
+        }
+
+    async def planning_handler(
+        context: dict[str, Any],
+        _request: dict[str, Any],
+    ) -> dict[str, Any]:
+        if context.get("done_plans"):
+            return {"next_action": "response", "action_calls": []}
+        return {
+            "next_action": "execute",
+            "action_calls": [
+                {
+                    "action_id": "search_task_evidence",
+                    "action_input": {"query": "task context"},
+                    "purpose": "Search exact evidence for a later TaskBoard card.",
+                }
+            ],
+        }
+
+    task_scope = {"kind": "agent_task", "id": "taskboard-action-loop-owner"}
+    parent_run_context = RunContext.create(
+        run_kind="agent_execution",
+        execution_id="taskboard-action-loop",
+        meta={"task_id": task_scope["id"]},
+    )
+    ambient_context = SimpleNamespace(
+        execution_id="outer-agent-execution",
+        lineage={},
+    )
+
+    with bind_runtime_context(agent_execution_context=ambient_context):
+        records = await agent.action.async_plan_and_execute(
+            prompt=agent.request.prompt,
+            settings=agent.settings,
+            action_list=agent.action.get_action_list(),
+            agent_name=agent.name,
+            parent_run_context=parent_run_context,
+            planning_handler=planning_handler,
+            max_rounds=2,
+        )
+
+    output_ref = next(
+        ref
+        for ref in records[0]["artifact_refs"]
+        if ref.get("role") == "output"
+    )
+    artifact_id = agent.action._artifact_manager.get_artifact_id_for_selection(
+        output_ref["selection_key"]
+    )
+    assert artifact_id is not None
+    assert agent.action._artifact_manager.get_artifact_scope(artifact_id) == task_scope
+    with agent.action._artifact_manager.bind_artifact_scope(task_scope):
+        readback = await agent.action.async_read_action_artifact(
+            selection_key=output_ref["selection_key"],
+            max_bytes=128,
+        )
+    assert readback["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -1271,6 +1587,142 @@ async def test_triggerflow_failure_convergence_callback_receives_bounded_records
     serialized = json.dumps(convergence, ensure_ascii=False, default=str).encode("utf-8")
     assert len(serialized) <= 16000, len(serialized)
     assert marker.encode("utf-8") not in serialized
+
+
+@pytest.mark.asyncio
+async def test_triggerflow_unchanged_typed_evidence_page_converges_without_round_cap(tmp_path) -> None:
+    agent: Any = Agently.create_agent("unchanged-evidence-convergence").use_task_workspace(
+        tmp_path / "task_workspace"
+    )
+    flow = agent.action._flow_controller.create_named_action_flow("TriggerFlowActionFlow")
+    observations: list[dict[str, Any]] = []
+    planning_rounds: list[int] = []
+    content_version = hashlib.sha256(b"immutable artifact page").hexdigest()
+
+    async def planning_handler(context: dict[str, Any], _request: dict[str, Any]) -> dict[str, Any]:
+        planning_rounds.append(int(context["round_index"]))
+        return {
+            "next_action": "execute",
+            "action_calls": [
+                {
+                    "action_id": "read_action_artifact",
+                    "action_input": {
+                        "selection_key": "sel-stable-page",
+                        "offset": 0,
+                        "max_bytes": 64,
+                    },
+                    "purpose": "Read the same immutable evidence page",
+                }
+            ],
+        }
+
+    async def execution_handler(
+        _context: dict[str, Any],
+        _request: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        transfer = {
+            "ok": True,
+            "status": "success",
+            "owner": "action_artifact",
+            "locator": "sel-stable-page",
+            "content_version": content_version,
+            "range": {"offset": 0, "end": 64, "read_bytes": 64},
+            "value": "immutable artifact page",
+        }
+        return [
+            {
+                "action_call_id": f"recall-{len(planning_rounds)}",
+                "action_id": "read_action_artifact",
+                "purpose": "Read the same immutable evidence page",
+                "status": "success",
+                "success": True,
+                "ok": True,
+                "result": transfer,
+                "data": transfer,
+            }
+        ]
+
+    async def observation_handler(observation: dict[str, Any]) -> None:
+        observations.append(copy.deepcopy(observation))
+
+    records = await flow.async_run(
+        action=agent.action,
+        prompt=agent.request.prompt,
+        settings=agent.settings,
+        action_list=[
+            {
+                "action_id": "read_action_artifact",
+                "desc": "Read one immutable artifact page.",
+                "kwargs": {},
+            }
+        ],
+        planning_handler=planning_handler,
+        execution_handler=execution_handler,
+        max_rounds=None,
+        runtime_observation_handler=observation_handler,
+    )
+
+    assert len(planning_rounds) == 3
+    assert len(records) == 3
+    convergence = next(
+        observation
+        for observation in observations
+        if observation.get("kind") == "loop_unchanged_evidence_converged"
+    )
+    assert convergence["payload"]["occurrence_count"] == 3
+    assert convergence["payload"]["evidence_identities"] == [
+        {
+            "owner": "action_artifact",
+            "locator": "sel-stable-page",
+            "content_version": content_version,
+            "range": {"offset": 0, "end": 64, "read_bytes": 64},
+        }
+    ]
+
+
+def test_unchanged_evidence_counter_resets_when_same_round_has_other_information_progress() -> None:
+    from agently.builtins.plugins.ActionFlow.TriggerFlowActionFlow import (
+        TriggerFlowActionFlow,
+    )
+
+    class State:
+        def __init__(self):
+            self.values = {}
+
+        def get_state(self, key, default=None):
+            return self.values.get(key, default)
+
+        def set_state(self, key, value):
+            self.values[key] = value
+
+    state = State()
+    page = {
+        "status": "success",
+        "result": {
+            "owner": "action_artifact",
+            "locator": "sel-stable-page",
+            "content_version": "sha256:stable",
+            "range": {"offset": 0, "end": 64, "read_bytes": 64},
+        },
+    }
+    fresh = {
+        "status": "success",
+        "action_id": "repo_search",
+        "result": {"matches": ["new/source.py:12"]},
+    }
+
+    assert TriggerFlowActionFlow._update_unchanged_evidence_page_state(
+        state, [page], max_consecutive_unchanged_evidence_rounds=3
+    )[:2] == (False, 1)
+    assert TriggerFlowActionFlow._update_unchanged_evidence_page_state(
+        state, [page], max_consecutive_unchanged_evidence_rounds=3
+    )[:2] == (False, 2)
+    assert TriggerFlowActionFlow._update_unchanged_evidence_page_state(
+        state, [page, fresh], max_consecutive_unchanged_evidence_rounds=3
+    ) == (False, 0, [])
+    assert TriggerFlowActionFlow._update_unchanged_evidence_page_state(
+        state, [page], max_consecutive_unchanged_evidence_rounds=3
+    )[:2] == (False, 1)
 
 
 @pytest.mark.asyncio

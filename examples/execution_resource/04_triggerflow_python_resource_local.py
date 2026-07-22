@@ -1,34 +1,29 @@
 import asyncio
 from pprint import pprint
-from typing import Any, cast
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 
 
 async def main():
     flow = TriggerFlow(name="example-triggerflow-managed-python")
+    agent = Agently.create_agent()
+    agent.enable_python(
+        action_id="managed_python",
+        expose_to_model=False,
+        sandbox="trusted_local",
+    )
 
     async def calculate(data: TriggerFlowRuntimeData):
-        sandbox = cast(Any, data.require_resource("managed_python"))
-        result = sandbox.run(
-            "input_value = " + repr(int(data.value)) + "\n"
-            "result = base + input_value\n"
-        )["result"]
-        data.state.set("answer", result)
+        result = await agent.action.async_execute_action(
+            "managed_python",
+            {"source_code": f"print(40 + {int(data.value)})\n"},
+        )
+        assert result.get("status") == "success", result
+        data.state.set("answer", int(result["data"]["stdout"].strip()))
 
     flow.to(calculate)
 
-    result = await flow.async_start(
-        2,
-        execution_resources=[
-            {
-                "kind": "python",
-                "scope": "execution",
-                "resource_key": "managed_python",
-                "config": {"base_vars": {"base": 40}},
-            }
-        ],
-    )
+    result = await flow.async_start(2)
 
     print("[TRIGGERFLOW_RESULT]")
     pprint(result)
@@ -45,24 +40,20 @@ if __name__ == "__main__":
 
 # Expected key output:
 # [TRIGGERFLOW_RESULT] prints {"answer": 42}.
-# [EXECUTION_HANDLES_AFTER_RELEASE] prints [] after the execution-scoped Python resource is released.
+# [EXECUTION_HANDLES_AFTER_RELEASE] prints [] after the action-call resource is released.
 
 # How it works:
-# execution_resources=[{kind:"python", scope:"execution", resource_key:"managed_python",
-# config:{base_vars:{base:40}}}] declares a Python sandbox that persists across the entire
-# TriggerFlow execution (scope="execution"), not just one action call.
-# data.require_resource("managed_python") retrieves the sandbox handle inside a chunk.
-# sandbox.run(code)["result"] executes code with base=40 in scope; input_value=2 → answer=42.
-# After async_close(), execution-scoped handles are released automatically.
+# TriggerFlow owns orchestration. The Action Runtime owns code execution.
+# The chunk calls a canonical CodeExecution Action; TaskWorkspace materializes the
+# immutable source bundle before the selected trusted-local provider executes it.
+# The action-call-scoped handle and Workspace grant are released after the call.
 #
 # Flow:
-# async_start(2, execution_resources=[...])
-#   | Python sandbox created with base_vars={base:40}, scope="execution"
+# async_start(2)
 #   v
-# calculate: data.require_resource("managed_python")
-#   sandbox.run("input_value=2\nresult=base+input_value") -> 42
+# calculate: agent.action.async_execute_action("managed_python", {"source_code": "print(40 + 2)"})
+#   Workspace bundle -> trusted_local provider -> stdout "42"
 #   data.state.set("answer", 42)
 #   |
 #   v
-# async_close() -> {"answer": 42}
-# handle released -> list(scope="execution") == []
+# async_close() -> {"answer": 42}; action-call handle already released

@@ -18,7 +18,10 @@ from typing import Any, TYPE_CHECKING, Sequence
 from typing_extensions import Self
 
 from agently.core import BaseAgent, Session
-from agently.core.runtime.RuntimeContext import get_current_request_run_context
+from agently.core.runtime.RuntimeContext import (
+    get_current_agent_execution_run_context,
+    get_current_request_run_context,
+)
 
 if TYPE_CHECKING:
     from agently.core import Prompt
@@ -189,8 +192,12 @@ class SessionExtension(BaseAgent):
         if self.activated_session is not None:
             _settings.set("runtime.session_id", self.activated_session.id)
         Session.apply_request_prefix(prompt, self.activated_session)
-        if self.activated_session is not None:
+        if (
+            self.activated_session is not None
+            and get_current_agent_execution_run_context() is None
+        ):
             await self.activated_session.async_prepare_memory(prompt, _settings)
+        if self.activated_session is not None:
             memo = self.activated_session.memo
             memo_size = self._runtime_size(memo)
             await self._async_emit_session_runtime_observation(

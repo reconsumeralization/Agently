@@ -245,6 +245,7 @@ def test_prompt_tools_are_converted_and_explicit_tools_override_by_name():
                     "name": "lookup_issue",
                     "desc": "Lookup a GitHub issue.",
                     "kwargs": {"issue_id": (str, "Issue id")},
+                    "required_input_keys": ["issue_id"],
                 },
             ],
         },
@@ -256,6 +257,7 @@ def test_prompt_tools_are_converted_and_explicit_tools_override_by_name():
 
     assert search_docs["description"] == "explicit override"
     assert lookup_issue["input_schema"]["properties"]["issue_id"]["type"] == "string"
+    assert lookup_issue["input_schema"]["required"] == ["issue_id"]
     assert lookup_issue["input_schema"]["additionalProperties"] is False
 
 

@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 
-from agently.core.TaskWorkspace import TaskWorkspaceManager
+from agently.core.TaskWorkspace import TaskWorkspace
 
 
 class MissingRendererExportHandler:
@@ -76,9 +76,8 @@ class MissingRendererExportHandler:
 
 async def main():
     with TemporaryDirectory() as temp_dir:
-        manager = TaskWorkspaceManager()
-        manager.register_file_io_handler(cast(Any, MissingRendererExportHandler()))
-        workspace = manager.create(Path(temp_dir) / "task-workspace", mode="read_write")
+        workspace = TaskWorkspace(Path(temp_dir) / "task-workspace", mode="read_write")
+        workspace.register_file_io_handler(cast(Any, MissingRendererExportHandler()))
 
         await workspace.write_file("notes/todo.txt", "ship workspace file io")
         text_read = await workspace.read_file("notes/todo.txt", max_bytes=32)
@@ -106,7 +105,7 @@ async def main():
             "text_content": "ship workspace file io",
             "text_sha256_present": True,
             "binary_readable": False,
-            "binary_code": "workspace.file.no_read_handler",
+            "binary_code": "task_workspace.file.no_read_handler",
             "exported": False,
             "export_dependency": "demo-renderer",
         }
@@ -115,7 +114,7 @@ async def main():
 asyncio.run(main())
 
 # Expected key output:
-# {'text_content': 'ship workspace file io', 'text_sha256_present': True, 'binary_readable': False, 'binary_code': 'workspace.file.no_read_handler', 'exported': False, 'export_dependency': 'demo-renderer'}
+# {'text_content': 'ship workspace file io', 'text_sha256_present': True, 'binary_readable': False, 'binary_code': 'task_workspace.file.no_read_handler', 'exported': False, 'export_dependency': 'demo-renderer'}
 #
 # This example uses a deterministic demo export handler so the output is stable
 # even when optional renderer packages are installed locally. The default text

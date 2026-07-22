@@ -15,6 +15,43 @@ from agently.types.trigger_flow import AGGREGATION_SCOPE_META_KEY
 from agently.types.trigger_flow import TRIGGER_FLOW_EXECUTION_SNAPSHOT_KIND
 
 
+class _TriggerFlowManagedCounter:
+    def __init__(self, value: int):
+        self.value = value
+
+    def increment(self) -> int:
+        return self.value + 1
+
+
+class _TriggerFlowManagedCounterProvider:
+    provider_id = "triggerflow_test_managed_counter"
+    supported_kinds = ("triggerflow_test_managed_counter",)
+
+    async def async_ensure(self, *, requirement, policy, existing_handle=None):
+        _ = (policy, existing_handle)
+        config = dict(requirement.get("config", {}))
+        return {
+            "handle_id": f"managed-counter:{requirement.get('owner_id', 'execution')}",
+            "resource": _TriggerFlowManagedCounter(int(config.get("value", 0))),
+            "status": "ready",
+            "meta": {"provider_id": self.provider_id},
+        }
+
+    async def async_health_check(self, handle):
+        _ = handle
+        return "healthy"
+
+    async def async_release(self, handle):
+        _ = handle
+
+
+@pytest.fixture(scope="module")
+def trigger_flow_managed_counter_provider():
+    provider = _TriggerFlowManagedCounterProvider()
+    execution_resource.register_provider(cast(Any, provider))
+    return provider
+
+
 def test_trigger_flow_runtime_data_alias_is_exported():
     assert TriggerFlowRuntimeData is TriggerFlowEventData
 
@@ -1183,13 +1220,16 @@ async def test_trigger_flow_config_round_trip_with_runtime_resources():
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_execution_resource_injects_managed_resource():
+async def test_trigger_flow_execution_resource_injects_managed_resource(
+    trigger_flow_managed_counter_provider,
+):
+    _ = trigger_flow_managed_counter_provider
     flow = TriggerFlow()
 
     async def calculate(data: TriggerFlowRuntimeData):
-        sandbox = data.require_resource("managed_python")
-        assert sandbox is not None
-        data.state.set("calculated", sandbox.run("result = value + 1")["result"])
+        counter = data.require_resource("managed_counter")
+        assert counter is not None
+        data.state.set("calculated", counter.increment())
 
     flow.to(calculate)
 
@@ -1197,10 +1237,11 @@ async def test_trigger_flow_execution_resource_injects_managed_resource():
         41,
         execution_resources=[
             {
-                "kind": "python",
+                "kind": "triggerflow_test_managed_counter",
+                "provider_id": "triggerflow_test_managed_counter",
                 "scope": "execution",
-                "resource_key": "managed_python",
-                "config": {"base_vars": {"value": 41}},
+                "resource_key": "managed_counter",
+                "config": {"value": 41},
             }
         ],
     )
@@ -1210,11 +1251,14 @@ async def test_trigger_flow_execution_resource_injects_managed_resource():
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_save_records_managed_execution_resource_keys():
+async def test_trigger_flow_save_records_managed_execution_resource_keys(
+    trigger_flow_managed_counter_provider,
+):
+    _ = trigger_flow_managed_counter_provider
     flow = TriggerFlow()
 
     async def hold_resource(data: TriggerFlowRuntimeData):
-        data.state.set("has_resource", data.require_resource("managed_python") is not None)
+        data.state.set("has_resource", data.require_resource("managed_counter") is not None)
 
     flow.to(hold_resource).end()
 
@@ -1222,53 +1266,58 @@ async def test_trigger_flow_save_records_managed_execution_resource_keys():
         auto_close=False,
         execution_resources=[
             {
-                "requirement_id": "managed-python-save-test",
-                "kind": "python",
+                "requirement_id": "managed-counter-save-test",
+                "kind": "triggerflow_test_managed_counter",
+                "provider_id": "triggerflow_test_managed_counter",
                 "scope": "execution",
-                "resource_key": "managed_python",
+                "resource_key": "managed_counter",
             }
         ],
     )
     await execution.async_start("start", wait_for_result=False)
     state = execution.save()
 
-    assert "managed_python" in state["managed_resource_keys"]
-    assert "managed-python-save-test" in state["execution_resource_requirement_ids"]
+    assert "managed_counter" in state["managed_resource_keys"]
+    assert "managed-counter-save-test" in state["execution_resource_requirement_ids"]
     requirements = state["resource_requirements"]
     environment_requirements = [
         requirement
         for requirement in requirements
         if requirement["kind"] == "execution_resource_requirement"
     ]
-    assert environment_requirements[0]["metadata"]["resource_key"] == "managed_python"
-    assert environment_requirements[0]["metadata"]["requirement"]["requirement_id"] == "managed-python-save-test"
+    assert environment_requirements[0]["metadata"]["resource_key"] == "managed_counter"
+    assert environment_requirements[0]["metadata"]["requirement"]["requirement_id"] == "managed-counter-save-test"
 
     await execution.async_close()
     assert execution_resource.list(scope="execution") == []
 
 
 @pytest.mark.asyncio
-async def test_trigger_flow_async_load_restores_managed_execution_resource():
+async def test_trigger_flow_async_load_restores_managed_execution_resource(
+    trigger_flow_managed_counter_provider,
+):
+    _ = trigger_flow_managed_counter_provider
     flow = TriggerFlow()
 
     async def pause(data: TriggerFlowRuntimeData):
         return await data.async_pause_for(type="exchange", exchange_kind="approval", interrupt_id="approval", resume_to="next")
 
     async def use_environment(data: TriggerFlowRuntimeData):
-        sandbox = data.require_resource("managed_python")
-        assert sandbox is not None
-        data.state.set("answer", sandbox.run("result = value + 1")["result"])
+        counter = data.require_resource("managed_counter")
+        assert counter is not None
+        data.state.set("answer", counter.increment())
 
     flow.to(pause).to(use_environment)
     execution = flow.create_execution(
         auto_close=False,
         execution_resources=[
             {
-                "requirement_id": "managed-python-load-test",
-                "kind": "python",
+                "requirement_id": "managed-counter-load-test",
+                "kind": "triggerflow_test_managed_counter",
+                "provider_id": "triggerflow_test_managed_counter",
                 "scope": "execution",
-                "resource_key": "managed_python",
-                "config": {"base_vars": {"value": 41}},
+                "resource_key": "managed_counter",
+                "config": {"value": 41},
             }
         ],
     )

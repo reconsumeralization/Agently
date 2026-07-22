@@ -47,16 +47,17 @@ from agently.types.data import (
     ContextReadIntent,
     SkillMode,
 )
+from agently.types.plugins import ContextSource
 from agently.utils import DataFormatter, FunctionShifter
 
 from .bridges import (
+    bridge_agent_task_stream_item as bridge_agent_task_stream_item_entry,
     bridge_model_stream_item as bridge_model_stream_item_entry,
     bridge_task_dag_stream_item as bridge_task_dag_stream_item_entry,
     record_action_log as record_action_log_entry,
     record_model_response_id as record_model_response_id_entry,
 )
 from .diagnostics import (
-    build_execution_meta,
     initial_diagnostics,
     initial_record_refs,
     record_error_diagnostic,
@@ -179,10 +180,7 @@ class AgentExecution:
             )
         agent_task_workspace = getattr(self.agent, "task_workspace", None)
         if isinstance(agent_task_workspace, TaskWorkspace):
-            self.task_workspace = TaskWorkspace(
-                agent_task_workspace.root,
-                mode=agent_task_workspace.mode,
-                create=True,
+            self.task_workspace = agent_task_workspace._derive(
                 execution_id=self.id,
             )
         else:
@@ -209,12 +207,14 @@ class AgentExecution:
         self.skill_library = getattr(self.agent, "skill_library", None)
         self.skill_bindings: list[SkillBinding] = []
         self._skill_context_binding_id: str | None = None
+        self._session_memory_context_binding_id: str | None = None
         self._task_context_prompt_entry_ids: set[str] = set()
         self._task_context_prepared = False
         self.context_readers: dict[tuple[str, str], Any] = {}
         self.context_packages: list[Any] = []
         self.context_consumptions: list[ContextConsumption] = []
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
+        self._parent_model_request_budget = self._resolve_parent_model_request_budget()
         self._load_inherited_strategy_context()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
@@ -225,6 +225,8 @@ class AgentExecution:
             task_execution_strategy=self.inherited_task_execution_strategy,
             effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
             strategy_context_source=self.inherited_strategy_context_source,
+            task_workspace=self.task_workspace,
+            parent_model_request_budget=self._parent_model_request_budget,
         )
         self.parent_run_context = parent_run_context
         self.agent_execution_run_context: "RunContext | None" = None
@@ -406,8 +408,22 @@ class AgentExecution:
         self.inherited_strategy_context_source = getattr(parent_context, "strategy_context_source", None)
         return self
 
+    def _resolve_parent_model_request_budget(self):
+        from agently.core.runtime.RuntimeContext import get_current_agent_execution_context
+
+        parent_context = get_current_agent_execution_context()
+        parent_budget = (
+            getattr(parent_context, "model_request_budget", None)
+            if parent_context is not getattr(self, "execution_context", None)
+            else None
+        )
+        if parent_budget is not None:
+            return parent_budget
+        return getattr(self, "_parent_model_request_budget", None)
+
     def _replace_runtime_context(self):
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
+        self._parent_model_request_budget = self._resolve_parent_model_request_budget()
         self._load_inherited_strategy_context()
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
@@ -418,6 +434,8 @@ class AgentExecution:
             task_execution_strategy=self.inherited_task_execution_strategy,
             effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
             strategy_context_source=self.inherited_strategy_context_source,
+            task_workspace=self.task_workspace,
+            parent_model_request_budget=self._parent_model_request_budget,
         )
         self.stream = AgentExecutionStream(
             execution_id=self.id,
@@ -1094,6 +1112,9 @@ class AgentExecution:
         if self._skill_context_binding_id is not None:
             self.task_context.remove(self._skill_context_binding_id)
             self._skill_context_binding_id = None
+        if self._session_memory_context_binding_id is not None:
+            self.task_context.remove(self._session_memory_context_binding_id)
+            self._session_memory_context_binding_id = None
         self.skill_bindings = []
         self.context_readers.clear()
 
@@ -1146,6 +1167,27 @@ class AgentExecution:
                 },
             )
 
+        active_session = getattr(self.agent, "activated_session", None)
+        create_memory_source = getattr(
+            active_session,
+            "create_memory_context_source",
+            None,
+        )
+        if callable(create_memory_source):
+            memory_source = cast(
+                ContextSource | None,
+                create_memory_source(settings=self.request.settings),
+            )
+            if memory_source is not None:
+                self._session_memory_context_binding_id = self.task_context.attach(
+                    memory_source,
+                    binding_id=f"session_memory_binding:{self.id}",
+                    scope="session",
+                    metadata={
+                        "session_id": str(getattr(active_session, "id", "")),
+                    },
+                )
+
         self.prompt_snapshot = dict(prompt_snapshot)
         self.execution_prompt_snapshot = self._snapshot_execution_prompt()
         self.route_planner.prompt_snapshot = dict(self.prompt_snapshot)
@@ -1162,6 +1204,25 @@ class AgentExecution:
     ) -> Any:
         if not self._task_context_prepared:
             await self.async_prepare_task_context()
+        raw_context_budget = self.options.get("context_budget")
+        context_budget = (
+            raw_context_budget
+            if isinstance(raw_context_budget, Mapping)
+            else {}
+        )
+
+        def positive_int(*keys: str, default: int) -> int:
+            for key in keys:
+                value = context_budget.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    return value
+            return default
+
+        resolved_budget = budget or ContextBudget(
+            max_chars=positive_int("max_chars", "chars", default=12000),
+            max_blocks=positive_int("max_blocks", default=64),
+            max_block_chars=positive_int("max_block_chars", default=6000),
+        )
         key = (str(consumer_id), str(phase))
         reader = self.context_readers.get(key)
         if reader is None:
@@ -1174,33 +1235,39 @@ class AgentExecution:
             reader = self.task_context.reader(
                 consumer=consumer_id,
                 phase=phase,
-                budget=budget or ContextBudget(),
+                budget=resolved_budget,
                 semantic_selector=semantic_selector,
             )
             self.context_readers[key] = reader
+        policy_metadata: dict[str, Any] = {}
+        if str(context_budget.get("required_overflow") or "").strip() == "lossy_digest":
+            policy_metadata["required_overflow"] = "lossy_digest"
+        if str(context_budget.get("optional_selection") or "").strip() == "none":
+            policy_metadata["optional_selection"] = "none"
         resolved_intent = intent
         if resolved_intent is None:
             resolved_intent = ContextReadIntent(
                 query=self.task_target(),
-                metadata={"exclude_already_in_prompt": True},
+                metadata={
+                    "exclude_already_in_prompt": True,
+                    **policy_metadata,
+                },
+            )
+        elif isinstance(resolved_intent, ContextReadIntent) and policy_metadata:
+            resolved_intent = ContextReadIntent(
+                query=resolved_intent.query,
+                explicit_refs=resolved_intent.explicit_refs,
+                roles=resolved_intent.roles,
+                filters=resolved_intent.filters,
+                metadata={**policy_metadata, **dict(resolved_intent.metadata)},
+            )
+        elif isinstance(resolved_intent, str) and policy_metadata:
+            resolved_intent = ContextReadIntent(
+                query=resolved_intent,
+                metadata=policy_metadata,
             )
         package = await reader.async_read(resolved_intent)
-        required_omissions = [item for item in package.omissions if item.required]
-        failed_required_bindings = {
-            str(item.details.get("binding_id") or "")
-            for item in package.diagnostics
-            if item.code == "context.source_candidates_failed"
-        }
-        required_binding_ids = {
-            binding.binding_id
-            for binding in reader.snapshot.bindings
-            if binding.required
-        }
-        if required_omissions or failed_required_bindings.intersection(required_binding_ids):
-            raise RuntimeError(
-                "Required TaskContext content could not be delivered completely to "
-                f"consumer {consumer_id!r}."
-            )
+        reader.ensure_required_delivery(package)
         self.context_packages.append(package)
         self.logs.setdefault("context_packages", []).append(package.to_dict())
         return package
@@ -1525,6 +1592,14 @@ class AgentExecution:
 
     async def bridge_task_dag_stream_item(self, item: Any, *, route: str) -> None:
         await bridge_task_dag_stream_item_entry(self, item, route=route)
+
+    async def bridge_agent_task_stream_item(
+        self,
+        item: Any,
+        *,
+        route: str = "agent_task",
+    ) -> None:
+        await bridge_agent_task_stream_item_entry(self, item, route=route)
 
     async def bridge_model_stream_item(
         self,

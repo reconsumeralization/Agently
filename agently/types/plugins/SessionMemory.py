@@ -25,6 +25,13 @@ class SessionMemory(AgentlyPlugin, Protocol):
 
     def bind_memory_store(self, memory_store: Any) -> None: ...
 
+    def create_context_source(
+        self,
+        *,
+        session: Any,
+        settings: Any,
+    ) -> Any: ...
+
     async def prepare_request(
         self,
         *,

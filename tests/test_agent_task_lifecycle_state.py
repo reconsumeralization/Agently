@@ -61,7 +61,7 @@ def test_lifecycle_state_replaces_carriers_atomically_and_rejects_duplicate_ids(
     )
 
     assert state.state_version == 3
-    assert state.phase == "outputs.materialized"
+    assert state.phase == "candidate_ready"
     assert inventory.inventory_version == 1
     assert inventory.state_version == 3
     assert inventory.carriers[0].state_version == 3
@@ -134,6 +134,133 @@ def test_lifecycle_state_serialization_round_trip_preserves_current_versions_onl
     assert state_inventory is not None
     assert restored_inventory.carriers == state_inventory.carriers
     assert isinstance(restored_inventory.carriers[0], TerminalCarrier)
+
+
+def test_terminal_carrier_preserves_physical_staging_path_and_logical_root_target():
+    state = AgentTaskLifecycleState(
+        task_id="task_staged_target",
+        requested_strategy="taskboard",
+        effective_strategy="taskboard",
+    )
+    staging_path = "working/taskboard/synthesis/terminal-candidates/final.md"
+
+    inventory = state.replace_carriers(
+        [
+            {
+                **_task_workspace_carrier(
+                    "car_staged",
+                    "cv_staged",
+                    path=staging_path,
+                ),
+                "target_path": "final.md",
+            }
+        ],
+        expected_version=1,
+    )
+    restored = AgentTaskLifecycleState.from_dict(state.to_dict())
+
+    assert inventory.carriers[0].path == staging_path
+    assert inventory.carriers[0].target_path == "final.md"
+    assert restored.carrier_inventory is not None
+    assert restored.carrier_inventory.carriers[0].target_path == "final.md"
+
+
+def test_lifecycle_state_advances_repaired_carrier_version_atomically():
+    state = AgentTaskLifecycleState(
+        task_id="task_atomic_carrier_repair",
+        requested_strategy="taskboard",
+        effective_strategy="taskboard",
+    )
+    state.replace_carriers(
+        [
+            {
+                **_task_workspace_carrier(
+                    "car_report",
+                    "cv_1",
+                    path="working/taskboard/report/terminal-candidates/final.md",
+                    digest="a" * 64,
+                ),
+                "target_path": "final.md",
+            }
+        ],
+        expected_version=1,
+    )
+    state.record_terminal_transition(
+        "repair",
+        expected_version=2,
+        repair_contract={
+            "contract_subject": "carrier:car_report",
+            "requirements": [
+                {
+                    "carrier_id": "car_report",
+                    "content_version_id": "cv_1",
+                }
+            ],
+        },
+    )
+
+    inventory = state.advance_terminal_carrier_version(
+        carrier_id="car_report",
+        expected_content_version_id="cv_1",
+        content_version_id="cv_2",
+        content_digest="b" * 64,
+        source_work_result_id="work:repair:1",
+        expected_version=3,
+    )
+
+    assert state.phase == "post_patch_reverifying"
+    assert state.repair_contract == {}
+    assert state.terminal_decision == {
+        "transition": "verification_retry",
+        "carrier_id": "car_report",
+        "superseded_content_version_id": "cv_1",
+        "content_version_id": "cv_2",
+        "state_version": 4,
+    }
+    assert inventory.inventory_version == 3
+    assert inventory.carriers[0].carrier_id == "car_report"
+    assert inventory.carriers[0].content_version_id == "cv_2"
+    assert inventory.carriers[0].content_digest == "b" * 64
+    assert inventory.carriers[0].target_path == "final.md"
+
+    with pytest.raises(ValueError, match="stale terminal carrier content version"):
+        state.advance_terminal_carrier_version(
+            carrier_id="car_report",
+            expected_content_version_id="cv_1",
+            content_version_id="cv_3",
+            content_digest="c" * 64,
+            source_work_result_id="work:repair:stale",
+            expected_version=4,
+        )
+
+
+def test_semantic_acceptance_of_staging_carrier_waits_for_root_promotion():
+    state = AgentTaskLifecycleState(
+        task_id="task_staged_acceptance",
+        requested_strategy="taskboard",
+        effective_strategy="taskboard",
+    )
+    inventory = state.replace_carriers(
+        [
+            {
+                **_task_workspace_carrier("car_report", "cv_candidate"),
+                "path": "working/report/terminal-candidates/final.md",
+                "target_path": "final.md",
+            }
+        ],
+        expected_version=state.state_version,
+    )
+
+    accepted = state.record_terminal_transition(
+        "accepted",
+        expected_version=state.state_version,
+        accepted_carrier_ids=["car_report"],
+    )
+
+    assert accepted.inventory_version == inventory.inventory_version + 1
+    assert state.phase == "promotion_ready"
+    assert state.terminal_decision["transition"] == "promotion_ready"
+    assert state.terminal_decision["semantic_transition"] == "accepted"
 
 
 def test_lifecycle_state_preserves_skill_install_activation_and_context_facts():

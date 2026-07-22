@@ -46,6 +46,13 @@ agent.set_settings(
 agent.set_settings("record_store.vector_index.enabled", True)
 ```
 
+SessionMemory 仍负责 extraction/compression policy 与 accepted RecordStore
+写入。它把 active recall 暴露为 source kind 为 `session_memory` 的
+`AgentlyMemoryContextSource`；AgentExecution 将这份 TaskContext source 与其他任务
+信息一起绑定。随后由 ContextIndex 复用 structural/vector candidate，并由
+ContextReader 完成 consumer-bound 精确读取与 `ContextPackage` 交付。SessionMemory
+不再运行第二套 retrieval-to-prompt pipeline。
+
 memory extraction、prose relevance、rerank 与 summary 属于模型语义工作。宿主
 代码负责 schema 校验、RecordStore filters、持久化 accepted records 与预算
 约束；plugin 不用关键词表充当语义所有者。

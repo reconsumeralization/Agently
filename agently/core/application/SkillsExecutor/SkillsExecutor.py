@@ -28,7 +28,7 @@ from agently.core.application.SkillLibrary import (
     SkillPackageRevision,
 )
 from agently.core.context import TaskContext
-from agently.types.data import ContextBudget, ContextReadIntent
+from agently.types.data import ContextBudget, ContextReadIntent, SkillSourceRequest
 from agently.utils import FunctionShifter
 
 if TYPE_CHECKING:
@@ -36,8 +36,12 @@ if TYPE_CHECKING:
     from agently.utils import Settings
 
 
-def _trust_from_compatibility(value: str | None) -> str:
-    normalized = str(value or "local").strip().lower()
+def _trust_from_compatibility(
+    value: str | None,
+    *,
+    default: str = "local",
+) -> str:
+    normalized = str(value or default).strip().lower()
     if normalized in {"local", "trusted"}:
         return "trusted"
     return normalized or "untrusted"
@@ -351,13 +355,24 @@ class SkillsExecutor:
         resolver_mode: str = "deterministic",
         resolver_agent: Any = None,
     ) -> dict[str, Any]:
-        del update, discover, resolver_mode, resolver_agent
-        if fetch or ref or subpath or source_type not in {None, "local", "path"}:
-            raise ValueError(
-                "The SkillLibrary compatibility facade installs local Skill packs only; "
-                "materialize remote sources before installation."
-            )
-        resolved_trust = _trust_from_compatibility(trust_level)
+        del discover, resolver_mode, resolver_agent
+        uses_source_provider = bool(
+            fetch
+            or ref
+            or subpath
+            or source_type not in {None, "local", "path"}
+        )
+        effective_source_type = str(
+            source_type or ("git" if uses_source_provider else "local")
+        ).strip().lower()
+        resolved_trust = _trust_from_compatibility(
+            trust_level,
+            default=(
+                "local"
+                if effective_source_type in {"local", "path"}
+                else "untrusted"
+            ),
+        )
         if (
             self._allowed_trust_levels is not None
             and resolved_trust not in self._allowed_trust_levels
@@ -365,6 +380,20 @@ class SkillsExecutor:
             raise ValueError(
                 f"Skill trust level is not allowed by this facade: {resolved_trust!r}."
             )
+        if uses_source_provider:
+            pack = self.library.install_pack_source(
+                SkillSourceRequest(
+                    source=str(source),
+                    source_type=effective_source_type,
+                    ref=ref,
+                    subpath=subpath,
+                    update=update,
+                ),
+                name=name,
+                skill_pack_id=skills_pack_id,
+                trust=resolved_trust,
+            )
+            return _pack_contract(pack)
         return self.registry.install_skills_pack(
             source,
             name=name,

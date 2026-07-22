@@ -70,19 +70,24 @@ class ModelRequestContextSelector:
             }
             for candidate in candidates
         ]
-        request.input(
-            {
-                "intent": intent.query,
-                "consumer_id": consumer.consumer_id,
-                "phase": str(phase),
-            }
-        )
+        request_input: dict[str, Any] = {
+            "intent": intent.query,
+            "consumer_id": consumer.consumer_id,
+            "phase": str(phase),
+        }
+        selection_budget = intent.metadata.get("selection_budget")
+        if isinstance(selection_budget, Mapping):
+            request_input["selection_budget"] = dict(selection_budget)
+        request.input(request_input)
         request.info({"offered_context_blocks": cards})
         request.instruct(
             "Select only optional Context blocks that are semantically useful "
-            "for this intent and consumer phase. Return only offered block_key "
-            "values. Do not reproduce source ids, paths, revisions, bindings, "
-            "content, permissions, or executable objects."
+            "for this intent and consumer phase. Return them in descending task relevance, "
+            "putting exact API, schema, integration-contract, or directly requested evidence "
+            "before general background. Keep the ordered subset within selection_budget using "
+            "the offered estimated_chars and block count; omit lower-value blocks instead of "
+            "selecting everything. Return only offered block_key values. Do not reproduce source "
+            "ids, paths, revisions, bindings, content, permissions, or executable objects."
         )
         request.output(
             {

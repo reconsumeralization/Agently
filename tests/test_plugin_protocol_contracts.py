@@ -4,15 +4,15 @@ import inspect
 import importlib
 from pathlib import Path
 
+import agently.types.plugins as plugin_types
+
 from agently.builtins.plugins.ActionExecutor import (
     BashSandboxActionExecutor,
     BrowseActionExecutor,
-    CodeRuntimeActionExecutor,
+    CodeExecutionActionExecutor,
     DockerActionExecutor,
     LocalFunctionActionExecutor,
     MCPActionExecutor,
-    NodeJSActionExecutor,
-    PythonSandboxActionExecutor,
     SearchActionExecutor,
     SQLiteActionExecutor,
 )
@@ -24,9 +24,8 @@ from agently.builtins.plugins.ExecutionResourceProvider import (
     BrowserExecutionResourceProvider,
     DockerExecutionResourceProvider,
     MCPExecutionResourceProvider,
-    NodeExecutionResourceProvider,
-    PythonExecutionResourceProvider,
     SQLiteExecutionResourceProvider,
+    TrustedLocalExecutionResourceProvider,
 )
 from agently.builtins.plugins.ModelRequester.AnthropicCompatible import AnthropicCompatible
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import OpenAICompatible
@@ -37,7 +36,9 @@ from agently.types.plugins import (
     ActionRuntime,
     AgentExecution,
     AgentOrchestrator,
+    ContextSource,
     ExecutionResourceProvider,
+    SessionMemory,
 )
 from agently.utils.Settings import Settings
 
@@ -50,20 +51,42 @@ def _method_names(protocol: type) -> list[str]:
     ]
 
 
+def test_context_source_protocol_is_descriptor_and_exact_read_only():
+    change_feed = getattr(plugin_types, "ContextSourceChangeFeed", None)
+
+    assert not hasattr(plugin_types, "ContextSourceCandidateWindow")
+    assert not hasattr(ContextSource, "async_list_candidates")
+    assert not hasattr(ContextSource, "async_read")
+    assert hasattr(ContextSource, "async_enumerate_descriptors")
+    assert hasattr(ContextSource, "async_read_exact")
+    assert {"source_id", "source_kind"}.issubset(ContextSource.__annotations__)
+    assert change_feed is not None
+    assert _method_names(change_feed) == ["async_changes"]
+
+
+def test_session_memory_protocol_exposes_context_source_instead_of_retrieval_policy():
+    methods = _method_names(SessionMemory)
+
+    assert "create_context_source" in methods
+    assert "prepare_request" in methods
+    assert "retrieve" not in methods
+    assert "rerank" not in methods
+
+
 def test_builtin_execution_resource_providers_match_protocol():
     providers = [
         BashExecutionResourceProvider(),
         BrowserExecutionResourceProvider(),
         DockerExecutionResourceProvider(),
         MCPExecutionResourceProvider(),
-        NodeExecutionResourceProvider(),
-        PythonExecutionResourceProvider(),
         SQLiteExecutionResourceProvider(),
+        TrustedLocalExecutionResourceProvider(),
     ]
 
     for provider in providers:
         assert isinstance(provider, ExecutionResourceProvider)
-        assert provider.kind
+        assert provider.provider_id
+        assert provider.supported_kinds
         for method_name in _method_names(ExecutionResourceProvider):
             assert callable(getattr(provider, method_name))
 
@@ -80,12 +103,10 @@ def test_builtin_action_executors_match_protocol():
     executors = [
         LocalFunctionActionExecutor(lambda: None),
         MCPActionExecutor(action_id="protocol_mcp", transport={"type": "direct", "tools": []}),
-        PythonSandboxActionExecutor(),
         BashSandboxActionExecutor(timeout=1),
         SearchActionExecutor(search=FakeSearch(), method_name="search"),
         BrowseActionExecutor(browse=FakeBrowse()),
-        NodeJSActionExecutor(timeout=1),
-        CodeRuntimeActionExecutor(language="python", timeout=1),
+        CodeExecutionActionExecutor(language="python", timeout=1),
         DockerActionExecutor(timeout=1),
         SQLiteActionExecutor(),
     ]

@@ -33,6 +33,7 @@ from __future__ import annotations
 import inspect
 import json
 import uuid
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -77,6 +78,7 @@ from .ActionFlowController import ActionFlowController
 from .ActionMetadata import sanitize_action_spec_for_metadata, summarize_action_records
 from .ActionResourceRegistrar import ActionResourceRegistrar
 from .ActionNormalization import (
+    apply_action_decision_round_dispatch_policy,
     is_execution_error_result,
     normalize_action_call,
     normalize_action_decision,
@@ -177,9 +179,14 @@ class Action:
                 "from a previous Action call by artifact reference when the execution "
                 "digest is not enough."
             ),
-            kwargs={
-                "selection_key": (str, "Host-issued selection key from a previous Action execution digest."),
-            },
+            kwargs=cast(
+                "KwargsType",
+                {
+                    "selection_key": (str, "Host-issued selection key from a previous Action execution digest."),
+                    "offset": (int, "Optional serialized byte offset for progressive readback.", False),
+                    "max_bytes": (int, "Optional maximum serialized bytes to return.", False),
+                },
+            ),
             func=self.async_read_action_artifact,
             side_effect_level="read",
             expose_to_model=False,
@@ -193,10 +200,19 @@ class Action:
     async def async_read_action_artifact(
         self,
         selection_key: str,
+        offset: int = 0,
+        max_bytes: int | None = None,
     ) -> dict[str, Any]:
         from agently.base import async_emit_runtime
         from agently.core.runtime import get_current_agent_execution_context
         from agently.types.data import ObservationEvent
+
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("Action artifact readback offset must be an integer >= 0.")
+        if max_bytes is not None and (
+            isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0
+        ):
+            raise ValueError("Action artifact readback max_bytes must be a positive integer.")
 
         expected_scope = self._artifact_manager.current_artifact_scope()
         if expected_scope is None:
@@ -220,16 +236,47 @@ class Action:
             }
         else:
             artifact, value = transfer
+            content_version = str(artifact.get("sha256") or "").strip()
             result = {
                 "ok": True,
                 "status": "success",
+                "owner": "action_artifact",
+                "locator": str(selection_key),
+                "content_version": content_version,
+                "selection_key": str(selection_key),
                 "artifact_type": artifact.get("artifact_type", ""),
                 "label": artifact.get("label", ""),
                 "media_type": artifact.get("media_type", ""),
-                "value": value,
-                "data": value,
-                "result": value,
             }
+            if max_bytes is None:
+                result.update(
+                    {
+                        "value": value,
+                        "data": value,
+                        "result": value,
+                    }
+                )
+            else:
+                raw_value = self._artifact_manager._json_bytes(value)
+                start = min(offset, len(raw_value))
+                end = min(len(raw_value), start + max_bytes)
+                segment = raw_value[start:end].decode("utf-8", errors="replace")
+                result.update(
+                    {
+                        "value": segment,
+                        "data": segment,
+                        "result": segment,
+                        "serialized_media_type": "application/json",
+                        "total_bytes": len(raw_value),
+                        "range": {
+                            "offset": start,
+                            "end": end,
+                            "read_bytes": end - start,
+                        },
+                        "truncated": end < len(raw_value),
+                        "next_offset": end if end < len(raw_value) else None,
+                    }
+                )
 
         await async_emit_runtime(
             ObservationEvent(
@@ -239,6 +286,9 @@ class Action:
                 message="Action artifact selection read completed.",
                 payload={
                     "selection_key": selection_key,
+                    "offset": offset,
+                    "max_bytes": max_bytes,
+                    "range": result.get("range"),
                     "status": result.get("status"),
                     "ok": result.get("ok"),
                 },
@@ -285,6 +335,7 @@ class Action:
         action_id: str,
         desc: str | None,
         kwargs: "KwargsType | None",
+        required_input_keys: list[str],
         returns: "ReturnType | None",
         tags: list[str],
         default_policy: "ActionPolicy | None",
@@ -313,9 +364,61 @@ class Action:
             "execution_resources": execution_resources if execution_resources is not None else [],
             "meta": meta if meta is not None else {},
         })
+        if required_input_keys:
+            spec["required_input_keys"] = required_input_keys
         if returns is not None:
             spec["returns"] = returns
         return spec
+
+    @staticmethod
+    def _resolve_required_input_keys(
+        *,
+        kwargs: "KwargsType | None",
+        func: Callable[..., Any] | None,
+        required_input_keys: Sequence[str] | None,
+    ) -> list[str]:
+        declared = list(kwargs or {})
+        declared_set = {str(key) for key in declared if str(key) != "<*>"}
+        if required_input_keys is not None:
+            required = [str(key) for key in required_input_keys]
+            unknown = sorted(set(required) - declared_set)
+            if unknown:
+                raise ValueError(
+                    "required_input_keys contains undeclared Action kwargs: "
+                    + ", ".join(unknown)
+                    + "."
+                )
+            return [key for key in declared if key in set(required)]
+
+        markers: dict[str, bool] = {}
+        for key, descriptor in (kwargs or {}).items():
+            if (
+                isinstance(descriptor, tuple)
+                and len(descriptor) >= 3
+                and isinstance(descriptor[2], bool)
+            ):
+                markers[str(key)] = descriptor[2]
+
+        signature_required: set[str] = set()
+        if func is not None:
+            signature = inspect.signature(func)
+            signature_required = {
+                name
+                for name, parameter in signature.parameters.items()
+                if name in declared_set
+                and parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                }
+                and parameter.default is inspect.Parameter.empty
+            }
+        return [
+            key
+            for key in declared
+            if key != "<*>"
+            and markers.get(key, key in signature_required)
+        ]
 
     def register_action(
         self,
@@ -325,6 +428,7 @@ class Action:
         kwargs: "KwargsType | None",
         func: Callable[..., Any] | None = None,
         executor=None,
+        required_input_keys: Sequence[str] | None = None,
         returns: "ReturnType | None" = None,
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
@@ -342,10 +446,16 @@ class Action:
             executor = self._create_executor("LocalFunctionActionExecutor", func=func)
         normalized_tags = self._normalize_tags(tags)
         executor_type = str(getattr(executor, "kind", "function"))
+        resolved_required_input_keys = self._resolve_required_input_keys(
+            kwargs=kwargs,
+            func=func,
+            required_input_keys=required_input_keys,
+        )
         spec = self._sanitize_action_spec(
             action_id=action_id,
             desc=desc,
             kwargs=kwargs,
+            required_input_keys=resolved_required_input_keys,
             returns=returns,
             tags=normalized_tags,
             default_policy=default_policy,
@@ -626,7 +736,16 @@ class Action:
     @staticmethod
     def _artifact_scope_from_run_context(run_context: Any) -> dict[str, str]:
         meta = getattr(run_context, "meta", None)
-        task_id = str(meta.get("task_id") or "").strip() if isinstance(meta, dict) else ""
+        lineage = meta.get("lineage") if isinstance(meta, dict) else None
+        task_id = (
+            str(meta.get("task_id") or "").strip()
+            if isinstance(meta, dict)
+            else ""
+        ) or (
+            str(lineage.get("task_id") or "").strip()
+            if isinstance(lineage, dict)
+            else ""
+        )
         if task_id:
             return {"kind": "agent_task", "id": task_id}
         execution_id = str(getattr(run_context, "execution_id", "") or "").strip()
@@ -647,6 +766,35 @@ class Action:
         if execution_id:
             return {"kind": "agent_execution", "id": execution_id}
         return None
+
+    @classmethod
+    def _resolve_artifact_scope(
+        cls,
+        *,
+        run_context: Any,
+        agent_execution_context: Any,
+    ) -> dict[str, str]:
+        """Resolve the deepest explicit owner without ambient-owner shadowing.
+
+        A caller-supplied RunContext can deliberately transfer an Action batch
+        into an AgentTask scope while the batch is executed inside an outer
+        AgentExecution. Task identity therefore outranks execution identity,
+        and an explicit run Task owner outranks the ambient execution context.
+        """
+
+        run_scope = cls._artifact_scope_from_run_context(run_context)
+        execution_scope = cls._artifact_scope_from_agent_execution_context(
+            agent_execution_context
+        )
+        if run_scope.get("kind") == "agent_task":
+            return run_scope
+        if execution_scope is not None and execution_scope.get("kind") == "agent_task":
+            return execution_scope
+        if run_scope.get("kind") == "agent_execution":
+            return run_scope
+        if execution_scope is not None:
+            return execution_scope
+        return run_scope
 
     def _release_artifact_scope(self, artifact_scope: dict[str, str]) -> int:
         return self._artifact_manager.release_scope(artifact_scope)
@@ -1056,6 +1204,9 @@ class Action:
         tags: str | list[str] | None = None,
         default_policy: "ActionPolicy | None" = None,
         expose_to_model: bool = False,
+        providers: Sequence[str | Mapping[str, Any]] | None = None,
+        unsafe_fallback: bool = False,
+        isolation: Literal["required", "preferred", "none"] = "required",
         docker_image: str | None = None,
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -1071,6 +1222,9 @@ class Action:
             tags=tags,
             default_policy=default_policy,
             expose_to_model=expose_to_model,
+            providers=providers,
+            unsafe_fallback=unsafe_fallback,
+            isolation=isolation,
             docker_image=docker_image,
             docker_binary=docker_binary,
             docker_default_args=docker_default_args,
@@ -1256,6 +1410,16 @@ class Action:
 
     def _normalize_action_decision(self, decision: Any) -> "ActionDecision":
         return normalize_action_decision(decision)
+
+    @staticmethod
+    def _apply_action_decision_round_dispatch_policy(
+        decision: "ActionDecision",
+        settings: "Settings",
+    ) -> "ActionDecision":
+        policy = settings.get("action.loop.round_dispatch_policy", None)
+        if policy is None:
+            policy = settings.get("tool.loop.round_dispatch_policy", None)
+        return apply_action_decision_round_dispatch_policy(decision, policy)
 
     def _normalize_execution_record(self, record: Any, command: "ActionCall | None", index: int) -> "ActionResult":
         return normalize_execution_record(record, command, index)

@@ -21,12 +21,26 @@ import re
 import shutil
 import subprocess
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, cast
 
-from agently.types.data import TaskWorkspaceFileRead, TaskWorkspaceFileWrite
+from agently.types.data import (
+    TaskWorkspaceFileRead,
+    TaskWorkspaceFileRef,
+    TaskWorkspaceFileWrite,
+)
+from agently.types.data import (
+    CodeExecutionBundle,
+    TaskWorkspaceAccessGrant,
+    TaskWorkspaceAccessRequirement,
+    TaskWorkspaceExecutionManifest,
+    TaskWorkspaceExecutionManifestFile,
+)
+from agently.types.plugins import TaskWorkspaceFileIOHandler
 
 from .Errors import TaskWorkspacePolicyError
+from .FileIORegistry import _TaskWorkspaceFileIORegistry
 from .Identity import TaskWorkspaceIdentityCatalog
 
 
@@ -52,13 +66,15 @@ class TaskWorkspace:
             raise FileNotFoundError(str(self.root))
         self.mode = mode
         self.execution_id = str(execution_id or f"task_{uuid.uuid4().hex}")
-        from .Manager import TaskWorkspaceManager
-
-        self.manager = TaskWorkspaceManager()
+        self._file_io_registry = _TaskWorkspaceFileIORegistry()
         self._identity_catalog = TaskWorkspaceIdentityCatalog(
             self.root / ".agently",
             task_workspace_id=self.task_workspace_id,
         )
+        from .ExecutionAccess import TaskWorkspaceExecutionAccess
+
+        self._execution_access = TaskWorkspaceExecutionAccess(self)
+        self._terminal_target_protections: dict[str, frozenset[Path]] = {}
 
     @property
     def task_workspace_id(self) -> str:
@@ -67,6 +83,49 @@ class TaskWorkspace:
     @property
     def fallback_root(self) -> Path:
         return self.root / ".agently" / "files" / self.execution_id
+
+    def _derive(
+        self,
+        *,
+        mode: str | None = None,
+        execution_id: str | None = None,
+    ) -> "TaskWorkspace":
+        derived = TaskWorkspace(
+            self.root,
+            mode=mode or self.mode,
+            create=True,
+            execution_id=execution_id or self.execution_id,
+        )
+        derived._file_io_registry = self._file_io_registry.clone()
+        return derived
+
+    def issue_execution_access(
+        self,
+        *,
+        action_call_id: str,
+        requirement: TaskWorkspaceAccessRequirement,
+    ) -> TaskWorkspaceAccessGrant:
+        return self._execution_access.issue(
+            action_call_id=action_call_id,
+            requirement=requirement,
+        )
+
+    async def materialize_execution_bundle(
+        self,
+        grant: TaskWorkspaceAccessGrant,
+        bundle: CodeExecutionBundle,
+    ) -> TaskWorkspaceExecutionManifest:
+        return await self._execution_access.materialize(grant, bundle)
+
+    async def collect_execution_outputs(
+        self,
+        grant: TaskWorkspaceAccessGrant,
+        paths: list[str] | tuple[str, ...],
+    ) -> tuple[TaskWorkspaceExecutionManifestFile, ...]:
+        return await self._execution_access.collect_outputs(grant, paths)
+
+    def close_execution_access(self, grant_id: str) -> None:
+        self._execution_access.close(grant_id)
 
     def resolve_path(self, path: str | os.PathLike[str]) -> Path:
         raw = Path(path).expanduser()
@@ -100,11 +159,29 @@ class TaskWorkspace:
     def inspect_file(self, path: str | os.PathLike[str]) -> dict[str, object]:
         target = self.resolve_file_path(path)
         return dict(
-            self.manager.inspect_file_path(
+            self._file_io_registry.inspect(
                 target,
                 relative_path=self._relative(target),
             )
         )
+
+    def register_file_io_handler(
+        self,
+        handler: TaskWorkspaceFileIOHandler,
+        *,
+        replace: bool = False,
+    ) -> "TaskWorkspace":
+        """Extend this TaskWorkspace's file representation boundary."""
+
+        self._file_io_registry.register(handler, replace=replace)
+        return self
+
+    def unregister_file_io_handler(self, handler_id: str) -> "TaskWorkspace":
+        self._file_io_registry.unregister(handler_id)
+        return self
+
+    def list_file_io_handlers(self) -> list[str]:
+        return self._file_io_registry.list()
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -117,7 +194,40 @@ class TaskWorkspace:
     def _relative(self, path: Path) -> str:
         return path.relative_to(self.root).as_posix()
 
-    def _write_target(self, requested: Path, requested_path: str) -> tuple[Path, bool]:
+    @contextmanager
+    def _protect_terminal_targets(
+        self,
+        paths: list[str] | tuple[str, ...],
+    ) -> Iterator[None]:
+        """Block ordinary writes to terminal targets while one card is running."""
+
+        token = uuid.uuid4().hex
+        targets = frozenset(self.resolve_path(path) for path in paths)
+        self._terminal_target_protections[token] = targets
+        try:
+            yield
+        finally:
+            self._terminal_target_protections.pop(token, None)
+
+    def _assert_terminal_target_writable(self, requested: Path) -> None:
+        if any(
+            requested in targets
+            for targets in self._terminal_target_protections.values()
+        ):
+            raise TaskWorkspacePolicyError(
+                "A protected terminal target can only change through "
+                "digest-pinned TaskWorkspace promotion."
+            )
+
+    def _write_target(
+        self,
+        requested: Path,
+        requested_path: str,
+        *,
+        allow_terminal_target: bool = False,
+    ) -> tuple[Path, bool]:
+        if not allow_terminal_target:
+            self._assert_terminal_target_writable(requested)
         fallback_root = self.fallback_root.resolve()
         if requested == fallback_root or fallback_root in requested.parents:
             # A task may continue or replace the private carrier returned by a
@@ -193,7 +303,7 @@ class TaskWorkspace:
         target = self.resolve_file_path(path)
         if not target.is_file():
             raise FileNotFoundError(f"TaskWorkspace file not found: {path}")
-        result = await self.manager.read_file_path(
+        result = await self._file_io_registry.read(
             target,
             relative_path=self._relative(target),
             max_bytes=max_bytes,
@@ -235,6 +345,7 @@ class TaskWorkspace:
         expected_sha256: str | None = None,
     ) -> TaskWorkspaceFileWrite:
         target = self.resolve_file_path(path)
+        self._assert_terminal_target_writable(target)
         if self.mode != "read_write" and not (
             target == self.fallback_root or self.fallback_root in target.parents
         ):
@@ -262,6 +373,55 @@ class TaskWorkspace:
             task_workspace_id=self.task_workspace_id,
             execution_id=self.execution_id,
             replacements=replacements,
+        )
+
+    async def _atomic_replace_file_content(
+        self,
+        path: str | os.PathLike[str],
+        content: str,
+        *,
+        expected_sha256: str,
+        replacements: int = 0,
+    ) -> TaskWorkspaceFileWrite:
+        """Conditionally replace one text file with one atomic filesystem mutation."""
+
+        target = self.resolve_file_path(path)
+        self._assert_terminal_target_writable(target)
+        if self.mode != "read_write" and not (
+            target == self.fallback_root or self.fallback_root in target.parents
+        ):
+            raise TaskWorkspacePolicyError(
+                "External TaskWorkspace editing requires explicit write permission."
+            )
+        if not target.is_file():
+            raise FileNotFoundError(f"TaskWorkspace file not found: {path}")
+        expected_digest = str(expected_sha256 or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+            raise ValueError("expected_sha256 must be a SHA-256 digest.")
+        if await asyncio.to_thread(self._sha256, target) != expected_digest:
+            raise ValueError("TaskWorkspace file has changed since the expected sha256.")
+
+        data = str(content).encode("utf-8")
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            await asyncio.to_thread(temporary.write_bytes, data)
+            # Recheck immediately before replace so concurrent writers cannot be
+            # silently overwritten after the initial conditional read.
+            if await asyncio.to_thread(self._sha256, target) != expected_digest:
+                raise ValueError("TaskWorkspace file changed before atomic replacement.")
+            await asyncio.to_thread(os.replace, temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+        return TaskWorkspaceFileWrite(
+            path=self._relative(target),
+            requested_path=Path(path).as_posix(),
+            bytes=len(data),
+            sha256=await asyncio.to_thread(self._sha256, target),
+            fallback=self.fallback_root in target.parents,
+            task_workspace_id=self.task_workspace_id,
+            execution_id=self.execution_id,
+            replacements=max(0, int(replacements)),
         )
 
     async def copy_from(
@@ -338,12 +498,16 @@ class TaskWorkspace:
         *,
         path: str | os.PathLike[str] = ".",
         pattern: str = "**/*",
+        offset: int = 0,
         max_results: int = 20,
         max_file_bytes: int = 20000,
         include_hidden: bool = False,
         **_: object,
     ) -> list[dict[str, object]]:
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError("offset must be a non-negative integer.")
         results: list[dict[str, object]] = []
+        matched_files = 0
         query_text = str(query or "").casefold()
         pattern = "**/*" if str(pattern or "").strip() in {"", "**"} else str(pattern)
         candidates: set[Path] = set()
@@ -363,6 +527,9 @@ class TaskWorkspace:
             for line_no, line in enumerate(readback.content.splitlines(), start=1):
                 if query_text and query_text not in line.casefold():
                     continue
+                if matched_files < offset:
+                    matched_files += 1
+                    break
                 results.append(
                     {
                         "path": relative,
@@ -378,6 +545,7 @@ class TaskWorkspace:
                         "content_state": "bounded_readback_available",
                     }
                 )
+                matched_files += 1
                 break
         return results
 
@@ -480,7 +648,9 @@ class TaskWorkspace:
                 continue
             if raw_path.startswith(("a/", "b/")):
                 raw_path = raw_path[2:]
-            normalized = self._relative(self.resolve_path(raw_path))
+            resolved = self.resolve_path(raw_path)
+            self._assert_terminal_target_writable(resolved)
+            normalized = self._relative(resolved)
             if normalized not in paths:
                 paths.append(normalized)
         if not paths:
@@ -519,11 +689,73 @@ class TaskWorkspace:
         export_kind: str,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        _ = options
-        if export_kind not in {"copy", "raw"}:
-            raise ValueError(f"TaskWorkspace export kind is unsupported: {export_kind}")
-        result = await self.copy_from(self.resolve_path(source_path), output_path)
-        return result.to_dict()
+        source = self.resolve_file_path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"TaskWorkspace source file not found: {source_path}")
+        if export_kind in {"copy", "raw"}:
+            result = await self.copy_from(source, output_path)
+            return result.to_dict()
+        requested_path = Path(output_path).as_posix()
+        requested = self.resolve_path(output_path)
+        target, _fallback = self._write_target(requested, requested_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        result = await self._file_io_registry.export(
+            source,
+            target,
+            source_relative_path=self._relative(source),
+            output_relative_path=self._relative(target),
+            export_kind=export_kind,
+            options=options,
+        )
+        return dict(result)
+
+    async def atomic_promote_file(
+        self,
+        source_path: str | os.PathLike[str],
+        target_path: str | os.PathLike[str],
+        *,
+        expected_sha256: str,
+    ) -> TaskWorkspaceFileRef:
+        """Atomically replace one logical target with digest-pinned staged bytes."""
+
+        expected_digest = str(expected_sha256 or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+            raise ValueError("expected_sha256 must be a lowercase or uppercase SHA-256 digest.")
+        source = self.resolve_file_path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Staged TaskWorkspace file not found: {source_path}")
+        if await asyncio.to_thread(self._sha256, source) != expected_digest:
+            raise ValueError("staged TaskWorkspace file digest changed")
+
+        requested_path = Path(target_path).as_posix()
+        requested = self.resolve_path(target_path)
+        target, _fallback = self._write_target(
+            requested,
+            requested_path,
+            allow_terminal_target=True,
+        )
+        if source == target:
+            return cast(
+                TaskWorkspaceFileRef,
+                await self._promote_file_identity(target, role="task_workspace_artifact"),
+            )
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            await asyncio.to_thread(shutil.copyfile, source, temporary)
+            if await asyncio.to_thread(self._sha256, temporary) != expected_digest:
+                raise ValueError("temporary promotion digest mismatch")
+            await asyncio.to_thread(os.replace, temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+        if await asyncio.to_thread(self._sha256, target) != expected_digest:
+            raise ValueError("promoted TaskWorkspace file digest mismatch")
+        return cast(
+            TaskWorkspaceFileRef,
+            await self._promote_file_identity(target, role="task_workspace_artifact"),
+        )
 
     async def _promote_file_identity(
         self,

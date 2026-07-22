@@ -13,7 +13,7 @@ agent = create_agent(
 )
 
 agent.enable_python(
-    desc="Use for exact arithmetic and list statistics. Assign the final answer to `result`.",
+    desc="Use for exact arithmetic and list statistics. Print the final answer as JSON.",
     expose_to_model=True,
 )
 
@@ -22,7 +22,7 @@ if __name__ == "__main__":
     turn = agent.input(
         "Use Python for this list: [15, 23, 42, 8, 12]. "
         "Calculate average, count, and max-minus-min gap. "
-        "The Python code must assign a dict to `result` with keys average, count, and max_minus_min_gap. "
+        "The Python code must print one JSON object with keys average, count, and max_minus_min_gap. "
         "Then reply with those values."
     )
 
@@ -52,7 +52,7 @@ if __name__ == "__main__":
 # agent.enable_python(expose_to_model=True)
 #   |
 #   v
-# model plans: run_python(python_code="nums=[15,23,42,8,12]\nresult={...}")
+# model plans: run_python(source_code="...print(json.dumps(result))")
 #   |
 #   v
 # Docker-backed Python profile runs code -> average=20.0, count=5, max_minus_min_gap=34

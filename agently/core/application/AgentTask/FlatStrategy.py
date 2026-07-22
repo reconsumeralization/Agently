@@ -1141,7 +1141,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 source_kinds = [
                     value
                     for value in source_kinds
-                    if value in {"record_store", "task_workspace"}
+                    if value
                 ]
                 if source_kinds:
                     candidate["source_kinds"] = list(dict.fromkeys(source_kinds))
@@ -1150,19 +1150,14 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     "snippet_limit",
                     "snippet_offset",
                     "max_file_bytes",
-                    "context_lines",
-                    "top_n",
-                    "max_candidates",
                 ):
                     value = item.get(key)
                     if value is not None:
                         candidate[key] = DataFormatter.sanitize(value)
-                for key in ("tags", "method", "selection"):
+                for key in ("tags",):
                     value = item.get(key)
                     if value is not None:
                         candidate[key] = DataFormatter.sanitize(value)
-                if item.get("rerank") is not None:
-                    candidate["rerank"] = bool(item.get("rerank"))
                 if item.get("include_hidden") is not None:
                     candidate["include_hidden"] = bool(item.get("include_hidden"))
                 filters = item.get("filters")
@@ -1191,14 +1186,8 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                     expanded = dict(template)
                     expanded["query"] = content_query
                     query_groups.append(expanded)
-                    if len(query_groups) >= 8:
-                        break
-                if len(query_groups) >= 8:
-                    break
                 continue
             query_groups.append(candidate)
-            if len(query_groups) >= 8:
-                break
         if not query_groups:
             return {}
         raw_fallback_order = raw.get("fallback_order") or raw.get("fallbacks")
@@ -1243,7 +1232,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             text = str(value or "").strip()
             if text and text not in queries:
                 queries.append(text)
-        return queries[:8]
+        return queries
 
     def _normalize_step_deliverable_mode(self, plan: dict[str, Any]) -> None:
         raw_mode = str(plan.get("deliverable_mode") or "").strip().lower().replace("-", "_")
@@ -1788,6 +1777,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             intent=f"Plan iteration {iteration_index}: {self.goal}",
         )
         request = self.agent.create_temp_request()
+        self._bind_task_context_attachments(request, context_package)
         language_policy = self._language_policy()
         self._apply_language_policy_to_request(request, language_policy)
         planner_capabilities = self._planner_capabilities()
@@ -1811,7 +1801,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 "task_shape_analysis": DataFormatter.sanitize(self.task_shape_analysis),
                 "planner_capabilities": planner_capabilities,
                 "capability_evidence_requirements": self._capability_evidence_requirements(),
-                "retrieval_policy": scoped_retrieval_policy(),
+                "retrieval_policy": self._task_context_retrieval_policy(),
                 "language_policy": language_policy,
             }
         )
@@ -1875,12 +1865,12 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "Action kwargs from the compact planner capability list."
             " For TaskWorkspace, repository, or file-backed evidence, prefer scoped retrieval before bulk reads when it can "
             "reduce prompt input. If useful, return scoped_retrieval.query_groups with prioritized exact phrases or "
-            "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. ContextReader and its source adapters only "
+            "natural search text plus expected_role='evidence_snippet' or 'locator_ref'. Select source_kinds only from "
+            "retrieval_policy.source_kinds and keep source-specific structural filters in separate query groups. ContextReader only "
             "record bounded facts; the planner/verifier must judge semantic usefulness after seeing snippets or readbacks. "
-            "Use query_group.path and pattern for bounded TaskWorkspace file search. For "
-            "explicit retrieval tuning, query groups may include tags, method='auto'|'keyword'|'vector'|'hybrid', "
-            "rerank, selection='length'|'top_n', top_n, or max_candidates; omit method unless the task gives a concrete "
-            "retrieval requirement, so each ContextSource adapter can choose its supported retrieval policy. "
+            "Use query_group.path and pattern for bounded file-source search. Query groups may express business filters, "
+            "exact refs, tags, max_results, snippet_limit, and source-owned size bounds; never choose lexical, vector, "
+            "rerank, or source-native search mechanisms because ContextIndex owns those mechanisms. "
             "Blocks use context_read.read and record ContextPackage diagnostics in bounded facts. "
             "For TaskWorkspace files, query is the content text to search, path is the directory or file scope, and pattern is a "
             "file glob such as '*.md' or '*' rather than another content keyword. "
@@ -1937,7 +1927,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                 ),
                 "scoped_retrieval": (
                     dict,
-                    "Optional retrieval plan: {query_groups: [{query, expected_role, source_kinds?: ['record_store'|'task_workspace'], path?, pattern?, filters?, tags?, method?, rerank?, selection?, top_n?, max_results?, max_candidates?, snippet_limit?, max_file_bytes?}], fallback_order?: [...]}; executors return facts only",
+                    "Optional retrieval plan: {query_groups: [{query, expected_role, source_kinds?: [offered source kind], path?, pattern?, filters?, tags?, max_results?, snippet_limit?, max_file_bytes?}], fallback_order?: [...]}; use only retrieval_policy.source_kinds and express business scope, never retrieval mechanisms; executors return facts only",
                     False,
                 ),
             },
@@ -2020,6 +2010,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             )
 
         request = self.agent.create_temp_request()
+        self._bind_task_context_attachments(request, context_package)
         language_policy = self._language_policy()
         self._apply_language_policy_to_request(request, language_policy)
         repair_context = self._active_repair_context()
@@ -2322,7 +2313,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
                                 ),
                                 "new_string": (
                                     str,
-                                    "Bounded supported replacement; empty removes the unsupported claim",
+                                    "Bounded supported replacement, or exactly empty when repair_policy is delete_only",
                                     True,
                                 ),
                             }
@@ -2466,8 +2457,10 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
         request.instruct(
             "Propose the smallest deterministic repair for the structured grounding requirements. "
             "Return exactly one replace operation for every offered claim_key and copy old_string exactly from that "
-            "requirement's artifact_quote. Use only the authorized TaskWorkspace target path. new_string may narrow the "
-            "claim to what the offered evidence supports or remove it when no supported replacement is available. "
+            "requirement's artifact_quote. Use only the authorized TaskWorkspace target path. This request cannot acquire "
+            "or validate new evidence, so never invent a new fact, readback state, path assertion, or evidence citation. "
+            "When repair_policy='delete_only', new_string must be the exactly empty string; a qualifying rewording is not "
+            "a deletion. Otherwise new_string may narrow the claim only to what the already offered evidence supports. "
             "Do not call Actions, do not return candidate_final_result, final_result, artifact_markdown, a full-file "
             "body, a full-file rewrite, append/insert/write operations, replace_all, or edits outside the implicated "
             "artifact quotes. The host validates identity, scope, current content version, exact-match cardinality, "
@@ -2595,7 +2588,7 @@ class AgentTaskFlatStrategyMixin(AgentTaskMixinBase):
             "effective_execution_strategy": self.effective_execution_strategy,
             "context_pack": DataFormatter.sanitize(context_pack),
             "execution_prompt": self._execution_prompt_context(),
-            "retrieval_policy": scoped_retrieval_policy(),
+            "retrieval_policy": self._task_context_retrieval_policy(),
             "scoped_retrieval": DataFormatter.sanitize(plan.get("scoped_retrieval", {})),
             "evidence_ledger": DataFormatter.sanitize(evidence_ledger or {}),
             "scoped_retrieval_results": DataFormatter.sanitize(list(scoped_retrieval_results or ())),

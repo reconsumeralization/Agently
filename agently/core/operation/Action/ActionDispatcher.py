@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import uuid
 from typing import Any, cast
 
 from agently.core.operation.ExecutionResource import (
@@ -36,8 +37,9 @@ from agently.types.data import (
     ExecutionResourceHandle,
     ExecutionResourcePolicy,
     ExecutionResourceRequirement,
+    TaskWorkspaceAccessGrant,
+    TaskWorkspaceAccessRequirement,
 )
-from agently.types.plugins import ActionExecutor
 from agently.utils import FunctionShifter, Settings, SettingsNamespace
 
 from .ActionRegistry import ActionRegistry
@@ -131,6 +133,15 @@ class ActionDispatcher:
         if not isinstance(meta, dict):
             return set()
         raw_keys = meta.get("host_only_input_keys", [])
+        if isinstance(raw_keys, str):
+            return {raw_keys}
+        if isinstance(raw_keys, (list, tuple, set)):
+            return {str(key) for key in raw_keys if str(key)}
+        return set()
+
+    @staticmethod
+    def _required_action_input_keys(spec: ActionSpec) -> set[str]:
+        raw_keys: Any = spec.get("required_input_keys", [])
         if isinstance(raw_keys, str):
             return {raw_keys}
         if isinstance(raw_keys, (list, tuple, set)):
@@ -257,6 +268,7 @@ class ActionDispatcher:
             "message": message,
         }
         result: dict[str, Any] = {
+            "action_call_id": str(action_call.get("action_call_id", "")),
             "ok": False,
             "status": "approval_required",
             "purpose": str(action_call.get("purpose", f"Use { action_id }")),
@@ -358,6 +370,26 @@ class ActionDispatcher:
         tool_name = str(spec.get("name", action_id))
         if isinstance(output, dict) and output.get("status") in self.VALID_STATUSES:
             result: dict[str, Any] = dict(output)
+            if result.get("status") not in {"success", "partial_success"}:
+                reason = result.get("reason") or result.get("stderr") or result.get("detail")
+                if reason and not result.get("error"):
+                    result["error"] = str(reason)
+                if "result" not in result and "data" not in result:
+                    failure_data = {
+                        key: result[key]
+                        for key in (
+                            "reason",
+                            "detail",
+                            "need_approval",
+                            "diagnostics",
+                            "workdir",
+                            "cmd",
+                            "timeout_seconds",
+                        )
+                        if key in result
+                    }
+                    result["result"] = failure_data
+                    result["data"] = failure_data
         elif isinstance(output, dict) and output.get("need_approval") is True:
             message = str(output.get("reason", "Action execution requires approval."))
             result = dict(
@@ -395,6 +427,7 @@ class ActionDispatcher:
         if not isinstance(action_input, dict):
             action_input = {}
         result.setdefault("ok", result.get("status") in {"success", "partial_success"})
+        result.setdefault("action_call_id", str(action_call.get("action_call_id", "")))
         result.setdefault("status", "success" if result.get("ok") else "error")
         result.setdefault("purpose", purpose)
         result.setdefault("action_id", action_id)
@@ -480,6 +513,107 @@ class ActionDispatcher:
             prepared.append(prepared_requirement)
         return prepared
 
+    @staticmethod
+    def _resolve_task_workspace(settings: Settings):
+        from agently.core.TaskWorkspace import TaskWorkspace
+        from agently.core.TaskWorkspace._defaults import default_task_workspace_root
+        from agently.core.runtime import get_current_agent_execution_context
+
+        execution_context = get_current_agent_execution_context()
+        bound_workspace = getattr(execution_context, "task_workspace", None)
+        if isinstance(bound_workspace, TaskWorkspace):
+            return bound_workspace
+        configured_root = settings.get("task_workspace.root", None)
+        configured_mode = str(settings.get("task_workspace.mode", "read_only"))
+        if configured_root is not None:
+            return TaskWorkspace(
+                str(configured_root),
+                mode=configured_mode,
+                create=True,
+                execution_id=f"action_{uuid.uuid4().hex}",
+            )
+        execution_id = f"action_{uuid.uuid4().hex}"
+        return TaskWorkspace(
+            default_task_workspace_root()
+            / ".agently"
+            / "task_workspaces"
+            / "direct"
+            / execution_id,
+            mode="read_only",
+            create=True,
+            execution_id=execution_id,
+        )
+
+    @staticmethod
+    def _workspace_access_requirement(
+        value: dict[str, Any],
+    ) -> TaskWorkspaceAccessRequirement:
+        raw_inputs = value.get("input_paths", ())
+        raw_outputs = value.get("output_paths", value.get("expected_outputs", ()))
+        input_paths = (
+            (raw_inputs,)
+            if isinstance(raw_inputs, str)
+            else tuple(raw_inputs) if isinstance(raw_inputs, (list, tuple)) else ()
+        )
+        output_paths = (
+            (raw_outputs,)
+            if isinstance(raw_outputs, str)
+            else tuple(raw_outputs) if isinstance(raw_outputs, (list, tuple)) else ()
+        )
+        return TaskWorkspaceAccessRequirement(
+            mode=cast(Any, str(value.get("mode", "snapshot"))),
+            include_workspace_root=bool(value.get("include_workspace_root", False)),
+            input_paths=tuple(str(item) for item in input_paths),
+            output_paths=tuple(str(item) for item in output_paths),
+            retain_source=bool(value.get("retain_source", False)),
+        )
+
+    @staticmethod
+    def _close_workspace_grants(
+        task_workspace: Any,
+        grants: list[TaskWorkspaceAccessGrant],
+    ) -> None:
+        if task_workspace is None:
+            return
+        for grant in grants:
+            task_workspace.close_execution_access(grant.grant_id)
+
+    async def _release_execution_resources(
+        self,
+        execution_resource: Any,
+        handles: list[ExecutionResourceHandle],
+        *,
+        action_call: ActionCall,
+        action_scope_only: bool,
+    ) -> list[ActionDiagnostic]:
+        diagnostics: list[ActionDiagnostic] = []
+        for handle in handles:
+            if action_scope_only and handle.get("scope") != "action_call":
+                continue
+            try:
+                await execution_resource.async_release(handle)
+            except Exception as error:
+                code = str(
+                    getattr(error, "code", "")
+                    or "execution_resource.release_failed"
+                )
+                diagnostics.append(
+                    self._exception_diagnostic(
+                        code=code,
+                        message=str(error) or "Execution resource release failed.",
+                        error=error,
+                        meta={
+                            "handle_id": str(handle.get("handle_id", "")),
+                            "provider_id": str(handle.get("provider_id", "")),
+                        },
+                    )
+                )
+        if diagnostics:
+            raw = action_call.get("diagnostics")
+            existing = raw if isinstance(raw, list) else []
+            action_call["diagnostics"] = [*existing, *diagnostics]
+        return diagnostics
+
     def _execution_resource_error_result(
         self,
         *,
@@ -494,6 +628,7 @@ class ActionDispatcher:
         if not isinstance(action_input, dict):
             action_input = {}
         result = {
+            "action_call_id": str(action_call.get("action_call_id", "")),
             "ok": False,
             "status": status,
             "purpose": str(action_call.get("purpose", f"Use { action_id }")),
@@ -527,10 +662,12 @@ class ActionDispatcher:
         todo_suggestion: str = "",
         next_value: str = "",
     ) -> ActionResult:
+        action_call_id = f"act_call_{uuid.uuid4().hex}"
         execution_settings = settings if settings is not None else self.settings
         spec = self.registry.get_spec(action_id)
         if spec is None:
             return {
+                "action_call_id": action_call_id,
                 "ok": False,
                 "status": "error",
                 "purpose": purpose or f"Use { action_id }",
@@ -552,6 +689,7 @@ class ActionDispatcher:
         tool_name = str(spec.get("name", action_id))
         if executor is None:
             return {
+                "action_call_id": action_call_id,
                 "ok": False,
                 "status": "error",
                 "purpose": purpose or f"Use { action_id }",
@@ -604,6 +742,7 @@ class ActionDispatcher:
                 )
             )
         action_call: ActionCall = {
+            "action_call_id": action_call_id,
             "purpose": purpose or f"Use { action_id }",
             "action_id": action_id,
             "action_input": dict(action_input),
@@ -615,6 +754,33 @@ class ActionDispatcher:
             "tool_kwargs": dict(action_input),
             "diagnostics": call_diagnostics,
         }
+        missing_input_keys = (
+            sorted(self._required_action_input_keys(spec) - set(action_input))
+            if source_protocol in self.MODEL_PLANNING_PROTOCOLS
+            else []
+        )
+        if missing_input_keys:
+            message = (
+                f"Action '{action_id}' is missing required input keys: "
+                + ", ".join(missing_input_keys)
+                + "."
+            )
+            call_diagnostics.append(
+                self._exception_diagnostic(
+                    code="action.input.required_keys_missing",
+                    message=message,
+                    meta={
+                        "source_protocol": source_protocol,
+                        "missing_input_keys": missing_input_keys,
+                    },
+                )
+            )
+            return self._execution_resource_error_result(
+                spec=spec,
+                action_call=action_call,
+                status="error",
+                error=message,
+            )
         policy = self._merge_policy(execution_settings, spec, sanitized_override)
         if isinstance(trusted_policy_override, dict) and trusted_policy_override:
             # Host-trusted grants (e.g. a policy approval resolved through the
@@ -659,8 +825,27 @@ class ActionDispatcher:
                 return cast(ActionResult, approval_result)
             if approved_policy is not None:
                 policy = approved_policy
-        if spec.get("sandbox_required") is True and not getattr(executor, "sandboxed", False):
+        resource_managed_isolation = any(
+            isinstance(requirement, dict)
+            and isinstance(
+                dict(requirement.get("required_capabilities", {})).get(
+                    "isolation"
+                ),
+                dict,
+            )
+            for requirement in spec.get("execution_resources", [])
+            if isinstance(spec.get("execution_resources", []), list)
+        )
+        if (
+            spec.get("sandbox_required") is True
+            and not getattr(executor, "sandboxed", False)
+            and not (
+                getattr(executor, "resource_isolation_managed", False)
+                and resource_managed_isolation
+            )
+        ):
             return {
+                "action_call_id": action_call_id,
                 "ok": False,
                 "status": "blocked",
                 "purpose": str(action_call.get("purpose", f"Use { action_id }")),
@@ -690,12 +875,30 @@ class ActionDispatcher:
         ensured_handles: list[ExecutionResourceHandle] = []
         environment_resources: dict[str, Any] = {}
         environment_handles: dict[str, ExecutionResourceHandle] = {}
+        workspace_grants: list[TaskWorkspaceAccessGrant] = []
+        workspace_grants_by_key: dict[str, TaskWorkspaceAccessGrant] = {}
+        task_workspace: Any = None
         try:
             for requirement in self._prepare_execution_resource_requirements(
                 spec=spec,
                 settings=execution_settings,
                 policy=policy,
             ):
+                raw_workspace_access = requirement.get("workspace_access")
+                if isinstance(raw_workspace_access, dict):
+                    if task_workspace is None:
+                        task_workspace = self._resolve_task_workspace(execution_settings)
+                    resource_key = str(
+                        requirement.get("resource_key", action_id)
+                    )
+                    grant = task_workspace.issue_execution_access(
+                        action_call_id=action_call_id,
+                        requirement=self._workspace_access_requirement(raw_workspace_access),
+                    )
+                    workspace_grants.append(grant)
+                    workspace_grants_by_key[resource_key] = grant
+                    requirement["action_call_id"] = action_call_id
+                    requirement["task_workspace_access_grant"] = grant
                 handle = await execution_resource.async_ensure(
                     requirement,
                     owner_id=str(requirement.get("owner_id", "")),
@@ -708,9 +911,17 @@ class ActionDispatcher:
             if environment_handles:
                 action_call["execution_resource_handles"] = environment_handles
                 action_call["execution_resource_resources"] = environment_resources
+            if task_workspace is not None:
+                action_call["task_workspace"] = task_workspace
+                action_call["task_workspace_access_grants"] = workspace_grants_by_key
         except ExecutionResourceApprovalRequired as error:
-            for handle in ensured_handles:
-                await execution_resource.async_release(handle)
+            await self._release_execution_resources(
+                execution_resource,
+                ensured_handles,
+                action_call=action_call,
+                action_scope_only=False,
+            )
+            self._close_workspace_grants(task_workspace, workspace_grants)
             approval: ActionApproval = {
                 "required": True,
                 "reason": error.code,
@@ -727,8 +938,13 @@ class ActionDispatcher:
                 approval=approval,
             )
         except ExecutionResourceApprovalDenied as error:
-            for handle in ensured_handles:
-                await execution_resource.async_release(handle)
+            await self._release_execution_resources(
+                execution_resource,
+                ensured_handles,
+                action_call=action_call,
+                action_scope_only=False,
+            )
+            self._close_workspace_grants(task_workspace, workspace_grants)
             return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
@@ -736,8 +952,13 @@ class ActionDispatcher:
                 error=str(error),
             )
         except ExecutionResourceError as error:
-            for handle in ensured_handles:
-                await execution_resource.async_release(handle)
+            await self._release_execution_resources(
+                execution_resource,
+                ensured_handles,
+                action_call=action_call,
+                action_scope_only=False,
+            )
+            self._close_workspace_grants(task_workspace, workspace_grants)
             action_call.setdefault("diagnostics", [])
             diagnostics = action_call.get("diagnostics")
             if isinstance(diagnostics, list):
@@ -755,8 +976,13 @@ class ActionDispatcher:
                 error=str(error),
             )
         except Exception as error:
-            for handle in ensured_handles:
-                await execution_resource.async_release(handle)
+            await self._release_execution_resources(
+                execution_resource,
+                ensured_handles,
+                action_call=action_call,
+                action_scope_only=False,
+            )
+            self._close_workspace_grants(task_workspace, workspace_grants)
             return self._execution_resource_error_result(
                 spec=spec,
                 action_call=action_call,
@@ -766,6 +992,9 @@ class ActionDispatcher:
 
         timeout = policy.get("timeout_seconds", None)
         timeout_seconds = float(timeout) if isinstance(timeout, (int, float)) else 0.0
+        cleanup_diagnostics: list[ActionDiagnostic] = []
+        execution_error_result: ActionResult | None = None
+        output: Any = None
         try:
             with bind_runtime_context(action_policy=cast(dict[str, Any], dict(policy))):
                 if isinstance(timeout, (int, float)) and timeout > 0:
@@ -786,15 +1015,13 @@ class ActionDispatcher:
                         settings=execution_settings,
                     )
         except asyncio.TimeoutError:
-            for handle in ensured_handles:
-                if handle.get("scope") == "action_call":
-                    await execution_resource.async_release(handle)
             timeout_diagnostic = self._exception_diagnostic(
                 code="action.execution.timeout",
                 message=f"Action '{ action_id }' timed out after { timeout_seconds } seconds.",
                 meta={"timeout_seconds": timeout_seconds, "source_protocol": source_protocol},
             )
-            return {
+            execution_error_result = cast(ActionResult, {
+                "action_call_id": action_call_id,
                 "ok": False,
                 "status": "error",
                 "purpose": str(action_call.get("purpose", f"Use { action_id }")),
@@ -812,11 +1039,8 @@ class ActionDispatcher:
                 "expose_to_model": bool(spec.get("expose_to_model", True)),
                 "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
                 "executor_type": str(spec.get("executor_type", "")),
-            }
+            })
         except Exception as error:
-            for handle in ensured_handles:
-                if handle.get("scope") == "action_call":
-                    await execution_resource.async_release(handle)
             diagnostic_code = "action.input.type_error" if isinstance(error, TypeError) else "action.execution.exception"
             exception_diagnostic = self._exception_diagnostic(
                 code=diagnostic_code,
@@ -824,7 +1048,8 @@ class ActionDispatcher:
                 error=error,
                 meta={"source_protocol": source_protocol},
             )
-            return {
+            execution_error_result = cast(ActionResult, {
+                "action_call_id": action_call_id,
                 "ok": False,
                 "status": "error",
                 "purpose": str(action_call.get("purpose", f"Use { action_id }")),
@@ -845,11 +1070,38 @@ class ActionDispatcher:
                 "expose_to_model": bool(spec.get("expose_to_model", True)),
                 "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
                 "executor_type": str(spec.get("executor_type", "")),
-            }
+            })
         finally:
-            for handle in ensured_handles:
-                if handle.get("scope") == "action_call":
-                    await execution_resource.async_release(handle)
+            cleanup_diagnostics = await self._release_execution_resources(
+                execution_resource,
+                ensured_handles,
+                action_call=action_call,
+                action_scope_only=True,
+            )
+            self._close_workspace_grants(task_workspace, workspace_grants)
+
+        if execution_error_result is not None:
+            if cleanup_diagnostics:
+                raw_diagnostics = execution_error_result.get("diagnostics")
+                result_diagnostics = (
+                    list(raw_diagnostics)
+                    if isinstance(raw_diagnostics, list)
+                    else []
+                )
+                result_diagnostics.extend(cleanup_diagnostics)
+                execution_error_result["diagnostics"] = result_diagnostics
+            return execution_error_result
+
+        if cleanup_diagnostics:
+            return self._execution_resource_error_result(
+                spec=spec,
+                action_call=action_call,
+                status="error",
+                error=(
+                    "Action execution completed, but its execution resource "
+                    "could not be released safely."
+                ),
+            )
 
         result = self._normalize_executor_output(
             spec=spec,

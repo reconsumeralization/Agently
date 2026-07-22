@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from agently.builtins.plugins.SkillSourceProvider import GitSkillSourceProvider
 from agently.core.application.SkillLibrary import SkillLibrary
 from agently.core.application.SkillsExecutor import SkillsExecutor
 
@@ -23,6 +25,26 @@ def _write_skill(root: Path) -> Path:
     (root / "references" / "guide.md").write_text("Compatibility guide", encoding="utf-8")
     (root / "scripts" / "check.py").write_text("print('check')", encoding="utf-8")
     return root
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _remote_pack(root: Path) -> tuple[Path, str]:
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "tests@example.com")
+    _git(root, "config", "user.name", "Agently Tests")
+    _write_skill(root / "skills" / "compatibility-skill")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "remote pack")
+    return root, _git(root, "rev-parse", "HEAD")
 
 
 def test_released_install_inspect_list_and_read_delegate_to_skill_library(
@@ -253,3 +275,53 @@ def test_facade_source_has_no_old_internal_owner_or_execution_strategy_imports()
         "AgentTask",
     ):
         assert forbidden not in source
+
+
+def test_compatibility_facade_resolves_remote_pack_through_skill_library(
+    tmp_path: Path,
+) -> None:
+    source, commit = _remote_pack(tmp_path / "remote")
+    library = SkillLibrary(tmp_path / "library")
+    library.register_source_provider(
+        GitSkillSourceProvider(cache_root=tmp_path / "source-cache")
+    )
+    facade = SkillsExecutor(library=library)
+
+    result = facade.install_skills_pack(
+        source,
+        fetch=True,
+        ref="main",
+        subpath="skills",
+        source_type="git",
+        trust_level="trusted",
+        skills_pack_id="remote-pack",
+    )
+
+    assert result["source_provenance"]["resolved_revision"] == commit
+    assert result["source_provenance"]["requested_ref"] == "main"
+    assert result["installed_skills"] == ["compatibility-skill"]
+
+
+def test_compatibility_facade_defaults_remote_pack_to_untrusted(
+    tmp_path: Path,
+) -> None:
+    source, _commit = _remote_pack(tmp_path / "remote")
+    library = SkillLibrary(tmp_path / "library")
+    library.register_source_provider(
+        GitSkillSourceProvider(cache_root=tmp_path / "source-cache")
+    )
+    facade = SkillsExecutor(library=library)
+
+    result = facade.install_skills_pack(
+        source,
+        fetch=True,
+        ref="main",
+        subpath="skills",
+        source_type="git",
+        skills_pack_id="remote-pack",
+    )
+
+    assert result["trust_level"] == "untrusted"
+    assert facade.inspect_skills("compatibility-skill")["trust_level"] == (
+        "untrusted"
+    )

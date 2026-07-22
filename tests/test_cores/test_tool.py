@@ -238,6 +238,43 @@ def test_model_sourced_action_input_strips_spec_host_only_kwargs():
     assert received[-1] == {"value": 4, "privileged": True}
 
 
+def test_action_contract_derives_required_input_keys_and_rejects_missing_input():
+    action = Agently.create_agent().action
+    action_id = f"required_input_{ uuid.uuid4().hex[:8] }"
+    received: list[dict[str, Any]] = []
+
+    def capture(query: str, limit: int = 20):
+        received.append({"query": query, "limit": limit})
+        return received[-1]
+
+    action.register_action(
+        action_id=action_id,
+        desc="Capture a required query and optional limit.",
+        kwargs={
+            "query": (str, "Search query."),
+            "limit": (int, "Maximum results. Default: 20."),
+        },
+        func=capture,
+        expose_to_model=True,
+    )
+
+    spec = action.action_registry.get_spec(action_id)
+    assert spec["required_input_keys"] == ["query"]
+
+    result = action.execute_action(
+        action_id,
+        {"limit": 5},
+        source_protocol="structured_plan",
+    )
+
+    assert result["status"] == "error"
+    assert received == []
+    assert any(
+        diagnostic.get("code") == "action.input.required_keys_missing"
+        for diagnostic in result.get("diagnostics", [])
+    )
+
+
 def test_model_sourced_bash_action_input_strips_allow_unsafe(tmp_path):
     agent = Agently.create_agent()
     action_id = f"bash_input_safety_{ uuid.uuid4().hex[:8] }"
@@ -296,9 +333,13 @@ def test_action_dispatcher_parameter_error_has_structured_diagnostic():
     assert result.get("status") == "error"
     diagnostics = result.get("diagnostics")
     assert isinstance(diagnostics, list)
-    error_diagnostic = next(item for item in diagnostics if item.get("code") == "action.input.type_error")
+    error_diagnostic = next(
+        item
+        for item in diagnostics
+        if item.get("code") == "action.input.required_keys_missing"
+    )
     error_meta = error_diagnostic.get("meta", {})
-    assert error_meta["exception_type"] == "TypeError"
+    assert error_meta["missing_input_keys"] == ["value"]
 
 
 def test_action_dispatcher_timeout_has_structured_diagnostic():
@@ -387,17 +428,29 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     assert recalled["value"]["stdout"] == stdout
     assert recalled["value"]["stderr"] == stderr
 
+    artifact_count_before_recall = len(action._artifact_manager._artifacts)
     dispatched_recall = action.execute_action(
         "read_action_artifact",
         {
             "selection_key": str(output_ref.get("selection_key", "")),
+            "max_bytes": 4096,
         },
         source_protocol="structured_plan",
         artifact_scope=artifact_scope,
     )
     assert dispatched_recall.get("status") == "success"
-    assert dispatched_recall.get("data", {}).get("carrier_compacted") is True
     assert len(json.dumps(dispatched_recall, ensure_ascii=False, default=str).encode("utf-8")) <= 16000
+    recall_digest = dispatched_recall.get("result")
+    assert isinstance(recall_digest, dict)
+    recall_preview = recall_digest.get("result_preview")
+    assert isinstance(recall_preview, dict)
+    assert recall_preview["owner"] == "action_artifact"
+    assert recall_preview["locator"] == output_ref["selection_key"]
+    assert recall_preview["content_version"] == output_ref["sha256"]
+    assert recall_preview["range"] == {"offset": 0, "end": 4096, "read_bytes": 4096}
+    assert "y" * 128 in recall_preview["value"]
+    assert dispatched_recall.get("artifact_refs") == []
+    assert len(action._artifact_manager._artifacts) == artifact_count_before_recall
     action._release_artifact_scope(artifact_scope)
 
 
@@ -589,10 +642,10 @@ def test_action_sandbox_executors(tmp_path):
     bash_action_id = f"bash_sandbox_{ uuid.uuid4().hex[:8] }"
 
     action.register_python_sandbox_action(action_id=python_action_id)
-    python_result = action.execute_action(python_action_id, {"python_code": "result = 1 + 2"})
+    python_result = action.execute_action(python_action_id, {"source_code": "print(1 + 2)"})
     assert python_result.get("status") == "success"
     python_data = cast(dict[str, Any], python_result.get("data"))
-    assert python_data["result"] == 3
+    assert python_data["stdout"] == "3\n"
 
     action.register_bash_sandbox_action(
         action_id=bash_action_id,

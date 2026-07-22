@@ -10,7 +10,6 @@ from agently.core.TaskWorkspace import (
     TaskWorkspacePolicyError,
 )
 from agently.core.application.SkillLibrary import SkillLibrary
-from agently.types.data import ContextReadIntent
 
 
 @pytest.mark.asyncio
@@ -29,6 +28,67 @@ async def test_task_workspace_edits_caller_directory_with_direct_root(tmp_path: 
     assert readback.content == "Final result"
     assert readback.truncated is False
     assert readback.sha256 == created.sha256
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_atomic_content_replace_is_digest_conditional(tmp_path: Path) -> None:
+    workspace = TaskWorkspace(tmp_path, mode="read_write", execution_id="task-atomic-edit")
+    original = await workspace.write_file("candidate.md", "first\nsecond\n")
+
+    replaced = await workspace._atomic_replace_file_content(
+        "candidate.md",
+        "first\nrepaired\n",
+        expected_sha256=original.sha256,
+        replacements=1,
+    )
+
+    assert replaced.replacements == 1
+    assert (tmp_path / "candidate.md").read_text(encoding="utf-8") == "first\nrepaired\n"
+    with pytest.raises(ValueError, match="changed since"):
+        await workspace._atomic_replace_file_content(
+            "candidate.md",
+            "stale overwrite\n",
+            expected_sha256=original.sha256,
+        )
+    assert (tmp_path / "candidate.md").read_text(encoding="utf-8") == "first\nrepaired\n"
+
+
+@pytest.mark.asyncio
+async def test_terminal_target_write_guard_allows_only_digest_pinned_promotion(
+    tmp_path: Path,
+) -> None:
+    workspace = TaskWorkspace(tmp_path, mode="read_write", execution_id="task-guard")
+    await workspace.write_file("final.md", "previous accepted body\n")
+    staged = await workspace.write_file(
+        "working/taskboard/finalize/terminal-candidates/final.md",
+        "verified candidate body\n",
+    )
+
+    with workspace._protect_terminal_targets(["final.md"]):
+        with pytest.raises(TaskWorkspacePolicyError, match="terminal target"):
+            await workspace.write_file("final.md", "premature overwrite")
+        with pytest.raises(TaskWorkspacePolicyError, match="terminal target"):
+            await workspace.edit_file("final.md", "previous", "premature")
+        with pytest.raises(TaskWorkspacePolicyError, match="terminal target"):
+            await workspace.apply_patch(
+                """diff --git a/final.md b/final.md
+--- a/final.md
++++ b/final.md
+@@ -1 +1 @@
+-previous accepted body
++premature patch body
+"""
+            )
+        promoted = await workspace.atomic_promote_file(
+            staged.path,
+            "final.md",
+            expected_sha256=staged.sha256,
+        )
+
+    assert promoted["sha256"] == staged.sha256
+    assert (tmp_path / "final.md").read_text(encoding="utf-8") == (
+        "verified candidate body\n"
+    )
 
 
 @pytest.mark.asyncio
@@ -58,6 +118,30 @@ async def test_read_only_task_workspace_creates_task_artifact_in_private_fallbac
 
 
 @pytest.mark.asyncio
+async def test_context_source_exposes_execution_fallback_as_logical_file(
+    tmp_path: Path,
+) -> None:
+    workspace = TaskWorkspace(tmp_path, mode="read_only", execution_id="task-context")
+    created = await workspace.write_file(
+        "notes/alpha.md",
+        "release deadline is 2026-07-01\n",
+    )
+    source = TaskWorkspaceContextSource(workspace)
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=20,
+    )
+
+    assert created.path == ".agently/files/task-context/notes/alpha.md"
+    assert [item.source_ref for item in page.descriptors] == ["notes/alpha.md"]
+    assert page.descriptors[0].metadata["path"] == "notes/alpha.md"
+    readback = await source.async_read_exact("notes/alpha.md", max_chars=200)
+    assert readback.content == "release deadline is 2026-07-01\n"
+
+
+@pytest.mark.asyncio
 async def test_read_only_task_workspace_can_continue_only_its_own_fallback_carrier(
     tmp_path: Path,
 ) -> None:
@@ -82,7 +166,7 @@ async def test_task_workspace_enforces_path_containment(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_workspace_context_source_performs_source_local_search_and_exact_read(
+async def test_task_workspace_context_source_enumerates_all_files_and_exact_reads(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "report.md").write_text(
@@ -93,28 +177,56 @@ async def test_task_workspace_context_source_performs_source_local_search_and_ex
     workspace = TaskWorkspace(tmp_path, mode="read_only", execution_id="task-1")
     source = TaskWorkspaceContextSource(workspace)
 
-    candidates = await source.async_list_candidates(
-        ContextReadIntent(query="Revenue"),
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
         limit=20,
     )
+    descriptors = page.descriptors
 
-    assert [item.source_ref for item in candidates] == ["report.md"]
-    assert candidates[0].role == "information"
-    assert candidates[0].metadata["line"] == 1
-    block = await source.async_read(candidates[0], max_chars=200)
+    assert [item.source_ref for item in descriptors] == ["notes.md", "report.md"]
+    report = next(item for item in descriptors if item.source_ref == "report.md")
+    assert report.role == "information"
+    block = await source.async_read_exact(report.source_ref, max_chars=200)
     assert block.content == "Revenue increased by 12 percent.\nMargin was stable."
     assert block.completeness == "complete"
     assert block.source_ref == "report.md"
     assert block.metadata["sha256"]
 
-    excluded = await source.async_list_candidates(
-        ContextReadIntent(
-            query="Revenue",
-            filters={"source_kinds": ["record_store"]},
-        ),
-        limit=20,
+
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_pages_matching_files(tmp_path: Path) -> None:
+    for index in range(5):
+        (tmp_path / f"report-{index}.md").write_text(
+            f"shared marker {index}",
+            encoding="utf-8",
+        )
+    source = TaskWorkspaceContextSource(
+        TaskWorkspace(tmp_path, mode="read_only", execution_id="task-pages")
     )
-    assert excluded == ()
+    first = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=2,
+    )
+    second = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=first.next_cursor,
+        limit=2,
+    )
+
+    assert [item.source_ref for item in first.descriptors] == [
+        "report-0.md",
+        "report-1.md",
+    ]
+    assert [item.source_ref for item in second.descriptors] == [
+        "report-2.md",
+        "report-3.md",
+    ]
+    assert first.next_cursor is not None
+    assert set(item.source_ref for item in first.descriptors).isdisjoint(
+        item.source_ref for item in second.descriptors
+    )
 
 
 def test_task_workspace_source_revision_observes_external_file_change(tmp_path: Path) -> None:
@@ -127,6 +239,170 @@ def test_task_workspace_source_revision_observes_external_file_change(tmp_path: 
     second = source.source_revision
 
     assert first != second
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_enumerates_without_query_and_reads_exact(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "report.md").write_text("Revenue increased", encoding="utf-8")
+    source = TaskWorkspaceContextSource(
+        TaskWorkspace(tmp_path, mode="read_only", execution_id="descriptor-source")
+    )
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=10,
+    )
+    readback = await source.async_read_exact("report.md", max_chars=100)
+
+    assert source.source_kind == "task_workspace"
+    assert [item.source_ref for item in page.descriptors] == ["report.md"]
+    assert page.descriptors[0].index_text
+    assert readback.content == "Revenue increased"
+    assert readback.source_revision == page.source_revision
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_indexes_image_name_without_preparing_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Minimal valid PNG signature is sufficient for deterministic media
+    # classification; enumeration must not base64-prepare it.
+    (tmp_path / "chart.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    )
+    workspace = TaskWorkspace(
+        tmp_path,
+        mode="read_only",
+        execution_id="image-context-source",
+    )
+    source = TaskWorkspaceContextSource(workspace)
+
+    async def fail_if_read(*_args, **_kwargs):
+        raise AssertionError("image enumeration must not prepare attachment bytes")
+
+    monkeypatch.setattr(workspace, "read_file", fail_if_read)
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=10,
+    )
+
+    descriptor = page.descriptors[0]
+    assert descriptor.source_ref == "chart.png"
+    assert descriptor.summary == "chart.png"
+    assert descriptor.index_text == "chart.png"
+    assert descriptor.metadata["content_kind"] == "image"
+    assert descriptor.metadata["media_type"] == "image/png"
+    assert "base64" not in descriptor.index_text
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_returns_image_attachment_only_on_exact_representation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "chart.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    )
+    source = TaskWorkspaceContextSource(
+        TaskWorkspace(
+            tmp_path,
+            mode="read_only",
+            execution_id="image-context-exact-read",
+        )
+    )
+
+    readback = await source.async_read_exact(
+        "chart.png",
+        max_chars=1,
+        representation="image_attachment",
+    )
+
+    assert readback.content[0]["type"] == "image_url"
+    assert readback.content[0]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
+    assert readback.metadata["context_representation"] == "image_attachment"
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_context_source_parses_xlsx_for_context(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "课程规划"
+    sheet.append(["课程", "说明"])
+    sheet.append(["AI 能力边界与银行责任", "只交付解析后的文本"])
+    workbook.save(tmp_path / "curriculum.xlsx")
+    workbook.close()
+    source = TaskWorkspaceContextSource(
+        TaskWorkspace(
+            tmp_path,
+            mode="read_only",
+            execution_id="xlsx-context-source",
+        )
+    )
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=10,
+    )
+    descriptor = page.descriptors[0]
+    readback = await source.async_read_exact(
+        "curriculum.xlsx",
+        max_chars=20_000,
+    )
+
+    assert descriptor.metadata["content_kind"] == "office"
+    assert descriptor.metadata["context_representation"] == "parsed_text"
+    assert readback.metadata["context_representation"] == "parsed_text"
+    assert "AI 能力边界与银行责任" in readback.content
+    assert not isinstance(readback.content, bytes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "main.cjs",
+        "main.cts",
+        "main.go",
+        "main.mjs",
+        "main.mts",
+        "types.pyi",
+        "main.c",
+        "main.cc",
+        "main.cpp",
+        "main.h",
+        "main.hpp",
+    ],
+)
+async def test_task_workspace_context_source_keeps_empty_mainstream_code_as_text(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    (tmp_path / filename).write_text("", encoding="utf-8")
+    workspace = TaskWorkspace(
+        tmp_path,
+        mode="read_only",
+        execution_id=f"empty-source-{filename}",
+    )
+    source = TaskWorkspaceContextSource(workspace)
+
+    page = await source.async_enumerate_descriptors(
+        profile={"schema_version": "context-index/v1"},
+        cursor=None,
+        limit=10,
+    )
+
+    assert workspace.inspect_file(filename)["content_kind"] == "text"
+    assert page.descriptors[0].metadata["context_representation"] == "text"
 
 
 def test_task_workspace_has_no_cross_source_context_builder(tmp_path: Path) -> None:

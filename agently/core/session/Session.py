@@ -138,6 +138,23 @@ class Session:
         self._memory_mode = mode
         return self
 
+    def create_memory_context_source(self, settings: "Settings | None" = None):
+        if self._memory_plugin is None:
+            return None
+        if getattr(self._memory_plugin, "memory_store", None) is None:
+            memory_store = self._resolve_memory_store()
+            if memory_store is not None:
+                self._memory_plugin.bind_memory_store(memory_store)
+        factory = getattr(self._memory_plugin, "create_context_source", None)
+        if not callable(factory):
+            raise TypeError(
+                "The active SessionMemory plugin must provide create_context_source(...)."
+            )
+        return factory(
+            session=self,
+            settings=settings or self.settings,
+        )
+
     async def async_prepare_memory(self, prompt: "Prompt", settings: "Settings"):
         if self._memory_plugin is None:
             return {}

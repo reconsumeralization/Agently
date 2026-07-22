@@ -23,9 +23,11 @@ from typing_extensions import Self
 
 from agently.core import BaseAgent
 from agently.core.application.SkillLibrary import SkillBinding, SkillPackageRevision
-from agently.types.data import SkillMode
+from agently.types.data import SkillMode, SkillScriptAuthorization
 from agently.utils import FunctionShifter
 from agently.utils.DataGuardian import _copy_public, _ensure_dict, _ensure_list
+
+from .SkillActionBinder import BoundSkillAction, SkillActionBinder
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,34 @@ class SkillsExtension(BaseAgent):
         self.skill_library = skill_library
         self.__session_skill_selectors: list[dict[str, Any]] = []
         self.__session_skills_pack_selectors: list[dict[str, Any]] = []
+
+    def bind_skill_script_action(
+        self,
+        execution: Any,
+        *,
+        binding_id: str,
+        resource_path: str,
+        authorization: SkillScriptAuthorization,
+    ) -> BoundSkillAction:
+        bindings = getattr(execution, "skill_bindings", None)
+        if not isinstance(bindings, list) or not bindings:
+            raise RuntimeError(
+                "Prepare the AgentExecution TaskContext before binding a Skill script Action."
+            )
+        matches = [
+            binding
+            for binding in bindings
+            if isinstance(binding, SkillBinding)
+            and binding.binding_id == str(binding_id)
+        ]
+        if len(matches) != 1:
+            raise ValueError("binding_id must identify one exact Skill binding.")
+        return SkillActionBinder(self.skill_library).bind(
+            execution=execution,
+            skill_binding=matches[0],
+            resource_path=resource_path,
+            authorization=authorization,
+        )
 
     def use_skills(
         self,

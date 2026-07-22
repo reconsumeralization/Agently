@@ -184,6 +184,16 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                     )
                 ]
                 operation_claim_keys.append(claim_key)
+                if str(requirement.get("repair_policy") or "").strip() == "delete_only":
+                    new = self._grounding_patch_first_string(
+                        operation,
+                        _GROUNDING_WORKSPACE_REPLACE_NEW_KEYS,
+                    )
+                    if new != "":
+                        return (
+                            False,
+                            "Grounding patch repair_policy=delete_only requires an exactly empty new_string.",
+                        )
             elif require_exact_claim_coverage:
                 return False, "Every grounding patch operation must reference its host-issued claim_key."
             if len(normalized_old) < 8 or not any(
@@ -258,24 +268,21 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 prepared.append((claim_key, old, new))
 
             expected_sha256 = str(current_ref.get("sha256") or "")
-            operation_records: list[dict[str, Any]] = []
-            for index, (claim_key, old, new) in enumerate(prepared):
-                write_result = await self.task_workspace.edit_file(
-                    path,
-                    old,
-                    new,
-                    replace_all=False,
-                    expected_sha256=expected_sha256,
-                )
-                expected_sha256 = str(write_result.get("sha256") or "")
-                operation_records.append(
-                    {
-                        "index": index,
-                        "type": "replace",
-                        "claim_key": claim_key,
-                        "replacement_count": int(write_result.get("replacements") or 0),
-                    }
-                )
+            await self.task_workspace._atomic_replace_file_content(
+                path,
+                simulated,
+                expected_sha256=expected_sha256,
+                replacements=len(prepared),
+            )
+            operation_records = [
+                {
+                    "index": index,
+                    "type": "replace",
+                    "claim_key": claim_key,
+                    "replacement_count": 1,
+                }
+                for index, (claim_key, _old, _new) in enumerate(prepared)
+            ]
 
             promoted = await self.task_workspace._promote_file_identity(path, role="grounding_candidate")
             final_size = int(promoted.get("bytes") or promoted.get("size") or 0)
@@ -1110,6 +1117,28 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             depended_on.update(str(dep_id) for dep_id in getattr(item, "depends_on", ()) or ())
         return card_id not in depended_on
 
+    def _taskboard_terminal_candidate_path(
+        self,
+        context: Any,
+        target_path: str,
+    ) -> str:
+        target = self.task_workspace.resolve_path(target_path)
+        relative_target = target.relative_to(self.task_workspace.root).as_posix()
+        if relative_target == ".agently" or relative_target.startswith(".agently/"):
+            raise TaskWorkspacePolicyError(
+                "Terminal deliverables cannot target TaskWorkspace private state."
+            )
+        card = getattr(context, "card", None)
+        card_id = str(getattr(card, "id", "") or "card").strip() or "card"
+        safe_card_id = "".join(
+            ch if ch.isalnum() or ch in {"-", "_", "."} else "-"
+            for ch in card_id
+        ) or "card"
+        return (
+            f"working/taskboard/{safe_card_id}/terminal-candidates/"
+            f"{relative_target}"
+        )
+
     def _prepare_taskboard_task_workspace_artifact_delivery(
         self,
         card_output: Any,
@@ -1129,15 +1158,63 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             for path in self._taskboard_context_final_task_workspace_deliverables(context)
             if not required_paths or path in required_paths
         ]
+        manifest = card_output.get("artifact_manifest")
+        manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
+        requested_path = self._task_workspace_artifact_manifest_path(manifest_dict)
+        has_remaining_work = self._has_remaining_work(
+            card_output.get("remaining_work")
+        ) or self._has_remaining_work(card_output.get("gaps"))
+        status = str(card_output.get("status") or "").strip().lower()
+        next_action = (
+            str(card_output.get("next_board_action") or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        completed_leaf_delivery_handoff = bool(
+            status == "completed"
+            and card_output.get("sufficient") is True
+            and next_action
+            not in {
+                "readback",
+                "needs_readback",
+                "repair",
+                "patch",
+                "block",
+                "stop",
+            }
+        )
+        leaf_can_stage_terminal_candidate = bool(
+            self._taskboard_context_card_is_leaf(context)
+            and (not has_remaining_work or completed_leaf_delivery_handoff)
+        )
+        terminal_target = ""
         if final_card_paths:
-            manifest = card_output.get("artifact_manifest")
-            manifest_dict = dict(manifest) if isinstance(manifest, Mapping) else {}
-            requested_path = self._task_workspace_artifact_manifest_path(manifest_dict)
-            if requested_path in final_card_paths:
-                return card_output, plan
-            manifest_dict["path"] = final_card_paths[0]
+            terminal_target = (
+                requested_path
+                if requested_path in final_card_paths
+                else final_card_paths[0]
+            )
+        elif (
+            required_paths
+            and leaf_can_stage_terminal_candidate
+            and requested_path in required_paths
+        ):
+            terminal_target = requested_path
+        if terminal_target:
+            staging_path = self._taskboard_terminal_candidate_path(
+                context,
+                terminal_target,
+            )
+            manifest_dict["path"] = staging_path
             result = dict(card_output)
             result["artifact_manifest"] = manifest_dict
+            plan.update(
+                {
+                    "terminal_target_path": terminal_target,
+                    "terminal_candidate_path": staging_path,
+                }
+            )
             diagnostics: list[Any] = []
             raw_diagnostics = result.get("diagnostics")
             if isinstance(raw_diagnostics, Sequence) and not isinstance(raw_diagnostics, str | bytes | bytearray):
@@ -1146,27 +1223,19 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 diagnostics.append(raw_diagnostics)
             diagnostics.append(
                 {
-                    "code": "taskboard.task_workspace_artifact.final_path_authorized",
-                    "message": "A framework-marked final TaskBoard card is authorized to write the required deliverable path.",
+                    "code": "taskboard.task_workspace_artifact.terminal_candidate_staged",
+                    "message": (
+                        "A final TaskBoard card writes a verifier candidate; "
+                        "the required target changes only after terminal acceptance."
+                    ),
                     "requested_path": requested_path,
-                    "final_path": final_card_paths[0],
+                    "terminal_candidate_path": staging_path,
+                    "terminal_target_path": terminal_target,
                 }
             )
             result["diagnostics"] = DataFormatter.sanitize(diagnostics)
             return result, plan
-        has_remaining_work = self._has_remaining_work(card_output.get("remaining_work")) or self._has_remaining_work(
-            card_output.get("gaps")
-        )
-        status = str(card_output.get("status") or "").strip().lower()
-        next_action = str(card_output.get("next_board_action") or "").strip().lower().replace("-", "_")
-        completed_leaf_delivery_handoff = bool(
-            status == "completed"
-            and card_output.get("sufficient") is True
-            and next_action not in {"readback", "needs_readback", "repair", "patch", "block", "stop"}
-        )
-        if self._taskboard_context_card_is_leaf(context) and (
-            not has_remaining_work or completed_leaf_delivery_handoff
-        ):
+        if leaf_can_stage_terminal_candidate:
             return card_output, plan
 
         manifest = card_output.get("artifact_manifest")
@@ -1214,17 +1283,29 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         final_card_paths = [
             path for path in self._taskboard_context_final_task_workspace_deliverables(context) if path in required_paths
         ]
-        can_write_required = bool(
+        can_stage_required = bool(
             required_paths and (final_card_paths or self._taskboard_context_card_is_leaf(context))
         )
+        authorized_targets = final_card_paths or (
+            required_paths if can_stage_required else []
+        )
+        terminal_candidate_paths = {
+            target: self._taskboard_terminal_candidate_path(context, target)
+            for target in authorized_targets
+        }
         return {
             "schema_version": "agent_task_taskboard_task_workspace_delivery/v1",
             "required_deliverables": required_paths,
-            "authorized_final_deliverable_paths": final_card_paths or (required_paths if can_write_required else []),
-            "can_write_required_deliverables": can_write_required,
+            "authorized_terminal_candidate_paths": list(
+                terminal_candidate_paths.values()
+            ),
+            "terminal_target_mappings": terminal_candidate_paths,
+            "can_stage_required_deliverables": can_stage_required,
+            "can_write_required_deliverables": False,
             "policy": (
-                "Use required deliverable paths for final or framework-marked repair/continuation cards. "
-                "Use working refs for intermediate evidence cards."
+                "Write final or framework-marked repair/continuation output only to the offered terminal candidate "
+                "path. The required target path is protected until verifier acceptance and host promotion. Use "
+                "working refs for intermediate evidence cards."
             ),
         }
 
@@ -1283,7 +1364,15 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             for item in ledger_items
             if isinstance(item, Mapping)
         }
-        for item in evidence_items:
+        # Allocate task-scoped identities only after the EvidenceEnvelope has
+        # normalized provider/action vocabulary (for example
+        # partial_success -> ok and complete -> full).  Allocating first and
+        # normalizing on a later ledger render makes the same canonical item
+        # appear to change immutable status/body-state fields across revisions.
+        normalized_items = evidence_envelope_from_value(
+            {"evidence_items": evidence_items}
+        ).evidence_items
+        for item in normalized_items:
             canonical_item = self._task_references().add_evidence(item)
             evidence_id = str(canonical_item.get("evidence_id") or canonical_item.get("id") or "").strip()
             if evidence_id and evidence_id in seen:

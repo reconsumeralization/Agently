@@ -42,6 +42,23 @@ DEFAULT_SAFE_CMD_PREFIXES = [
 ]
 
 
+def normalize_command_argv(cmd: str | Sequence[str]) -> list[str]:
+    """Normalize one shell command without invoking a shell.
+
+    A string is parsed with shell-style quoting. A sequence normally represents
+    argv tokens, but one sequence item may also contain the complete command.
+    The latter shape is common in structured model output and remains safe
+    because it is parsed into argv rather than executed through a shell.
+    """
+
+    if isinstance(cmd, str):
+        return shlex.split(cmd)
+    args = [str(item) for item in cmd]
+    if len(args) == 1:
+        return shlex.split(args[0])
+    return args
+
+
 class Cmd:
     def __init__(
         self,
@@ -92,7 +109,10 @@ class Cmd:
                 "TaskWorkspace file actions for reading, searching, editing, and writing files."
             ),
             kwargs={
-                "cmd": ("str | list[str]", "Command to run."),
+                "cmd": (
+                    "str | list[str]",
+                    "Exactly one command: a command string, argv tokens, or a one-item list containing the complete command.",
+                ),
                 "workdir": ("str | None", "Working directory."),
             },
             func=self.run,
@@ -112,9 +132,7 @@ class Cmd:
         return [action_id]
 
     def _normalize_cmd(self, cmd: str | Sequence[str]) -> list[str]:
-        if isinstance(cmd, str):
-            return shlex.split(cmd)
-        return list(cmd)
+        return normalize_command_argv(cmd)
 
     def _is_cmd_allowed(self, args: list[str]) -> bool:
         if not args:

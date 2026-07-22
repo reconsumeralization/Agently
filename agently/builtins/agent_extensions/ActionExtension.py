@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
-import re
-import shutil
-import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -118,6 +114,7 @@ class ActionExtension(BaseAgent):
             kwargs=copied_spec.get("kwargs", {}),
             func=global_registry.get_func(action_id),
             executor=executor,
+            required_input_keys=copied_spec.get("required_input_keys"),
             returns=copied_spec.get("returns"),
             tags=copied_spec.get("tags", []),
             default_policy=copied_spec.get("default_policy", {}),
@@ -322,6 +319,13 @@ class ActionExtension(BaseAgent):
             raise ValueError("desc_mode must be one of: 'append', 'override', 'default'.")
         return f"{ default_desc }\n\nAdditional guidance: { extra }"
 
+    @staticmethod
+    def _normalize_code_sandbox_mode(value: CodeSandboxMode) -> CodeSandboxMode:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        if normalized not in {"auto", "docker", "trusted_local"}:
+            raise ValueError("sandbox must be one of: 'auto', 'docker', 'trusted_local'.")
+        return cast(CodeSandboxMode, normalized)
+
     async def async_use_mcp(
         self,
         transport: "MCPConfigs | str | Any",
@@ -382,27 +386,36 @@ class ActionExtension(BaseAgent):
         image_pull_policy: ImagePullPolicyMode | None = None,
         timeout: int = 60,
     ) -> Self:
-        if sandbox == "trusted_local":
-            default_desc = (
-                "Run Python code through an explicitly trusted local in-process execution resource for "
-                "deterministic calculation or small data shaping. Assign the final value to `result`."
+        if preset_objects is not None or base_vars is not None or allowed_return_types is not None:
+            raise ValueError(
+                "enable_python() no longer supports in-process preset_objects, base_vars, or "
+                "allowed_return_types. Materialize explicit files and use the Workspace-bound "
+                "CodeExecution input/output contract."
             )
-        else:
-            default_desc = (
-                "Run Python code in a Docker-backed sandbox when a local Docker service is available. "
-                "Use this for deterministic calculation or small data shaping and assign the final value "
-                "to `result`. Dependency installation is controlled by the host resource policy, not by "
-                "model-visible action inputs; if Docker is unavailable this action fails closed."
-            )
-        self.action.register_python_sandbox_action(
+        sandbox_mode = self._normalize_code_sandbox_mode(sandbox)
+        providers: list[str] | None = None
+        unsafe_fallback = False
+        isolation: Literal["required", "preferred", "none"] = "required"
+        if sandbox_mode == "docker":
+            providers = ["docker"]
+        elif sandbox_mode == "trusted_local":
+            providers = ["trusted_local"]
+            unsafe_fallback = True
+            isolation = "none"
+        default_desc = (
+            "Run Python code through the canonical Workspace-bound CodeExecution chain. "
+            "The host prepares an immutable bundle, selects one eligible provider, and reads "
+            "declared outputs back through TaskWorkspace."
+        )
+        return self.enable_code_runtime(
+            language="python",
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
-            tags=[f"agent-{ self.name }"],
+            desc_mode="override",
             expose_to_model=expose_to_model,
-            preset_objects=preset_objects,
-            base_vars=base_vars,
-            allowed_return_types=allowed_return_types,
-            sandbox=sandbox,
+            providers=providers,
+            unsafe_fallback=unsafe_fallback,
+            isolation=isolation,
             docker_image=docker_image,
             docker_binary=docker_binary,
             docker_default_args=docker_default_args,
@@ -411,7 +424,6 @@ class ActionExtension(BaseAgent):
             image_pull_policy=image_pull_policy,
             timeout=timeout,
         )
-        return self
 
     def enable_shell(
         self,
@@ -529,35 +541,43 @@ class ActionExtension(BaseAgent):
         provisioning_profile: ProvisioningProfileMode = "strict",
         image_pull_policy: ImagePullPolicyMode | None = None,
     ) -> Self:
-        task_workspace = getattr(self, "task_workspace", None)
-        if cwd is None and task_workspace is not None:
-            cwd = str(getattr(task_workspace, "root"))
-        if sandbox == "trusted_local":
-            default_desc = "Run JavaScript with Node.js inside an explicitly trusted local execution resource."
-        else:
-            default_desc = (
-                "Run JavaScript with Node.js inside a Docker-backed execution resource when a local Docker "
-                "service is available. Dependency installation is controlled by the host resource policy, "
-                "not by model-visible action inputs; if Docker is unavailable this action fails closed."
+        if node_binary != "node" or cwd is not None or env is not None:
+            raise ValueError(
+                "enable_nodejs() no longer accepts provider-owned node_binary, cwd, or env settings. "
+                "Use source files, arguments, TaskWorkspace access, and provider candidate config."
             )
-        self.action.register_nodejs_action(
+        sandbox_mode = self._normalize_code_sandbox_mode(sandbox)
+        providers: list[str] | None = None
+        unsafe_fallback = False
+        isolation: Literal["required", "preferred", "none"] = "required"
+        if sandbox_mode == "docker":
+            providers = ["docker"]
+        elif sandbox_mode == "trusted_local":
+            providers = ["trusted_local"]
+            unsafe_fallback = True
+            isolation = "none"
+        default_desc = (
+            "Run JavaScript with Node.js through the canonical Workspace-bound CodeExecution chain. "
+            "The host prepares an immutable bundle, selects one eligible provider, and reads "
+            "declared outputs back through TaskWorkspace."
+        )
+        return self.enable_code_runtime(
+            language="nodejs",
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
-            tags=[f"agent-{ self.name }"],
+            desc_mode="override",
             expose_to_model=expose_to_model,
-            node_binary=node_binary,
-            cwd=cwd,
-            timeout=timeout,
-            env=env,
-            sandbox=sandbox,
+            providers=providers,
+            unsafe_fallback=unsafe_fallback,
+            isolation=isolation,
             docker_image=docker_image,
             docker_binary=docker_binary,
             docker_default_args=docker_default_args,
             dependency_policy=dependency_policy,
             provisioning_profile=provisioning_profile,
             image_pull_policy=image_pull_policy,
+            timeout=timeout,
         )
-        return self
 
     def enable_code_runtime(
         self,
@@ -567,6 +587,9 @@ class ActionExtension(BaseAgent):
         desc: str | None = None,
         desc_mode: CapabilityDescMode = "append",
         expose_to_model: bool = True,
+        providers: Sequence[str | Mapping[str, Any]] | None = None,
+        unsafe_fallback: bool = False,
+        isolation: Literal["required", "preferred", "none"] = "required",
         docker_image: str | None = None,
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -575,31 +598,29 @@ class ActionExtension(BaseAgent):
         image_pull_policy: ImagePullPolicyMode | None = None,
         timeout: int = 60,
     ) -> Self:
-        from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceProvider import (
-            get_code_runtime_profile,
-        )
+        from agently.builtins.plugins.CodeRuntimeAdapter import get_code_runtime_adapter
 
-        profile = get_code_runtime_profile(language, image=docker_image)
+        adapter = get_code_runtime_adapter(language)
         display_names = {
             "nodejs": "JavaScript/Node.js",
-            "typescript": "TypeScript",
             "cpp": "C++",
-            "csharp": "C#/.NET",
-            "r": "R",
         }
-        language_name = display_names.get(profile["language"], str(profile["language"]).capitalize())
+        language_name = display_names.get(adapter.language_id, adapter.language_id.capitalize())
         default_desc = (
-            f"Run { language_name } code inside a Docker-backed code runtime sandbox. "
-            "The host-selected runtime profile owns image pull and dependency preparation; "
-            "the model can provide source files and arguments but not arbitrary compiler or package-manager commands."
+            f"Run { language_name } code through a Workspace-bound execution provider. "
+            "The host-selected provider and runtime policy own isolation and dependency preparation; "
+            "the model can provide source files and arguments but not raw compiler or package-manager commands."
         )
         self.action.register_code_runtime_action(
-            language=profile["language"],
+            language=adapter.language_id,
             action_id=action_id,
             desc=self._build_capability_desc(default_desc, desc, mode=desc_mode),
             tags=[f"agent-{ self.name }"],
             expose_to_model=expose_to_model,
-            docker_image=str(profile["image"]),
+            providers=providers,
+            unsafe_fallback=unsafe_fallback,
+            isolation=isolation,
+            docker_image=docker_image,
             docker_binary=docker_binary,
             docker_default_args=docker_default_args,
             dependency_policy=dependency_policy,
@@ -707,9 +728,14 @@ class ActionExtension(BaseAgent):
         elif task_workspace is not None:
             task_workspace_for_actions = task_workspace
 
-        from agently.core.TaskWorkspace import TaskWorkspaceManager
+        if task_workspace_for_actions is None:
+            from agently.core.TaskWorkspace import TaskWorkspace
 
-        manager = TaskWorkspaceManager()
+            task_workspace_for_actions = TaskWorkspace(
+                root_path,
+                mode="read_write" if write else "read_only",
+            )
+        active_task_workspace = cast("TaskWorkspace", task_workspace_for_actions)
 
         def action_name(name: str):
             return f"{ prefix }{ name }" if prefix else name
@@ -729,34 +755,21 @@ class ActionExtension(BaseAgent):
                 raise ValueError(f"Path is outside task_workspace root: { path }") from error
             return resolved
 
-        def is_hidden(path: Path):
-            try:
-                relative_parts = path.relative_to(root_path).parts
-            except ValueError:
-                return True
-            return any(part.startswith(".") for part in relative_parts)
-
         def mutation_task_workspace():
-            if task_workspace_for_actions is None:
-                return None
-            if getattr(task_workspace_for_actions, "mode", "read_only") == "read_write":
-                return task_workspace_for_actions
+            if active_task_workspace.mode == "read_write":
+                return active_task_workspace
             policy = get_current_action_policy() or {}
             if policy.get("policy_approval_granted") is not True:
-                return task_workspace_for_actions
-            from agently.core.TaskWorkspace import TaskWorkspace
-
-            return TaskWorkspace(
-                root_path,
+                return active_task_workspace
+            return active_task_workspace._derive(
                 mode="read_write",
-                execution_id=getattr(task_workspace_for_actions, "execution_id", None),
             )
 
         def task_workspace_mutation_approval(
             operation: str,
             action_call: dict[str, Any],
         ) -> dict[str, Any]:
-            if task_workspace_for_actions is None or getattr(task_workspace_for_actions, "mode", "read_only") == "read_write":
+            if active_task_workspace.mode == "read_write":
                 return {"required": False}
             action_input = action_call.get("action_input", {})
             action_input = action_input if isinstance(action_input, dict) else {}
@@ -764,11 +777,11 @@ class ActionExtension(BaseAgent):
             if operation == "apply_patch":
                 paths = patch_paths(str(action_input.get("patch") or ""))
                 external_required = any(
-                    task_workspace_for_actions._resolve_external_file_path(item).exists()
+                    active_task_workspace._resolve_external_file_path(item).exists()
                     for item in paths
                 )
             else:
-                target = task_workspace_for_actions._resolve_external_file_path(path)
+                target = active_task_workspace._resolve_external_file_path(path)
                 paths = [str(target.relative_to(root_path))]
                 external_required = target.exists()
             if not external_required:
@@ -780,7 +793,7 @@ class ActionExtension(BaseAgent):
                 "paths": paths,
                 "canonical_path": canonical_paths[0] if len(canonical_paths) == 1 else None,
                 "canonical_paths": canonical_paths,
-                "task_workspace_id": task_workspace_for_actions.task_workspace_id,
+                "task_workspace_id": active_task_workspace.task_workspace_id,
             }
             return {
                 "required": True,
@@ -791,38 +804,12 @@ class ActionExtension(BaseAgent):
                 },
             }
 
-        def iter_task_workspace_files(
-            path: str = ".",
-            pattern: str = "*",
-            max_results: int = 200,
-            include_hidden: bool = False,
-        ):
-            base = resolve_task_workspace_path(path)
-            if base.is_file():
-                candidates = [base]
-            elif base.exists():
-                candidates = base.rglob(pattern)
-            else:
-                candidates = []
-            collected: list[Path] = []
-            for candidate in candidates:
-                if len(collected) >= max_results:
-                    break
-                if not candidate.is_file():
-                    continue
-                if not include_hidden and is_hidden(candidate):
-                    continue
-                collected.append(candidate)
-            return collected
-
         def relative_path(path: Path):
             return str(path.relative_to(root_path))
 
         def ordinary_action_path(path: str | Path):
-            if task_workspace_for_actions is not None:
-                target = task_workspace_for_actions.resolve_file_path(path)
-                return task_workspace_for_actions._ordinary_file_relative_path(target)
-            return relative_path(resolve_task_workspace_path(path))
+            target = active_task_workspace.resolve_file_path(path)
+            return active_task_workspace._ordinary_file_relative_path(target)
 
         def file_result_action_output(result: Any):
             return {
@@ -835,12 +822,9 @@ class ActionExtension(BaseAgent):
         read_state: dict[str, dict[str, Any]] = {}
 
         def inspect_task_workspace_file(path: str | Path):
-            if task_workspace_for_actions is not None:
-                info = dict(task_workspace_for_actions.inspect_file(path))
-                info["path"] = ordinary_action_path(path)
-                return info
-            target = resolve_task_workspace_path(path)
-            return manager.inspect_file_path(target, relative_path=relative_path(target))
+            info = dict(active_task_workspace.inspect_file(path))
+            info["path"] = ordinary_action_path(path)
+            return info
 
         def remember_read(path: str | Path, result: Mapping[str, Any], *, offset: int = 0):
             if not coding_agent:
@@ -883,37 +867,17 @@ class ActionExtension(BaseAgent):
                 raise ValueError("File has been modified since it was read; read it again before writing.")
 
         async def manager_read_file(path: str, max_bytes: int = max_file_bytes, offset: int = 0):
-            if task_workspace_for_actions is not None:
-                target = task_workspace_for_actions.resolve_file_path(path)
-                result = await manager.read_file_path(
-                    target,
-                    relative_path=ordinary_action_path(path),
-                    max_bytes=max_bytes,
-                    offset=offset,
-                )
-                return result
-            target = resolve_task_workspace_path(path)
-            if not target.is_file():
-                raise FileNotFoundError(f"TaskWorkspace file not found: { path }")
-            return await manager.read_file_path(
-                target,
-                relative_path=relative_path(target),
+            result = await active_task_workspace.read_file(
+                path,
                 max_bytes=max_bytes,
                 offset=offset,
             )
+            return result.to_dict()
 
         async def manager_write_file(path: str, content: str, append: bool = False):
             selected_workspace = mutation_task_workspace()
-            if selected_workspace is not None:
-                result = await selected_workspace.write_file(path, content, append=append)
-                return result.to_dict()
-            target = resolve_task_workspace_path(path)
-            return await manager.write_file_path(
-                target,
-                relative_path=relative_path(target),
-                content=content,
-                append=append,
-            )
+            result = await selected_workspace.write_file(path, content, append=append)
+            return result.to_dict()
 
         async def manager_edit_file(
             path: str,
@@ -925,50 +889,14 @@ class ActionExtension(BaseAgent):
         ):
             require_fresh_for_write(path, expected_sha256)
             selected_workspace = mutation_task_workspace()
-            if selected_workspace is not None:
-                result = await selected_workspace.edit_file(
-                    path,
-                    old_string,
-                    new_string,
-                    replace_all=replace_all,
-                    expected_sha256=expected_sha256,
-                )
-                result = result.to_dict()
-            else:
-                info = inspect_task_workspace_file(path)
-                if not info.get("exists"):
-                    if old_string != "":
-                        raise FileNotFoundError(f"TaskWorkspace file not found: { path }")
-                    result = await manager_write_file(path, new_string, append=False)
-                else:
-                    file_bytes = info.get("bytes")
-                    read_result = await manager_read_file(
-                        path,
-                        max_bytes=(file_bytes if isinstance(file_bytes, int) else 0) + 1,
-                    )
-                    content = str(read_result.get("content") or "")
-                    if old_string == new_string:
-                        raise ValueError("old_string and new_string are identical; no edit was applied.")
-                    if old_string == "":
-                        if content:
-                            raise ValueError("Cannot create a file with edit_file because the target already exists.")
-                        new_content = new_string
-                        replacements = 1
-                    else:
-                        replacements = content.count(old_string)
-                        if replacements <= 0:
-                            raise ValueError("old_string was not found in the TaskWorkspace file.")
-                        if replacements > 1 and not replace_all:
-                            raise ValueError(
-                                "old_string matched multiple locations; set replace_all=True or provide more context."
-                            )
-                        new_content = (
-                            content.replace(old_string, new_string)
-                            if replace_all
-                            else content.replace(old_string, new_string, 1)
-                        )
-                    result = dict(await manager_write_file(path, new_content, append=False))
-                    result["replacements"] = replacements
+            result = await selected_workspace.edit_file(
+                path,
+                old_string,
+                new_string,
+                replace_all=replace_all,
+                expected_sha256=expected_sha256,
+            )
+            result = result.to_dict()
             remember_write(path, result)
             return result
 
@@ -1011,30 +939,10 @@ class ActionExtension(BaseAgent):
                 if inspect_task_workspace_file(path).get("exists"):
                     require_fresh_for_write(path)
             selected_workspace = mutation_task_workspace()
-            if selected_workspace is not None:
-                result = await selected_workspace.apply_patch(patch, expected_files=expected_files)
-            else:
-                git_path = shutil.which("git")
-                if git_path is None:
-                    raise RuntimeError("git executable is required for apply_patch.")
-                completed = await asyncio.to_thread(
-                    subprocess.run,
-                    [git_path, "apply", "--whitespace=nowarn"],
-                    cwd=str(root_path),
-                    input=str(patch or ""),
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                    timeout=30,
-                )
-                if completed.returncode != 0:
-                    raise ValueError(str(completed.stderr or completed.stdout or "git apply failed").strip())
-                result = {
-                    "ok": True,
-                    "status": "success",
-                    "paths": paths,
-                    "file_infos": [inspect_task_workspace_file(path) for path in paths],
-                }
+            result = await selected_workspace.apply_patch(
+                patch,
+                expected_files=expected_files,
+            )
             for path in paths:
                 info = inspect_task_workspace_file(path)
                 if info.get("exists"):
@@ -1047,23 +955,10 @@ class ActionExtension(BaseAgent):
             export_kind: str,
             options: dict[str, Any] | None = None,
         ):
-            source = (
-                task_workspace_for_actions.resolve_file_path(source_path)
-                if task_workspace_for_actions is not None
-                else resolve_task_workspace_path(source_path)
-            )
-            if not source.is_file():
-                raise FileNotFoundError(f"TaskWorkspace source file not found: { source_path }")
-            output = (
-                task_workspace_for_actions.resolve_file_path(output_path)
-                if task_workspace_for_actions is not None
-                else resolve_task_workspace_path(output_path)
-            )
-            return await manager.export_file_path(
-                source,
-                output,
-                source_relative_path=relative_path(source),
-                output_relative_path=relative_path(output),
+            selected_workspace = mutation_task_workspace()
+            return await selected_workspace.export_file(
+                source_path,
+                output_path,
                 export_kind=export_kind,
                 options=options,
             )
@@ -1076,16 +971,13 @@ class ActionExtension(BaseAgent):
                 max_results: int = 200,
                 include_hidden: bool = False,
             ):
-                if task_workspace_for_actions is not None:
-                    result = await task_workspace_for_actions.glob_files(
-                        pattern,
-                        path=path,
-                        max_results=max_results,
-                        include_hidden=include_hidden,
-                    )
-                    return list(result.get("matches", []))
-                files = iter_task_workspace_files(path, pattern, max_results, include_hidden)
-                return [str(file.relative_to(root_path)) for file in files]
+                result = await active_task_workspace.glob_files(
+                    pattern,
+                    path=path,
+                    max_results=max_results,
+                    include_hidden=include_hidden,
+                )
+                return list(result.get("matches", []))
 
             self.action.register_action(
                 action_id=action_name("list_files"),
@@ -1141,23 +1033,12 @@ class ActionExtension(BaseAgent):
                 max_results: int = 200,
                 include_hidden: bool = False,
             ):
-                if task_workspace_for_actions is not None:
-                    return await task_workspace_for_actions.glob_files(
-                        pattern,
-                        path=path,
-                        max_results=max_results,
-                        include_hidden=include_hidden,
-                    )
-                files = iter_task_workspace_files(path, pattern, max_results=max_results, include_hidden=include_hidden)
-                matches = [relative_path(file) for file in files]
-                return {
-                    "pattern": pattern,
-                    "path": path,
-                    "matches": matches,
-                    "count": len(matches),
-                    "truncated": len(matches) >= max_results,
-                    "max_results": max_results,
-                }
+                return await active_task_workspace.glob_files(
+                    pattern,
+                    path=path,
+                    max_results=max_results,
+                    include_hidden=include_hidden,
+                )
 
             self.action.register_action(
                 action_id=action_name("glob_files"),
@@ -1193,56 +1074,16 @@ class ActionExtension(BaseAgent):
                 max_results: int = 50,
                 include_hidden: bool = False,
             ):
-                if task_workspace_for_actions is not None:
-                    return await task_workspace_for_actions.grep_files(
-                        pattern,
-                        path=path,
-                        regex=regex,
-                        glob=glob,
-                        context_lines=context_lines,
-                        max_results=max_results,
-                        include_hidden=include_hidden,
-                        max_file_bytes=max_search_file_bytes,
-                    )
-                compiled = re.compile(pattern) if regex else None
-                results: list[dict[str, Any]] = []
-                files = iter_task_workspace_files(path, glob or "**/*", max_results=1000, include_hidden=include_hidden)
-                for file in files:
-                    if len(results) >= max_results:
-                        break
-                    if file.stat().st_size > max_search_file_bytes:
-                        continue
-                    read_result = await manager_read_file(relative_path(file), max_bytes=max_search_file_bytes)
-                    text = str(read_result.get("content") or "")
-                    lines = text.splitlines()
-                    for line_index, line in enumerate(lines):
-                        matched = bool(compiled.search(line)) if compiled is not None else str(pattern) in line
-                        if not matched:
-                            continue
-                        start = max(0, line_index - max(0, context_lines))
-                        end = min(len(lines), line_index + max(0, context_lines) + 1)
-                        results.append(
-                            {
-                                "path": relative_path(file),
-                                "line": line_index + 1,
-                                "text": line,
-                                "snippet": "\n".join(lines[start:end]),
-                                "line_start": start + 1,
-                                "line_end": end,
-                                "truncated": False,
-                            }
-                        )
-                        break
-                return {
-                    "pattern": pattern,
-                    "regex": regex,
-                    "glob": glob or "**/*",
-                    "path": path,
-                    "matches": results,
-                    "count": len(results),
-                    "truncated": len(results) >= max_results,
-                    "max_results": max_results,
-                }
+                return await active_task_workspace.grep_files(
+                    pattern,
+                    path=path,
+                    regex=regex,
+                    glob=glob,
+                    context_lines=context_lines,
+                    max_results=max_results,
+                    include_hidden=include_hidden,
+                    max_file_bytes=max_search_file_bytes,
+                )
 
             self.action.register_action(
                 action_id=action_name("grep_files"),
@@ -1279,69 +1120,14 @@ class ActionExtension(BaseAgent):
                 max_results: int = 50,
                 include_hidden: bool = False,
             ):
-                if task_workspace_for_actions is not None:
-                    return await task_workspace_for_actions.search_files(
-                        query,
-                        path=path,
-                        pattern=pattern,
-                        max_results=max_results,
-                        include_hidden=include_hidden,
-                        max_file_bytes=max_search_file_bytes,
-                    )
-                results: list[dict[str, Any]] = []
-                files = iter_task_workspace_files(path, pattern, max_results=1000, include_hidden=include_hidden)
-                for file in files:
-                    if len(results) >= max_results:
-                        break
-                    file_size = file.stat().st_size
-                    if file_size > max_search_file_bytes:
-                        continue
-                    result = await manager_read_file(
-                        relative_path(file),
-                        max_bytes=max_search_file_bytes,
-                    )
-                    if not result.get("readable") or result.get("content_kind") != "text":
-                        continue
-                    text = str(result.get("content", ""))
-                    for line_no, line in enumerate(text.splitlines(), start=1):
-                        if query in line:
-                            path_text = relative_path(file)
-                            search_scope = {
-                                "path": path,
-                                "pattern": pattern,
-                                "include_hidden": include_hidden,
-                                "max_results": max_results,
-                            }
-                            locator_ref = {
-                                "role": "locator_ref",
-                                "content_state": "ref_only",
-                                "source": "task_workspace.search_files",
-                                "query": query,
-                                "scope": search_scope,
-                                "path": path_text,
-                                "bytes": file_size,
-                            }
-                            results.append(
-                                {
-                                    "path": path_text,
-                                    "line": line_no,
-                                    "text": line,
-                                    "role": "evidence_snippet",
-                                    "content_state": "bounded_readback_available",
-                                    "source": "task_workspace.search_files",
-                                    "query": query,
-                                    "scope": search_scope,
-                                    "locator_ref": locator_ref,
-                                    "snippet": line,
-                                    "snippet_chars": len(line),
-                                    "snippet_bytes": len(line.encode("utf-8")),
-                                    "line_start": line_no,
-                                    "line_end": line_no,
-                                    "bytes": file_size,
-                                }
-                            )
-                            break
-                return results
+                return await active_task_workspace.search_files(
+                    query,
+                    path=path,
+                    pattern=pattern,
+                    max_results=max_results,
+                    include_hidden=include_hidden,
+                    max_file_bytes=max_search_file_bytes,
+                )
 
             self.action.register_action(
                 action_id=action_name("search_files"),

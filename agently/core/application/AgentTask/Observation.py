@@ -108,6 +108,16 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
             )
             self._latest_taskboard_acceptance_index = DataFormatter.sanitize(acceptance_index)
             revision_id = str(effective_revision.revision_id)
+            await self._write_taskboard_resume_snapshot(
+                stage=stage,
+                tick_index=tick_index,
+                revision=effective_revision,
+                evidence_view=evidence_view,
+                acceptance_index=acceptance_index,
+                runtime_topology=runtime_topology or {},
+                terminal_reason=terminal_reason,
+                final_result=final_result,
+            )
             await self._emit(
                 "agent_task.taskboard.tick_recorded",
                 {
@@ -769,6 +779,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         )
         route = execution_meta.get("route", {})
         artifact_refs = logs.get("artifact_refs", [])
+        file_refs = logs.get("file_refs", [])
         artifact_readbacks = cls._artifact_readback_evidence_ids(artifact_refs)
         record_refs = execution_meta.get("record_refs") or logs.get("record_refs", {})
         task_workspace_refs = execution_meta.get("task_workspace_refs") or logs.get(
@@ -833,6 +844,7 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
                 }
             },
             "artifact_refs": DataFormatter.sanitize(artifact_refs),
+            "file_refs": DataFormatter.sanitize(file_refs),
             "record_refs": DataFormatter.sanitize(record_refs),
             "task_workspace_refs": DataFormatter.sanitize(task_workspace_refs),
             "route": DataFormatter.sanitize(route),
@@ -1550,8 +1562,20 @@ class AgentTaskObservationMixin(AgentTaskMixinBase):
         if not isinstance(raw, Mapping):
             raw = {}
         model_digest = record.get("model_digest")
+        if (
+            isinstance(model_digest, Mapping)
+            and model_digest.get("same_as") == "result"
+            and isinstance(record.get("result"), Mapping)
+        ):
+            model_digest = record.get("result")
         if not isinstance(model_digest, Mapping) or not model_digest:
             raw_model_digest = raw.get("model_digest")
+            if (
+                isinstance(raw_model_digest, Mapping)
+                and raw_model_digest.get("same_as") == "result"
+                and isinstance(raw.get("result"), Mapping)
+            ):
+                raw_model_digest = raw.get("result")
             if isinstance(raw_model_digest, Mapping) and raw_model_digest:
                 model_digest = raw_model_digest
         digest = model_digest if isinstance(model_digest, Mapping) and model_digest else (raw or record)

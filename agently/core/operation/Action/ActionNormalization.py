@@ -232,6 +232,69 @@ def normalize_action_decision(decision: Any) -> ActionDecision:
     }
 
 
+def apply_action_decision_round_dispatch_policy(
+    decision: ActionDecision,
+    policy: Any,
+) -> ActionDecision:
+    """Project one structurally safe Action-ID cohort for the current round.
+
+    Calls sharing an Action ID may still fan out in parallel. Calls using a
+    different Action ID are intentionally discarded so the planner must see the
+    current cohort's results and produce fresh arguments in the next round.
+    This is a structural dependency boundary; it does not infer semantics from
+    Action names, descriptions, or arguments.
+    """
+
+    if policy != "single_action_id_cohort":
+        return decision
+    action_calls = decision.get("action_calls", [])
+    if not isinstance(action_calls, list) or len(action_calls) <= 1:
+        return decision
+
+    selected_action_id = str(
+        action_calls[0].get("action_id", action_calls[0].get("tool_name", ""))
+    )
+    selected_calls: list[ActionCall] = []
+    deferred_calls: list[ActionCall] = []
+    deferred_action_ids: list[str] = []
+    for action_call in action_calls:
+        action_id = str(action_call.get("action_id", action_call.get("tool_name", "")))
+        if action_id == selected_action_id:
+            selected_calls.append(action_call)
+            continue
+        deferred_calls.append(action_call)
+        if action_id not in deferred_action_ids:
+            deferred_action_ids.append(action_id)
+    if not deferred_calls:
+        return decision
+
+    diagnostics = list(decision.get("diagnostics", []))
+    diagnostics.append(
+        {
+            "source": "ActionFlow",
+            "severity": "info",
+            "code": "action_loop.round_dispatch.deferred_distinct_actions",
+            "message": (
+                "Distinct Action IDs were deferred so the next planning round can consume "
+                "this Action cohort's results before producing fresh calls."
+            ),
+            "meta": {
+                "policy": "single_action_id_cohort",
+                "selected_action_id": selected_action_id,
+                "selected_call_count": len(selected_calls),
+                "deferred_action_ids": deferred_action_ids,
+                "deferred_call_count": len(deferred_calls),
+            },
+        }
+    )
+    projected = dict(decision)
+    for key in ("execution_actions", "action_calls", "execution_commands", "tool_commands"):
+        if key in projected:
+            projected[key] = selected_calls
+    projected["diagnostics"] = diagnostics
+    return cast(ActionDecision, projected)
+
+
 def normalize_execution_record(
     record: Any,
     command: ActionCall | None,

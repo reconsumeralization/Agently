@@ -61,8 +61,10 @@ execution = Agently.blocks.bind_runtime(graph).create_execution(
 ```
 
 `context_read` accepts only `read`, `search`, and `scoped_search`. It returns the
-ContextPackage projection, locator refs, and bounded evidence snippets. Writes,
-links, checkpoints, and other side effects fail closed.
+ContextPackage projection, locator refs, bounded evidence snippets, per-source
+coverage, and a compact `continuation_available` fact. Source cursors remain
+private to the TaskContext-owned reader and are never exposed by the block.
+Writes, links, checkpoints, and other side effects fail closed.
 
 Source-specific filters such as `source_kinds`, `path`, `pattern`, `method`, and
 `top_n` are forwarded to the bound reader. They constrain candidate collection;

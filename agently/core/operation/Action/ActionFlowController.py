@@ -217,10 +217,10 @@ class ActionFlowController:
                 "action_type": "action_calls",
             },
         )
-        parent_artifact_scope = action._artifact_scope_from_agent_execution_context(
-            get_current_agent_execution_context(),
+        artifact_scope = action._resolve_artifact_scope(
+            run_context=batch_run,
+            agent_execution_context=get_current_agent_execution_context(),
         )
-        artifact_scope = parent_artifact_scope or action._artifact_scope_from_run_context(batch_run)
         owns_artifact_scope = artifact_scope.get("kind") == "action_run"
         action_runs = [
             batch_run.create_child(
