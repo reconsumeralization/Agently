@@ -175,6 +175,17 @@ UUID、多组 id、URL 或无关 metadata。
 可见性、保留策略、失败行为与质量证据状态时，才可以使用有界的任务特定过程字段。
 通用且未消费的 `reasoning`、`analysis` 或 `thinking` 字段不是质量机制。
 
+## 相关信息就近聚合
+
+一起变化、服务同一 consumer 的信息应尽量就近聚合。无论人还是 Coding Agent，理解
+一个请求、不变量或副作用所需的跨文件检索次数与嵌套深度都应尽量降低。不要只为了
+缩短当前代码或让目录形式看起来分层完整，就把只使用一次的 schema、常量、helper
+或 class 搬到别处。
+
+这不意味着创建 god module。无关职责仍应拆分；只有新边界真正拥有复用、独立版本或
+review、policy/lifecycle、非平凡表示转换或动态组装时才抽取，并让调用点可以直接定位
+到该 owner。目标是可读的内聚，而不是最大程度内联。
+
 ## 删除没有 owner 的 wrapper
 
 新增 Service、Manager、Factory、request wrapper、repository facade 或 adapter 前，

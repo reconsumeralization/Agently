@@ -20,6 +20,40 @@ Agently splits a prompt into named slots. The slots compose, so you can set pers
 | `input` | user message | the actual question or payload |
 | `output` | user message + parser | the schema you want back |
 
+## Keep one request contract local
+
+For a one-off request, keep its related information visible in one review path.
+The `input`, authoritative `info`, `instruct`, `output` schema, and result
+consumption should normally form one readable execution block:
+
+```python
+result = (
+    agent
+    .input({"ticket_text": ticket_text})
+    .info({"allowed_queues": allowed_queues})
+    .instruct("Select the best queue and give one concise explanation.")
+    .output({
+        "queue": (str, "One value from allowed_queues.", True),
+        "explanation": (str, "Concise user-visible explanation.", True),
+    })
+    .get_result()
+)
+triage = await result.async_get_data()
+```
+
+A single YAML/JSON Prompt Configure file loaded with explicit `mappings` is the
+same kind of cohesive contract when prompt behavior should evolve outside
+Python. Extract a schema or prompt fragment only when it is reused unchanged,
+owned and versioned by another interface/module, independently reviewed or
+product-edited, or genuinely generated or conditional. Keep that owner directly
+discoverable from the call site.
+
+Moving a one-use schema into a distant constant, tiny getter, request builder,
+or forwarding wrapper solely to shorten the chain adds review-time lookup count
+and depth without adding an owner. That is not useful abstraction. Conversely,
+do not force unrelated responsibilities into one large function or file: group
+information that changes together and serves the same consumer.
+
 ## Strict external interface contracts
 
 When model output will be passed directly to a documented API request, module
