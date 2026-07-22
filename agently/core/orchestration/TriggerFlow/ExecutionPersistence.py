@@ -377,6 +377,17 @@ class TriggerFlowExecutionPersistence:
         self._validate_state_sections(state)
         snapshot_state = state
         self._raise_for_snapshot_contract(snapshot_state)
+        active_sub_flow_frame_ids = sorted(
+            str(frame_id)
+            for frame_id, frame in snapshot_state.get("sub_flow_frames", {}).items()
+            if isinstance(frame, dict) and frame.get("status") in {"running", "cancel_requested"}
+        )
+        if active_sub_flow_frame_ids:
+            raise RuntimeError(
+                "Can not load TriggerFlow execution snapshot with active sub-flow frame(s) "
+                f"{ active_sub_flow_frame_ids }. Live child executions and tasks are process-local and are not "
+                "restart-resumable; settle or cancel them before saving a resumable snapshot."
+            )
         if validate_resources:
             load = self.inspect_load_state(
                 snapshot_state,

@@ -119,6 +119,69 @@ What happens:
 
 Items pushed via `data.async_put_into_stream(...)` inside the child show up in the **parent execution's** runtime stream. From an external consumer's point of view, sub-flows look like part of the same execution.
 
+## Control a running child by frame id
+
+`capture` and `write_back` are boundary bindings, not live bindings: `capture`
+copies the selected parent values when the child starts, and `write_back` runs
+only after successful child completion. When the host needs to inspect, signal,
+or cancel an active child, keep an explicit parent execution handle and use its
+sub-flow frame:
+
+```python
+execution = parent_flow.create_execution(auto_close=False)
+start_task = asyncio.create_task(execution.async_start(input_value))
+
+# After the host observes triggerflow.sub_flow_started for this execution:
+frames = execution.get_sub_flow_frames()
+frame_id = next(
+    frame_id
+    for frame_id, frame in frames.items()
+    if frame["status"] == "running"
+)
+
+await execution.async_emit_to_sub_flow(
+    frame_id,
+    "StopRequested",
+    {"reason": "superseded"},
+)
+
+cancelled = await execution.async_cancel_sub_flow(
+    frame_id,
+    reason="superseded",
+)
+await start_task
+```
+
+The synchronous counterparts are `emit_to_sub_flow(...)` and
+`cancel_sub_flow(...)`.
+
+`async_cancel_sub_flow(...)` returns `True` only when that call wins the active
+or waiting frame's cancellation transition. A late or duplicate cancellation
+returns `False`. Cancellation changes the frame through `cancel_requested` to
+`cancelled`, cancels cooperative in-process child work, and prevents child
+`write_back` and parent downstream continuation. It does **not** close the
+parent execution, so the parent can continue accepting later events.
+
+`async_emit_to_sub_flow(...)` forwards one signal through the child execution's
+normal signal net. The child concurrency budget still applies: if a control
+handler must run beside long-lived child work, configure enough sub-flow
+`concurrency`. Signal forwarding is a best-effort control aid; cancellation or
+an application/provider-owned idempotency fence remains the correctness
+boundary for irreversible work. If cancellation wins while a signal is in
+flight, the forwarding call raises `RuntimeError` and the signal handler is
+cooperatively cancelled.
+
+Frame statuses are observable as `running`, `waiting`, `cancel_requested`,
+`cancelled`, `failed`, or `completed`. Running frame metadata is serializable
+for audit, but live executions and tasks are not. Loading a snapshot containing
+a `running` or `cancel_requested` frame fails closed; settle or cancel active
+children before saving a restart-resumable snapshot. Existing `waiting` frames
+remain restorable through projected root interrupts.
+
+Framework cancellation cannot physically retract an already-submitted remote
+model request, thread, subprocess, or external side effect. Those boundaries
+still need provider abort, idempotency, or durable fence semantics.
+
 ## Child pauses project to the parent
 
 If a child flow calls `pause_for(...)`, the parent execution becomes waiting too. External systems still manage only the parent execution id and the parent interrupt id:

@@ -124,7 +124,8 @@
     "triggerflow": {
       "record_store_resource": "flow.create_execution(record_store=...); record_store=False opts out",
       "task_workspace_contract": "TriggerFlow does not create or infer a TaskWorkspace.",
-      "durability_contract": "RecordStore or another explicit provider supplies snapshot, runtime-event, lease, and artifact-ref ports."
+      "durability_contract": "RecordStore or another explicit provider supplies snapshot, runtime-event, lease, and artifact-ref ports.",
+      "active_sub_flow_control": "Running to_sub_flow children register serializable frames before start. Explicit parent executions may signal or cancel one live child by frame id; cancelled children skip write-back and continuation. Live child handles are process-local, so active-frame snapshots fail closed on load while waiting interrupt frames remain resumable."
     },
     "task_context": {
       "owner": "TaskContext",

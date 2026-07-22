@@ -156,6 +156,15 @@ TriggerFlow accepts `record_store=...`; `record_store=False` opts out. A
 RecordStore may also provide explicit snapshot, runtime-event, lease, and
 artifact-ref ports. TriggerFlow does not create a TaskWorkspace.
 
+Active children created by `to_sub_flow(...)` now register a `running` frame
+before child work starts. An explicit parent execution can inspect frames,
+forward a best-effort signal with `async_emit_to_sub_flow(...)`, or cancel and
+fence one child with `async_cancel_sub_flow(...)` without closing the parent.
+Cancellation records a `cancelled` frame and skips child write-back plus parent
+continuation. Live child tasks are process-local: loading a snapshot containing
+a `running` or `cancel_requested` frame fails closed, while projected `waiting`
+frames keep their existing save/load/resume contract.
+
 Blocks retains read-only `context_read` over a caller-bound ContextReader.
 Writes and other side effects stay with TaskWorkspace Actions, RecordStore,
 ActionRuntime, policy, or host code.
