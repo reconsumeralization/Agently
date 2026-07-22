@@ -108,7 +108,9 @@ async def test_locally_installed_mainstream_toolchain_executes_workspace_bundle(
         }
     )
 
-    result = await handle["resource"].async_execute_code(
+    resource = handle.get("resource")
+    assert resource is not None
+    result = await resource.async_execute_code(
         bundle=bundle,
         manifest=manifest,
         grant=grant,
@@ -152,7 +154,9 @@ async def test_action_runtime_runs_workspace_bound_provider_chain_with_explicit_
             },
         )
 
-    assert result["status"] == "success", result
-    assert result["data"]["stdout"] == "workspace-action-ok\n"
-    assert result["data"]["unsafe"] is True
-    assert result["data"]["meta"]["provider_contract"] == "workspace_code_execution_v1"
+    assert result.get("status") == "success", result
+    result_data = result.get("data")
+    assert isinstance(result_data, dict)
+    assert result_data["stdout"] == "workspace-action-ok\n"
+    assert result_data["unsafe"] is True
+    assert result_data["meta"]["provider_contract"] == "workspace_code_execution_v1"

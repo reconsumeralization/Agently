@@ -19,7 +19,9 @@ async def main():
             {"source_code": f"print(40 + {int(data.value)})\n"},
         )
         assert result.get("status") == "success", result
-        data.state.set("answer", int(result["data"]["stdout"].strip()))
+        action_data = result.get("data")
+        assert isinstance(action_data, dict)
+        data.state.set("answer", int(str(action_data["stdout"]).strip()))
 
     flow.to(calculate)
 

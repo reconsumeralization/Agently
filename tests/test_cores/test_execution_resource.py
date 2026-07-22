@@ -20,6 +20,7 @@ from agently.core import (
 from agently.core.TaskWorkspace import TaskWorkspace
 from agently.types.data import (
     CodeExecutionRequest,
+    ExecutionResourceHandle,
     ExecutionResourceRequirement,
     TaskWorkspaceAccessRequirement,
 )
@@ -109,7 +110,7 @@ async def test_execution_resource_release_failure_is_structured_and_quarantined(
         supported_kinds = ("failing_release",)
         DEFAULT_SETTINGS: dict[str, Any] = {}
 
-        async def async_probe(self, *, requirement, policy):
+        async def async_probe(self, *, requirement: Any, policy: Any) -> Any:
             _ = requirement, policy
             return {
                 "provider_id": self.provider_id,
@@ -119,7 +120,9 @@ async def test_execution_resource_release_failure_is_structured_and_quarantined(
                 "reason": "fixture",
             }
 
-        async def async_ensure(self, *, requirement, policy, existing_handle=None):
+        async def async_ensure(
+            self, *, requirement: Any, policy: Any, existing_handle: Any = None
+        ) -> Any:
             _ = requirement, policy, existing_handle
             return {
                 "handle_id": "failing-release:1",
@@ -127,11 +130,11 @@ async def test_execution_resource_release_failure_is_structured_and_quarantined(
                 "status": "ready",
             }
 
-        async def async_health_check(self, handle):
+        async def async_health_check(self, handle: Any) -> Any:
             _ = handle
             return "ready"
 
-        async def async_release(self, handle):
+        async def async_release(self, handle: Any) -> None:
             _ = handle
             raise RuntimeError("resource is still live")
 
@@ -147,8 +150,9 @@ async def test_execution_resource_release_failure_is_structured_and_quarantined(
         await manager.async_release(handle)
 
     assert raised.value.code == "execution_resource.release_failed"
-    assert manager.inspect("failing-release:1")["status"] == "failed"
-    assert manager.inspect("failing-release:1")["meta"]["cleanup_error"] == (
+    inspected = cast(ExecutionResourceHandle, manager.inspect("failing-release:1"))
+    assert inspected.get("status") == "failed"
+    assert inspected.get("meta", {}).get("cleanup_error") == (
         "resource is still live"
     )
 
@@ -644,7 +648,9 @@ async def test_execution_resource_provider_failure_does_not_poison_registry():
 
     class FailingProvider:
         name = "FailingProvider"
+        provider_id = "FailingProvider"
         kind = "test_failing_resource"
+        supported_kinds = ("test_failing_resource",)
         DEFAULT_SETTINGS: dict[str, Any] = {}
 
         @staticmethod
@@ -655,13 +661,23 @@ async def test_execution_resource_provider_failure_does_not_poison_registry():
         def _on_unregister():
             pass
 
-        async def async_ensure(self, *, requirement, policy, existing_handle=None):
+        async def async_probe(self, *, requirement: Any, policy: Any) -> Any:
+            _ = requirement, policy
+            return {
+                "provider_id": self.provider_id,
+                "available": True,
+                "supported_kinds": list(self.supported_kinds),
+            }
+
+        async def async_ensure(
+            self, *, requirement: Any, policy: Any, existing_handle: Any = None
+        ) -> Any:
             raise RuntimeError("Simulated provider failure")
 
-        async def async_health_check(self, handle):
+        async def async_health_check(self, handle: Any) -> Any:
             return "unhealthy"
 
-        async def async_release(self, handle):
+        async def async_release(self, handle: Any) -> None:
             pass
 
     manager.register_provider(FailingProvider())

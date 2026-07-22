@@ -13,7 +13,13 @@ from agently.builtins.plugins.ExecutionResourceProvider.DockerExecutionResourceP
 )
 from agently.core import ExecutionResourceManager
 from agently.core.TaskWorkspace import TaskWorkspace
-from agently.types.data import CodeExecutionRequest, TaskWorkspaceAccessRequirement
+from agently.types.data import (
+    CodeExecutionRequest,
+    ExecutionResourceHandle,
+    ExecutionResourceProviderProbe,
+    ExecutionResourceStatus,
+    TaskWorkspaceAccessRequirement,
+)
 from agently.types.data.code_execution import required_code_execution_isolation
 from agently.types.plugins import CodeExecutionResource
 from agently.utils import Settings
@@ -34,14 +40,16 @@ class _ExternalResource:
 
 class _ExternalProvider:
     DEFAULT_SETTINGS: dict[str, Any] = {}
-    supported_kinds = ("code_execution",)
+    supported_kinds: tuple[str, ...] = ("code_execution",)
 
     def __init__(self, provider_id: str, mechanism: str) -> None:
         self.provider_id = provider_id
         self.name = provider_id
         self.mechanism = mechanism
 
-    async def async_probe(self, *, requirement, policy):
+    async def async_probe(
+        self, *, requirement: Any, policy: Any
+    ) -> ExecutionResourceProviderProbe:
         _ = requirement, policy
         return {
             "provider_id": self.provider_id,
@@ -59,7 +67,9 @@ class _ExternalProvider:
             "reason": "synthetic external-provider fixture",
         }
 
-    async def async_ensure(self, *, requirement, policy, existing_handle=None):
+    async def async_ensure(
+        self, *, requirement: Any, policy: Any, existing_handle: Any = None
+    ) -> ExecutionResourceHandle:
         _ = policy, existing_handle
         grant = requirement["task_workspace_access_grant"]
         return {
@@ -68,10 +78,10 @@ class _ExternalProvider:
             "status": "ready",
         }
 
-    async def async_health_check(self, handle):
+    async def async_health_check(self, handle: ExecutionResourceHandle) -> ExecutionResourceStatus:
         return "ready" if isinstance(handle.get("resource"), _ExternalResource) else "unhealthy"
 
-    async def async_release(self, handle):
+    async def async_release(self, handle: ExecutionResourceHandle) -> None:
         _ = handle
 
 
@@ -129,7 +139,8 @@ async def test_external_provider_needs_no_core_changes_for_grant_bundle_executio
             "task_workspace_access_grant": grant,
         }
     )
-    resource = handle["resource"]
+    resource = handle.get("resource")
+    assert resource is not None
     result = await resource.async_execute_code(
         bundle=bundle,
         manifest=manifest,
@@ -207,7 +218,7 @@ async def test_docker_runtime_variant_reuses_provider_lifecycle_through_resource
         }
     )
 
-    assert isinstance(handle["resource"], _AlternativeContainerRuntimeResource)
+    assert isinstance(handle.get("resource"), _AlternativeContainerRuntimeResource)
     # Selection probes once, the manager re-probes immediately before ensure,
     # and ensure creates the grant-bound live resource.
     assert len(provider.created_resources) == 3

@@ -838,7 +838,7 @@ def test_action_extension_code_runtime_reads_ordered_provider_settings_and_appen
         "isolation_preference": "preferred",
         "unsafe_fallback_enabled": True,
     }
-    assert spec["sandbox_required"] is False
+    assert spec.get("sandbox_required") is False
 
 
 def test_action_extension_enable_code_runtime_required_language_adapters():

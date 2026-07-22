@@ -36,11 +36,13 @@ async def test_docker_provider_exposes_code_execution_capabilities() -> None:
 
     assert provider.provider_id == "docker"
     assert "code_execution" in provider.supported_kinds
-    assert probe["capabilities"]["isolation"]["process_contained"] is True
-    assert probe["capabilities"]["isolation"]["host_filesystem_restricted"] is True
-    assert "python" in probe["capabilities"]["languages"]
-    assert probe["capabilities"]["toolchains"]["python"]["available"] is True
-    assert probe["capabilities"]["toolchains"]["python"]["version"].startswith("3.")
+    capabilities = probe.get("capabilities")
+    assert isinstance(capabilities, dict)
+    assert capabilities["isolation"]["process_contained"] is True
+    assert capabilities["isolation"]["host_filesystem_restricted"] is True
+    assert "python" in capabilities["languages"]
+    assert capabilities["toolchains"]["python"]["available"] is True
+    assert capabilities["toolchains"]["python"]["version"].startswith("3.")
 
 
 @pytest.mark.asyncio
@@ -84,7 +86,9 @@ async def test_docker_executes_materialized_workspace_bundle(tmp_path: Path) -> 
         policy={"timeout_seconds": 20, "max_output_bytes": 10000},
     )
 
-    result = await handle["resource"].async_execute_code(
+    resource = handle.get("resource")
+    assert resource is not None
+    result = await resource.async_execute_code(
         bundle=bundle,
         manifest=manifest,
         grant=grant,

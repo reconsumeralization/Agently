@@ -6,6 +6,9 @@ from typing import Any
 import pytest
 
 from agently.core.context import TaskContext
+from agently.types.data import ContextSourceDescriptorPage, ContextSourceRead
+
+
 class RecordingSource:
     def __init__(
         self,
@@ -25,7 +28,7 @@ class RecordingSource:
         profile: Mapping[str, Any],
         cursor: str | None,
         limit: int,
-    ) -> object:
+    ) -> ContextSourceDescriptorPage:
         self.enumerate_calls += 1
         raise AssertionError("TaskContext must not enumerate a source while binding or snapshotting it.")
 
@@ -36,7 +39,7 @@ class RecordingSource:
         max_chars: int,
         representation: str | None = None,
         range_start: int = 0,
-    ) -> object:
+    ) -> ContextSourceRead:
         self.read_calls += 1
         raise AssertionError("TaskContext must not read a source while binding or snapshotting it.")
 

@@ -134,6 +134,7 @@ def test_agent_task_binds_context_image_as_attachment_without_serializing_data_u
     assert projected["items"][0]["content"] is None
     assert "data:image/png;base64" not in str(projected)
     prompt = request.prompt.get(inherit=False)
+    assert prompt is not None
     assert prompt["attachment"][0]["type"] == "text"
     assert prompt["attachment"][1] == attachment
 

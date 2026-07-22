@@ -257,8 +257,9 @@ class MockSlowCancelableRequester:
 
     async def request_model(self, request_data: AgentlyRequestData):
         del request_data
-        if type(self).started is not None:
-            type(self).started.set()
+        started = type(self).started
+        if started is not None:
+            started.set()
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:

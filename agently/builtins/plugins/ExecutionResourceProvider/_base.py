@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agently.types.data import ExecutionResourceProviderProbe
+
 
 class BuiltinExecutionResourceProvider:
     """Preferred probe surface shared by builtin resource providers."""
@@ -16,7 +21,9 @@ class BuiltinExecutionResourceProvider:
     def supported_kinds(self) -> tuple[str, ...]:
         return (self.kind,)
 
-    async def async_probe(self, *, requirement, policy):
+    async def async_probe(
+        self, *, requirement: Any, policy: Any
+    ) -> "ExecutionResourceProviderProbe":
         _ = requirement, policy
         return {
             "provider_id": self.provider_id,

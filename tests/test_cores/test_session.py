@@ -232,6 +232,7 @@ async def test_session_memory_recall_uses_task_context_without_prompt_slots(tmp_
 
     diagnostics = await session.async_prepare_memory(request.prompt, session.settings)
     prompt_data = request.prompt.get()
+    assert isinstance(prompt_data, dict)
     info = prompt_data.get("info", {})
 
     assert "GLOBAL_MEMORY" not in prompt_data

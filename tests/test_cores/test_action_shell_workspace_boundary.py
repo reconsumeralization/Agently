@@ -143,7 +143,11 @@ async def test_task_workspace_shell_executes_in_its_declared_container_mount(
     )
     spec = agent.action.action_registry.get_spec("task_workspace_shell")
     assert spec is not None
-    profile = spec["execution_resources"][0]["config"]["runtime_profile"]
+    resources = spec.get("execution_resources")
+    assert resources
+    config = resources[0].get("config")
+    assert isinstance(config, dict)
+    profile = config["runtime_profile"]
     captured: dict[str, Any] = {}
     resource = DockerExecutionResource(runtime_profile=profile)
 

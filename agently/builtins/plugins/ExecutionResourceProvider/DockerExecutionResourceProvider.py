@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from agently.types.data import (
         ExecutionResourceHandle,
         ExecutionResourcePolicy,
+        ExecutionResourceProviderProbe,
         ExecutionResourceRequirement,
         ExecutionResourceStatus,
     )
@@ -947,7 +948,12 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
             "container_rootfs_read_only": False,
         }
 
-    async def async_probe(self, *, requirement, policy):
+    async def async_probe(
+        self,
+        *,
+        requirement: "ExecutionResourceRequirement",
+        policy: "ExecutionResourcePolicy",
+    ) -> "ExecutionResourceProviderProbe":
         config = requirement.get("config", {})
         config = config if isinstance(config, dict) else {}
         default_args = config.get("default_args", [])

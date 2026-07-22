@@ -14,8 +14,6 @@
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from .base import AgentlyPlugin
-
 if TYPE_CHECKING:
     from agently.types.data import (
         CodeExecutionBundle,
@@ -43,9 +41,20 @@ class CodeExecutionResource(Protocol):
 
 
 @runtime_checkable
-class ExecutionResourceProvider(AgentlyPlugin, Protocol):
-    provider_id: str
-    supported_kinds: tuple[str, ...]
+class ExecutionResourceProvider(Protocol):
+    """Runtime contract for a directly registered resource provider.
+
+    Plugin lifecycle hooks are intentionally not part of this protocol. A
+    provider loaded through PluginManager must satisfy the plugin contract at
+    that boundary, while ``ExecutionResourceManager.register_provider`` only
+    requires the runtime behavior declared here.
+    """
+
+    @property
+    def provider_id(self) -> str: ...
+
+    @property
+    def supported_kinds(self) -> tuple[str, ...]: ...
 
     async def async_probe(
         self,

@@ -14622,11 +14622,15 @@ async def test_grounding_patch_advances_same_terminal_carrier_and_invalidates_ol
     )
 
     delivery = output["task_workspace_patch_delivery"]
-    repaired = task._lifecycle_state.carrier_inventory.carriers[0]
+    lifecycle_state = task._lifecycle_state
+    assert lifecycle_state is not None
+    carrier_inventory = lifecycle_state.carrier_inventory
+    assert carrier_inventory is not None
+    repaired = carrier_inventory.carriers[0]
     assert delivery["status"] == "completed"
     assert delivery["terminal_carrier_id"] == "car_report"
-    assert task._lifecycle_state.phase == "post_patch_reverifying"
-    assert task._lifecycle_state.repair_contract == {}
+    assert lifecycle_state.phase == "post_patch_reverifying"
+    assert lifecycle_state.repair_contract == {}
     assert repaired.carrier_id == "car_report"
     assert repaired.content_version_id == delivery["content_version_id"]
     assert repaired.content_version_id != identity["content_version_id"]

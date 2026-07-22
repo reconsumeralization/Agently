@@ -194,7 +194,7 @@ async def test_required_skill_availability_joins_revision_selector_to_canonical_
 
     assert execution.required_skill_ids() == [package.revision_ref]
     selected, failure = await _resolve_required_skill_availability(
-        execution,
+        cast(Any, execution),
         goal="Use the exact installed revision",
     )
 

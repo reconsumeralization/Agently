@@ -6,7 +6,12 @@ import pytest
 
 from agently import Agently
 from agently.core import ExecutionResourceError, ExecutionResourceManager
-from agently.types.data import required_code_execution_isolation
+from agently.types.data import (
+    ExecutionResourceHandle,
+    ExecutionResourceProviderProbe,
+    ExecutionResourceStatus,
+    required_code_execution_isolation,
+)
 from agently.utils import Settings
 
 
@@ -20,7 +25,7 @@ def _manager() -> ExecutionResourceManager:
 
 class _Provider:
     DEFAULT_SETTINGS: dict[str, Any] = {}
-    supported_kinds = ("code_execution",)
+    supported_kinds: tuple[str, ...] = ("code_execution",)
 
     def __init__(
         self,
@@ -48,7 +53,9 @@ class _Provider:
         self.probe_configs: list[dict[str, Any]] = []
         self.ensure_configs: list[dict[str, Any]] = []
 
-    async def async_probe(self, *, requirement, policy):
+    async def async_probe(
+        self, *, requirement: Any, policy: Any
+    ) -> ExecutionResourceProviderProbe:
         _ = requirement, policy
         self.probe_count += 1
         self.probe_configs.append(dict(requirement.get("config", {})))
@@ -69,7 +76,9 @@ class _Provider:
             "reason": "available" if available else "not installed",
         }
 
-    async def async_ensure(self, *, requirement, policy, existing_handle=None):
+    async def async_ensure(
+        self, *, requirement: Any, policy: Any, existing_handle: Any = None
+    ) -> ExecutionResourceHandle:
         _ = requirement, policy, existing_handle
         self.ensure_count += 1
         self.ensure_configs.append(dict(requirement.get("config", {})))
@@ -79,11 +88,11 @@ class _Provider:
             "status": "ready",
         }
 
-    async def async_health_check(self, handle):
+    async def async_health_check(self, handle: ExecutionResourceHandle) -> ExecutionResourceStatus:
         _ = handle
         return "ready"
 
-    async def async_release(self, handle):
+    async def async_release(self, handle: ExecutionResourceHandle) -> None:
         _ = handle
         self.release_count += 1
 
@@ -110,8 +119,8 @@ async def test_manager_skips_unavailable_and_ineligible_providers() -> None:
         }
     )
 
-    assert handle["provider_id"] == "eligible"
-    assert [item["provider_id"] for item in handle["meta"]["provider_probes"]] == [
+    assert handle.get("provider_id") == "eligible"
+    assert [item["provider_id"] for item in handle.get("meta", {})["provider_probes"]] == [
         "missing",
         "wrong-language",
         "eligible",
@@ -155,7 +164,7 @@ async def test_provider_is_reprobed_before_ensure_and_priority_falls_through() -
         }
     )
 
-    assert handle["provider_id"] == "fallback"
+    assert handle.get("provider_id") == "fallback"
     assert changed.probe_count == 2
     assert changed.ensure_count == 0
 
@@ -177,7 +186,7 @@ async def test_explicit_provider_and_release_use_the_selected_provider() -> None
     )
     await manager.async_release(handle)
 
-    assert handle["provider_id"] == "selected"
+    assert handle.get("provider_id") == "selected"
     assert first.ensure_count == 0
     assert selected.ensure_count == 1
     assert selected.release_count == 1
@@ -232,7 +241,7 @@ async def test_provider_selection_enforces_minimum_and_exact_toolchain_versions(
         }
     )
 
-    assert handle["provider_id"] == "eligible"
+    assert handle.get("provider_id") == "eligible"
 
     with pytest.raises(ExecutionResourceError):
         await manager.async_ensure(
@@ -275,14 +284,14 @@ async def test_candidate_descriptor_merges_only_selected_provider_config() -> No
         }
     )
 
-    assert handle["provider_id"] == "host-policy"
+    assert handle.get("provider_id") == "host-policy"
     assert first.probe_configs == [{"common": "base", "runtime": "alternative"}]
     assert selected.probe_configs == [
         {"common": "base", "profile": "strict"},
         {"common": "base", "profile": "strict"},
     ]
     assert selected.ensure_configs == [{"common": "base", "profile": "strict"}]
-    assert handle["meta"]["selected_provider_candidate"] == {
+    assert handle.get("meta", {})["selected_provider_candidate"] == {
         "index": 1,
         "provider_id": "host-policy",
     }
@@ -328,8 +337,8 @@ async def test_preferred_capabilities_choose_isolated_provider_before_unsafe_pri
         }
     )
 
-    assert handle["provider_id"] == "isolated"
-    assert handle["meta"]["selected_provider_candidate"][
+    assert handle.get("provider_id") == "isolated"
+    assert handle.get("meta", {})["selected_provider_candidate"][
         "preferred_capabilities_satisfied"
     ] is True
 
@@ -370,10 +379,10 @@ async def test_preferred_capabilities_record_explicit_fallback_when_unavailable(
         }
     )
 
-    assert handle["provider_id"] == "unsafe"
-    assert handle["meta"]["selected_provider_candidate"][
+    assert handle.get("provider_id") == "unsafe"
+    assert handle.get("meta", {})["selected_provider_candidate"][
         "preferred_capabilities_satisfied"
     ] is False
-    assert handle["meta"]["selected_provider_candidate"][
+    assert handle.get("meta", {})["selected_provider_candidate"][
         "preference_fallback"
     ] is True

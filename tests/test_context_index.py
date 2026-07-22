@@ -100,6 +100,7 @@ class CountingDescriptorSource:
 
 
 class CountingEmbeddingProvider:
+    name = "fixture-embedding"
     provider_id = "fixture-embedding"
     model = "fixture-v1"
 
@@ -125,6 +126,7 @@ class CountingEmbeddingProvider:
 
 
 class FailingEmbeddingProvider:
+    name = "failing-embedding"
     provider_id = "failing-embedding"
     model = "fixture-v1"
 

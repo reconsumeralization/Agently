@@ -3977,8 +3977,8 @@ async def test_taskboard_dependency_readback_advances_past_prior_range(tmp_path)
                         "body": "0123456789" * 6 + "0123",
                     "read_identity": {
                         "owner": "action_artifact",
-                        "locator": artifact["selection_key"],
-                        "content_version": artifact["sha256"],
+                        "locator": artifact.get("selection_key"),
+                        "content_version": artifact.get("sha256"),
                         "range": {"offset": 0, "end": 64},
                     },
                 }
@@ -4022,12 +4022,12 @@ async def test_taskboard_dependency_readback_skips_exhausted_artifact(tmp_path):
                         "status": "ok",
                         "body_state": "full",
                         "body": "complete Action artifact body",
-                    "total_bytes": artifact["bytes"],
+                    "total_bytes": artifact.get("bytes"),
                     "read_identity": {
                         "owner": "action_artifact",
-                        "locator": artifact["selection_key"],
-                        "content_version": artifact["sha256"],
-                        "range": {"offset": 0, "end": artifact["bytes"]},
+                        "locator": artifact.get("selection_key"),
+                        "content_version": artifact.get("sha256"),
+                        "range": {"offset": 0, "end": artifact.get("bytes")},
                     },
                 }
             ],

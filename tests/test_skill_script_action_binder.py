@@ -203,14 +203,17 @@ async def test_bound_skill_script_executes_through_workspace_and_docker(
 
     result = await agent.action.async_execute_action(bound.action_id, {})
 
-    assert result["status"] == "success"
-    assert result["data"]["stdout"] == "skill-bridge-actual\n"
-    assert len(result["artifacts"]) == 1
-    published_path = result["artifacts"][0]["path"]
+    assert result.get("status") == "success"
+    result_data = result.get("data")
+    artifacts = result.get("artifacts")
+    assert isinstance(result_data, dict)
+    assert isinstance(artifacts, list) and len(artifacts) == 1
+    assert result_data["stdout"] == "skill-bridge-actual\n"
+    published_path = artifacts[0].get("path", "")
     assert published_path.endswith("/output/validated.txt")
     assert published_path.startswith(".agently/files/")
     readback = await execution.task_workspace.read_file(published_path)
     assert readback.content == "actual-docker"
-    assert result["data"]["meta"]["provider_contract"] == (
+    assert result_data["meta"]["provider_contract"] == (
         "workspace_code_execution_v1"
     )

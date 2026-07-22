@@ -259,7 +259,8 @@ def test_action_contract_derives_required_input_keys_and_rejects_missing_input()
     )
 
     spec = action.action_registry.get_spec(action_id)
-    assert spec["required_input_keys"] == ["query"]
+    assert spec is not None
+    assert spec.get("required_input_keys") == ["query"]
 
     result = action.execute_action(
         action_id,
@@ -267,7 +268,7 @@ def test_action_contract_derives_required_input_keys_and_rejects_missing_input()
         source_protocol="structured_plan",
     )
 
-    assert result["status"] == "error"
+    assert result.get("status") == "error"
     assert received == []
     assert any(
         diagnostic.get("code") == "action.input.required_keys_missing"
@@ -445,8 +446,8 @@ def test_large_action_output_uses_digest_and_artifact_ref():
     recall_preview = recall_digest.get("result_preview")
     assert isinstance(recall_preview, dict)
     assert recall_preview["owner"] == "action_artifact"
-    assert recall_preview["locator"] == output_ref["selection_key"]
-    assert recall_preview["content_version"] == output_ref["sha256"]
+    assert recall_preview["locator"] == output_ref.get("selection_key")
+    assert recall_preview["content_version"] == output_ref.get("sha256")
     assert recall_preview["range"] == {"offset": 0, "end": 4096, "read_bytes": 4096}
     assert "y" * 128 in recall_preview["value"]
     assert dispatched_recall.get("artifact_refs") == []
