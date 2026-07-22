@@ -985,6 +985,72 @@ def test_block_carrier_stock_audit_joins_same_run_dynamic_quote_across_projectio
     assert facts["required_fields_present"] is True
     assert facts["complete_object_equal_across_chain"] is True
 
+
+def test_block_carrier_stock_audit_rejects_partial_observer_object_even_when_ticker_exists():
+    runner = _load_block_carrier_runner()
+    action_avgo = {
+        "ticker": "AVGO",
+        "last_sale_price": "SYNTHETIC_CURRENT_PRICE",
+        "net_change": "SYNTHETIC_CURRENT_NET_CHANGE",
+        "percentage_change": "SYNTHETIC_CURRENT_PERCENTAGE_CHANGE",
+        "last_trade_timestamp": "SYNTHETIC_CURRENT_TIMESTAMP",
+        "source": "synthetic_current_source",
+        "provider_specific_sibling": {"must_survive": True},
+    }
+    observer_avgo = dict(action_avgo)
+    observer_avgo.pop("provider_specific_sibling")
+    quote_payload = {"companies": [action_avgo]}
+    record = {
+        "case_id": "stock_risk_outlook",
+        "framework_meta": {
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "market_quotes",
+                        "action_call_id": "call-current-run",
+                        "data": quote_payload,
+                    }
+                ]
+            },
+            "close_snapshot": {
+                "task": {
+                    "diagnostics": {
+                        "terminal_evidence_projection": {
+                            "items": [
+                                {
+                                    "reference_id": "ref-current-run",
+                                    "action_id": "market_quotes",
+                                    "body_preview": {"companies": [observer_avgo]},
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        },
+        "candidate": {
+            "framework_evidence": {
+                "action_readbacks": [
+                    {
+                        "reference_id": "ref-current-run",
+                        "action_id": "market_quotes",
+                        "preview": json.dumps(quote_payload),
+                    }
+                ]
+            }
+        },
+    }
+
+    facts = runner._dynamic_quote_projection_facts(record)
+
+    assert facts["action_result_present"] is True
+    assert facts["observer_projection_present"] is True
+    assert facts["runner_cold_readback_present"] is True
+    assert facts["observer_matches_action_result"] is False
+    assert facts["runner_cold_readback_matches_action_result"] is True
+    assert facts["complete_object_equal_across_chain"] is False
+
+
 def test_real_sample_runner_prioritizes_action_readbacks_before_ref_limit():
     runner = _load_real_samples_runner()
     old_limit = os.environ.get("REAL_SAMPLE_JUDGE_MAX_EVIDENCE_ITEMS")
