@@ -16,6 +16,7 @@
 import asyncio
 import contextlib
 import copy
+import time
 import uuid
 from collections.abc import Mapping
 from typing import Any, Literal, TYPE_CHECKING, Sequence, cast
@@ -23,7 +24,12 @@ from typing import Any, Literal, TYPE_CHECKING, Sequence, cast
 from agently.core.runtime.RuntimeContext import resolve_parent_run_context
 from agently.types.data import EMPTY, SerializableMapping
 from agently.types.trigger_flow import RUNTIME_STREAM_STOP
-from .Control import TRIGGER_FLOW_STATUS_WAITING, TriggerFlowPauseSignal
+from .Control import (
+    TRIGGER_FLOW_STATUS_CANCELLED,
+    TRIGGER_FLOW_STATUS_FAILED,
+    TRIGGER_FLOW_STATUS_WAITING,
+    TriggerFlowPauseSignal,
+)
 from .Execution import TriggerFlowExecution
 from .SubFlowBindings import (
     _CAPTURE_SOURCE_SCOPES,
@@ -367,6 +373,128 @@ class TriggerFlowBlueprintSubFlow:
     def make_frame_id(self, parent_execution: TriggerFlowExecution, operator_id: str):
         return f"{ parent_execution.id }:{ operator_id }:{ uuid.uuid4().hex }"
 
+    def build_active_frame(
+        self,
+        *,
+        parent_execution: TriggerFlowExecution,
+        child_execution: TriggerFlowExecution,
+        child_flow_name: str,
+        operator: dict[str, Any],
+        data: Any,
+        resource_bindings: Mapping[str, str],
+    ):
+        now = time.time()
+        return {
+            "frame_id": self.make_frame_id(parent_execution, operator["id"]),
+            "status": "running",
+            "parent_execution_id": parent_execution.id,
+            "parent_operator_id": operator["id"],
+            "child_execution_id": child_execution.id,
+            "child_flow_name": child_flow_name,
+            "created_at": now,
+            "started_at": now,
+            "parent_signal": parent_execution._serialize_signal(data.signal),
+            "parent_layer_marks": data._layer_marks.copy(),
+            "parent_value": _clone_sub_flow_value(data.value),
+            "projected_interrupts": {},
+            "resource_bindings": dict(resource_bindings),
+            "resource_keys": sorted(str(key) for key in child_execution.get_runtime_resources().keys()),
+        }
+
+    def error_summary(self, error: BaseException):
+        return {
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+
+    async def finalize_cancelled_frame(
+        self,
+        *,
+        parent_execution: TriggerFlowExecution,
+        child_execution: TriggerFlowExecution,
+        frame_id: str,
+        reason: str,
+    ):
+        child_execution._set_status(TRIGGER_FLOW_STATUS_CANCELLED)
+        cleanup_error: BaseException | None = None
+        try:
+            await child_execution.async_close(
+                reason="sub_flow_cancelled",
+                timeout=0,
+                pending_interrupts="cancel",
+            )
+        except BaseException as error:
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            cleanup_error = error
+
+        transitioned = False
+        async with parent_execution._sub_flow_control_lock:
+            stored_frame = parent_execution._get_sub_flow_frames().get(frame_id)
+            if not isinstance(stored_frame, dict):
+                return None
+            if stored_frame.get("status") in {"completed", "failed"}:
+                return copy.deepcopy(stored_frame)
+            frame = copy.deepcopy(stored_frame)
+            if frame.get("status") != "cancelled":
+                transitioned = True
+            frame["status"] = "cancelled"
+            frame["cancel_reason"] = str(reason)
+            frame.setdefault("cancel_requested_at", time.time())
+            frame["cancelled_at"] = time.time()
+            frame["child_saved_state"] = child_execution.save()
+            if cleanup_error is not None:
+                frame["cleanup_error"] = self.error_summary(cleanup_error)
+            parent_execution._set_sub_flow_frame(frame_id, frame)
+
+        if transitioned:
+            await parent_execution._emit_runtime_event(
+                "triggerflow.sub_flow_cancelled",
+                level="WARNING",
+                message=(
+                    f"TriggerFlow execution '{ parent_execution.id }' cancelled "
+                    f"sub-flow frame '{ frame_id }'."
+                ),
+                payload=parent_execution._sub_flow_event_payload(frame, reason=str(reason)),
+            )
+        return frame
+
+    async def fail_frame(
+        self,
+        *,
+        parent_execution: TriggerFlowExecution,
+        child_execution: TriggerFlowExecution,
+        frame_id: str,
+        error: BaseException,
+    ):
+        child_execution._set_status(TRIGGER_FLOW_STATUS_FAILED)
+        async with parent_execution._sub_flow_control_lock:
+            stored_frame = parent_execution._get_sub_flow_frames().get(frame_id)
+            if not isinstance(stored_frame, dict):
+                return None
+            if stored_frame.get("status") in {"cancel_requested", "cancelled"}:
+                return copy.deepcopy(stored_frame)
+            frame = copy.deepcopy(stored_frame)
+            frame["status"] = "failed"
+            frame["failed_at"] = time.time()
+            frame["error"] = self.error_summary(error)
+            frame["child_saved_state"] = child_execution.save()
+            parent_execution._set_sub_flow_frame(frame_id, frame)
+        await parent_execution._emit_runtime_event(
+            "triggerflow.sub_flow_failed",
+            level="ERROR",
+            message=(
+                f"TriggerFlow execution '{ parent_execution.id }' sub-flow frame "
+                f"'{ frame_id }' failed."
+            ),
+            payload=parent_execution._sub_flow_event_payload(
+                frame,
+                error=self.error_summary(error),
+            ),
+            error=error,
+        )
+        return frame
+
     def build_parent_data(
         self,
         parent_execution: TriggerFlowExecution,
@@ -464,24 +592,55 @@ class TriggerFlowBlueprintSubFlow:
     ):
         result = await child_execution.async_close(reason="sub_flow_completed")
         data = self.build_parent_data(parent_execution, frame, operator)
-        if normalized_write_back is None:
-            if isinstance(result, dict) and "$final_result" in result:
-                data.value = result["$final_result"]
+        frame_id = str(frame["frame_id"])
+        cancellation_reason: str | None = None
+        async with parent_execution._sub_flow_control_lock:
+            stored_frame = parent_execution._get_sub_flow_frames().get(frame_id)
+            if not isinstance(stored_frame, dict):
+                raise RuntimeError(
+                    f"TriggerFlow sub flow frame '{ frame_id }' disappeared before completion."
+                )
+            if stored_frame.get("status") in {"cancel_requested", "cancelled"}:
+                cancellation_reason = str(stored_frame.get("cancel_reason") or "cancelled")
             else:
-                data.value = result
-        else:
-            write_back_target = _SubFlowWriteBackTarget(data.value)
-            self.apply_bindings(
-                write_back_bindings,
-                source=_SubFlowWriteBackSource(result),
-                target=write_back_target,
-            )
-            write_back_target.apply(data)
+                if normalized_write_back is None:
+                    if isinstance(result, dict) and "$final_result" in result:
+                        data.value = result["$final_result"]
+                    else:
+                        data.value = result
+                else:
+                    write_back_target = _SubFlowWriteBackTarget(data.value)
+                    self.apply_bindings(
+                        write_back_bindings,
+                        source=_SubFlowWriteBackSource(result),
+                        target=write_back_target,
+                    )
+                    write_back_target.apply(data)
 
-        frame["status"] = "completed"
-        frame["child_saved_state"] = child_execution.save()
-        frame["result"] = parent_execution._to_serializable_value(result)
-        parent_execution._set_sub_flow_frame(frame["frame_id"], frame)
+                frame = copy.deepcopy(stored_frame)
+                frame["status"] = "completed"
+                frame["completed_at"] = time.time()
+                frame["child_saved_state"] = child_execution.save()
+                frame["result"] = parent_execution._to_serializable_value(result)
+                parent_execution._set_sub_flow_frame(frame_id, frame)
+
+        if cancellation_reason is not None:
+            await self.finalize_cancelled_frame(
+                parent_execution=parent_execution,
+                child_execution=child_execution,
+                frame_id=frame_id,
+                reason=cancellation_reason,
+            )
+            return None
+
+        await parent_execution._emit_runtime_event(
+            "triggerflow.sub_flow_completed",
+            message=(
+                f"TriggerFlow execution '{ parent_execution.id }' completed "
+                f"sub-flow frame '{ frame_id }'."
+            ),
+            payload=parent_execution._sub_flow_event_payload(frame),
+        )
 
         emit_signal = operator["emit_signals"][0]
         await data.async_emit(
@@ -573,6 +732,24 @@ class TriggerFlowBlueprintSubFlow:
                     resource_bindings,
                 )
 
+            frame = self.build_active_frame(
+                parent_execution=data.execution,
+                child_execution=sub_flow_execution,
+                child_flow_name=isolated_sub_flow.name,
+                operator=operator,
+                data=data,
+                resource_bindings=resource_bindings,
+            )
+            frame_id = str(frame["frame_id"])
+            control_task = asyncio.current_task()
+            if control_task is None:
+                raise RuntimeError("TriggerFlow sub flow control requires a running asyncio task.")
+            data.execution._register_live_sub_flow(
+                frame_id,
+                sub_flow_execution,
+                control_task,
+                frame,
+            )
             stream_bridge_task = asyncio.create_task(
                 self.bridge_runtime_stream(
                     sub_flow_execution,
@@ -580,24 +757,16 @@ class TriggerFlowBlueprintSubFlow:
                 )
             )
             try:
+                await data.execution._emit_runtime_event(
+                    "triggerflow.sub_flow_started",
+                    message=(
+                        f"TriggerFlow execution '{ data.execution.id }' started "
+                        f"sub-flow frame '{ frame_id }'."
+                    ),
+                    payload=data.execution._sub_flow_event_payload(frame),
+                )
                 await sub_flow_execution._async_run_start(capture_target.build_input())
                 if sub_flow_execution.is_waiting():
-                    frame_id = self.make_frame_id(data.execution, operator["id"])
-                    frame = {
-                        "frame_id": frame_id,
-                        "status": "waiting",
-                        "parent_execution_id": data.execution.id,
-                        "parent_operator_id": operator["id"],
-                        "child_execution_id": sub_flow_execution.id,
-                        "child_flow_name": isolated_sub_flow.name,
-                        "parent_signal": data.execution._serialize_signal(data.signal),
-                        "parent_layer_marks": data._layer_marks.copy(),
-                        "parent_value": _clone_sub_flow_value(data.value),
-                        "child_saved_state": sub_flow_execution.save(),
-                        "projected_interrupts": {},
-                        "resource_bindings": dict(resource_bindings),
-                        "resource_keys": sorted(str(key) for key in sub_flow_execution.get_runtime_resources().keys()),
-                    }
                     projected_root_ids = await self.project_child_interrupts(
                         parent_execution=data.execution,
                         child_execution=sub_flow_execution,
@@ -617,25 +786,55 @@ class TriggerFlowBlueprintSubFlow:
                 result = await self.complete_frame(
                     parent_execution=data.execution,
                     child_execution=sub_flow_execution,
-                    frame={
-                        "frame_id": self.make_frame_id(data.execution, operator["id"]),
-                        "status": "running",
-                        "parent_execution_id": data.execution.id,
-                        "parent_operator_id": operator["id"],
-                        "child_execution_id": sub_flow_execution.id,
-                        "child_flow_name": isolated_sub_flow.name,
-                        "parent_signal": data.execution._serialize_signal(data.signal),
-                        "parent_layer_marks": data._layer_marks.copy(),
-                        "parent_value": _clone_sub_flow_value(data.value),
-                        "projected_interrupts": {},
-                        "resource_bindings": dict(resource_bindings),
-                        "resource_keys": sorted(str(key) for key in sub_flow_execution.get_runtime_resources().keys()),
-                    },
+                    frame=frame,
                     operator=operator,
                     normalized_write_back=normalized_write_back,
                     write_back_bindings=write_back_bindings,
                 )
+            except asyncio.CancelledError:
+                stored_frame = data.execution._get_sub_flow_frames().get(frame_id, frame)
+                cancel_requested = (
+                    isinstance(stored_frame, dict)
+                    and stored_frame.get("status") in {"cancel_requested", "cancelled"}
+                )
+                reason = (
+                    str(stored_frame.get("cancel_reason") or "cancelled")
+                    if isinstance(stored_frame, dict)
+                    else "cancelled"
+                )
+                await self.finalize_cancelled_frame(
+                    parent_execution=data.execution,
+                    child_execution=sub_flow_execution,
+                    frame_id=frame_id,
+                    reason=reason if cancel_requested else "parent_control_task_cancelled",
+                )
+                if cancel_requested:
+                    return None
+                raise
+            except BaseException as error:
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    raise
+                stored_frame = data.execution._get_sub_flow_frames().get(frame_id, frame)
+                if (
+                    isinstance(stored_frame, dict)
+                    and stored_frame.get("status") in {"cancel_requested", "cancelled"}
+                ):
+                    await self.finalize_cancelled_frame(
+                        parent_execution=data.execution,
+                        child_execution=sub_flow_execution,
+                        frame_id=frame_id,
+                        reason=str(stored_frame.get("cancel_reason") or "cancelled"),
+                    )
+                    return None
+                await self.fail_frame(
+                    parent_execution=data.execution,
+                    child_execution=sub_flow_execution,
+                    frame_id=frame_id,
+                    error=error,
+                )
+                raise
             finally:
+                data.execution._unregister_live_sub_flow(frame_id, sub_flow_execution)
                 stream_bridge_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stream_bridge_task
@@ -686,6 +885,17 @@ class TriggerFlowBlueprintSubFlow:
                 f"'{ root_interrupt_id }' is not mapped to a child interrupt."
             )
 
+        frame["status"] = "running"
+        frame["resumed_at"] = time.time()
+        control_task = asyncio.current_task()
+        if control_task is None:
+            raise RuntimeError("TriggerFlow sub flow resume control requires a running asyncio task.")
+        parent_execution._register_live_sub_flow(
+            frame_id,
+            child_execution,
+            control_task,
+            frame,
+        )
         stream_bridge_task = asyncio.create_task(
             self.bridge_runtime_stream(
                 child_execution,
@@ -714,7 +924,50 @@ class TriggerFlowBlueprintSubFlow:
                 normalized_write_back=normalized_write_back,
                 write_back_bindings=write_back_bindings,
             )
+        except asyncio.CancelledError:
+            stored_frame = parent_execution._get_sub_flow_frames().get(frame_id, frame)
+            cancel_requested = (
+                isinstance(stored_frame, dict)
+                and stored_frame.get("status") in {"cancel_requested", "cancelled"}
+            )
+            reason = (
+                str(stored_frame.get("cancel_reason") or "cancelled")
+                if isinstance(stored_frame, dict)
+                else "cancelled"
+            )
+            await self.finalize_cancelled_frame(
+                parent_execution=parent_execution,
+                child_execution=child_execution,
+                frame_id=frame_id,
+                reason=reason if cancel_requested else "parent_control_task_cancelled",
+            )
+            if cancel_requested:
+                return None
+            raise
+        except BaseException as error:
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            stored_frame = parent_execution._get_sub_flow_frames().get(frame_id, frame)
+            if (
+                isinstance(stored_frame, dict)
+                and stored_frame.get("status") in {"cancel_requested", "cancelled"}
+            ):
+                await self.finalize_cancelled_frame(
+                    parent_execution=parent_execution,
+                    child_execution=child_execution,
+                    frame_id=frame_id,
+                    reason=str(stored_frame.get("cancel_reason") or "cancelled"),
+                )
+                return None
+            await self.fail_frame(
+                parent_execution=parent_execution,
+                child_execution=child_execution,
+                frame_id=frame_id,
+                error=error,
+            )
+            raise
         finally:
+            parent_execution._unregister_live_sub_flow(frame_id, child_execution)
             stream_bridge_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await stream_bridge_task
