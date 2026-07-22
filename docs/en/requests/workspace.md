@@ -63,6 +63,15 @@ agent.enable_task_workspace_file_actions(
 )
 ```
 
+File-format extension stays on the same owner. Register a
+`TaskWorkspaceFileIOHandler` directly on the bound `TaskWorkspace`; there is no
+separate Workspace manager or factory whose registry can drift from the file
+boundary:
+
+```python
+task_workspace.register_file_io_handler(custom_file_handler)
+```
+
 TaskWorkspace produces stable locator and content-version facts for host-side
 readback. A short application citation alias such as `[[ref:ref_1]]` is a
 request-local display alias, not durable identity. Host code validates it and

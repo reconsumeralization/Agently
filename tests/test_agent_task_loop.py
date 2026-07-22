@@ -605,6 +605,13 @@ def test_cumulative_evidence_prefers_complete_prior_body_for_same_required_ident
         success_criteria=["Every ticker remains verifier-visible."],
         execution="taskboard",
     )
+    expected_avgo = {
+        "ticker": "AVGO",
+        "last_sale_price": "SYNTHETIC_PRIOR_AVGO_PRICE",
+        "net_change": "SYNTHETIC_PRIOR_AVGO_NET_CHANGE",
+        "percentage_change": "SYNTHETIC_PRIOR_AVGO_PERCENTAGE_CHANGE",
+        "diagnostic": "bounded-fallback-detail-" * 12,
+    }
     companies = [
         {
             "ticker": ticker,
@@ -614,9 +621,14 @@ def test_cumulative_evidence_prefers_complete_prior_body_for_same_required_ident
             "diagnostic": "bounded-fallback-detail-" * 12,
         }
         for ticker, price, change, percent in (
-            ("NVDA", "$206.42", "-0.87", "-0.42%"),
-            ("AMD", "$544.71", "+0.28", "+0.05%"),
-            ("AVGO", "$384.80", "-1.70", "-0.44%"),
+            ("NVDA", "SYNTHETIC_PRIOR_NVDA_PRICE", "SYNTHETIC_PRIOR_NVDA_CHANGE", "SYNTHETIC_PRIOR_NVDA_PERCENT"),
+            ("AMD", "SYNTHETIC_PRIOR_AMD_PRICE", "SYNTHETIC_PRIOR_AMD_CHANGE", "SYNTHETIC_PRIOR_AMD_PERCENT"),
+            (
+                "AVGO",
+                expected_avgo["last_sale_price"],
+                expected_avgo["net_change"],
+                expected_avgo["percentage_change"],
+            ),
         )
     ]
     body = json.dumps({"companies": companies}, ensure_ascii=False)
@@ -663,9 +675,7 @@ def test_cumulative_evidence_prefers_complete_prior_body_for_same_required_ident
     avgo = next(
         item for item in body_preview["companies"] if item["ticker"] == "AVGO"
     )
-    assert avgo["last_sale_price"] == "$384.80"
-    assert avgo["net_change"] == "-1.70"
-    assert avgo["percentage_change"] == "-0.44%"
+    assert avgo == expected_avgo
 
 
 def test_terminal_projection_rehydrates_lossy_structured_body_from_canonical_reference():
@@ -676,6 +686,13 @@ def test_terminal_projection_rehydrates_lossy_structured_body_from_canonical_ref
         success_criteria=["All structured siblings remain visible."],
         execution="taskboard",
     )
+    expected_avgo = {
+        "ticker": "AVGO",
+        "last_sale_price": "SYNTHETIC_TERMINAL_AVGO_PRICE",
+        "net_change": "SYNTHETIC_TERMINAL_AVGO_NET_CHANGE",
+        "percentage_change": "SYNTHETIC_TERMINAL_AVGO_PERCENTAGE_CHANGE",
+        "diagnostic": "provider-fallback-detail-" * 12,
+    }
     body = json.dumps(
         {
             "companies": [
@@ -687,9 +704,14 @@ def test_terminal_projection_rehydrates_lossy_structured_body_from_canonical_ref
                     "diagnostic": "provider-fallback-detail-" * 12,
                 }
                 for ticker, price, change, percent in (
-                    ("NVDA", "$206.375", "-0.915", "-0.44%"),
-                    ("AMD", "$544.37", "-0.06", "-0.01%"),
-                    ("AVGO", "$384.80", "-1.70", "-0.44%"),
+                    ("NVDA", "SYNTHETIC_TERMINAL_NVDA_PRICE", "SYNTHETIC_TERMINAL_NVDA_CHANGE", "SYNTHETIC_TERMINAL_NVDA_PERCENT"),
+                    ("AMD", "SYNTHETIC_TERMINAL_AMD_PRICE", "SYNTHETIC_TERMINAL_AMD_CHANGE", "SYNTHETIC_TERMINAL_AMD_PERCENT"),
+                    (
+                        "AVGO",
+                        expected_avgo["last_sale_price"],
+                        expected_avgo["net_change"],
+                        expected_avgo["percentage_change"],
+                    ),
                 )
             ]
         },
@@ -719,9 +741,7 @@ def test_terminal_projection_rehydrates_lossy_structured_body_from_canonical_ref
     avgo = next(
         item for item in body_preview["companies"] if item["ticker"] == "AVGO"
     )
-    assert avgo["last_sale_price"] == "$384.80"
-    assert avgo["net_change"] == "-1.70"
-    assert avgo["percentage_change"] == "-0.44%"
+    assert avgo == expected_avgo
 
 
 def test_terminal_evidence_projection_for_observers_keeps_only_verifier_used_refs():

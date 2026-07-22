@@ -121,7 +121,11 @@ Key method:
 - `create_runtime_emitter(source)` delegates to `agently.base.event_center`.
 
 ### PythonSandbox
-Purpose: execute small snippets safely with restricted builtins and whitelisted return types.
+Purpose: compatibility utility for evaluating small expressions with restricted builtins and whitelisted return types.
+
+This is not an OS/process isolation boundary and is not the owner for unified
+code execution. Use ActionRuntime code execution with an isolation-capable
+ExecutionResource provider for untrusted Python, Node.js, Go, or C++ code.
 
 Key behaviors:
 - `run(code)` executes in a sandbox; raises if a return type is not in `allowed_return_types`.

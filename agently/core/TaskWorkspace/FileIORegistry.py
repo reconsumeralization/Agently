@@ -25,41 +25,28 @@ from .FileIO import (
     unsupported_read_result,
     unsupported_write_result,
 )
-from .TaskWorkspace import TaskWorkspace
 
 
-class TaskWorkspaceManager:
-    """Factory and format-handler registry for the explicit task file boundary."""
+class _TaskWorkspaceFileIORegistry:
+    """TaskWorkspace-internal dispatch for pluggable file representations."""
 
     def __init__(self) -> None:
-        self._file_io_handlers: dict[str, TaskWorkspaceFileIOHandler] = {}
-        self.register_file_io_handler(DefaultTextTaskWorkspaceFileIOHandler())
-        self.register_file_io_handler(PdfTaskWorkspaceFileIOHandler())
-        self.register_file_io_handler(OfficeTaskWorkspaceFileIOHandler())
-        self.register_file_io_handler(ImageVLMTaskWorkspaceFileIOHandler())
-        self.register_file_io_handler(HtmlExportTaskWorkspaceFileIOHandler())
+        self._handlers: dict[str, TaskWorkspaceFileIOHandler] = {}
+        for handler in (
+            DefaultTextTaskWorkspaceFileIOHandler(),
+            PdfTaskWorkspaceFileIOHandler(),
+            OfficeTaskWorkspaceFileIOHandler(),
+            ImageVLMTaskWorkspaceFileIOHandler(),
+            HtmlExportTaskWorkspaceFileIOHandler(),
+        ):
+            self.register(handler)
 
-    def create(
-        self,
-        root: str | Path,
-        *,
-        create: bool = True,
-        mode: str = "read_only",
-        execution_id: str | None = None,
-    ) -> TaskWorkspace:
-        return TaskWorkspace(
-            root,
-            create=create,
-            mode=mode,
-            execution_id=execution_id,
-        )
-
-    def register_file_io_handler(
+    def register(
         self,
         handler: TaskWorkspaceFileIOHandler,
         *,
         replace: bool = False,
-    ) -> "TaskWorkspaceManager":
+    ) -> None:
         name = str(getattr(handler, "name", "")).strip()
         if not name:
             raise ValueError("TaskWorkspace file IO handler name must be non-empty.")
@@ -68,22 +55,26 @@ class TaskWorkspaceManager:
                 raise TypeError(
                     f"TaskWorkspace file IO handler must provide {method_name}(...)."
                 )
-        if name in self._file_io_handlers and not replace:
+        if name in self._handlers and not replace:
             raise ValueError(f"TaskWorkspace file IO handler is already registered: {name}")
-        self._file_io_handlers[name] = handler
-        return self
+        self._handlers[name] = handler
 
-    def unregister_file_io_handler(self, handler_id: str) -> "TaskWorkspaceManager":
-        self._file_io_handlers.pop(str(handler_id).strip(), None)
-        return self
+    def unregister(self, handler_id: str) -> None:
+        self._handlers.pop(str(handler_id).strip(), None)
 
-    def list_file_io_handlers(self) -> list[str]:
-        return sorted(self._file_io_handlers)
+    def list(self) -> list[str]:
+        return sorted(self._handlers)
 
-    def inspect_file_path(self, path: Path, *, relative_path: str) -> TaskWorkspaceFileInfo:
+    def clone(self) -> "_TaskWorkspaceFileIORegistry":
+        cloned = _TaskWorkspaceFileIORegistry()
+        cloned._handlers = dict(self._handlers)
+        return cloned
+
+    @staticmethod
+    def inspect(path: Path, *, relative_path: str) -> TaskWorkspaceFileInfo:
         return inspect_task_workspace_file(path, relative_path=relative_path)
 
-    def _select_file_io_handler(
+    def _select(
         self,
         *,
         operation: TaskWorkspaceFileOperation,
@@ -92,7 +83,7 @@ class TaskWorkspaceManager:
         export_kind: str | None = None,
     ) -> TaskWorkspaceFileIOHandler | None:
         if handler is not None:
-            selected = self._file_io_handlers.get(str(handler).strip())
+            selected = self._handlers.get(str(handler).strip())
             if selected is None:
                 raise KeyError(f"TaskWorkspace file IO handler is not registered: {handler}")
             return (
@@ -105,7 +96,7 @@ class TaskWorkspaceManager:
                 else None
             )
         for candidate in sorted(
-            self._file_io_handlers.values(),
+            self._handlers.values(),
             key=lambda item: (
                 int(getattr(item, "priority", 1000)),
                 str(getattr(item, "name", "")),
@@ -119,7 +110,7 @@ class TaskWorkspaceManager:
                 return candidate
         return None
 
-    async def read_file_path(
+    async def read(
         self,
         path: Path,
         *,
@@ -129,12 +120,8 @@ class TaskWorkspaceManager:
         handler: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> TaskWorkspaceReadResult:
-        file_info = self.inspect_file_path(path, relative_path=relative_path)
-        selected = self._select_file_io_handler(
-            operation="read",
-            file_info=file_info,
-            handler=handler,
-        )
+        file_info = self.inspect(path, relative_path=relative_path)
+        selected = self._select(operation="read", file_info=file_info, handler=handler)
         if selected is None:
             return unsupported_read_result(
                 file_info=file_info,
@@ -150,7 +137,7 @@ class TaskWorkspaceManager:
             options=options,
         )
 
-    async def write_file_path(
+    async def write(
         self,
         path: Path,
         *,
@@ -160,12 +147,8 @@ class TaskWorkspaceManager:
         handler: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> TaskWorkspaceWriteResult:
-        file_info = self.inspect_file_path(path, relative_path=relative_path)
-        selected = self._select_file_io_handler(
-            operation="write",
-            file_info=file_info,
-            handler=handler,
-        )
+        file_info = self.inspect(path, relative_path=relative_path)
+        selected = self._select(operation="write", file_info=file_info, handler=handler)
         if selected is None:
             return unsupported_write_result(
                 file_info=file_info,
@@ -181,7 +164,7 @@ class TaskWorkspaceManager:
             options=options,
         )
 
-    async def export_file_path(
+    async def export(
         self,
         source_path: Path,
         output_path: Path,
@@ -192,15 +175,9 @@ class TaskWorkspaceManager:
         handler: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> TaskWorkspaceExportResult:
-        source_info = self.inspect_file_path(
-            source_path,
-            relative_path=source_relative_path,
-        )
-        output_info = self.inspect_file_path(
-            output_path,
-            relative_path=output_relative_path,
-        )
-        selected = self._select_file_io_handler(
+        source_info = self.inspect(source_path, relative_path=source_relative_path)
+        output_info = self.inspect(output_path, relative_path=output_relative_path)
+        selected = self._select(
             operation="export",
             file_info=source_info,
             handler=handler,
@@ -228,4 +205,4 @@ class TaskWorkspaceManager:
         )
 
 
-__all__ = ["TaskWorkspaceManager"]
+__all__: list[str] = []

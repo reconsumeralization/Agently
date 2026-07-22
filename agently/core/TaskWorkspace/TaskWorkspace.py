@@ -37,8 +37,10 @@ from agently.types.data import (
     TaskWorkspaceExecutionManifest,
     TaskWorkspaceExecutionManifestFile,
 )
+from agently.types.plugins import TaskWorkspaceFileIOHandler
 
 from .Errors import TaskWorkspacePolicyError
+from .FileIORegistry import _TaskWorkspaceFileIORegistry
 from .Identity import TaskWorkspaceIdentityCatalog
 
 
@@ -64,9 +66,7 @@ class TaskWorkspace:
             raise FileNotFoundError(str(self.root))
         self.mode = mode
         self.execution_id = str(execution_id or f"task_{uuid.uuid4().hex}")
-        from .Manager import TaskWorkspaceManager
-
-        self.manager = TaskWorkspaceManager()
+        self._file_io_registry = _TaskWorkspaceFileIORegistry()
         self._identity_catalog = TaskWorkspaceIdentityCatalog(
             self.root / ".agently",
             task_workspace_id=self.task_workspace_id,
@@ -83,6 +83,21 @@ class TaskWorkspace:
     @property
     def fallback_root(self) -> Path:
         return self.root / ".agently" / "files" / self.execution_id
+
+    def _derive(
+        self,
+        *,
+        mode: str | None = None,
+        execution_id: str | None = None,
+    ) -> "TaskWorkspace":
+        derived = TaskWorkspace(
+            self.root,
+            mode=mode or self.mode,
+            create=True,
+            execution_id=execution_id or self.execution_id,
+        )
+        derived._file_io_registry = self._file_io_registry.clone()
+        return derived
 
     def issue_execution_access(
         self,
@@ -144,11 +159,29 @@ class TaskWorkspace:
     def inspect_file(self, path: str | os.PathLike[str]) -> dict[str, object]:
         target = self.resolve_file_path(path)
         return dict(
-            self.manager.inspect_file_path(
+            self._file_io_registry.inspect(
                 target,
                 relative_path=self._relative(target),
             )
         )
+
+    def register_file_io_handler(
+        self,
+        handler: TaskWorkspaceFileIOHandler,
+        *,
+        replace: bool = False,
+    ) -> "TaskWorkspace":
+        """Extend this TaskWorkspace's file representation boundary."""
+
+        self._file_io_registry.register(handler, replace=replace)
+        return self
+
+    def unregister_file_io_handler(self, handler_id: str) -> "TaskWorkspace":
+        self._file_io_registry.unregister(handler_id)
+        return self
+
+    def list_file_io_handlers(self) -> list[str]:
+        return self._file_io_registry.list()
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -270,7 +303,7 @@ class TaskWorkspace:
         target = self.resolve_file_path(path)
         if not target.is_file():
             raise FileNotFoundError(f"TaskWorkspace file not found: {path}")
-        result = await self.manager.read_file_path(
+        result = await self._file_io_registry.read(
             target,
             relative_path=self._relative(target),
             max_bytes=max_bytes,
@@ -656,11 +689,25 @@ class TaskWorkspace:
         export_kind: str,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        _ = options
-        if export_kind not in {"copy", "raw"}:
-            raise ValueError(f"TaskWorkspace export kind is unsupported: {export_kind}")
-        result = await self.copy_from(self.resolve_path(source_path), output_path)
-        return result.to_dict()
+        source = self.resolve_file_path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"TaskWorkspace source file not found: {source_path}")
+        if export_kind in {"copy", "raw"}:
+            result = await self.copy_from(source, output_path)
+            return result.to_dict()
+        requested_path = Path(output_path).as_posix()
+        requested = self.resolve_path(output_path)
+        target, _fallback = self._write_target(requested, requested_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        result = await self._file_io_registry.export(
+            source,
+            target,
+            source_relative_path=self._relative(source),
+            output_relative_path=self._relative(target),
+            export_kind=export_kind,
+            options=options,
+        )
+        return dict(result)
 
     async def atomic_promote_file(
         self,

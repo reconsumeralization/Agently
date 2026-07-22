@@ -914,6 +914,77 @@ def test_framework_action_event_count_includes_nested_agent_task_actions():
 
     assert runner.count_framework_action_events(stream_summary) == 16
 
+
+def test_block_carrier_stock_audit_joins_same_run_dynamic_quote_across_projection_chain():
+    runner = _load_block_carrier_runner()
+    dynamic_avgo = {
+        "ticker": "AVGO",
+        "last_sale_price": "SYNTHETIC_LIVE_PRICE",
+        "net_change": "SYNTHETIC_LIVE_NET_CHANGE",
+        "percentage_change": "SYNTHETIC_LIVE_PERCENTAGE_CHANGE",
+        "last_trade_timestamp": "SYNTHETIC_LIVE_TIMESTAMP",
+        "source": "synthetic_live_source",
+        "provider_specific_sibling": {"preserved": True},
+    }
+    quote_payload = {"companies": [{"ticker": "NVDA"}, dynamic_avgo]}
+    record = {
+        "case_id": "stock_risk_outlook",
+        "framework_meta": {
+            "logs": {
+                "action_logs": [
+                    {
+                        "action_id": "market_quotes",
+                        "action_call_id": "call-current-run",
+                        "data": quote_payload,
+                    }
+                ]
+            },
+            "close_snapshot": {
+                "task": {
+                    "diagnostics": {
+                        "terminal_evidence_projection": {
+                            "items": [
+                                {
+                                    "reference_id": "ref-current-run",
+                                    "action_id": "market_quotes",
+                                    "body_preview": quote_payload,
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        },
+        "candidate": {
+            "framework_evidence": {
+                "action_readbacks": [
+                    {
+                        "reference_id": "ref-current-run",
+                        "action_id": "market_quotes",
+                        "preview": json.dumps(quote_payload),
+                    }
+                ]
+            }
+        },
+    }
+
+    facts = runner._dynamic_quote_projection_facts(record)
+
+    assert facts["baseline"] == "same_run_action_result"
+    assert facts["uses_static_market_oracle"] is False
+    assert facts["observed_fields"] == {
+        key: dynamic_avgo[key]
+        for key in (
+            "last_sale_price",
+            "net_change",
+            "percentage_change",
+            "last_trade_timestamp",
+            "source",
+        )
+    }
+    assert facts["required_fields_present"] is True
+    assert facts["complete_object_equal_across_chain"] is True
+
 def test_real_sample_runner_prioritizes_action_readbacks_before_ref_limit():
     runner = _load_real_samples_runner()
     old_limit = os.environ.get("REAL_SAMPLE_JUDGE_MAX_EVIDENCE_ITEMS")

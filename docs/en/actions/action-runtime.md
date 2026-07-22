@@ -470,6 +470,12 @@ extra.tool_logs  # equivalent to extra.action_logs at the old surface
 
 These remain valid public mounting surfaces. They map onto the new action runtime internally — they don't imply a `ToolManager` implementation. Migrate to the action surface when convenient; nothing breaks immediately.
 
+The historical `use_sandbox(...)`, `bash_sandbox`, and `PythonSandbox` names are
+compatibility surfaces, not the isolation owner for unified code execution.
+New Python/Node.js/Go/C++ execution declares isolation capabilities on an
+`ExecutionResource` provider; `trusted_local` remains an explicit unsafe
+fallback and cannot satisfy `isolation=required`.
+
 ## Planning model key
 
 Action planning is a model-owned step. When an Agent uses `model_pool`, set

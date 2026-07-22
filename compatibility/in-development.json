@@ -145,7 +145,7 @@
     "task_workspace": {
       "surface": [
         "TaskWorkspace",
-        "TaskWorkspaceManager",
+        "TaskWorkspace.register_file_io_handler",
         "Agent.use_task_workspace",
         "Agent.enable_task_workspace_file_actions"
       ],

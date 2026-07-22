@@ -58,6 +58,14 @@ agent.enable_task_workspace_file_actions(
 )
 ```
 
+文件格式扩展仍由同一个 owner 承担。把 `TaskWorkspaceFileIOHandler` 直接注册到
+已绑定的 `TaskWorkspace`；不存在另一套可能与实际文件边界发生 registry 漂移的
+Workspace manager 或 factory：
+
+```python
+task_workspace.register_file_io_handler(custom_file_handler)
+```
+
 TaskWorkspace 为宿主 readback 提供稳定的 locator 与 content-version facts。
 `[[ref:ref_1]]` 这类短引用只是请求内显示别名，不是持久身份；宿主必须校验
 它，再映射回 canonical reference 身份。

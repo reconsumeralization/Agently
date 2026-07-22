@@ -180,10 +180,7 @@ class AgentExecution:
             )
         agent_task_workspace = getattr(self.agent, "task_workspace", None)
         if isinstance(agent_task_workspace, TaskWorkspace):
-            self.task_workspace = TaskWorkspace(
-                agent_task_workspace.root,
-                mode=agent_task_workspace.mode,
-                create=True,
+            self.task_workspace = agent_task_workspace._derive(
                 execution_id=self.id,
             )
         else:

@@ -406,6 +406,11 @@ extra.tool_logs  # 旧入口的 extra.action_logs
 
 它们仍是有效的公开挂载入口。内部映射到新 action runtime —— 不意味着 `ToolManager` 实现。方便时迁到 action 入口；什么都不会立刻坏。
 
+历史 `use_sandbox(...)`、`bash_sandbox` 与 `PythonSandbox` 名称属于兼容入口，
+不是统一代码执行的隔离 owner。新的 Python/Node.js/Go/C++ 执行在
+`ExecutionResource` provider 上声明 isolation capabilities；`trusted_local`
+仍是显式不安全 fallback，不能满足 `isolation=required`。
+
 ## 规划模型 key
 
 Action planning 是模型拥有的步骤。如果 Agent 使用 `model_pool`，应把
