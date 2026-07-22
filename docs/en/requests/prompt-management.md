@@ -22,9 +22,10 @@ Agently splits a prompt into named slots. The slots compose, so you can set pers
 
 ## Keep one request contract local
 
-For a one-off request, keep its related information visible in one review path.
-The `input`, authoritative `info`, `instruct`, `output` schema, and result
-consumption should normally form one readable execution block:
+For a one-off Agently fluent request, keep the request expression visible as
+one readable chain: `input`, authoritative `info`, `instruct`, `output` schema,
+and the terminal result call such as `get_result()`, `get_data()`, or
+`async_get_data()`.
 
 ```python
 result = (
@@ -42,17 +43,10 @@ triage = await result.async_get_data()
 ```
 
 A single YAML/JSON Prompt Configure file loaded with explicit `mappings` is the
-same kind of cohesive contract when prompt behavior should evolve outside
-Python. Extract a schema or prompt fragment only when it is reused unchanged,
-owned and versioned by another interface/module, independently reviewed or
-product-edited, or genuinely generated or conditional. Keep that owner directly
-discoverable from the call site.
-
-Moving a one-use schema into a distant constant, tiny getter, request builder,
-or forwarding wrapper solely to shorten the chain adds review-time lookup count
-and depth without adding an owner. That is not useful abstraction. Conversely,
-do not force unrelated responsibilities into one large function or file: group
-information that changes together and serves the same consumer.
+declarative equivalent. Split the chain only when a piece is reused unchanged,
+independently owned/versioned or product-edited, or genuinely generated or
+conditional. Do not move a one-use schema or prompt step elsewhere merely to
+make the Agently request chain look shorter.
 
 ## Strict external interface contracts
 

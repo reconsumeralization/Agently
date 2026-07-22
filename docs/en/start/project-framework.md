@@ -196,19 +196,13 @@ bounds, consumer, visibility, retention, failure behavior, and quality-evidence
 status are explicit. A generic unconsumed `reasoning`, `analysis`, or `thinking`
 field is not a quality mechanism.
 
-## Keep related information local
+## Keep information easy to find
 
-Co-locate information that changes together and serves the same consumer. For
-both people and coding agents, minimize the cross-file lookup count and nesting
-depth required to understand one request, invariant, or side effect. Do not
-move a one-use schema, constant, helper, or class elsewhere merely to make the
-local code shorter or the directory tree look formally layered.
-
-This is not a reason to create a god module. Split unrelated responsibilities,
-and extract a boundary when it owns real reuse, independent versioning/review,
-policy or lifecycle, non-trivial representation translation, or dynamic
-composition. Keep an extracted owner directly discoverable from its call site.
-Readable cohesion is the goal, not maximum inlining.
+Minimize the cross-file lookup count and nesting depth required by people and
+coding agents to understand the current behavior. Do not split one-use schemas,
+constants, helpers, classes, or wrappers into separate locations unless the new
+boundary has actual reuse value or an independently owned/versioned contract.
+Formal separation without either benefit is over-design.
 
 ## Remove unowned wrappers
 
