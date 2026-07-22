@@ -63,6 +63,14 @@ Skills as planner capabilities or accept a `skills` execution shape.
 `skills.revisions.bound` reports revision binding without claiming activation;
 `skills.context.bound` reports actual response-bound context consumption.
 
+The release-pinned Skill check now follows that ownership literally. It uses
+the retained management facade only to configure/install/inspect the canonical
+`SkillLibrary`, resolves the immutable revision through `Agently.skill_library`,
+and binds that exact revision with `agent.require_skills(...)`. The former
+`resolve_skills_plan(...)` / `prompt_bindings` assertion was removed because it
+pinned the deleted SkillsExecutor planning and prompt-injection engine rather
+than supported 4.1.4.2 behavior.
+
 ## AgentTask and durability
 
 AgentTask planning, observations, verification, and replan state stay in memory
