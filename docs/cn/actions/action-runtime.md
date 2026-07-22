@@ -191,6 +191,12 @@ safe shell profile，例如 `pwd`、`ls`、`rg`、`cat`、`git status`、`git di
 返回；某个 stream 超过 `max_output_chars` 时，完整 stream 会写入 TaskWorkspace root 下的
 当前执行的 `.agently/files/<execution-id>/shell-output/` fallback，并在
 action result 中返回引用。
+
+`run_bash.workdir` 默认相对于注入的 workspace root；只有 host 提供的 absolute path 已在
+该 root 内时才会接受。既可以使用 `.` / child path，也可以使用当前 TaskWorkspace 暴露的
+逻辑 `.agently/files/<execution-id>` locator；host 对 root-prefixed logical locator 只消费
+一次，不会把它再次拼到 physical root 后面。parent traversal 或任何逃出注入 root 的路径
+都会 fail closed。
 `allow_unsafe` 是 host-only 的直接执行授权，不会出现在模型可见的 shell action schema
 中；模型计划出的 action input 里即使包含该字段也会被清洗。模型选择的命令超出 safe
 profile 时，应通过需要审批的 action 或 ExecutionExchange provider 路由，而不是允许

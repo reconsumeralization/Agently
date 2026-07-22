@@ -447,6 +447,7 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
             readbacks: list[dict[str, Any]] = []
             file_readbacks: list[dict[str, Any]] = []
             effective_file_refs = [dict(ref) for ref in file_refs if isinstance(ref, Mapping)]
+            canonical_action_file_refs: list[dict[str, Any]] = []
             diagnostics: list[dict[str, Any]] = []
             readback_evidence_items: list[dict[str, Any]] = []
             if not refs and not file_refs:
@@ -541,6 +542,17 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
                                     + _compact_agent_task_error_message(error, fallback=error.__class__.__name__)
                                 ),
                             }
+                        if isinstance(raw_readback, Mapping):
+                            raw_value = raw_readback.get(
+                                "value",
+                                raw_readback.get("data", raw_readback.get("result")),
+                            )
+                            self._merge_taskboard_file_refs(
+                                canonical_action_file_refs,
+                                self._taskboard_file_refs_from_action_readbacks(
+                                    [{"data": raw_value}]
+                                ),
+                            )
                         compact = self._compact_taskboard_action_artifact_readback(raw_readback, ref)
                         readbacks.append(compact)
                         self._record_taskboard_read_progress(
@@ -559,7 +571,11 @@ class AgentTaskTaskBoardReadbackMixin(AgentTaskMixinBase):
 
                     success_count = sum(1 for item in readbacks if item.get("ok"))
                     failed_count = len(readbacks) - success_count
-                discovered_file_refs = self._taskboard_file_refs_from_action_readbacks(readbacks)
+                # Canonical TaskWorkspace identity is extracted from the cold
+                # Action result before model-hot preview compaction. The hot
+                # preview may intentionally replace `path` with requested_path
+                # and must not become an identity reconstruction source.
+                discovered_file_refs = canonical_action_file_refs
                 added_file_refs = self._merge_taskboard_file_refs(effective_file_refs, discovered_file_refs)
                 if added_file_refs:
                     diagnostics.append(

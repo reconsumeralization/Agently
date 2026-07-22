@@ -1265,6 +1265,7 @@ class AgentTaskTaskBoardStrategyMixin(
                 continue
             card = dict(raw_card)
             final_paths = self._normalize_string_list(card.get("final_task_workspace_deliverables"))
+            card_dependencies = self._normalize_string_list(card.get("depends_on"))
             commands_value = card.get("action_commands")
             commands = (
                 [dict(command) for command in commands_value if isinstance(command, Mapping)]
@@ -1326,6 +1327,33 @@ class AgentTaskTaskBoardStrategyMixin(
                             }
                         )
 
+            if commands and card_dependencies and not final_paths:
+                required_action_ids = self._normalize_string_list(
+                    card.get("requires_capability_ids")
+                )
+                attempted_action_ids = self._merge_string_lists(
+                    [command.get("action_id") for command in commands]
+                )
+                card.pop("action_commands", None)
+                commands = []
+                if attempted_action_ids:
+                    card["requires_capability_ids"] = self._merge_string_lists(
+                        [*required_action_ids, *attempted_action_ids]
+                    )
+                normalization_diagnostics.append(
+                    {
+                        "code": "taskboard.initial_plan.dependent_action_commands_deferred",
+                        "card_id": str(
+                            card.get("id")
+                            or card.get("card_id")
+                            or f"card-{index + 1}"
+                        ),
+                        "depends_on": card_dependencies,
+                        "deferred_action_ids": attempted_action_ids,
+                        "fallback": "taskboard_action_command_request",
+                    }
+                )
+
             if not final_paths:
                 prepared.append(card)
                 continue
@@ -1336,7 +1364,8 @@ class AgentTaskTaskBoardStrategyMixin(
                 prepared.append(card)
                 continue
 
-            exact_final_write = False
+            original_dependencies = card_dependencies
+            exact_final_write_commands: list[dict[str, Any]] = []
             for command in commands:
                 action_id = str(command.get("action_id") or "").strip()
                 action_input = command.get("action_input")
@@ -1346,11 +1375,50 @@ class AgentTaskTaskBoardStrategyMixin(
                     and str(action_input.get("path") or "").strip() in final_paths
                     and isinstance(action_input.get("content"), str)
                 ):
-                    exact_final_write = True
-                    break
-            if exact_final_write:
+                    exact_final_write_commands.append(command)
+            if exact_final_write_commands and not original_dependencies:
                 prepared.append(card)
                 continue
+            if exact_final_write_commands:
+                deferred_command_ids = {id(command) for command in exact_final_write_commands}
+                commands = [
+                    command for command in commands if id(command) not in deferred_command_ids
+                ]
+                deferred_action_ids = set(
+                    self._normalize_string_list(
+                        [command.get("action_id") for command in exact_final_write_commands]
+                    )
+                )
+                remaining_required_action_ids = [
+                    action_id
+                    for action_id in self._normalize_string_list(
+                        card.get("requires_capability_ids")
+                    )
+                    if action_id not in deferred_action_ids
+                ]
+                if remaining_required_action_ids:
+                    card["requires_capability_ids"] = remaining_required_action_ids
+                else:
+                    card.pop("requires_capability_ids", None)
+                normalization_diagnostics.append(
+                    {
+                        "code": "taskboard.initial_plan.dependent_final_write_deferred",
+                        "card_id": str(
+                            card.get("id")
+                            or card.get("card_id")
+                            or f"card-{index + 1}"
+                        ),
+                        "depends_on": original_dependencies,
+                        "deferred_action_ids": sorted(deferred_action_ids),
+                        "fallback": "dependency_aware_control_delivery",
+                    }
+                )
+                if not commands:
+                    card["allowed_execution_shape"] = "control"
+                    card.pop("action_commands", None)
+                    prepared.append(card)
+                    continue
+                card["action_commands"] = commands
 
             card_id = str(card.get("id") or card.get("card_id") or "").strip()
             if not card_id:
@@ -1367,7 +1435,6 @@ class AgentTaskTaskBoardStrategyMixin(
             used_ids.add(final_id)
             split_final_ids[card_id] = final_id
 
-            original_dependencies = self._normalize_string_list(card.get("depends_on"))
             source_card = dict(card)
             source_card["objective"] = (
                 "Execute the declared Action command batch and preserve its results as dependency evidence."
@@ -1377,7 +1444,21 @@ class AgentTaskTaskBoardStrategyMixin(
                 "Every declared action_commands entry has a recorded terminal result."
             )
             source_card["allowed_execution_shape"] = "actions"
-            source_card["action_commands"] = commands
+            if original_dependencies:
+                source_card.pop("action_commands", None)
+                normalization_diagnostics.append(
+                    {
+                        "code": "taskboard.initial_plan.dependent_action_commands_deferred",
+                        "card_id": card_id,
+                        "depends_on": original_dependencies,
+                        "deferred_action_ids": self._normalize_string_list(
+                            [command.get("action_id") for command in commands]
+                        ),
+                        "fallback": "taskboard_action_command_request",
+                    }
+                )
+            else:
+                source_card["action_commands"] = commands
             source_card.pop("final_task_workspace_deliverables", None)
             command_action_ids = self._normalize_string_list(
                 [command.get("action_id") for command in commands]

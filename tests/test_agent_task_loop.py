@@ -67,6 +67,28 @@ def test_task_shared_star_export_includes_evidence_ledger_helpers():
         assert callable(namespace.get(helper_name))
 
 
+def test_action_preview_prefers_logical_task_workspace_requested_path():
+    compact = AgentTask._compact_action_preview_value(
+        {
+            "path": ".agently/files/execution-1/reconcile.py",
+            "requested_path": "reconcile.py",
+            "fallback": True,
+            "task_workspace_id": "task_workspace:test",
+            "file_refs": [
+                {
+                    "path": ".agently/files/execution-1/reconcile.py",
+                    "requested_path": "reconcile.py",
+                    "task_workspace_id": "task_workspace:test",
+                }
+            ],
+        },
+        max_chars=1800,
+    )
+
+    assert compact["path"] == "reconcile.py"
+    assert compact["file_refs"][0]["path"] == "reconcile.py"
+
+
 def test_agent_task_process_summary_is_compact_and_not_evidence():
     payload = {
         "decision_basis": ["Use the available bounded evidence."],
@@ -495,6 +517,101 @@ def test_taskboard_live_readback_ref_survives_ref_only_flood_into_binding_guard(
     )
 
 
+def test_taskboard_model_projection_restores_complete_structured_dependency_readback():
+    task = AgentTask(
+        _create_agent("taskboard-complete-dependency-readback"),
+        task_id="taskboard-complete-dependency-readback",
+        goal="Use the exact computed result from a dependency Action artifact.",
+        success_criteria=["The downstream card sees the computed result."],
+        execution="taskboard",
+    )
+    stdout = json.dumps(
+        {
+            "prefix_diagnostics": "prefix-detail-" * 180,
+            "computed_result": {
+                "expected_revenue": 583.08,
+                "paid": 583.11,
+                "difference": 0.03,
+            },
+            "suffix_diagnostics": "suffix-detail-" * 180,
+        },
+        ensure_ascii=False,
+    )
+    complete_body = json.dumps(
+        {
+            "action_id": "run_bash",
+            "ok": True,
+            "returncode": 0,
+            "stderr": "",
+            "stdout": stdout,
+            "stdout_truncated": False,
+        },
+        ensure_ascii=False,
+    )
+    assert 1800 < len(complete_body) < 12000
+    dependency_readbacks = {
+        "evidence_items": [
+            {
+                "id": "dependency-readback:order-reconciliation",
+                "kind": "taskboard_action_artifact.readback",
+                "status": "ok",
+                "body_state": "truncated",
+                "body": complete_body,
+                "owner": "action_artifact",
+                "locator": "order-reconciliation-output",
+                "content_version": "sha256:order-reconciliation-output",
+            }
+        ]
+    }
+
+    live_ledger = task._taskboard_live_evidence_ledger(
+        {"evidence_items": []},
+        dependency_readbacks,
+        max_items=120,
+        body_chars=1800,
+    )
+    assert live_ledger["items"][0]["body_truncated_for_view"] is True
+
+    projection = task._model_evidence_ledger_projection(live_ledger, max_items=64)
+    body_preview = projection["items"][0]["body_preview"]
+
+    assert isinstance(body_preview, Mapping)
+    assert json.loads(body_preview["stdout"])["computed_result"] == {
+        "expected_revenue": 583.08,
+        "paid": 583.11,
+        "difference": 0.03,
+    }
+
+
+def test_taskboard_action_artifact_preview_keeps_complete_bounded_structured_value():
+    stdout = json.dumps(
+        {
+            "prefix_diagnostics": "prefix-detail-" * 180,
+            "computed_result": {"computed_total": 42},
+            "suffix_diagnostics": "suffix-detail-" * 180,
+        }
+    )
+    value = {
+        "action_id": "run_bash",
+        "ok": True,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": stdout,
+        "stdout_truncated": False,
+    }
+    assert len(json.dumps(value)) < 12000
+
+    preview = AgentTask._compact_taskboard_action_artifact_value_preview(
+        value,
+        max_chars=12000,
+    )
+
+    assert preview == value
+    assert json.loads(preview["stdout"])["computed_result"] == {
+        "computed_total": 42
+    }
+
+
 def test_model_evidence_projection_preserves_complete_structured_action_siblings():
     task = AgentTask(
         _create_agent("taskboard-structured-action-evidence-projection"),
@@ -733,7 +850,7 @@ def test_terminal_projection_rehydrates_lossy_structured_body_from_canonical_ref
     )
     assert lossy["items"][0]["body_truncated_for_view"] is True
 
-    hydrated = task._canonical_structured_evidence_ledger_for_verifier(lossy)
+    hydrated = task._canonical_structured_evidence_ledger_for_model(lossy)
     projection = task._model_evidence_ledger_projection(hydrated, max_items=8)
     body_preview = projection["items"][0]["body_preview"]
 
@@ -2730,6 +2847,54 @@ def test_task_reference_catalog_preserves_identity_across_lossy_view_projection(
                 "status": "failed",
             }
         )
+
+
+def test_repeated_task_context_delivery_does_not_retarget_canonical_evidence_block():
+    task = AgentTask(
+        _create_agent("task-context-repeat-delivery"),
+        task_id="task-context-repeat-delivery",
+        goal="Reuse the same source evidence across repair requests.",
+        success_criteria=["Repeated Context delivery keeps one canonical source identity."],
+        execution="taskboard",
+    )
+
+    def package(block_id: str, package_id: str, consumer_id: str) -> SimpleNamespace:
+        block = SimpleNamespace(
+            block_id=block_id,
+            block_key="source:reconciliation.py",
+            source_id="source:task-reference-catalog",
+            source_revision="revision:1",
+            source_ref="reconciliation.py",
+            binding_id="binding:reconciliation.py",
+            role="information",
+            content='{"expected_revenue": 583.08}',
+            completeness="complete",
+            refs=(),
+            metadata={},
+        )
+        return SimpleNamespace(
+            package_id=package_id,
+            task_context_id="task-context:repeat-delivery",
+            context_revision=1,
+            consumer_id=consumer_id,
+            phase="card",
+            blocks=(block,),
+        )
+
+    first = task._task_context_package_evidence_ledger(
+        package("context-block:first", "package:first", "consumer:first")
+    )
+    second = task._task_context_package_evidence_ledger(
+        package("context-block:second", "package:second", "consumer:second")
+    )
+
+    merged = task._taskboard_card_binding_evidence_ledger(first, second)
+
+    assert {
+        item["reference_id"] for item in merged["items"]
+    } == {first["items"][0]["reference_id"]}
+    assert all(item["source_ref"] == "reconciliation.py" for item in merged["items"])
+    assert all("block_id" not in item for item in merged["items"])
 
 
 def test_terminal_convergence_uses_stable_issue_keys_and_structured_state_digest():
@@ -7063,6 +7228,130 @@ def test_taskboard_initial_plan_splits_action_commands_from_final_delivery(tmp_p
     assert final_card["final_task_workspace_deliverables"] == ["final.md"]
 
 
+def test_taskboard_initial_plan_defers_dependent_exact_final_write(tmp_path):
+    task_workspace_root = tmp_path / "task_workspace"
+    agent = _create_agent("agent-taskboard-defer-dependent-final-write").use_task_workspace(
+        task_workspace_root,
+        mode="read_write",
+    )
+    agent.enable_task_workspace_file_actions(
+        root=task_workspace_root,
+        read=True,
+        write=True,
+        search=False,
+        list_files=False,
+        expose_to_model=True,
+    )
+    task = AgentTask(
+        agent,
+        task_id="taskboard-defer-dependent-final-write",
+        goal="Run the calculation and write its actual output to final.md.",
+        success_criteria=["final.md contains the observed calculation output."],
+        execution="taskboard",
+    )
+    raw_plan = {
+        "board_goal": task.goal,
+        "cards": [
+            {
+                "id": "run-calculation",
+                "objective": "Run the calculation and preserve its output.",
+                "depends_on": [],
+                "done_when": "The calculation output is recorded.",
+                "allowed_execution_shape": "actions",
+            },
+            {
+                "id": "write-final",
+                "objective": "Write the observed calculation output to final.md.",
+                "depends_on": ["run-calculation"],
+                "done_when": "final.md contains the observed output.",
+                "allowed_execution_shape": "actions",
+                "requires_capability_ids": ["write_file"],
+                "action_commands": [
+                    {
+                        "purpose": "Write the final report.",
+                        "action_id": "write_file",
+                        "action_input": {
+                            "path": "final.md",
+                            "content": "# Result\n\n...\n",
+                        },
+                    }
+                ],
+                "final_task_workspace_deliverables": ["final.md"],
+            },
+        ],
+        "completion_gate": "final.md contains the observed calculation output.",
+        "why_this_effort_shape": "The final report depends on runtime evidence.",
+    }
+
+    normalized = task._normalize_taskboard_initial_plan(raw_plan)
+
+    final_card = normalized["cards"][1]
+    assert final_card["id"] == "write-final"
+    assert final_card["allowed_execution_shape"] == "control"
+    assert final_card["depends_on"] == ["run-calculation"]
+    assert "action_commands" not in final_card
+    assert "requires_capability_ids" not in final_card
+    assert normalized["diagnostics"][-1]["code"] == (
+        "taskboard.initial_plan.dependent_final_write_deferred"
+    )
+
+
+def test_taskboard_initial_plan_defers_dependent_action_commands_until_execution(tmp_path):
+    agent = _create_agent("agent-taskboard-defer-dependent-action")
+
+    @agent.action_func
+    def run_program(path: str) -> dict[str, str]:
+        return {"path": path, "status": "executed"}
+
+    task = AgentTask(
+        agent,
+        task_id="taskboard-defer-dependent-action",
+        goal="Write and execute a generated program.",
+        success_criteria=["The exact generated file is executed."],
+        execution="taskboard",
+    )
+    raw_plan = {
+        "board_goal": task.goal,
+        "cards": [
+            {
+                "id": "write-program",
+                "objective": "Write the generated program.",
+                "depends_on": [],
+                "done_when": "The actual program path is recorded.",
+                "allowed_execution_shape": "control",
+            },
+            {
+                "id": "run-program",
+                "objective": "Execute the exact generated program.",
+                "depends_on": ["write-program"],
+                "done_when": "The program execution succeeds.",
+                "allowed_execution_shape": "actions",
+                "requires_capability_ids": ["run_program"],
+                "action_commands": [
+                    {
+                        "purpose": "Execute the generated program.",
+                        "action_id": "run_program",
+                        "action_input": {"path": "preplanned-name.py"},
+                    }
+                ],
+            },
+        ],
+        "completion_gate": "The generated program executes successfully.",
+        "why_this_effort_shape": "Execution consumes the generated file path.",
+    }
+
+    normalized = task._normalize_taskboard_initial_plan(raw_plan)
+
+    run_card = normalized["cards"][1]
+    assert run_card["allowed_execution_shape"] == "actions"
+    assert run_card["depends_on"] == ["write-program"]
+    assert run_card["requires_capability_ids"] == ["run_program"]
+    assert "action_commands" not in run_card
+    assert normalized["diagnostics"][-1]["code"] == (
+        "taskboard.initial_plan.dependent_action_commands_deferred"
+    )
+
+
 def test_taskboard_initial_plan_rejects_undeclared_action_input_keys(tmp_path):
     task_workspace_root = tmp_path / "task_workspace"
     agent = _create_agent("agent-taskboard-reject-invalid-action-input").use_task_workspace(
@@ -7475,6 +7764,137 @@ async def test_taskboard_control_delivery_preserves_task_workspace_action_eviden
     task._accumulate_capability_evidence(terminal_summary)
     missing, _unenforced = task._evaluate_capability_evidence(terminal_summary)
     assert missing == []
+
+
+def test_taskboard_completed_sufficient_manifest_handoff_allows_framework_draft():
+    output = {
+        "status": "completed",
+        "sufficient": True,
+        "next_board_action": "finalize",
+        "artifact_manifest": {
+            "path": "working/taskboard/finalize/terminal-candidates/final.md",
+            "sections": [
+                {
+                    "id": "summary",
+                    "title": "Summary",
+                    "intent": "Present the evidence-grounded result.",
+                    "source_refs": ["ref_a"],
+                }
+            ],
+        },
+        "remaining_work": [
+            "Write final.md to the terminal candidate path and read it back."
+        ],
+    }
+
+    assert (
+        AgentTask._taskboard_control_output_allows_task_workspace_delivery(output)
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_taskboard_control_manifest_handoff_streams_terminal_candidate(
+    tmp_path,
+):
+    task = AgentTask(
+        _create_agent("taskboard-control-manifest-handoff").use_task_workspace(
+            tmp_path / "task_workspace"
+        ),
+        task_id="taskboard-control-manifest-handoff",
+        goal="Write the evidence-grounded report to final.md.",
+        success_criteria=["final.md is written and read back."],
+        execution="taskboard",
+        options={"agent_task": {"required_deliverables": [{"path": "final.md"}]}},
+    )
+    card = TaskBoardCard.from_value(
+        {
+            "id": "finalize",
+            "objective": "Synthesize and deliver the final report.",
+            "allowed_execution_shape": "control",
+            "metadata": {"final_task_workspace_deliverables": ["final.md"]},
+        }
+    )
+    revision = TaskBoardRevision.create(
+        board_id=task.id,
+        graph=TaskBoardGraph.from_value(
+            {"graph_id": f"{task.id}.graph", "cards": [card.to_dict()]}
+        ),
+    )
+    context = SimpleNamespace(
+        card=card,
+        revision=revision,
+        dependency_results={},
+        planning_policy=None,
+    )
+    body = "# Final Report\n\nEvidence-grounded result.\n"
+
+    async def fake_run_work_unit_through_blocks(**kwargs: Any):
+        work_unit = kwargs["work_unit"]
+        return (
+            {
+                "status": "completed",
+                "sufficient": True,
+                "next_board_action": "finalize",
+                "artifact_manifest": {
+                    "path": "working/taskboard/finalize/terminal-candidates/final.md",
+                    "sections": [
+                        {
+                            "id": "summary",
+                            "title": "Summary",
+                            "intent": "Present the evidence-grounded result.",
+                        }
+                    ],
+                },
+                "remaining_work": [
+                    "Write final.md to the terminal candidate path and read it back."
+                ],
+            },
+            {
+                "execution_id": f"{task.id}:taskboard:finalize:control",
+                "status": "completed",
+                "logs": {"action_logs": [], "route_logs": {}, "errors": []},
+            },
+            WorkUnitResult(id=str(work_unit.id), status="completed"),
+        )
+
+    async def fake_stream_task_workspace_artifact_draft(**kwargs: Any):
+        path = kwargs["path"]
+        await task.task_workspace.write_file(path, body, append=False)
+        readback = await task.task_workspace.read_file(path)
+        ref = task._task_workspace_artifact_ref_from_readback(
+            readback,
+            path=path,
+            source=str(kwargs.get("source") or "test.taskboard.control.manifest"),
+        )
+        return {
+            "source": kwargs.get("source"),
+            "path": path,
+            "status": "delivered",
+            "mode": "streamed_task_workspace_artifact",
+            "file_refs": [ref],
+        }
+
+    cast(Any, task)._run_work_unit_through_blocks = fake_run_work_unit_through_blocks
+    cast(Any, task)._stream_task_workspace_artifact_draft = (
+        fake_stream_task_workspace_artifact_draft
+    )
+
+    result = await task._run_taskboard_control_card(
+        context,
+        {"goal": task.goal, "profile": "", "items": [], "omitted": [], "diagnostics": {}},
+    )
+
+    staging_path = "working/taskboard/finalize/terminal-candidates/final.md"
+    assert result.status == "completed"
+    assert result.preview["remaining_work"] == []
+    assert result.preview["ready_for_final_verification"] is True
+    assert result.preview["task_workspace_artifact_delivery"]["mode"] == (
+        "streamed_task_workspace_artifact"
+    )
+    assert task.task_workspace.resolve_file_path(staging_path).read_text(
+        encoding="utf-8"
+    ) == body
 
 
 @pytest.mark.asyncio
@@ -11362,6 +11782,96 @@ async def test_task_workspace_artifact_stream_draft_uses_bounded_dependency_proj
     assert WorkspaceArtifactDraftBoundedDependencyRequester.draft_request_chars < 50_000
     assert huge not in WorkspaceArtifactDraftBoundedDependencyRequester.draft_request_text
     assert "Collected bounded evidence." in WorkspaceArtifactDraftBoundedDependencyRequester.draft_request_text
+
+
+@pytest.mark.asyncio
+async def test_task_workspace_artifact_stream_draft_receives_control_evidence_ledger(
+    tmp_path,
+):
+    class WorkspaceArtifactDraftControlEvidenceRequester(MockAgentTaskRequester):
+        name = "WorkspaceArtifactDraftControlEvidenceRequester"
+        draft_text = ""
+
+        async def request_model(self, request_data: AgentlyRequestData):
+            text = json.dumps(
+                DataFormatter.sanitize(request_data.data), ensure_ascii=False
+            )
+            if "Write only the final Markdown artifact body." in text:
+                self.__class__.draft_text = text
+                assert "taskboard_action_artifact.readback" in text
+                assert "observed-runtime-total=42" in text
+                yield "message", "# Runtime Report\n\nObserved total: 42.\n"
+                return
+            yield "message", json.dumps({"answer": "unused"}, ensure_ascii=False)
+
+    settings = Settings(
+        name="agent-task-workspace-artifact-control-evidence-settings",
+        parent=Agently.settings,
+    )
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="agent-task-workspace-artifact-control-evidence-plugins",
+    )
+    plugin_manager.register(
+        "ModelRequester",
+        WorkspaceArtifactDraftControlEvidenceRequester,
+        activate=True,
+    )
+    agent = Agently.AgentType(
+        plugin_manager,
+        parent_settings=settings,
+        name="agent-task-workspace-artifact-control-evidence",
+    )
+    task = AgentTask(
+        agent,
+        task_id="workspace-artifact-control-evidence",
+        goal="Write the observed runtime result to final.md.",
+        success_criteria=["The report preserves the observed runtime total."],
+        task_workspace=tmp_path / "task-workspace",
+    )
+    control_evidence_ledger = task._stable_evidence_ledger_view(
+        {
+            "evidence_items": [
+                {
+                    "kind": "taskboard_action_artifact.readback",
+                    "status": "ok",
+                    "owner": "action_artifact",
+                    "locator": "runtime-output",
+                    "content_version": "sha256:runtime-output",
+                    "body": json.dumps(
+                        {
+                            "ok": True,
+                            "returncode": 0,
+                            "stdout": "observed-runtime-total=42",
+                        }
+                    ),
+                }
+            ]
+        },
+        max_items=8,
+        body_chars=1800,
+    )
+
+    delivery = await task._stream_task_workspace_artifact_draft(
+        path="final.md",
+        plan={"deliverable_mode": "task_workspace_artifact"},
+        execution_result={"artifact_manifest": {"path": "final.md"}},
+        execution_meta={
+            "status": "completed",
+            "logs": {"action_logs": [], "route_logs": {}},
+        },
+        source="test.task_workspace_artifact_draft.control_evidence",
+        evidence_ledger=control_evidence_ledger,
+        context_pack=None,
+        iteration_index=1,
+    )
+
+    assert delivery is not None
+    assert delivery["status"] == "delivered"
+    assert "observed-runtime-total=42" in (
+        WorkspaceArtifactDraftControlEvidenceRequester.draft_text
+    )
 
 
 @pytest.mark.asyncio

@@ -2220,6 +2220,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         *,
         plan: Mapping[str, Any] | None = None,
         execution_meta: Mapping[str, Any] | None = None,
+        evidence_ledger: Mapping[str, Any] | None = None,
         source: str = "agent_task.task_workspace_artifact",
         context_pack: "TaskContextView | None" = None,
         iteration_index: int | None = None,
@@ -2405,6 +2406,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
                 plan=plan,
                 execution_result=result,
                 execution_meta=execution_meta,
+                evidence_ledger=evidence_ledger,
                 source=source,
                 context_pack=context_pack,
                 iteration_index=iteration_index,
@@ -2947,6 +2949,7 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         execution_result: Mapping[str, Any],
         execution_meta: Mapping[str, Any] | None,
         source: str,
+        evidence_ledger: Mapping[str, Any] | None = None,
         context_pack: "TaskContextView | None" = None,
         iteration_index: int | None = None,
         card_context: Any | None = None,
@@ -2974,8 +2977,41 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
         )
         language_policy = self._language_policy()
         draft_execution.language(language_policy.get("language", "auto"))
-        cumulative_evidence_ledger = self._cumulative_evidence_ledger(dict(execution_meta or {}))
-        offered_source_references = source_refs_from_ledger(cumulative_evidence_ledger, max_refs=64)
+        cumulative_evidence_ledger = self._cumulative_evidence_ledger(
+            dict(execution_meta or {})
+        )
+        explicit_items = (
+            list(evidence_ledger.get("items", []))
+            if isinstance(evidence_ledger, Mapping)
+            and isinstance(evidence_ledger.get("items"), Sequence)
+            and not isinstance(
+                evidence_ledger.get("items"), str | bytes | bytearray
+            )
+            else []
+        )
+        cumulative_items = (
+            list(cumulative_evidence_ledger.get("items", []))
+            if isinstance(cumulative_evidence_ledger.get("items"), Sequence)
+            and not isinstance(
+                cumulative_evidence_ledger.get("items"), str | bytes | bytearray
+            )
+            else []
+        )
+        draft_evidence_ledger = self._stable_evidence_ledger_view(
+            {"evidence_items": [*explicit_items, *cumulative_items]},
+            max_items=96,
+            body_chars=1800,
+            budget_selection="content_first",
+            max_overflow_refs=96,
+        )
+        draft_prompt_evidence_ledger = self._model_evidence_ledger_projection(
+            draft_evidence_ledger,
+            max_items=64,
+        )
+        offered_source_references = source_refs_from_ledger(
+            draft_evidence_ledger,
+            max_refs=64,
+        )
         active_repair_context = (
             dict(repair_context) if isinstance(repair_context, Mapping) else self._active_repair_context()
         )
@@ -2988,6 +3024,9 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             "plan": DataFormatter.sanitize(plan or {}),
             "execution_result": DataFormatter.sanitize(execution_result),
             "execution_meta_summary": self._execution_log_summary(dict(execution_meta or {})),
+            "evidence_ledger": DataFormatter.sanitize(
+                draft_prompt_evidence_ledger
+            ),
             "offered_source_references": DataFormatter.sanitize(offered_source_references),
             "context_pack": DataFormatter.sanitize(context_pack or {}),
             "card": DataFormatter.sanitize(
@@ -3013,7 +3052,9 @@ class AgentTaskArtifactMixin(AgentTaskMixinBase):
             (
                 "Write only the final Markdown artifact body. "
                 "Do not output JSON, YAML, XML, code fences, file_refs, or a wrapper object. "
-                "Use only the provided task context, execution result, dependency results, and evidence summaries. "
+                "Use only the provided task context, execution result, dependency results, evidence_ledger, and "
+                "evidence summaries. Treat evidence_ledger as the authoritative bounded body-bearing evidence "
+                "projection and preserve its observed values exactly. "
                 "For source-grounded artifacts, cite only an offered_source_references.reference_id using the exact "
                 "token [[ref:<reference_id>]]. Do not copy or invent URLs, paths, Action ids, TaskWorkspace ids, or other "
                 "canonical identities into the citation token. "

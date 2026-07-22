@@ -351,6 +351,7 @@ class TaskWorkspaceFileWrite(_ResultMapping):
                     "task_workspace_id": self.task_workspace_id,
                     "execution_id": self.execution_id,
                     "path": self.path,
+                    "requested_path": self.requested_path,
                     "size": self.bytes,
                     "bytes": self.bytes,
                     "sha256": self.sha256,

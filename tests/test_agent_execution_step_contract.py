@@ -5081,6 +5081,7 @@ async def test_taskboard_readback_card_promotes_nested_task_workspace_file_refs_
 
     assert result.status == "completed"
     assert result.file_refs[0]["path"] == file_ref["path"]
+    assert result.file_refs[0]["requested_path"] == "downloads/source.md"
     assert result.metadata["file_ref_count"] == 1
     assert result.metadata["file_success_count"] == 1
     payload = result.preview

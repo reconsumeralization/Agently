@@ -17,6 +17,7 @@ deprecated through aliases.
 | Task information | `TaskContext` owns sources and derived indexes; `ContextReader` owns consumer-bound progressive readback | Bind sources to TaskContext and read through a scoped ContextReader | Breaking owner split; no combined Workspace shim | Context, AgentTask, recovery, and typing suites |
 | Files and records | `TaskWorkspace` owns task files; `RecordStore` owns durable records, snapshots, events, and memory persistence | Bind each owner explicitly with `use_task_workspace(...)` and `use_record_store(...)` | Breaking replacement of the former combined Workspace surface | Workspace/code-runtime and RecordStore suites |
 | Skills | `SkillLibrary` owns immutable revisions; AgentExecution owns exact-revision selection and binding | Install with the management facade when needed, resolve through `Agently.skill_library`, and bind with `agent.require_skills(...)` | Removed Skills route/strategy and prompt-injection ownership | Companion validators and release-pinned Skill example |
+| AgentTask delivery | TaskBoard dependency Actions, control decisions, dedicated artifact drafting, terminal verification, and promotion now share one canonical evidence lineage | Declare the required artifact path and let AgentTask materialize, verify, and promote it | Runtime hardening; manifest-only finalization no longer stalls before body materialization | Warm full-flow preflight, real TaskBoard scenario, and AgentTask regressions |
 | TriggerFlow sub-flows | Active frames are visible while running and accept frame-scoped signal/cancel control | Use explicit executions plus `get_sub_flow_frames()`, `async_emit_to_sub_flow(...)`, and `async_cancel_sub_flow(...)` | Additive API; cancellation fences write-back and continuation | Issue [#320](https://github.com/AgentEra/Agently/issues/320) and dedicated regression suite |
 | Execution providers | Direct runtime provider/executor protocols no longer require PluginManager lifecycle hooks | Implement the runtime protocol; implement plugin lifecycle only when loading through PluginManager | Structural typing correction; runtime dispatch is unchanged | Full pyright gate and provider/action tests |
 
@@ -143,9 +144,14 @@ an ordered evidence view. Material-claim targets use a host-owned stable exact
 claim identity rather than response-local `claim_N` positions.
 
 A control card that explicitly returns `sufficient=false` cannot become
-completed through `next_board_action=finalize`. It normalizes to a setback, so
-an outline-only manifest cannot create a completed-without-deliverable dead
-state.
+completed through `next_board_action=finalize`; it normalizes to a setback.
+When a sufficient completed control card instead returns an artifact manifest
+with a draftable outline but no final body, AgentTask runs its existing
+dedicated artifact-draft stage. That stage receives the same bounded canonical
+Action/readback evidence ledger used by control, and the resulting candidate
+still passes terminal verification, digest-pinned promotion, and complete
+post-promotion readback. Framework-owned materialization work is not treated as
+unfinished semantic card work, so this valid handoff cannot appear to stall.
 
 ## Workspace-backed code execution
 
@@ -162,6 +168,13 @@ Isolation probes use concrete boolean capability axes rather than provider
 self-labels. Expected outputs are bounded normalized paths under `output/`;
 missing outputs, cleanup failure, timeout, and cancellation fail visibly, with
 owned processes or containers terminated.
+
+For a TaskWorkspace-bound `run_bash` Action, a relative `workdir` is resolved
+inside the injected root. The model may use `.` or a child path, and may also
+echo the logical TaskWorkspace locator `.agently/files/<execution-id>` (or one
+of its children) already shown in evidence; the host recognizes that locator
+as the current root instead of appending it a second time. Traversal outside
+the injected root remains rejected.
 
 External isolation providers use ordered candidate descriptors. Concrete
 gVisor and Seatbelt implementations remain contributor-owned in PR #325 and

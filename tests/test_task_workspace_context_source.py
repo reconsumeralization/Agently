@@ -108,6 +108,7 @@ async def test_read_only_task_workspace_creates_task_artifact_in_private_fallbac
 
     assert created.requested_path == "new/report.md"
     assert created.path == ".agently/files/task-42/new/report.md"
+    assert created.to_dict()["file_refs"][0]["requested_path"] == "new/report.md"
     assert workspace.resolve_file_path("new/report.md") == (tmp_path / created.path).resolve()
     assert logical_readback.path == created.path
     assert logical_readback.content == "Task artifact"

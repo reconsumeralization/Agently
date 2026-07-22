@@ -113,6 +113,47 @@ async def test_cmd_with_task_workspace_boundary_runs_in_injected_root(tmp_path):
     assert str(tmp_path) in result["stdout"]
 
 
+@pytest.mark.asyncio
+async def test_cmd_resolves_relative_workdir_from_injected_root(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cmd = Cmd(allowed_cmd_prefixes=["pwd"], allowed_workdir_roots=[str(tmp_path)])
+
+    root_result = await cmd.run("pwd", workdir=".")
+    child_result = await cmd.run("pwd", workdir="project")
+
+    assert root_result["ok"] is True
+    assert child_result["ok"] is True
+    assert root_result["stdout"].strip() == str(tmp_path.resolve())
+    assert child_result["stdout"].strip() == str(project.resolve())
+
+
+@pytest.mark.asyncio
+async def test_cmd_collapses_task_workspace_root_prefixed_relative_workdir(tmp_path):
+    execution_root = tmp_path / ".agently" / "files" / "execution-1"
+    execution_root.mkdir(parents=True)
+    child = execution_root / "reports"
+    child.mkdir()
+    cmd = Cmd(
+        allowed_cmd_prefixes=["pwd"],
+        allowed_workdir_roots=[str(execution_root)],
+    )
+
+    root_result = await cmd.run(
+        "pwd",
+        workdir=".agently/files/execution-1",
+    )
+    child_result = await cmd.run(
+        "pwd",
+        workdir=".agently/files/execution-1/reports",
+    )
+
+    assert root_result["ok"] is True
+    assert child_result["ok"] is True
+    assert root_result["stdout"].strip() == str(execution_root.resolve())
+    assert child_result["stdout"].strip() == str(child.resolve())
+
+
 def test_v2_default_plugins_are_registered():
     action_executors = set(Agently.plugin_manager.get_plugin_list("ActionExecutor"))
     environment_providers = set(Agently.plugin_manager.get_plugin_list("ExecutionResourceProvider"))

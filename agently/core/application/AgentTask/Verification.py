@@ -1272,13 +1272,8 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         request = self.agent.create_temp_request()
         self._bind_task_context_attachments(request, context_package)
         self._apply_language_policy_to_request(request, language_policy)
-        canonical_verifier_ledger = (
-            self._canonical_structured_evidence_ledger_for_verifier(
-                evidence_ledger
-            )
-        )
         model_evidence_ledger = self._model_evidence_ledger_projection(
-            canonical_verifier_ledger,
+            evidence_ledger,
             max_items=_VERIFIER_LEDGER_MAX_ITEMS + 8,
             offered_reference_ids=set(
                 self._task_reference_catalog.offered_references()
@@ -2153,7 +2148,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             return (2, len(value))
         return (0, 0)
 
-    def _canonical_structured_evidence_ledger_for_verifier(
+    def _canonical_structured_evidence_ledger_for_model(
         self,
         evidence_ledger: Mapping[str, Any],
         *,
@@ -2161,9 +2156,10 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
     ) -> dict[str, Any]:
         """Rejoin lossy JSON views to their task-canonical evidence target.
 
-        This is a verifier projection only. Canonical evidence stays owned by
-        TaskReferenceCatalog; the ledger receives a bounded structured view so
-        sibling fields are not lost to an earlier head/tail text cut.
+        Canonical evidence stays owned by TaskReferenceCatalog; model-facing
+        ledgers receive a bounded structured view so sibling fields are not
+        lost to an earlier head/tail text cut. This applies equally to
+        TaskBoard card execution and terminal verification.
         """
         hydrated = dict(DataFormatter.sanitize(evidence_ledger))
         raw_items = hydrated.get("items")
@@ -2365,6 +2361,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             )
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
+        expanded_bounded_readbacks = 0
         for item in raw_items:
             if not isinstance(item, Mapping):
                 continue
@@ -2446,18 +2443,43 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             if body in (None, "", [], {}):
                 body = item.get("preview")
             if body not in (None, "", [], {}):
-                candidate["body_preview"] = cls._compact_verifier_prompt_value(
-                    cls._evidence_body_prompt_value(body),
-                    max_chars=1200,
-                )
+                body_value = cls._evidence_body_prompt_value(body)
+                preserve_complete_readback = False
+                if (
+                    str(item.get("kind") or "")
+                    == "taskboard_action_artifact.readback"
+                    and str(item.get("body_state") or "")
+                    in {"full", "bounded", "truncated"}
+                    and expanded_bounded_readbacks
+                    < _TASKBOARD_DEPENDENCY_READBACK_MAX_REFS
+                    and isinstance(body_value, Mapping | Sequence)
+                    and not isinstance(body_value, str | bytes | bytearray)
+                ):
+                    serialized_body = json.dumps(
+                        DataFormatter.sanitize(body_value),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    preserve_complete_readback = (
+                        len(serialized_body)
+                        <= _TASKBOARD_DEPENDENCY_READBACK_PREVIEW_CHARS
+                    )
+                if preserve_complete_readback:
+                    candidate["body_preview"] = DataFormatter.sanitize(body_value)
+                    expanded_bounded_readbacks += 1
+                else:
+                    candidate["body_preview"] = cls._compact_verifier_prompt_value(
+                        body_value,
+                        max_chars=1200,
+                    )
             candidates.append(DataFormatter.sanitize(candidate))
             if len(candidates) >= max_items:
                 break
         return candidates
 
-    @classmethod
     def _model_evidence_ledger_projection(
-        cls,
+        self,
         evidence_ledger: Mapping[str, Any],
         *,
         max_items: int = 80,
@@ -2467,8 +2489,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         include_host_identity: bool = False,
     ) -> dict[str, Any]:
         """Expose one host-issued identity per model-visible evidence item."""
-        candidates = cls._evidence_binding_repair_candidate_refs(
-            evidence_ledger,
+        canonical_evidence_ledger = self._canonical_structured_evidence_ledger_for_model(
+            evidence_ledger
+        )
+        candidates = self._evidence_binding_repair_candidate_refs(
+            canonical_evidence_ledger,
             max_items=max_items,
             offered_reference_ids=offered_reference_ids,
             preferred_reference_ids=preferred_reference_ids,
@@ -2477,7 +2502,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         )
         eligible_reference_ids: set[str] = set()
         for key in ("items", "overflow_item_refs"):
-            value = evidence_ledger.get(key) if isinstance(evidence_ledger, Mapping) else None
+            value = (
+                canonical_evidence_ledger.get(key)
+                if isinstance(canonical_evidence_ledger, Mapping)
+                else None
+            )
             if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
                 for item in value:
                     if not isinstance(item, Mapping):
@@ -5776,6 +5805,7 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
         keep_keys = (
             "selection_key",
             "path",
+            "requested_path",
             "role",
             "label",
             "artifact_type",
@@ -5795,6 +5825,11 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             "available",
         )
         compact = {key: ref.get(key) for key in keep_keys if key in ref}
+        if (
+            str(ref.get("requested_path") or "").strip()
+            and str(ref.get("task_workspace_id") or "").strip()
+        ):
+            compact["path"] = ref.get("requested_path")
         if not ref.get("selection_key"):
             for key in ("artifact_id", "action_call_id"):
                 if key in ref:
@@ -5910,11 +5945,19 @@ class AgentTaskVerificationMixin(AgentTaskMixinBase):
             ] + ([{"omitted": len(value) - limit, "reason": "prompt_budget"}] if len(value) > limit else [])
         if isinstance(value, dict):
             compacted: dict[str, Any] = {}
+            logical_task_workspace_path = (
+                value.get("requested_path")
+                if str(value.get("requested_path") or "").strip()
+                and str(value.get("task_workspace_id") or "").strip()
+                else None
+            )
             for index, (key, item) in enumerate(value.items()):
                 if index >= 36:
                     compacted["omitted"] = {"count": len(value) - 36, "reason": "prompt_budget"}
                     break
                 key_text = str(key)
+                if key_text == "path" and logical_task_workspace_path is not None:
+                    item = logical_task_workspace_path
                 item_chars = max_chars
                 if key_text in {"content", "raw", "text", "output", "result", "data", "body", "preview"}:
                     item_chars = max(1600, max_chars)

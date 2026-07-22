@@ -206,6 +206,13 @@ allowlist, Agently uses a small safe shell profile for commands such as `pwd`,
 stream exceeds `max_output_chars`, the full stream is written under the
 current execution fallback at `.agently/files/<execution-id>/shell-output/`
 and referenced from the action result.
+
+`run_bash.workdir` is relative to the injected workspace root unless the host
+supplies an absolute path already contained by that root. Both `.`/child paths
+and the logical `.agently/files/<execution-id>` locator exposed by the current
+TaskWorkspace are accepted; a root-prefixed logical locator is consumed once,
+not appended to the physical root again. Parent traversal or any other path
+outside the injected root fails closed.
 `allow_unsafe` is a host-only direct execution grant; it is not exposed in
 model-visible shell action schemas and is stripped from model-planned action
 inputs. If a model-selected command is outside the safe profile, route it

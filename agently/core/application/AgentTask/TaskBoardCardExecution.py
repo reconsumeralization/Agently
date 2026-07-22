@@ -1865,6 +1865,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                 card_output,
                 plan=delivery_plan,
                 execution_meta=cast(dict[str, Any], execution_meta),
+                evidence_ledger=evidence_ledger,
                 source=f"agent_task.taskboard.card.{context.card.id}.task_workspace_artifact",
                 context_pack=context_pack,
                 card_context=context,
@@ -2264,7 +2265,9 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             "After the main control result fields, include short self_check, short_summary, and progress_message for "
             "downstream board context and human progress; these process fields are not evidence. "
             "Judge status, sufficient, gaps, and remaining_work only against this card's objective and done_when; "
-            "work already assigned to a downstream card is not remaining work for the current card. "
+            "work already assigned to a downstream card is not remaining work for the current card. Writing and "
+            "reading back the complete artifact body or artifact_manifest returned by this request is framework-owned "
+            "delivery work and must not be listed as remaining_work. "
             f"{_TASKBOARD_SOURCE_REF_POLICY_INSTRUCTION}Also return whether the card is sufficient "
             "and what continuation, if any, the board should consider."
         )
@@ -2391,7 +2394,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
             ),
             "remaining_work": (
                 [str],
-                "Remaining work inside this card's objective/done_when only; exclude work owned by downstream cards",
+                "Remaining semantic work inside this card's objective/done_when only; exclude downstream work and framework-owned materialization/readback of a returned artifact body or manifest",
                 False,
             ),
             "self_check": (
@@ -2730,6 +2733,7 @@ class AgentTaskTaskBoardCardExecutionMixin(AgentTaskMixinBase):
                     card_output,
                     plan=delivery_plan,
                     execution_meta=cast(dict[str, Any], execution_meta),
+                    evidence_ledger=card_request_evidence_ledger,
                     source=f"agent_task.taskboard.card.{context.card.id}.task_workspace_artifact",
                     context_pack=context_pack,
                     card_context=context,

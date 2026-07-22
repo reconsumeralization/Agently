@@ -166,7 +166,29 @@ class Cmd:
 
     def _resolve_workdir(self, workdir: str | Path | None) -> Path | None:
         if workdir is not None:
-            return Path(workdir).resolve()
+            requested = Path(workdir).expanduser()
+            if requested.is_absolute() or not self.allowed_workdir_roots:
+                return requested.resolve()
+            root = self.allowed_workdir_roots[0]
+            requested_parts = requested.parts
+            root_parts = root.parts
+            # TaskWorkspace evidence may expose the bound root as a logical
+            # relative locator (for example .agently/files/<execution_id>).
+            # When that locator already names the injected root, consume the
+            # matching prefix instead of appending the root twice. Any suffix
+            # remains an ordinary child path and the existing boundary check
+            # still rejects traversal outside the injected root.
+            for prefix_size in range(
+                min(len(requested_parts), len(root_parts)),
+                0,
+                -1,
+            ):
+                if tuple(root_parts[-prefix_size:]) != tuple(
+                    requested_parts[:prefix_size]
+                ):
+                    continue
+                return root.joinpath(*requested_parts[prefix_size:]).resolve()
+            return (root / requested).resolve()
         if self.allowed_workdir_roots:
             return self.allowed_workdir_roots[0]
         # No TaskWorkspace-issued boundary configured; do not fall back to cwd.

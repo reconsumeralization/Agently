@@ -268,11 +268,20 @@ class AgentTaskTaskBoardPatchingMixin(AgentTaskMixinBase):
                 deliverable_mode="task_workspace_artifact",
                 manifest_path=manifest_path,
             )
+            framework_can_materialize_deliverable = bool(
+                cls._task_workspace_artifact_content_is_complete_body(content)
+                or (
+                    cls._task_workspace_artifact_manifest_needs_body(manifest_dict)
+                    and cls._task_workspace_artifact_manifest_has_draftable_outline(
+                        manifest_dict
+                    )
+                )
+            )
             if not (
                 status == "completed"
                 and card_output.get("sufficient") is True
                 and next_action == "finalize"
-                and cls._task_workspace_artifact_content_is_complete_body(content)
+                and framework_can_materialize_deliverable
             ):
                 return False
         if cls._has_remaining_work(card_output.get("gaps")):

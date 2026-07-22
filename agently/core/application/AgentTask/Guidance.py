@@ -317,7 +317,6 @@ class AgentTaskGuidanceMixin(AgentTaskMixinBase):
                 "kind": "task_context.content",
                 "status": status,
                 "body_state": body_state,
-                "block_id": str(getattr(block, "block_id", "") or ""),
                 "source_id": identity_payload["source_id"],
                 "source_revision": identity_payload["source_revision"],
                 "source_ref": identity_payload["source_ref"],
