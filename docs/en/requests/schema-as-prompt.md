@@ -163,7 +163,7 @@ class Ticket(BaseModel):
 agent.output(Ticket)  # equivalent to expanding the BaseModel into nested leaves
 ```
 
-`get_data_object()` on the response returns a Pydantic instance when `output()` was given a `BaseModel`.
+Passing `format="json"` explicitly has the same behavior. Nested `BaseModel` fields are expanded for the model-facing output requirement, while response validation reuses the originally declared model class. `get_data_object()` therefore returns a `Ticket` instance, including its nested Pydantic types and field constraints.
 
 ## Plain text
 

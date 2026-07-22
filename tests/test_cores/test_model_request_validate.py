@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, Field
 
 from agently import Agently
 from agently.core import ModelRequest, PluginManager
@@ -369,6 +370,55 @@ async def test_validate_runs_once_per_response_and_context_exposes_result_object
     assert calls == [{"status": "OPEN", "priority": 1}]
     assert contexts[0].result_object is not None
     assert contexts[0].typed is result_object
+
+
+@pytest.mark.asyncio
+async def test_pydantic_output_returns_declared_model_instance():
+    class Ticket(BaseModel):
+        status: str
+        priority: int = Field(ge=1, le=3)
+
+    MockValidateJSONRequester.reset([{"status": "OPEN", "priority": 1}])
+    request = _create_request(MockValidateJSONRequester, "pydantic-output-model")
+    request.output(Ticket, format="json")
+
+    response = request.get_response()
+    result_object = await response.async_get_data_object()
+    parsed_result = await response.async_get_data()
+
+    assert isinstance(result_object, Ticket)
+    assert result_object == Ticket(status="OPEN", priority=1)
+    assert parsed_result == {"status": "OPEN", "priority": 1}
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_pydantic_output_preserves_nested_models():
+    class Evidence(BaseModel):
+        fact: str
+        source_excerpt: str
+
+    class MeetingMinutes(BaseModel):
+        evidence: list[Evidence] = Field(min_length=1)
+        summary: str
+
+    expected = {
+        "evidence": [
+            {
+                "fact": "The team selected plan B.",
+                "source_excerpt": "selected plan B",
+            }
+        ],
+        "summary": "Plan B was selected.",
+    }
+    MockValidateJSONRequester.reset([expected])
+    agent = _create_agent(MockValidateJSONRequester, "agent-pydantic-output-model")
+    execution = agent.input("Summarize the meeting.").output(MeetingMinutes, format="json")
+
+    result_object = await execution.async_get_data_object()
+
+    assert isinstance(result_object, MeetingMinutes)
+    assert isinstance(result_object.evidence[0], Evidence)
+    assert result_object.model_dump() == expected
 
 
 @pytest.mark.asyncio

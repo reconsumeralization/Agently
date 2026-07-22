@@ -47,8 +47,8 @@ def test_companion_views_still_derive_from_released_manifest() -> None:
 def test_in_development_manifest_declares_breaking_owner_split() -> None:
     manifest = _development_manifest()
 
-    assert manifest["target_version"] == "4.1.4.2"
-    assert manifest["release_train"] == "2026-07-4.1.4.2-dev"
+    assert manifest["target_version"] == "4.1.4.3"
+    assert manifest["release_train"] == "2026-07-4.1.4.3-dev"
     assert "TaskContext" in manifest["notes"]
     assert "TaskWorkspace owns task files" in manifest["notes"]
     assert "RecordStore owns records and durability" in manifest["notes"]

@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.4.2"
-CURRENT_RELEASE_TRAIN = "2026-07-4.1.4.2"
+CURRENT_FRAMEWORK_VERSION = "4.1.4.3"
+CURRENT_RELEASE_TRAIN = "2026-07-4.1.4.3"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -15,15 +15,12 @@ DOCS_PUBLIC_SURFACE_PROTOCOL = "agently-docs.public-surface.v1"
 
 _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
  'framework': 'agently',
- 'framework_version': '4.1.4.2',
- 'release_train': '2026-07-4.1.4.2',
+ 'framework_version': '4.1.4.3',
+ 'release_train': '2026-07-4.1.4.3',
  'released_at': '2026-07-22',
- 'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.2. This breaking owner-boundary release '
-          'assigns task information to TaskContext and ContextReader, task files to TaskWorkspace, durable records to '
-          'RecordStore, immutable Skill revisions to SkillLibrary, and task-scoped Skill binding to AgentExecution. It '
-          'also adds frame-scoped active sub-flow signaling and cancellation, aligns release-pinned Skill usage with '
-          'current owners, and makes directly registered action/resource providers depend only on their runtime '
-          'protocols while PluginManager retains plugin lifecycle ownership.',
+ 'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.3. This patch makes direct Pydantic v2 '
+          'BaseModel classes first-class ModelRequest and AgentExecution output contracts, including nested models, '
+          'while preserving the 4.1.4.2 owner boundaries and runtime protocols.',
  'companions': {'devtools': {'companion_package': 'agently-devtools',
                              'runtime_protocol': 'agently-devtools.observation-runtime.v1',
                              'event_naming': {'preferred_event_type': 'RuntimeEvent',
@@ -249,7 +246,14 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                    'strategy_owner': 'SessionMemory plugin',
                                    'recall_owner': 'TaskContext via AgentlyMemoryContextSource',
                                    'task_file_dependency': False}},
- 'request_input': {'agent_execution_request_scope': {'surface': ['AgentExecution', 'AgentExecutionResult'],
+ 'request_input': {'structured_output': {'surface': ['ModelRequest.output',
+                                                       'AgentExecution.output',
+                                                       'ModelRequestResult.get_data_object'],
+                                          'contract': 'A Pydantic v2 BaseModel class is expanded recursively for '
+                                                      'prompt/schema generation and preserved as the final output '
+                                                      'model; successful object reads return an instance of the '
+                                                      'original class.'},
+                   'agent_execution_request_scope': {'surface': ['AgentExecution', 'AgentExecutionResult'],
                                                      'contract': 'Each call owns an isolated AgentExecution draft. '
                                                                  'Completed executions are immutable run records; '
                                                                  'prompt/config mutation after start fails fast.'},

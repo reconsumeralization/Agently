@@ -5,9 +5,10 @@
 1. [Coding Agents](coding-agents.md)：用 Agently-Skills companion repo 帮 Codex、Claude Code、Cursor 等工具获得当前 Agently 指引。
 2. [Skills Compatibility](skills-executor.md)：框架内通过 Agent API、plan、Actions 和 legacy SkillsExecutor facade 消费 runtime skills。
 3. [Code Execution Provider 迁移](code-execution-provider-migration.md)：Workspace-backed provider 契约和外部隔离 provider 的贡献者自有迁移目标。
-4. [Agently 4.1.4.2 Release Notes](release-notes-4.1.4.2.md)：TaskContext、TaskWorkspace、RecordStore 与 SkillLibrary 所有权收敛的破坏式更新。
-5. [Agently 4.1.4.1 Release Notes](release-notes-4.1.4.1.md)：AgentExecutionResult 业务数据和完整数据 reader 兼容性。
-6. [Agently 4.1.4 Development Notes](release-notes-4.1.4.md)：TaskBoard 增量验收和 verifier cache 优化。
+4. [Agently 4.1.4.3 Release Notes](release-notes-4.1.4.3.md)：直接与嵌套 Pydantic v2 输出模型兼容性修复。
+5. [Agently 4.1.4.2 Release Notes](release-notes-4.1.4.2.md)：TaskContext、TaskWorkspace、RecordStore 与 SkillLibrary 所有权收敛的破坏式更新。
+6. [Agently 4.1.4.1 Release Notes](release-notes-4.1.4.1.md)：AgentExecutionResult 业务数据和完整数据 reader 兼容性。
+7. [Agently 4.1.4 Development Notes](release-notes-4.1.4.md)：TaskBoard 增量验收和 verifier cache 优化。
 7. [Agently 4.1.3.9 Release Notes](release-notes-4.1.3.9.md)：Workspace retrieval、SessionMemory、AgentTask scoped retrieval、向量索引接缝和公开 typing 加固。
 8. [Agently 4.1.3.8 Release Notes](release-notes-4.1.3.8.md)：任务执行策略优化、TaskBoard 策略选择、ACP fallback 能力、输出控制兜底、观测兼容和公开类型元数据。
 9. [Agently 4.1.3.7 Release Notes](release-notes-4.1.3.7.md)：AgentExecution-backed AgentTaskLoop 加固、goal/effort 配置、Skills context packs 和 release-blocker runtime 修复。

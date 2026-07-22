@@ -161,7 +161,7 @@ class Ticket(BaseModel):
 agent.output(Ticket)  # 等价于把 BaseModel 展开为嵌套叶子
 ```
 
-当 `output()` 接收的是 `BaseModel` 时，response 的 `get_data_object()` 会返回 Pydantic 实例。
+显式传入 `format="json"` 时行为相同。嵌套的 `BaseModel` 字段会展开到面向模型的输出要求中，响应校验则复用最初声明的模型类。因此 `get_data_object()` 会返回 `Ticket` 实例，并保留嵌套 Pydantic 类型和字段约束。
 
 ## 纯文本
 

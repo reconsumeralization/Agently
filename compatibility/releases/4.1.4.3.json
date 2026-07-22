@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
   "framework": "agently",
-  "target_version": "4.1.4.3",
-  "release_train": "2026-07-4.1.4.3-dev",
-  "notes": "4.1.4.3 patch line: direct Pydantic v2 BaseModel classes are first-class ModelRequest and AgentExecution output contracts, including nested models, while preserving the 4.1.4.2 owner boundaries. TaskContext owns progressive disclosure and one internal derived ContextIndex lifecycle; ContextReader owns consumer-bound exact readback and ContextPackage construction. TaskWorkspace owns task files and code-execution grants, including verifier-gated atomic terminal promotion; RecordStore owns records and durability; SkillLibrary owns immutable installed Skill revisions and authorized remote-source snapshots; SessionMemory recall enters through a TaskContext source; AgentExecution owns task-scoped Skill binding. Workspace-backed code execution selects provider-neutral ExecutionResource providers after immutable bundle materialization. AgentTask process state stays in memory/logs by default and record_store_recovery is opt-in. The former combined Workspace, ContextBuilder, SkillsManager, Skills execution route/strategies, skill_activation, and workspace_operation are removed without shims.",
+  "framework_version": "4.1.4.3",
+  "release_train": "2026-07-4.1.4.3",
+  "released_at": "2026-07-22",
+  "notes": "Version-scoped companion compatibility manifest for Agently 4.1.4.3. This patch makes direct Pydantic v2 BaseModel classes first-class ModelRequest and AgentExecution output contracts, including nested models, while preserving the 4.1.4.2 owner boundaries and runtime protocols.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",
@@ -173,6 +174,14 @@
     }
   },
   "request_input": {
+    "structured_output": {
+      "surface": [
+        "ModelRequest.output",
+        "AgentExecution.output",
+        "ModelRequestResult.get_data_object"
+      ],
+      "contract": "A Pydantic v2 BaseModel class is expanded recursively for prompt/schema generation and preserved as the final output model; successful object reads return an instance of the original class."
+    },
     "agent_execution_request_scope": {
       "surface": [
         "AgentExecution",
