@@ -80,6 +80,16 @@ class ModelRequestResultDataFlow:
             return []
         return [str(item)[:300] for item in feedback[:8] if str(item).strip()]
 
+    @staticmethod
+    def get_validate_output_correction(validation_outcome: Mapping[str, Any]) -> list[str]:
+        if validation_outcome.get("kind") != "failed":
+            return []
+        reason = validation_outcome.get("reason")
+        if reason is None:
+            return []
+        reason_text = str(reason).strip()
+        return [reason_text[:300]] if reason_text else []
+
     def get_auto_ensure_keys(self, *, key_style: Literal["dot", "slash"] = "dot") -> list[str]:
         result = self._result
         cache_key = key_style
@@ -901,6 +911,7 @@ class ModelRequestResultDataFlow:
                         max_retries=max_retries,
                         raise_ensure_failure=raise_ensure_failure,
                         retry_count=retry_count + 1,
+                        output_correction=self.get_validate_output_correction(validation_outcome),
                     )
                 if validation_outcome.get("raise_value") is not None or raise_ensure_failure:
                     raise self.build_validation_failure_exception(validation_outcome)

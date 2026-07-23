@@ -205,6 +205,33 @@ async def test_agent_validate_failure_retries_and_emits_runtime_events():
 
 
 @pytest.mark.asyncio
+async def test_validate_failure_reason_is_added_to_retry_prompt_without_payload():
+    MockValidateJSONRequester.reset([{"status": "draft"}, {"status": "ready"}])
+    request = _create_request(MockValidateJSONRequester, "validate-retry-feedback")
+    request.output({"status": (str,)}, format="json")
+    validation_reason = "status must be ready before publication" + ("." * 300) + "UNBOUNDED_TAIL"
+
+    def require_ready(result, context):
+        del context
+        if result["status"] == "ready":
+            return True
+        return {
+            "ok": False,
+            "reason": validation_reason,
+            "payload": {"internal_policy": "do-not-send-to-model"},
+        }
+
+    data = await request.validate(require_ready).async_start(max_retries=1)
+
+    assert data == {"status": "ready"}
+    assert MockValidateJSONRequester.attempts == 2
+    assert "[OUTPUT CORRECTION]:" in MockValidateJSONRequester.prompt_texts[1]
+    assert "status must be ready before publication" in MockValidateJSONRequester.prompt_texts[1]
+    assert "UNBOUNDED_TAIL" not in MockValidateJSONRequester.prompt_texts[1]
+    assert "do-not-send-to-model" not in MockValidateJSONRequester.prompt_texts[1]
+
+
+@pytest.mark.asyncio
 async def test_validate_no_retry_can_return_last_result_when_raise_disabled():
     MockValidateJSONRequester.reset([{"status": "draft"}])
     request = _create_request(MockValidateJSONRequester, "validate-no-retry")
@@ -296,6 +323,7 @@ async def test_validate_handler_exception_retries_and_emits_validation_error():
     assert validation_error_event.payload["error_kind"] == "RuntimeError"
     assert validation_error_event.payload["reason"] == "validator boom"
     assert validation_error_event.payload["response_text"] == '{"answer": "ok"}'
+    assert "validator boom" not in MockValidateJSONRequester.prompt_texts[1]
 
 
 @pytest.mark.asyncio

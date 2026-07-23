@@ -210,9 +210,11 @@ await save_case_update(final)
    pass → return result   |   fail → retry (if budget remains) → top of pipeline
 ```
 
-A failure at any step retries the request. Pydantic failures add bounded
-field-level correction messages to the next attempt. Retries share one budget
-controlled by `max_retries` (default `3`). When the budget is exhausted:
+A retryable failure at any step retries the request. Pydantic failures add bounded
+field-level correction messages to the next attempt. A retryable custom
+validator failure adds its bounded `reason` to the same correction prompt.
+Retries share one budget controlled by `max_retries` (default `3`). When the
+budget is exhausted:
 
 - A Pydantic model violation always raises; an invalid dict is not an accepted
   value, even when `raise_ensure_failure=False`.
@@ -222,6 +224,12 @@ controlled by `max_retries` (default `3`). When the budget is exhausted:
 ## Where validate plugs in
 
 `.validate(handler)` registers a custom check. It runs **after** strict output and `ensure_keys` have already passed, on a canonical dict snapshot of the result.
+
+When a retryable handler result is not accepted, Agently sends its `reason`
+(up to 300 characters) to the next model attempt and asks for a complete
+replacement output. The optional validation `payload` and handler exception
+details remain host/runtime diagnostics and are not automatically copied into
+the model prompt.
 
 ```python
 def must_be_short(result, ctx):

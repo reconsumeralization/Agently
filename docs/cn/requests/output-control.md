@@ -195,8 +195,9 @@ await save_case_update(final)
    通过 → 返回结果   |   失败 → retry（预算未耗尽时）→ 回到顶部
 ```
 
-任意一步失败都触发重试。Pydantic 校验失败会把有界的字段级修正信息加入下一次
-attempt。重试共用一份预算，由 `max_retries`（默认 `3`）控制。预算耗尽时：
+任意一步可重试的失败都会触发重试。Pydantic 校验失败会把有界的字段级修正信息加入下一次
+attempt；可重试的自定义 validator 失败也会把有界的 `reason` 加入同一份修正
+提示词。重试共用一份预算，由 `max_retries`（默认 `3`）控制。预算耗尽时：
 
 - Pydantic 模型违反总会抛异常；即使 `raise_ensure_failure=False`，不合规 dict
   也不会成为已接受结果。
@@ -206,6 +207,10 @@ attempt。重试共用一份预算，由 `max_retries`（默认 `3`）控制。�
 ## validate 在哪一步
 
 `.validate(handler)` 注册自定义检查。它在 strict output 与 `ensure_keys` 都通过**之后**跑，作用对象是结果的 canonical dict snapshot。
+
+当可重试的 handler 结果未通过时，Agently 会把它的 `reason`（最多 300 字）
+提供给下一次模型调用，并要求重新给出完整输出。可选的 validation `payload`
+和 handler 异常详情仍然只用于 host/runtime 诊断，不会自动复制进模型提示词。
 
 ```python
 def must_be_short(result, ctx):
