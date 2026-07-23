@@ -46,6 +46,10 @@ from agently.types.plugins import PromptGenerator
 from agently.types.data import PromptModel, ChatMessageContent, TextMessageContent
 from agently.types.data.prompt import _classify_field_spec
 from agently.utils import SettingsNamespace, DataFormatter, DataPathBuilder, TimeInfo
+from .modules.output_contract import (
+    generate_output_requirement_lines,
+    pydantic_model_to_output_schema,
+)
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -147,55 +151,21 @@ class AgentlyPromptGenerator(PromptGenerator):
     def _is_pydantic_model_type(value: Any) -> TypeGuard[type[BaseModel]]:
         return isinstance(value, type) and issubclass(value, BaseModel)
 
-    @classmethod
-    def _pydantic_model_to_output_schema(
-        cls,
-        model_type: type[BaseModel],
-        *,
-        model_stack: frozenset[type[BaseModel]] = frozenset(),
-    ) -> dict[str, Any]:
-        next_stack = model_stack | {model_type}
-        schema: dict[str, Any] = {}
-        for field_name, field in model_type.model_fields.items():
-            output_name = field.alias if isinstance(field.alias, str) else field_name
-            annotation = field.annotation
-            while get_origin(annotation) is Annotated:
-                annotation = get_args(annotation)[0]
-
-            if cls._is_pydantic_model_type(annotation):
-                field_schema: Any = (
-                    annotation.__name__
-                    if annotation in next_stack
-                    else cls._pydantic_model_to_output_schema(annotation, model_stack=next_stack)
-                )
-            elif get_origin(annotation) in (list, set, tuple):
-                item_args = get_args(annotation)
-                item_type = item_args[0] if item_args else Any
-                while get_origin(item_type) is Annotated:
-                    item_type = get_args(item_type)[0]
-                if cls._is_pydantic_model_type(item_type):
-                    item_schema = (
-                        item_type.__name__
-                        if item_type in next_stack
-                        else cls._pydantic_model_to_output_schema(item_type, model_stack=next_stack)
-                    )
-                else:
-                    item_schema = item_type
-                field_schema = [item_schema]
-            else:
-                field_schema = annotation
-
-            description = field.description or ("Required field." if field.is_required() else "")
-            if field.is_required():
-                field_schema = (field_schema, description, True)
-            elif description:
-                field_schema = (field_schema, description)
-            schema[output_name] = field_schema
-        return schema
-
     @staticmethod
     def _is_ensure_marker(value: Any) -> bool:
         return DataPathBuilder.is_ensure_marker(value)
+
+    def _generate_output_requirement_lines(
+        self,
+        output: Any,
+        *,
+        title_mapping: dict[str, str] | None = None,
+    ) -> list[str]:
+        return generate_output_requirement_lines(
+            output,
+            replace_slot_references=self._replace_slot_references,
+            title_mapping=title_mapping,
+        )
 
     def _check_prompt_all_empty(self, prompt_object: PromptModel):
         # If prompt is customized, skip the check
@@ -328,6 +298,12 @@ class AgentlyPromptGenerator(PromptGenerator):
                 "All defined fields are required. Every section header listed below MUST appear",
                 "in your response exactly as specified.",
             ])
+        lines.extend(
+            self._generate_output_requirement_lines(
+                output,
+                title_mapping=title_mapping,
+            )
+        )
         lines.append("")
         lines.append("Required sections:")
         lines.append("")
@@ -407,6 +383,12 @@ class AgentlyPromptGenerator(PromptGenerator):
                 "",
                 "All defined fields are required. Every field block listed below MUST appear.",
             ])
+        lines.extend(
+            self._generate_output_requirement_lines(
+                output,
+                title_mapping=title_mapping,
+            )
+        )
         lines.extend(["", "<agently_output>"])
         for field_name, field_spec in output.items():
             if self._is_string_output_field(field_spec):
@@ -441,6 +423,12 @@ class AgentlyPromptGenerator(PromptGenerator):
                 "",
                 "All defined fields are required. Every top-level key listed below MUST appear.",
             ])
+        lines.extend(
+            self._generate_output_requirement_lines(
+                output,
+                title_mapping=title_mapping,
+            )
+        )
         lines.extend(["", "<<<BEGIN AGENTLY_YAML>>>"])
         for field_name, field_spec in output.items():
             lines.extend(self._generate_yaml_literal_field_lines(str(field_name), field_spec))
@@ -475,6 +463,12 @@ class AgentlyPromptGenerator(PromptGenerator):
                 "All defined fields are required. Every section header listed below MUST appear",
                 "in your response exactly as specified.",
             ])
+        lines.extend(
+            self._generate_output_requirement_lines(
+                output,
+                title_mapping=title_mapping,
+            )
+        )
         lines.append("")
         lines.append("Required sections:")
         lines.append("")
@@ -677,6 +671,10 @@ class AgentlyPromptGenerator(PromptGenerator):
                             ),
                             "Data Structure:",
                             self._generate_json_output_prompt(final_output, title_mapping=prompt_title_mapping),
+                            *self._generate_output_requirement_lines(
+                                final_output,
+                                title_mapping=prompt_title_mapping,
+                            ),
                             "",
                         ]
                     )
@@ -754,9 +752,9 @@ class AgentlyPromptGenerator(PromptGenerator):
         prompt_data = dict(self.prompt)
         if "output" in prompt_data and "output_format" not in prompt_data:
             prompt_data["output_format"] = self.settings.get("prompt.default_output_format", "json")
+        if self._is_pydantic_model_type(prompt_data.get("output")):
+            prompt_data["output"] = pydantic_model_to_output_schema(prompt_data["output"])
         prompt_object = PromptModel(**prompt_data)
-        if self._is_pydantic_model_type(prompt_object.output):
-            prompt_object.output = self._pydantic_model_to_output_schema(prompt_object.output)
         return prompt_object
 
     def to_text(

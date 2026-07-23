@@ -364,6 +364,111 @@ def test_pydantic_output_model_preserves_declared_type_and_exposes_structural_pr
     assert prompt.to_output_model() is Ticket
 
 
+@pytest.mark.parametrize(
+    "output_format",
+    ["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal"],
+)
+def test_pydantic_output_constraints_are_rendered_for_every_structured_format(output_format):
+    from pydantic import BaseModel, Field
+
+    class ActionItem(BaseModel):
+        name: str = Field(
+            min_length=2,
+            max_length=5,
+            pattern=r"^[a-z]+$",
+            description="item name",
+        )
+
+    class Ticket(BaseModel):
+        title: str = Field(min_length=3, max_length=8, description="result title")
+        priority: int = Field(ge=1, le=3, description="ticket priority")
+        action_items: list[ActionItem] = Field(
+            min_length=1,
+            max_length=2,
+            description="action items",
+        )
+
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.update(
+        {
+            "input": "Create a ticket.",
+            "output": Ticket,
+            "output_format": output_format,
+        }
+    )
+
+    text = prompt.to_text()
+
+    format_markers = {
+        "json": "Data Format: JSON",
+        "flat_markdown": "Data Format: Structured Markdown",
+        "hybrid": "Data Format: Structured Markdown with JSON blocks",
+        "xml_field": "Data Format: XML-like field envelope",
+        "yaml_literal": "Data Format: YAML literal document",
+    }
+    assert format_markers[output_format] in text
+    assert "Field requirements:" in text
+    assert "- title: result title; required; must not be null; length: 3..8 characters" in text
+    assert "- priority: ticket priority; required; must not be null; value: >= 1 and <= 3" in text
+    assert "- action_items: action items; required; must not be null; item count: 1..2" in text
+    assert (
+        "- action_items[*].name: item name; required; must not be null; " "length: 2..5 characters; pattern: ^[a-z]+$"
+    ) in text
+
+
+def test_pydantic_output_contract_renders_alias_nullability_literal_and_numeric_rules():
+    from typing import Literal
+    from pydantic import BaseModel, Field
+
+    class Ticket(BaseModel):
+        identifier: str = Field(alias="ticket_id", min_length=1)
+        note: str | None
+        status: Literal["open", "closed"]
+        confidence: float = Field(gt=0, lt=1, multiple_of=0.1)
+
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.update(
+        {
+            "input": "Create a ticket.",
+            "output": Ticket,
+            "output_format": "json",
+        }
+    )
+
+    text = prompt.to_text()
+
+    assert "- ticket_id: required; must not be null; length: >= 1 characters" in text
+    assert "- note: required; null is allowed" in text
+    assert '- status: required; must not be null; allowed values: ["open","closed"]' in text
+    assert "- confidence: required; must not be null; value: > 0 and < 1; multiple of 0.1" in text
+
+
+@pytest.mark.parametrize(
+    "output_format",
+    ["json", "flat_markdown", "hybrid", "xml_field", "yaml_literal"],
+)
+def test_tuple_ensure_policies_are_rendered_for_every_structured_format(output_format):
+    Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
+    prompt = Prompt(Agently.plugin_manager, Agently.settings)
+    prompt.update(
+        {
+            "input": "Decide whether to continue.",
+            "output": {
+                "ready": (bool, "whether ready", True),
+                "reply": (str, "final reply", "not_null"),
+            },
+            "output_format": output_format,
+        }
+    )
+
+    text = prompt.to_text()
+
+    assert "- ready: whether ready; required key; null or empty values are allowed" in text
+    assert "- reply: final reply; required key; value must not be null, blank, or empty" in text
+
+
 def test_serializable_output_prompt_preserves_not_null_ensure_marker():
     Agently.set_settings("plugins.PromptGenerator.name", "AgentlyPromptGenerator")
     prompt = Prompt(Agently.plugin_manager, Agently.settings)

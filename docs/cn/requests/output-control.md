@@ -12,6 +12,11 @@ keywords: Agently, output, validate, ensure_keys, retry, max_retries
 
 对 Agently `4.1.0.1+`，默认 authoring 路径是：在 `.output(...)` 里直接用第三槽 `ensure` 标记固定必填叶子，再由运行时把这些标记编译成 `ensure_keys`。只有当必填路径是运行时决定、条件分支决定，或用静态 schema 不好表达时，才手动传 `ensure_keys=`。默认情况下，第三槽 `True` 和手动 `ensure_keys` 只检查路径/key 是否出现；值可以是 `None`、空白字符串、`False`、`0`、空列表，或其他业务上合法的空值。若某个必填路径还必须包含可用值，显式写第三槽 `"not_null"`；它会拒绝 `None`、空白字符串、空列表或空 wildcard 匹配，以及列表中包含缺失的必填值，同时仍接受 `False` 和 `0`。
 
+tuple ensure 策略与受支持的 Pydantic 字段约束会进入首次结构化输出提示词，
+不会只留在响应后的校验阶段。直接声明的 Pydantic 输出模型同时仍是 typed
+接受权威：解析出的 dict 如果未通过模型校验，会使用同一份 retry 预算修正，
+不会被当作成功业务数据返回。
+
 ## 直接下游接口契约
 
 如果下游代码会把解析结果传给 API、SDK、模块接口或函数，`.output(...)`
@@ -175,22 +180,28 @@ await save_case_update(final)
 1. parse / repair          ← 从文本中抽取结构化对象
        │
        ▼
-2. strict output           ← 对照 .output(...) 形态校验；启用了 ensure_all_keys 则全检查
+2. Pydantic validation     ← 使用最初声明的 BaseModel（如有）
        │
        ▼
-3. ensure_keys             ← 每叶子的必填路径检查（由 ensure 标记编译而来）
+3. strict output           ← 对照 .output(...) 形态校验；启用了 ensure_all_keys 则全检查
        │
        ▼
-4. custom validate         ← .validate(handler) 与 validate_handler= 业务规则
+4. ensure_keys             ← 每叶子的必填路径检查（由 ensure 标记编译而来）
+       │
+       ▼
+5. custom validate         ← .validate(handler) 与 validate_handler= 业务规则
        │
        ▼
    通过 → 返回结果   |   失败 → retry（预算未耗尽时）→ 回到顶部
 ```
 
-任意一步失败都触发重试。重试共用一份预算，由 `max_retries`（默认 `3`）控制。预算耗尽时：
+任意一步失败都触发重试。Pydantic 校验失败会把有界的字段级修正信息加入下一次
+attempt。重试共用一份预算，由 `max_retries`（默认 `3`）控制。预算耗尽时：
 
-- `raise_ensure_failure=True`（默认）—— 抛异常。
-- `raise_ensure_failure=False` —— 直接返回最近一次解析结果。
+- Pydantic 模型违反总会抛异常；即使 `raise_ensure_failure=False`，不合规 dict
+  也不会成为已接受结果。
+- 对 strict shape 或 ensure 失败，`raise_ensure_failure=True`（默认）会抛异常，
+  `False` 才会返回最近一次解析结果。
 
 ## validate 在哪一步
 

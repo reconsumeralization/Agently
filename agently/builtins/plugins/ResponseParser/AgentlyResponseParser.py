@@ -19,7 +19,7 @@ import re
 import warnings
 
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Generator, Literal, Mapping, cast, overload
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from agently.types.plugins import ResponseParser
 from agently.types.data import StreamingData
@@ -207,6 +207,7 @@ class AgentlyResponseParser(ResponseParser):
         self._consumer_lock = asyncio.Lock()
         self._final_json_parse_result: tuple[str | None, Any, BaseModel | None, bool] | None = None
         self._runtime_observations: list[dict[str, Any]] = []
+        self._output_validation_feedback: list[str] = []
 
         self._streaming_canceled = False
 
@@ -223,13 +224,49 @@ class AgentlyResponseParser(ResponseParser):
     def _on_unregister():
         pass
 
+    @staticmethod
+    def _format_validation_location(location: Any) -> str:
+        if not isinstance(location, (list, tuple)):
+            return str(location) if location else "<root>"
+        parts: list[str] = []
+        for item in location:
+            if isinstance(item, int):
+                if parts:
+                    parts[-1] = f"{parts[-1]}[{item}]"
+                else:
+                    parts.append(f"[{item}]")
+            else:
+                parts.append(str(item))
+        return ".".join(parts) if parts else "<root>"
+
+    @classmethod
+    def _validation_feedback_from_error(cls, error: BaseException) -> list[str]:
+        if isinstance(error, ValidationError):
+            feedback: list[str] = []
+            for detail in error.errors(
+                include_url=False,
+                include_context=False,
+                include_input=False,
+            )[:8]:
+                location = cls._format_validation_location(detail.get("loc"))
+                message = str(detail.get("msg") or detail.get("type") or "Invalid value")
+                feedback.append(f"{location}: {message}"[:300])
+            if feedback:
+                return feedback
+        return [f"<root>: {str(error)}"[:300]]
+
     def _build_result_object(self, parsed: Any) -> BaseModel | None:
+        self._output_validation_feedback = []
         try:
             if self._OutputModel:
                 return self._OutputModel.model_validate(parsed)
-        except Exception:
+        except Exception as exc:
+            self._output_validation_feedback = self._validation_feedback_from_error(exc)
             return None
         return None
+
+    def get_output_validation_feedback(self) -> list[str]:
+        return list(self._output_validation_feedback)
 
     def _parse_json_output(self, text: str) -> tuple[str | None, Any, BaseModel | None, bool]:
         return parse_json_output(
@@ -342,6 +379,7 @@ class AgentlyResponseParser(ResponseParser):
         self.full_result_data["errors"].clear()
         self.full_result_data["extra"].clear()
         self._final_json_parse_result = None
+        self._output_validation_feedback = []
         self._streaming_canceled = False
 
     async def _handle_done_event(self, data: Any, buffer: str) -> None:

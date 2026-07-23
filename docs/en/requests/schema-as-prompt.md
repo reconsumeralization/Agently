@@ -93,6 +93,12 @@ ensure_keys = ["title", "items[*].name"]
 
 Array wildcards like `items[*]` are part of the path syntax. If `title` is missing or any `items[i].name` is missing in parse output, the request retries (subject to `max_retries`). `value` is allowed to be missing. A `True` marker checks presence only, so an empty string, `None`, `False`, `0`, or an empty list may still be valid data. Use `"not_null"` when the field should retry on `None`, blank strings, empty lists or wildcard matches, or lists containing missing required values.
 
+These policies are also rendered into the model-facing `Field requirements`
+section for every structured output format. `True` is described as a required
+key that may contain an empty or null value; `"not_null"` is described as a
+required key whose value cannot be null, blank, or empty. The prompt guidance
+and the result-side ensure check therefore use the same policy.
+
 ```python
 {
     "ready": (bool, "whether the planner can proceed", True),
@@ -149,7 +155,7 @@ You can also mix in Pydantic models and Enum classes anywhere a `TypeExpr` is al
 
 ```python
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class Severity(str, Enum):
     P0 = "P0"
@@ -158,12 +164,29 @@ class Severity(str, Enum):
 
 class Ticket(BaseModel):
     severity: Severity
-    rationale: str
+    rationale: str = Field(min_length=10, max_length=500)
+    confidence: float = Field(ge=0, le=1)
 
 agent.output(Ticket)  # equivalent to expanding the BaseModel into nested leaves
 ```
 
-Passing `format="json"` explicitly has the same behavior. Nested `BaseModel` fields are expanded for the model-facing output requirement, while response validation reuses the originally declared model class. `get_data_object()` therefore returns a `Ticket` instance, including its nested Pydantic types and field constraints.
+Pydantic requiredness, nullability, aliases, enum/literal values, string and
+collection lengths, numeric bounds, `multiple_of`, patterns, and recognized
+formats are projected into the same model-facing `Field requirements` section.
+This applies to `json`, `flat_markdown`, `hybrid`, `xml_field`, and
+`yaml_literal`; the original model class remains the runtime validation
+authority.
+
+Nested `BaseModel` fields and constrained list items are expanded recursively.
+When a response violates the declared Pydantic model, Agently sends bounded
+field-level correction feedback into the next retry. If the retry budget is
+exhausted, the invalid dict is not returned as successful business data.
+`get_data_object()` returns the declared model instance after a successful
+attempt.
+
+Custom Pydantic validators and constraints that cannot be expressed compactly
+remain host-side validation only; Agently does not claim to have translated
+arbitrary Python validation logic into the prompt.
 
 ## Plain text
 

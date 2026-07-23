@@ -12,6 +12,12 @@ The validation pipeline runs the first time a structured response result is cons
 
 For Agently `4.1.0.1+`, the default authoring path is: mark fixed required leaves directly in `.output(...)` with the third-slot `ensure` flag, then let the runtime compile those flags into `ensure_keys`. Pass `ensure_keys=` manually only when the required path is runtime-dependent, conditional, or easier to express outside the static schema. By default, tuple `True` and runtime `ensure_keys` check path/key presence only; the value may be `None`, a blank string, `False`, `0`, an empty list, or another intentionally empty value. Use the explicit tuple marker `"not_null"` when a required path must also contain a meaningful value; it rejects `None`, blank strings, empty lists or wildcard matches, and lists containing missing required values while still accepting `False` and `0`.
 
+Tuple ensure policies and supported Pydantic field constraints are rendered
+into the initial structured-output prompt, not reserved for post-response
+checks. A direct Pydantic output model also remains the typed acceptance
+authority: a parsed dict that fails the model is corrected through the shared
+retry budget and is never returned as successful business data.
+
 ## Direct downstream interface contracts
 
 If downstream code passes the parsed result to an API, SDK, module interface,
@@ -189,22 +195,29 @@ await save_case_update(final)
 1. parse / repair         ← extract structured object from text
         │
         ▼
-2. strict output          ← match against .output(...) shape; ensure_all_keys checks if set
+2. Pydantic validation    ← original declared BaseModel, when used
         │
         ▼
-3. ensure_keys            ← per-leaf required-path checks (compiled from the ensure flag)
+3. strict output          ← match against .output(...) shape; ensure_all_keys checks if set
         │
         ▼
-4. custom validate        ← .validate(handler) and validate_handler= business rules
+4. ensure_keys            ← per-leaf required-path checks (compiled from the ensure flag)
+        │
+        ▼
+5. custom validate        ← .validate(handler) and validate_handler= business rules
         │
         ▼
    pass → return result   |   fail → retry (if budget remains) → top of pipeline
 ```
 
-A failure at any step retries the request. Retries share one budget controlled by `max_retries` (default `3`). When the budget is exhausted:
+A failure at any step retries the request. Pydantic failures add bounded
+field-level correction messages to the next attempt. Retries share one budget
+controlled by `max_retries` (default `3`). When the budget is exhausted:
 
-- `raise_ensure_failure=True` (the default) — raises.
-- `raise_ensure_failure=False` — returns the latest parsed result anyway.
+- A Pydantic model violation always raises; an invalid dict is not an accepted
+  value, even when `raise_ensure_failure=False`.
+- For strict-shape or ensure failures, `raise_ensure_failure=True` (the default)
+  raises, while `False` returns the latest parsed result.
 
 ## Where validate plugs in
 
