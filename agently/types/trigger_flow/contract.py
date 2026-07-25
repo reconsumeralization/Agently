@@ -18,7 +18,11 @@ from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar, runtime_
 from pydantic import TypeAdapter
 from typing_extensions import NotRequired, TypedDict
 
-from agently.types.data import ExecutionExchangeRequest
+from agently.types.data import (
+    ExecutionExchangeRequest,
+    SnapshotPruneResult,
+    SnapshotRetentionPolicy,
+)
 
 InputT = TypeVar("InputT")
 StreamT = TypeVar("StreamT")
@@ -109,6 +113,35 @@ class TriggerFlowCompactionState(TypedDict):
     load_policy: dict[str, Any]
 
 
+TriggerFlowValueDigestProjection = TypedDict(
+    "TriggerFlowValueDigestProjection",
+    {
+        "$triggerflow_projection": Literal["value_digest"],
+        "algorithm": Literal["sha256"],
+        "sha256": str,
+        "serialized_bytes": int,
+    },
+)
+
+
+class TriggerFlowSnapshotProjectionPolicy(TypedDict):
+    enabled: bool
+    terminal_value_mode: Literal["full", "digest"]
+    min_value_bytes: int
+    project_terminal_signal_attempts: bool
+
+
+class TriggerFlowSnapshotProjectionState(TypedDict):
+    version: int
+    policy: TriggerFlowSnapshotProjectionPolicy
+    applied: bool
+    deferred_reason: str | None
+    projected_terminal_interrupt_ids: list[str]
+    projected_value_count: int
+    original_value_bytes: int
+    projected_value_bytes: int
+
+
 class TriggerFlowExecutionSnapshot(TypedDict, total=False):
     schema_version: int
     kind: Literal["triggerflow.execution_snapshot"]
@@ -130,6 +163,8 @@ class TriggerFlowExecutionSnapshot(TypedDict, total=False):
     sub_flow_frames: dict[str, Any]
     last_signal: dict[str, Any] | None
     signal_net: dict[str, Any]
+    snapshot_projection: TriggerFlowSnapshotProjectionState
+    snapshot_retention_policy: SnapshotRetentionPolicy | None
     result: dict[str, Any]
     durable_system_state: dict[str, Any]
     resource_requirements: list[TriggerFlowResourceRequirement]
@@ -232,6 +267,31 @@ class TriggerFlowExecutionSnapshotStore(Protocol):
         step_id: str | None = None,
         expected_state_version: int | None = None,
     ) -> Any: ...
+
+
+@runtime_checkable
+class TriggerFlowExecutionSnapshotRetentionStore(
+    TriggerFlowExecutionSnapshotStore,
+    Protocol,
+):
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+        retention: SnapshotRetentionPolicy | None = None,
+    ) -> Any: ...
+
+    async def prune_snapshots(
+        self,
+        run_id: str,
+        *,
+        keep_last: int,
+    ) -> SnapshotPruneResult: ...
+
+    async def delete_snapshot(self, run_id: str) -> dict[str, Any]: ...
 
 
 class TriggerFlowInterruptEvent(TypedDict):

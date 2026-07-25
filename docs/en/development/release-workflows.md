@@ -120,8 +120,10 @@ The release reviewer should first list the required behavior from the roadmap,
 spec, issue acceptance criteria, compatibility manifest, docs, and example
 rules. Then map each requirement to the evidence that proves it:
 
-- scenario examples with real DeepSeek or local Ollama output and stable
-  `Expected key output`
+- scenario examples with output from an explicitly configured online model
+  (DeepSeek by default) and stable `Expected key output`; local Ollama may be
+  used for supplementary diagnostics but is not part of the default test suite
+  or final release evidence
 - deterministic tests for compatibility, stream/meta shape, route lifecycle,
   budget accounting, errors, and workspace records
 - protocol/type tests for public contracts and dependency direction
@@ -195,8 +197,9 @@ For each affected Foundation capability:
 - list the runnable core example that proves that effect, adding one before
   release when none exists
 - run the example against the release candidate after pyright and pytest
-- use real DeepSeek or local Ollama when the effect includes model-owned
-  planning, routing, verification, or response generation
+- use an explicitly configured real online model, DeepSeek by default, when the
+  effect includes model-owned planning, routing, verification, or response
+  generation; local Ollama is optional diagnostic evidence only
 - record command, environment, and stable key output, artifact, stream,
   metadata, or side-effect evidence in the release PR body or review notes
 
@@ -219,9 +222,10 @@ Before recommending a release:
 
 - identify the pinned developer usage examples affected by the release claims,
   README guidance, release notes, compatibility manifest, or changed public API
-- run those scripts against the release candidate, using real DeepSeek or local
-  Ollama when the example contains model-owned routing, planning, verification,
-  evaluation, or response generation
+- run those scripts against the release candidate, using an explicitly
+  configured real online model, DeepSeek by default, when the example contains
+  model-owned routing, planning, verification, evaluation, or response
+  generation; local Ollama is optional diagnostic evidence only
 - run release examples with an explicit all-allowed test capability policy when
   they may exercise Skills, Actions, TaskWorkspace, RecordStore, network, Python, shell, HTTP,
   browse, search, or MCP capability loading; do not confuse this release-test
@@ -233,6 +237,12 @@ Before recommending a release:
 - if a failure shows that the recommended usage itself must change, stop before
   rewriting the example and ask the maintainer whether this release should
   accept that usage update
+
+Live model calls are explicit release experiments, not default `pytest`
+dependencies. The deterministic suite must not require a local Ollama service
+or a preinstalled local model. Local Ollama may still be used for developer
+diagnostics, but final release evidence should use the declared online
+provider/model unless the maintainer records a one-off waiver and limitations.
 
 The release PR body or review notes should list the pinned examples that were
 run, the reason each one was included, and whether the result preserved the

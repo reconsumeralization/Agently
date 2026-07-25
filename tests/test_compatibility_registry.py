@@ -47,8 +47,8 @@ def test_companion_views_still_derive_from_released_manifest() -> None:
 def test_in_development_manifest_declares_breaking_owner_split() -> None:
     manifest = _development_manifest()
 
-    assert manifest["target_version"] == "4.1.4.3"
-    assert manifest["release_train"] == "2026-07-4.1.4.3-dev"
+    assert manifest["target_version"] == "4.1.4.4"
+    assert manifest["release_train"] == "2026-07-4.1.4.4-dev"
     assert "TaskContext" in manifest["notes"]
     assert "TaskWorkspace owns task files" in manifest["notes"]
     assert "RecordStore owns records and durability" in manifest["notes"]
@@ -106,6 +106,17 @@ def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:
     assert "TaskWorkspace is never an event store" in (
         devtools["runtime_control"]["record_store_contract"]
     )
+
+
+def test_in_development_triggerflow_snapshot_projection_contract() -> None:
+    triggerflow = _development_manifest()["companions"]["triggerflow"]
+    contract = triggerflow["snapshot_projection_contract"]
+
+    assert "schema v2" in contract
+    assert "schema-v1" in contract
+    assert "set_snapshot_projection_policy" in contract
+    assert "pending recovery state remains complete" in contract
+    assert "whole-snapshot byte limit" in contract
 
 
 def test_in_development_code_execution_and_evidence_replan_contracts() -> None:

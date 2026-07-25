@@ -53,7 +53,13 @@ from agently.types.trigger_flow.runtime_keys import (
     PARENT_SIGNAL_ID_META_KEY,
     TRANSIENT_AGGREGATION_STATE_KEYS,
 )
-from agently.types.data import EMPTY, RunContext, RuntimeEvent
+from agently.types.data import (
+    EMPTY,
+    RunContext,
+    RuntimeEvent,
+    SnapshotPruneResult,
+    SnapshotRetentionPolicy,
+)
 from agently.types.data import ExecutionResourceRequirement
 from .Control import (
     TriggerFlowPauseSignal,
@@ -93,6 +99,7 @@ DISTRIBUTED_SNAPSHOT_PROVIDER_CAPABILITIES = (
 DISTRIBUTED_SNAPSHOT_PROVIDER_METHODS = (
     "get_snapshot",
     "put_snapshot",
+    "prune_snapshots",
     "claim_lease",
     "heartbeat_lease",
     "release_lease",
@@ -193,6 +200,13 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._retained_lineage_anchors: list[dict[str, Any]] = []
         self._snapshot_artifact_refs: list[dict[str, Any]] = []
         self._compaction_policy: dict[str, Any] = {}
+        self._snapshot_projection_policy: dict[str, Any] = {
+            "enabled": False,
+            "terminal_value_mode": "digest",
+            "min_value_bytes": 4096,
+            "project_terminal_signal_attempts": True,
+        }
+        self._snapshot_retention_policy: SnapshotRetentionPolicy | None = None
         self._load_policy: dict[str, Any] = {}
         self._heartbeat_at: float | None = None
         self._lease_until: float | None = self._created_at + lease_ttl if lease_ttl is not None else None
@@ -259,6 +273,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self.clear_runtime_resources = self._clear_runtime_resources
         self.declare_resource_requirement = self._declare_resource_requirement
         self.set_compaction_policy = self._set_compaction_policy
+        self.set_snapshot_projection_policy = self._set_snapshot_projection_policy
+        self.set_snapshot_retention_policy = self._set_snapshot_retention_policy
 
         # Runtime Stream
         self.put_into_stream = FunctionShifter.syncify(self.async_put_into_stream)
@@ -727,6 +743,10 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
 
     def get_lifecycle_state(self):
         return self._lifecycle_state
+
+    @property
+    def run_id(self) -> str:
+        return self.run_context.run_id or self.id
 
     @property
     def started(self) -> bool:
@@ -2144,6 +2164,59 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._bump_state_version()
         return self
 
+    def _set_snapshot_projection_policy(
+        self,
+        *,
+        terminal_value_mode: Literal["full", "digest"] = "digest",
+        min_value_bytes: int = 4096,
+        project_terminal_signal_attempts: bool = True,
+        enabled: bool = True,
+    ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
+        if terminal_value_mode not in {"full", "digest"}:
+            raise ValueError(
+                "snapshot projection terminal_value_mode must be one of: "
+                "'full', 'digest'."
+            )
+        if not isinstance(min_value_bytes, int) or isinstance(min_value_bytes, bool) or min_value_bytes < 0:
+            raise ValueError("snapshot projection min_value_bytes must be a non-negative integer.")
+        self._snapshot_projection_policy = {
+            "enabled": bool(enabled),
+            "terminal_value_mode": terminal_value_mode,
+            "min_value_bytes": min_value_bytes,
+            "project_terminal_signal_attempts": bool(project_terminal_signal_attempts),
+        }
+        self._bump_state_version()
+        return self
+
+    def _serializable_snapshot_projection_policy(self):
+        return self._to_serializable_value(self._snapshot_projection_policy)
+
+    def _set_snapshot_retention_policy(
+        self,
+        *,
+        keep_last: int | None,
+    ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
+        self._snapshot_retention_policy = self._normalize_snapshot_retention_policy({"keep_last": keep_last})
+        self._bump_state_version()
+        return self
+
+    def _normalize_snapshot_retention_policy(
+        self,
+        policy: Any,
+    ) -> SnapshotRetentionPolicy:
+        if not isinstance(policy, dict):
+            raise TypeError("snapshot retention policy must be a dictionary.")
+        unknown = sorted(set(policy) - {"keep_last"})
+        if unknown:
+            raise ValueError("snapshot retention policy contains unsupported keys: " f"{', '.join(unknown)}.")
+        keep_last = policy.get("keep_last")
+        if keep_last is not None:
+            if isinstance(keep_last, bool) or not isinstance(keep_last, int):
+                raise TypeError("snapshot retention keep_last must be a positive integer or None.")
+            if keep_last < 1:
+                raise ValueError("snapshot retention keep_last must be greater than or equal to 1.")
+        return {"keep_last": keep_last}
+
     def _set_load_read_limit(self, limit: int | None):
         if limit is not None and limit < 0:
             raise ValueError("load read limit must be non-negative or None.")
@@ -2697,9 +2770,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     ):
         await self._async_activate_recovery_durability(reason="async_save")
         resolved_snapshot_store = snapshot_store if snapshot_store is not None else self._snapshot_store
-        if resolved_snapshot_store is None or not callable(
-            getattr(resolved_snapshot_store, "put_snapshot", None)
-        ):
+        if resolved_snapshot_store is None or not callable(getattr(resolved_snapshot_store, "put_snapshot", None)):
             raise TypeError(
                 "TriggerFlow snapshot_store must expose async put_snapshot(run_id, state, step_id=...). "
                 "Pass snapshot_store to async_save(...) or set runtime resource 'snapshot_store'."
@@ -2720,12 +2791,49 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
             {
                 "step_id": resolved_step_id,
                 "expected_state_version": expected_state_version,
+                **(
+                    {"retention": self._snapshot_retention_policy}
+                    if self._snapshot_retention_policy is not None
+                    else {}
+                ),
             },
         )
+        if self._snapshot_retention_policy is not None and "retention" not in put_kwargs:
+            raise TypeError(
+                "TriggerFlow snapshot_store must accept retention=... when an "
+                "execution snapshot retention override is configured."
+            )
         return await put_snapshot(
             resolved_run_id,
             state,
             **put_kwargs,
+        )
+
+    async def async_prune_recovery_snapshots(
+        self,
+        *,
+        keep_last: int = 1,
+    ) -> SnapshotPruneResult:
+        if isinstance(keep_last, bool) or not isinstance(keep_last, int):
+            raise TypeError("TriggerFlow recovery snapshot keep_last must be a positive integer.")
+        if keep_last < 1:
+            raise ValueError("TriggerFlow recovery snapshot keep_last must be greater than or equal to 1.")
+        if not self.is_idle():
+            raise RuntimeError(f"Can not prune recovery snapshots for active TriggerFlow execution {self.id}.")
+        await self._async_activate_recovery_durability(reason="async_prune_recovery_snapshots")
+        snapshot_store = self._snapshot_store
+        prune_snapshots = getattr(snapshot_store, "prune_snapshots", None)
+        if snapshot_store is None or not callable(prune_snapshots):
+            raise TypeError(
+                "TriggerFlow snapshot_store must expose "
+                "async prune_snapshots(run_id, keep_last=...)."
+            )
+        return await cast(
+            Any,
+            prune_snapshots,
+        )(
+            self.run_id,
+            keep_last=keep_last,
         )
 
     async def _async_read_runtime_events_for_load(

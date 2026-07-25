@@ -1,6 +1,11 @@
 import asyncio
+import sys
 import tempfile
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from agently import TriggerFlow, TriggerFlowRuntimeData
 from agently.core.storage import RecordStore
@@ -8,13 +13,18 @@ from agently.core.storage import RecordStore
 
 async def triggerflow_durable_recovery_demo():
     with tempfile.TemporaryDirectory(prefix="agently-triggerflow-recovery-") as record_dir:
-        record_store = RecordStore(Path(record_dir), mode="read_write")
+        record_store = RecordStore(
+            Path(record_dir),
+            mode="read_write",
+            snapshot_retention={"keep_last": 3},
+        )
         flow = TriggerFlow(name="durable-approval-recovery")
 
         async def draft_request(data: TriggerFlowRuntimeData):
             await data.async_set_state("draft", {"topic": data.value}, emit=False)
             return await data.async_pause_for(
-                type="exchange", exchange_kind="approval",
+                type="exchange",
+                exchange_kind="approval",
                 payload={"question": "Approve this pricing update?"},
                 interrupt_id="approval",
                 resume_to="next",
@@ -48,8 +58,13 @@ async def triggerflow_durable_recovery_demo():
             record_store=record_store,
             runtime_resources={"runtime_event_store": record_store},
         )
+        execution.set_snapshot_retention_policy(keep_last=2)
         await execution.async_start("pricing")
-        snapshot_ref = await execution.async_save(step_id="waiting-approval")
+        await execution.async_save(step_id="waiting-approval-1")
+        await execution.async_save(step_id="waiting-approval-2")
+        snapshot_ref = await execution.async_save(step_id="waiting-approval-3")
+        retained_before_prune = len(await record_store.checkpoint_history(execution.run_id))
+        retention_report = await execution.async_prune_recovery_snapshots(keep_last=1)
         saved_snapshot = await record_store.get_data(snapshot_ref)
 
         recovered = flow.create_execution(
@@ -103,12 +118,13 @@ async def triggerflow_durable_recovery_demo():
 
         key_output = {
             "load_ready": load["ready"],
+            "retained_before_prune": retained_before_prune,
+            "retained_after_prune": retention_report["retained_records"],
             "approval_count": len(snapshot["approvals"]),
             "resume_status": resume_record["status"],
             "wait_dispatch_state": wait_request["dispatch_state"],
             "has_resume_completed_event": any(
-                event["event_type"] == "triggerflow.resume_completed"
-                for event in runtime_events
+                event["event_type"] == "triggerflow.resume_completed" for event in runtime_events
             ),
         }
         print(key_output)
@@ -120,6 +136,8 @@ if __name__ == "__main__":
 # Expected key output:
 # {
 #     'load_ready': True,
+#     'retained_before_prune': 2,
+#     'retained_after_prune': 1,
 #     'approval_count': 1,
 #     'resume_status': 'completed',
 #     'wait_dispatch_state': 'completed',
@@ -128,9 +146,12 @@ if __name__ == "__main__":
 #
 # How it works:
 # The first execution pauses at a durable ExternalWait approval request and
-# persists a RecordStore-backed execution snapshot. A fresh execution loads
-# that snapshot, accepts the approval with a stable resume_request_id, then a second
-# fresh execution receives the same callback id again.  The duplicate callback
+# persists RecordStore-backed execution snapshots. Its execution-level policy
+# overrides the provider default, keeps the latest two versions, and active
+# pruning then keeps the latest recovery point without requiring a run_id
+# argument. A fresh execution loads that snapshot, accepts the approval with a
+# stable resume_request_id, then a second fresh execution receives the same callback
+# id again. The duplicate callback
 # returns the completed interrupt record instead of running finalize twice.
 #
 # Flow:
@@ -139,7 +160,8 @@ if __name__ == "__main__":
 #   v
 # draft_request -> pause_for(type="exchange", exchange_kind="approval", resume_to="next")
 #   |
-# async_save(step_id="waiting-approval")
+# async_save(...) x3 -> automatic retention keeps latest 2
+# async_prune_recovery_snapshots() -> keeps latest 1
 #   |
 # [--- process/restart boundary represented by a fresh execution ---]
 #   |

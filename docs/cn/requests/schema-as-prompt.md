@@ -91,6 +91,11 @@ ensure_keys = ["title", "items[*].name"]
 
 数组通配 `items[*]` 是路径语法的一部分。如果解析后 `title` 缺失或任意 `items[i].name` 缺失就触发重试（受 `max_retries` 限制）。`value` 允许缺失。`True` 只检查路径存在，所以空字符串、`None`、`False`、`0` 或空列表仍可作为合法业务值。若字段遇到 `None`、空白字符串、空列表或空 wildcard 匹配，以及列表中包含缺失必填值时应重试，使用 `"not_null"`。
 
+这些策略也会进入每种结构化输出格式面向模型的 `Field requirements`。
+`True` 会被说明为「key 必须出现，但允许空值或 null」；`"not_null"` 会被说明为
+「key 必须出现，且值不能为 null、空白或空集合」。提示词建议与结果侧 ensure
+检查由此使用同一套策略。
+
 ```python
 {
     "ready": (bool, "planner 是否可以继续", True),
@@ -147,7 +152,7 @@ output:
 
 ```python
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class Severity(str, Enum):
     P0 = "P0"
@@ -156,12 +161,23 @@ class Severity(str, Enum):
 
 class Ticket(BaseModel):
     severity: Severity
-    rationale: str
+    rationale: str = Field(min_length=10, max_length=500)
+    confidence: float = Field(ge=0, le=1)
 
 agent.output(Ticket)  # 等价于把 BaseModel 展开为嵌套叶子
 ```
 
-显式传入 `format="json"` 时行为相同。嵌套的 `BaseModel` 字段会展开到面向模型的输出要求中，响应校验则复用最初声明的模型类。因此 `get_data_object()` 会返回 `Ticket` 实例，并保留嵌套 Pydantic 类型和字段约束。
+Pydantic 的必填性、可空性、alias、enum/literal、字符串与集合长度、数值边界、
+`multiple_of`、pattern 和已识别 format 会进入同一份面向模型的
+`Field requirements`。这适用于 `json`、`flat_markdown`、`hybrid`、
+`xml_field` 和 `yaml_literal`；原始模型类仍然是运行时校验权威。
+
+嵌套 `BaseModel` 与受约束的列表元素会递归展开。如果响应违反声明的 Pydantic
+模型，Agently 会把有界的字段级修正信息送入下一次 retry。预算耗尽后，不合规
+dict 不会被当作成功业务结果返回；成功时 `get_data_object()` 返回原声明模型实例。
+
+自定义 Pydantic validator 以及无法紧凑表达的约束只保留为 host-side 校验；
+Agently 不会声称已把任意 Python 校验逻辑转换进提示词。
 
 ## 纯文本
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import inspect
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
@@ -35,10 +36,13 @@ from agently.types.data.record_store import (
     RecordRetrievalMethod,
     RecordRetrievalPackage,
     RecordRetrievalSelection,
+    SnapshotPruneResult,
+    SnapshotRetentionPolicy,
     StoredRuntimeEvent,
 )
 from agently.types.plugins import RecordStoreBackend
 from .Retrieval import RerankHandler, retrieve_records
+from .SnapshotRetention import normalize_snapshot_retention
 from ._defaults import default_record_store_root, merge_scope
 
 if TYPE_CHECKING:
@@ -88,6 +92,7 @@ class RecordStore:
         vector_store_options: dict[str, Any] | None = None,
         default_scope: dict[str, Any] | None = None,
         default_search_scope: dict[str, Any] | None = None,
+        snapshot_retention: SnapshotRetentionPolicy | None = None,
     ):
         if mode not in {"read_only", "read_write"}:
             raise ValueError("RecordStore mode must be 'read_only' or 'read_write'.")
@@ -105,6 +110,14 @@ class RecordStore:
         self._embedding_options = dict(embedding_options or {})
         self._vector_store_provider = vector_store_provider
         self._vector_store_options = dict(vector_store_options or {})
+        self._snapshot_retention = (
+            normalize_snapshot_retention(
+                snapshot_retention,
+                default_keep_last=3,
+            )
+            if snapshot_retention is not None
+            else None
+        )
         self._file_mutation_lock = asyncio.Lock()
         self._execution_id = uuid.uuid4().hex
         if backend is None or isinstance(backend, (str, Path)):
@@ -440,12 +453,33 @@ class RecordStore:
         *,
         step_id: str | None = None,
         expected_state_version: int | None = None,
+        retention: SnapshotRetentionPolicy | None = None,
     ) -> RecordRef:
-        ref = await self.backend.put_snapshot(
+        put_snapshot = self.backend.put_snapshot
+        resolved_retention = self._snapshot_retention if retention is None else retention
+        put_kwargs: dict[str, Any] = {
+            "step_id": step_id,
+            "expected_state_version": expected_state_version,
+        }
+        if resolved_retention is not None:
+            try:
+                signature = inspect.signature(put_snapshot)
+            except (TypeError, ValueError):
+                signature = None
+            if signature is not None:
+                accepts_retention = "retention" in signature.parameters or any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+                )
+                if not accepts_retention:
+                    raise TypeError(
+                        "RecordStore snapshot provider must accept retention=... "
+                        "when snapshot retention is configured."
+                    )
+            put_kwargs["retention"] = resolved_retention
+        ref = await put_snapshot(
             run_id,
             state,
-            step_id=step_id,
-            expected_state_version=expected_state_version,
+            **put_kwargs,
         )
         return await self._scope_record_ref(ref)
 
@@ -469,6 +503,27 @@ class RecordStore:
             delete_snapshot,
         )
         return await delete_snapshot_async(run_id)
+
+    @_guard_record_store_mutation
+    async def prune_snapshots(
+        self,
+        run_id: str,
+        *,
+        keep_last: int,
+    ) -> SnapshotPruneResult:
+        prune_snapshots = getattr(self.backend, "prune_snapshots", None)
+        if not callable(prune_snapshots):
+            raise TypeError(
+                "RecordStore snapshot provider must expose "
+                "async prune_snapshots(run_id, keep_last=...)."
+            )
+        return await cast(
+            Callable[..., Awaitable[SnapshotPruneResult]],
+            prune_snapshots,
+        )(
+            run_id,
+            keep_last=keep_last,
+        )
 
     async def latest_checkpoint(self, run_id: str) -> RecordRef | None:
         if not self.default_search_scope:

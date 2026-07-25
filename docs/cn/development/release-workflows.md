@@ -101,7 +101,9 @@ release reviewer 应先列出 roadmap、spec、issue acceptance criteria、
 compatibility manifest、docs 和 example 规则里的要求，然后把每一项要求映射到证明它的
 证据：
 
-- 带真实 DeepSeek 或本地 Ollama 输出、并包含稳定 `Expected key output` 的场景 example
+- 带显式配置的真实线上模型输出（默认使用 DeepSeek）、并包含稳定
+  `Expected key output` 的场景 example；本地 Ollama 只可作为补充诊断，不进入默认测试套件，
+  也不作为最终 release 证据
 - 覆盖兼容性、stream/meta 形状、route lifecycle、budget accounting、错误语义和
   workspace record 的确定性测试
 - 覆盖公开协议和依赖方向的 protocol/type 测试
@@ -162,7 +164,7 @@ Foundation substrate，例如 ModelRequest result materialization、TriggerFlow 
 - 列出证明该效果的 runnable core example；如果没有，必须先补 example 再 release
 - 在 pyright 和 pytest 之后，用 release candidate 运行该 example
 - 如果效果包含模型拥有的 planning、routing、verification 或 response generation，必须使用
-  真实 DeepSeek 或本地 Ollama
+  显式配置的真实线上模型，默认使用 DeepSeek；本地 Ollama 只作为可选诊断证据
 - 在 release PR body 或 review notes 中记录 command、environment，以及稳定 key output、
   artifact、stream、metadata 或 side-effect 证据
 
@@ -183,8 +185,8 @@ waiver 和残余风险。
 - 根据本次 release claim、README 指引、release note、compatibility manifest 或变更的
   public API，识别受影响的锁定开发者用法 examples
 - 用 release candidate 实际运行这些脚本；如果 example 包含模型拥有的 routing、
-  planning、verification、evaluation 或 response generation，必须使用真实 DeepSeek 或本地
-  Ollama
+  planning、verification、evaluation 或 response generation，必须使用显式配置的真实线上
+  模型，默认使用 DeepSeek；本地 Ollama 只作为可选诊断证据
 - 如果 release examples 可能触发 Skills、Actions、TaskWorkspace、RecordStore、network、Python、shell、
   HTTP、browse、search 或 MCP capability loading，必须用显式全开的测试 capability
   policy 运行；不要把这个 release-test 姿态和 Agently 默认 fail-closed runtime 权限姿态混淆
@@ -193,6 +195,11 @@ waiver 和残余风险。
 - 如果推荐用法本应继续可用，则把失败视为 release blocker
 - 如果失败说明推荐用法本身必须改变，必须先暂停，不要直接重写 example；先请示维护者是否接受
   在本 release 更新该用法
+
+真实模型调用属于显式 release experiment，不是默认 `pytest` 依赖。默认确定性测试套件
+不得依赖本地 Ollama 服务或预装本地模型。本地 Ollama 仍可用于显式开发诊断，但最终
+release 证据应使用声明的线上 provider/model；若例外，维护者必须记录一次性 waiver 与
+局限。
 
 release PR body 或 review notes 应列出本次运行的锁定 examples、纳入原因，以及结果是否
 保留了既有开发者可见用法形态。不要为了让 release gate 通过而静默把锁定 example 替换成

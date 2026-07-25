@@ -109,6 +109,7 @@ class ModelRequestResult:
         self._validate_outcome: dict[str, Any] | None = None
         self._validate_lock = asyncio.Lock()
         self._validate_handler_signature: tuple[int, ...] | None = None
+        self._accepted_retry_result: ModelRequestResult | None = None
         self._data_flow = ModelRequestResultDataFlow(self)
         self.full_result_data = self._response_parser.full_result_data
         self._get_meta_sync = cast(Callable[[], dict[str, Any]], FunctionShifter.syncify(self.async_get_meta))
@@ -295,7 +296,7 @@ class ModelRequestResult:
     async def async_get_data_object(
         self,
         *,
-        ensure_keys: None,
+        ensure_keys: list[str] | None = None,
         validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
@@ -337,7 +338,7 @@ class ModelRequestResult:
     def get_data_object(
         self,
         *,
-        ensure_keys: None,
+        ensure_keys: list[str] | None = None,
         validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
@@ -362,6 +363,8 @@ class ModelRequestResult:
         )
 
     async def async_get_meta(self) -> dict[str, Any]:
+        if self._accepted_retry_result is not None:
+            return await self._accepted_retry_result.async_get_meta()
         try:
             return await self._await_materialization(
                 self._response_parser.async_get_meta(),
@@ -375,6 +378,8 @@ class ModelRequestResult:
         return self._get_meta_sync()
 
     async def async_get_text(self) -> str:
+        if self._accepted_retry_result is not None:
+            return await self._accepted_retry_result.async_get_text()
         try:
             return await self._await_materialization(
                 self._response_parser.async_get_text(),

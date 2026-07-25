@@ -146,6 +146,7 @@ class TriggerFlowExecutionResult(Generic[ResultT]):
     def get_meta(self):
         return {
             "execution_id": self._execution.id,
+            "run_id": self._execution.run_id,
             "flow_name": self._execution._trigger_flow.name,
             "status": self._execution._status,
             "lifecycle_state": self._execution._lifecycle_state,

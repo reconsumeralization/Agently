@@ -21,6 +21,8 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, Awaitable, Literal, TYPE_CHECKING, cast
 
+from pydantic import BaseModel
+
 from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.runtime import bind_runtime_context, get_current_agent_execution_context
 from agently.utils import DataFormatter, DataLocator, DataPathBuilder
@@ -60,6 +62,33 @@ class ModelRequestResultDataFlow:
         result._auto_ensure_policies_cache[cache_key] = ensure_policies
         result._auto_ensure_keys_cache[cache_key] = list(ensure_policies.keys())
         return ensure_policies
+
+    def get_declared_pydantic_output_model(self) -> type[BaseModel] | None:
+        declared_output = self._result.prompt.get("output")
+        if isinstance(declared_output, type) and issubclass(declared_output, BaseModel):
+            return declared_output
+        return None
+
+    def get_output_validation_feedback(self) -> list[str]:
+        if self.get_declared_pydantic_output_model() is None:
+            return []
+        getter = getattr(self._result._response_parser, "get_output_validation_feedback", None)
+        if not callable(getter):
+            return []
+        feedback = getter()
+        if not isinstance(feedback, list):
+            return []
+        return [str(item)[:300] for item in feedback[:8] if str(item).strip()]
+
+    @staticmethod
+    def get_validate_output_correction(validation_outcome: Mapping[str, Any]) -> list[str]:
+        if validation_outcome.get("kind") != "failed":
+            return []
+        reason = validation_outcome.get("reason")
+        if reason is None:
+            return []
+        reason_text = str(reason).strip()
+        return [reason_text[:300]] if reason_text else []
 
     def get_auto_ensure_keys(self, *, key_style: Literal["dot", "slash"] = "dot") -> list[str]:
         result = self._result
@@ -655,20 +684,40 @@ class ModelRequestResultDataFlow:
         max_retries: int,
         raise_ensure_failure: bool,
         retry_count: int,
+        output_correction: list[str] | None = None,
     ) -> Any:
         from agently.core.model.ModelRequestRunner import ModelRequestRunner
+        from agently.core.model.Prompt import Prompt
 
         result = self._result
         await self._apply_retry_backoff(retry_count)
-        return await ModelRequestRunner(
+        retry_prompt = result.prompt
+        if output_correction:
+            prompt_snapshot = result.prompt.get()
+            retry_prompt = Prompt(
+                result.plugin_manager,
+                result.settings,
+                prompt_dict=prompt_snapshot if isinstance(prompt_snapshot, dict) else {},
+            )
+            retry_prompt.update(
+                {
+                    "OUTPUT CORRECTION": [
+                        "The previous response did not satisfy the declared output contract.",
+                        "Return a complete replacement output that fixes every violation below.",
+                        *output_correction,
+                    ]
+                }
+            )
+        retry_result = ModelRequestRunner(
             result.agent_name,
             result.plugin_manager,
             result.settings,
-            result.prompt,
+            retry_prompt,
             result._extension_handlers,
             run_context=result.request_run_context,
             attempt_index=result.attempt_index + 1,
-        ).result.async_get_data(
+        ).result
+        data = await retry_result.async_get_data(
             type=type,
             ensure_keys=ensure_keys,
             validate_handler=validate_handler,
@@ -677,6 +726,8 @@ class ModelRequestResultDataFlow:
             raise_ensure_failure=raise_ensure_failure,
             _retry_count=retry_count,
         )
+        result._accepted_retry_result = retry_result._accepted_retry_result or retry_result
+        return data
 
     async def async_get_data(
         self,
@@ -690,6 +741,16 @@ class ModelRequestResultDataFlow:
         retry_count: int = 0,
     ) -> Any:
         result = self._result
+        if result._accepted_retry_result is not None:
+            return await result._accepted_retry_result.async_get_data(
+                type=type,
+                ensure_keys=ensure_keys,
+                validate_handler=validate_handler,
+                key_style=key_style,
+                max_retries=max_retries,
+                raise_ensure_failure=raise_ensure_failure,
+                _retry_count=retry_count,
+            )
         auto_ensure_policies = self.get_auto_ensure_policies(key_style=key_style)
         auto_ensure_keys = list(auto_ensure_policies.keys())
         strict_output = self.is_strict_output_enabled()
@@ -702,7 +763,10 @@ class ModelRequestResultDataFlow:
             active_ensure_keys = self.merge_ensure_keys(auto_ensure_keys, ensure_keys)
         active_ensure_policies = self.resolve_ensure_policies(active_ensure_keys, auto_ensure_policies)
         should_validate = bool(active_validate_handlers) or result._validate_outcome is not None
-        needs_constraint_flow = (type in ("parsed", "all") and (active_ensure_keys or strict_output)) or should_validate
+        has_pydantic_output = self.get_declared_pydantic_output_model() is not None
+        needs_constraint_flow = (
+            type in ("parsed", "all") and (active_ensure_keys or strict_output or has_pydantic_output)
+        ) or should_validate
         if not needs_constraint_flow:
             try:
                 data = await self.await_materialization(
@@ -753,6 +817,9 @@ class ModelRequestResultDataFlow:
                 constraint_data = data
                 if type == "all" and isinstance(data, Mapping):
                     constraint_data = data.get("parsed_result")
+                output_validation_feedback = self.get_output_validation_feedback()
+                if output_validation_feedback:
+                    raise ValueError("Pydantic output validation failed: " + "; ".join(output_validation_feedback))
                 if strict_output:
                     parsed_result = result._response_parser.full_result_data.get("parsed_result")
                     result_object = result._response_parser.full_result_data.get("result_object")
@@ -778,7 +845,11 @@ class ModelRequestResultDataFlow:
                             and not self.ensure_value_is_present(located_value)
                         ):
                             raise ValueError(f"Missing ensure key: { ensure_key }")
-            except Exception:
+            except Exception as constraint_error:
+                output_validation_feedback = self.get_output_validation_feedback()
+                output_correction = (
+                    output_validation_feedback if output_validation_feedback else [str(constraint_error)[:300]]
+                )
                 await self.emit_retrying_event(
                     retry_count=retry_count,
                     response_text=await result._response_parser.async_get_text(),
@@ -797,6 +868,13 @@ class ModelRequestResultDataFlow:
                         max_retries=max_retries,
                         raise_ensure_failure=raise_ensure_failure,
                         retry_count=retry_count + 1,
+                        output_correction=output_correction,
+                    )
+                if output_validation_feedback:
+                    retry_label = "retry" if max_retries == 1 else "retries"
+                    raise ValueError(
+                        "Pydantic output validation failed after "
+                        f"{max_retries} {retry_label}: " + "; ".join(output_validation_feedback)
                     )
                 if raise_ensure_failure:
                     raise self.build_output_retry_failure_exception(
@@ -833,6 +911,7 @@ class ModelRequestResultDataFlow:
                         max_retries=max_retries,
                         raise_ensure_failure=raise_ensure_failure,
                         retry_count=retry_count + 1,
+                        output_correction=self.get_validate_output_correction(validation_outcome),
                     )
                 if validation_outcome.get("raise_value") is not None or raise_ensure_failure:
                     raise self.build_validation_failure_exception(validation_outcome)
@@ -855,6 +934,11 @@ class ModelRequestResultDataFlow:
         raise_ensure_failure: bool = True,
     ):
         result = self._result
+        if result._accepted_retry_result is not None:
+            return await self.await_materialization(
+                result._accepted_retry_result._response_parser.async_get_data_object(),
+                stage="response_materialization",
+            )
         auto_ensure_keys = self.get_auto_ensure_keys(key_style=key_style)
         strict_output = self.is_strict_output_enabled()
         active_validate_handlers = self.resolve_validate_handlers(validate_handler)
@@ -865,7 +949,13 @@ class ModelRequestResultDataFlow:
         else:
             active_ensure_keys = self.merge_ensure_keys(auto_ensure_keys, ensure_keys)
         try:
-            if active_ensure_keys or strict_output or bool(active_validate_handlers) or result._validate_outcome is not None:
+            if (
+                active_ensure_keys
+                or strict_output
+                or self.get_declared_pydantic_output_model() is not None
+                or bool(active_validate_handlers)
+                or result._validate_outcome is not None
+            ):
                 await result.async_get_data(
                     ensure_keys=active_ensure_keys,
                     validate_handler=validate_handler,
@@ -874,6 +964,11 @@ class ModelRequestResultDataFlow:
                     _retry_count=0,
                     raise_ensure_failure=raise_ensure_failure,
                 )
+                if result._accepted_retry_result is not None:
+                    return await self.await_materialization(
+                        result._accepted_retry_result._response_parser.async_get_data_object(),
+                        stage="response_materialization",
+                    )
                 return await self.await_materialization(
                     result._response_parser.async_get_data_object(),
                     stage="response_materialization",

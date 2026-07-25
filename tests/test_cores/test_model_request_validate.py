@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from agently import Agently
 from agently.core import ModelRequest, PluginManager
-from agently.types.data import AgentlyRequestData
+from agently.types.data import AgentlyRequestData, OutputValidateResult
 from agently.utils import Settings
 
 
@@ -16,6 +16,7 @@ class MockValidateJSONRequester:
     DEFAULT_SETTINGS: dict[str, Any] = {}
     attempts = 0
     responses: list[Any] = []
+    prompt_texts: list[str] = []
 
     def __init__(self, prompt, settings):
         self.prompt = prompt
@@ -25,6 +26,7 @@ class MockValidateJSONRequester:
     def reset(cls, responses: list[Any]):
         cls.attempts = 0
         cls.responses = list(responses)
+        cls.prompt_texts = []
 
     @staticmethod
     def _on_register():
@@ -37,6 +39,7 @@ class MockValidateJSONRequester:
     def generate_request_data(self):
         type(self).attempts += 1
         prompt_object = self.prompt.to_prompt_object()
+        type(self).prompt_texts.append(self.prompt.to_text())
         return AgentlyRequestData(
             client_options={},
             headers={},
@@ -202,6 +205,33 @@ async def test_agent_validate_failure_retries_and_emits_runtime_events():
 
 
 @pytest.mark.asyncio
+async def test_validate_failure_reason_is_added_to_retry_prompt_without_payload():
+    MockValidateJSONRequester.reset([{"status": "draft"}, {"status": "ready"}])
+    request = _create_request(MockValidateJSONRequester, "validate-retry-feedback")
+    request.output({"status": (str,)}, format="json")
+    validation_reason = "status must be ready before publication" + ("." * 300) + "UNBOUNDED_TAIL"
+
+    def require_ready(result, context) -> OutputValidateResult:
+        del context
+        if result["status"] == "ready":
+            return True
+        return {
+            "ok": False,
+            "reason": validation_reason,
+            "payload": {"internal_policy": "do-not-send-to-model"},
+        }
+
+    data = await request.validate(require_ready).async_start(max_retries=1)
+
+    assert data == {"status": "ready"}
+    assert MockValidateJSONRequester.attempts == 2
+    assert "[OUTPUT CORRECTION]:" in MockValidateJSONRequester.prompt_texts[1]
+    assert "status must be ready before publication" in MockValidateJSONRequester.prompt_texts[1]
+    assert "UNBOUNDED_TAIL" not in MockValidateJSONRequester.prompt_texts[1]
+    assert "do-not-send-to-model" not in MockValidateJSONRequester.prompt_texts[1]
+
+
+@pytest.mark.asyncio
 async def test_validate_no_retry_can_return_last_result_when_raise_disabled():
     MockValidateJSONRequester.reset([{"status": "draft"}])
     request = _create_request(MockValidateJSONRequester, "validate-no-retry")
@@ -293,6 +323,7 @@ async def test_validate_handler_exception_retries_and_emits_validation_error():
     assert validation_error_event.payload["error_kind"] == "RuntimeError"
     assert validation_error_event.payload["reason"] == "validator boom"
     assert validation_error_event.payload["response_text"] == '{"answer": "ok"}'
+    assert "validator boom" not in MockValidateJSONRequester.prompt_texts[1]
 
 
 @pytest.mark.asyncio
@@ -389,6 +420,91 @@ async def test_pydantic_output_returns_declared_model_instance():
     assert isinstance(result_object, Ticket)
     assert result_object == Ticket(status="OPEN", priority=1)
     assert parsed_result == {"status": "OPEN", "priority": 1}
+
+
+@pytest.mark.asyncio
+async def test_pydantic_constraint_failure_retries_with_feedback_and_caches_accepted_result():
+    class Ticket(BaseModel):
+        title: str = Field(max_length=3)
+
+    MockValidateJSONRequester.reset(
+        [
+            {"title": "too long"},
+            {"title": "ok"},
+        ]
+    )
+    request = _create_request(MockValidateJSONRequester, "pydantic-output-constraint-retry")
+    request.output(Ticket, format="json")
+
+    response = request.get_response()
+    result_object = await response.async_get_data_object(max_retries=1)
+    parsed_result = await response.async_get_data(max_retries=1)
+    accepted_text = await response.async_get_text()
+
+    assert MockValidateJSONRequester.attempts == 2
+    assert result_object == Ticket(title="ok")
+    assert parsed_result == {"title": "ok"}
+    assert json.loads(accepted_text) == {"title": "ok"}
+    assert "[OUTPUT CORRECTION]:" in MockValidateJSONRequester.prompt_texts[1]
+    assert "title: String should have at most 3 characters" in MockValidateJSONRequester.prompt_texts[1]
+
+
+@pytest.mark.asyncio
+async def test_pydantic_constraint_failure_is_not_returned_after_retries_are_exhausted():
+    class Ticket(BaseModel):
+        title: str = Field(max_length=3)
+
+    MockValidateJSONRequester.reset(
+        [
+            {"title": "too long"},
+            {"title": "still too long"},
+        ]
+    )
+    request = _create_request(MockValidateJSONRequester, "pydantic-output-constraint-exhausted")
+    request.output(Ticket, format="json")
+
+    with pytest.raises(ValueError, match="Pydantic output validation failed.*title"):
+        await request.async_start(max_retries=1)
+
+    assert MockValidateJSONRequester.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_pydantic_constraint_failure_cannot_be_accepted_by_disabling_ensure_errors():
+    class Ticket(BaseModel):
+        title: str = Field(default="ok", max_length=3)
+
+    MockValidateJSONRequester.reset([{"title": "too long"}])
+    request = _create_request(MockValidateJSONRequester, "pydantic-output-constraint-no-ensure-raise")
+    request.output(Ticket, format="json")
+
+    with pytest.raises(ValueError, match="Pydantic output validation failed.*title"):
+        await request.async_start(
+            max_retries=0,
+            raise_ensure_failure=False,
+        )
+
+    assert MockValidateJSONRequester.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_optional_pydantic_constraint_failure_retries_for_typed_object_read():
+    class Ticket(BaseModel):
+        title: str = Field(default="ok", max_length=3)
+
+    MockValidateJSONRequester.reset(
+        [
+            {"title": "too long"},
+            {"title": "ok"},
+        ]
+    )
+    request = _create_request(MockValidateJSONRequester, "optional-pydantic-output-constraint-retry")
+    request.output(Ticket, format="json")
+
+    result_object = await request.get_response().async_get_data_object(max_retries=1)
+
+    assert MockValidateJSONRequester.attempts == 2
+    assert result_object == Ticket(title="ok")
 
 
 @pytest.mark.asyncio
