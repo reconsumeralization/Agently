@@ -347,10 +347,10 @@ await execution.async_save(
 ```
 
 被选中的 snapshot provider 必须报告 CAS、lease、range-read 和 retention
-能力，并暴露对应的 snapshot、lease 和 artifact methods；execution 也必须配置一个
-报告 event sequencing 的 RuntimeEvent store。local RecordStore backend 会通过这个
-fail-closed provider check，用于单节点开发和本地重启恢复，但它不是生产级跨 worker
-Redis/Postgres/object-storage backend。
+能力，并暴露对应的 snapshot read/write/prune、lease 和 artifact methods；execution 也必须配置一个
+报告 event sequencing 的 RuntimeEvent store。local RecordStore backend 适合单节点
+开发和本地重启恢复，但它不声明完整的分布式 capability 集，因此不会通过这个生产级
+provider check。
 
 如果需要持久诊断，可以在 execution 上配置 RuntimeEvent store：
 

@@ -48,6 +48,7 @@ from .RecordStore import (
     DurableCheckpointStore,
     EmbeddingProvider,
     ExecutionSnapshotStore,
+    ExecutionSnapshotRetentionStore,
     EvidenceLinker,
     IngestionProfile,
     RefResolver,

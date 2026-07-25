@@ -149,9 +149,9 @@ atomic claim, lease enforcement, and conflict handling.
 
 ```python
 execution.claim_lease("worker-a", lease_ttl=30)
-await execution.async_save(store, run_id=execution.id)
+await execution.async_save(store)
 
-saved = await store.get_snapshot(execution.id)
+saved = await store.get_snapshot(execution.run_id)
 assert saved is not None
 restored = flow.create_execution(auto_close=False)
 await restored.async_load(
@@ -159,6 +159,61 @@ await restored.async_load(
     runtime_resources={"approval_service": approval_service},
 )
 ```
+
+`run_id` is required by the low-level store API because the store does not own
+an execution context. It is optional on `execution.async_save(...)`: the
+execution supplies `execution.run_id`, which is also included in
+`execution.result.get_meta()`. Pass `run_id=...` only when the host
+deliberately owns a different recovery identity.
+
+The built-in local RecordStore keeps the latest three execution snapshots per
+`run_id` by default. Configure the provider policy when constructing the
+RecordStore:
+
+```python
+store = RecordStore(
+    "./recovery",
+    mode="read_write",
+    snapshot_retention={"keep_last": 5},
+)
+```
+
+Use `{"keep_last": None}` to disable automatic pruning. An execution can
+override its provider policy, and that override is itself preserved by
+save/load:
+
+```python
+execution.set_snapshot_retention_policy(keep_last=2)
+await execution.async_save(store)
+```
+
+The execution policy wins over the provider policy. Automatic pruning applies
+to execution snapshot writes; generic `put_checkpoint(...)` calls are not
+silently pruned.
+
+To reclaim old recovery versions while an execution remains recoverable:
+
+```python
+# Uses execution.run_id and requires the execution to be idle.
+report = await execution.async_prune_recovery_snapshots(keep_last=1)
+
+# Offline/provider administration requires the identity explicitly.
+report = await store.prune_snapshots(execution.run_id, keep_last=1)
+```
+
+Both APIs preserve the latest requested recovery points and report deleted
+record count and bytes. They do not close or cancel the execution. Full
+recovery deletion remains the explicit provider operation
+`store.delete_snapshot(run_id)`; normal terminal `async_close()` also cleans up
+the execution's recovery snapshots.
+
+Treat execution snapshots as operational recovery data: restart recovery,
+worker handoff, and continuation after a disconnected wait. They are not a
+business audit log or the durable source of truth for an order, approval, or
+other domain entity. Persist deterministic business state in the
+application's database or another business-owned store, and use RuntimeEvents
+or purpose-built audit records for durable history. Snapshot projection,
+physical snapshot retention, and RuntimeEvent compaction are separate policies.
 
 The execution snapshot is intentionally resource-key based. Serializable
 resource requirements can be persisted and inspected, but clients, callbacks,

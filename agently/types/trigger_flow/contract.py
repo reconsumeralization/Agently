@@ -18,7 +18,11 @@ from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar, runtime_
 from pydantic import TypeAdapter
 from typing_extensions import NotRequired, TypedDict
 
-from agently.types.data import ExecutionExchangeRequest
+from agently.types.data import (
+    ExecutionExchangeRequest,
+    SnapshotPruneResult,
+    SnapshotRetentionPolicy,
+)
 
 InputT = TypeVar("InputT")
 StreamT = TypeVar("StreamT")
@@ -160,6 +164,7 @@ class TriggerFlowExecutionSnapshot(TypedDict, total=False):
     last_signal: dict[str, Any] | None
     signal_net: dict[str, Any]
     snapshot_projection: TriggerFlowSnapshotProjectionState
+    snapshot_retention_policy: SnapshotRetentionPolicy | None
     result: dict[str, Any]
     durable_system_state: dict[str, Any]
     resource_requirements: list[TriggerFlowResourceRequirement]
@@ -262,6 +267,31 @@ class TriggerFlowExecutionSnapshotStore(Protocol):
         step_id: str | None = None,
         expected_state_version: int | None = None,
     ) -> Any: ...
+
+
+@runtime_checkable
+class TriggerFlowExecutionSnapshotRetentionStore(
+    TriggerFlowExecutionSnapshotStore,
+    Protocol,
+):
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+        retention: SnapshotRetentionPolicy | None = None,
+    ) -> Any: ...
+
+    async def prune_snapshots(
+        self,
+        run_id: str,
+        *,
+        keep_last: int,
+    ) -> SnapshotPruneResult: ...
+
+    async def delete_snapshot(self, run_id: str) -> dict[str, Any]: ...
 
 
 class TriggerFlowInterruptEvent(TypedDict):

@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Callable, cast
 
+from agently.types.data import SnapshotRetentionPolicy
 from agently.types.plugins import (
     DBStoreProvider,
     EmbeddingProvider,
@@ -58,6 +59,7 @@ class RecordStoreRegistry:
         "get_snapshot",
         "latest_snapshot",
         "delete_snapshot",
+        "prune_snapshots",
         "latest_checkpoint",
         "checkpoint_history",
         "append_runtime_event",
@@ -134,6 +136,7 @@ class RecordStoreRegistry:
         vector_store_options: dict[str, Any] | None = None,
         default_scope: dict[str, Any] | None = None,
         default_search_scope: dict[str, Any] | None = None,
+        snapshot_retention: SnapshotRetentionPolicy | None = None,
     ) -> RecordStore:
         return RecordStore(
             path_or_backend,
@@ -150,6 +153,7 @@ class RecordStoreRegistry:
             vector_store_options=vector_store_options,
             default_scope=default_scope,
             default_search_scope=default_search_scope,
+            snapshot_retention=snapshot_retention,
         )
 
     def _materialize_record_store(

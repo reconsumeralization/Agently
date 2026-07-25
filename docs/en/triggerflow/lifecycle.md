@@ -368,11 +368,11 @@ await execution.async_save(
 ```
 
 The selected snapshot provider must report CAS, lease, range-read, and
-retention capabilities and expose the matching snapshot, lease, and artifact
-methods. The execution must also have a RuntimeEvent store that reports event
-sequencing. The local RecordStore backend passes this fail-closed provider check
-for single-node development and local restart recovery, but it is not a
-production cross-worker Redis/Postgres/object-storage backend.
+retention capabilities and expose the matching snapshot read/write/prune,
+lease, and artifact methods. The execution must also have a RuntimeEvent store that reports event
+sequencing. The local RecordStore backend is suitable for single-node
+development and local restart recovery, but it does not claim the distributed
+capability set and therefore does not pass this production-provider check.
 
 For durable diagnostics, bind a RuntimeEvent store through execution resources:
 

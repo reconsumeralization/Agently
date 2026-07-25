@@ -120,6 +120,13 @@ interrupt value 与 completed SignalNet resume metadata，同时保留 pending r
 state 和 resume idempotency。它不同于 provider 拥有的 snapshot retention/TTL，
 也不同于 durable RuntimeEvent compaction。
 
+## Snapshot retention
+
+Snapshot provider 拥有的 policy，用于限制每个 `run_id` 物理保留的 execution
+snapshot 版本数。内置 local RecordStore 默认保留最新 3 份。它属于运行时恢复数据
+治理，不是业务状态留档；也独立于 TriggerFlow snapshot projection 与 RuntimeEvent
+compaction。
+
 ## Schema as Prompt
 
 Agently prompt 侧结构化 authoring 的当前命名方式：嵌套 dict + 叶子 `(TypeExpr, "description", True)`，第三槽是 `ensure`。旧版「Agently DSL」试图把 `.output()`、TriggerFlow contract、外部 schema 统一成同一 IR 的方向已归档。

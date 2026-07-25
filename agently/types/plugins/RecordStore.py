@@ -25,6 +25,8 @@ from agently.types.data.record_store import (
     RecordLink,
     RecordRef,
     RecordReference,
+    SnapshotPruneResult,
+    SnapshotRetentionPolicy,
     StoredRuntimeEvent,
 )
 
@@ -93,6 +95,28 @@ class ExecutionSnapshotStore(Protocol):
     async def get_snapshot(self, run_id: str) -> dict[str, Any] | None: ...
 
     async def latest_snapshot(self, run_id: str) -> RecordRef | None: ...
+
+@runtime_checkable
+class ExecutionSnapshotRetentionStore(ExecutionSnapshotStore, Protocol):
+    async def put_snapshot(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None = None,
+        expected_state_version: int | None = None,
+        retention: SnapshotRetentionPolicy | None = None,
+    ) -> RecordRef: ...
+
+    async def prune_snapshots(
+        self,
+        run_id: str,
+        *,
+        keep_last: int,
+    ) -> SnapshotPruneResult: ...
+
+    async def delete_snapshot(self, run_id: str) -> dict[str, Any]: ...
+
 
 @runtime_checkable
 class RuntimeEventStore(Protocol):
@@ -289,6 +313,7 @@ class DBStoreProvider(Protocol):
         *,
         step_id: str | None = None,
         expected_state_version: int | None = None,
+        retention: SnapshotRetentionPolicy | None = None,
     ) -> RecordRef: ...
 
     async def get_snapshot(self, run_id: str) -> dict[str, Any] | None: ...
@@ -296,6 +321,13 @@ class DBStoreProvider(Protocol):
     async def latest_snapshot(self, run_id: str) -> RecordRef | None: ...
 
     async def delete_snapshot(self, run_id: str) -> dict[str, Any]: ...
+
+    async def prune_snapshots(
+        self,
+        run_id: str,
+        *,
+        keep_last: int,
+    ) -> SnapshotPruneResult: ...
 
     async def latest_checkpoint(self, run_id: str) -> RecordRef | None: ...
 
@@ -435,6 +467,7 @@ __all__ = [
     "EmbeddingProvider",
     "EvidenceLinker",
     "ExecutionSnapshotStore",
+    "ExecutionSnapshotRetentionStore",
     "IngestionProfile",
     "RefResolver",
     "RuntimeEventStore",

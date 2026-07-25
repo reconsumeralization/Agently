@@ -34,11 +34,14 @@ from agently.types.data.record_store import (
     RecordLink,
     RecordRef,
     RecordReference,
+    SnapshotPruneResult,
+    SnapshotRetentionPolicy,
     StoredRuntimeEvent,
 )
 
 from .Errors import RecordStorePolicyError
 from .Identity import RecordIdentityCatalog
+from .SnapshotRetention import normalize_snapshot_retention
 from .Stores import VectorIndexPipeline
 
 
@@ -81,6 +84,7 @@ class LocalRecordStore:
         create: bool = True,
         mode: str = "read_write",
         initialize_default_vector_store_provider: bool = False,
+        snapshot_retention: SnapshotRetentionPolicy | None = None,
         **_: Any,
     ) -> None:
         if mode not in {"read", "read_only", "readonly", "read_write", "write"}:
@@ -106,6 +110,10 @@ class LocalRecordStore:
         self.vector_index = VectorIndexPipeline(
             embedding_provider=None,
             vector_store_provider=None,
+        )
+        self._snapshot_retention = normalize_snapshot_retention(
+            snapshot_retention,
+            default_keep_last=3,
         )
         self._db_store_provider_loader: Callable[[], tuple[Any | None, str]] | None = None
         self._embedding_provider_loader: Callable[[], Any | None] | None = None
@@ -665,8 +673,27 @@ class LocalRecordStore:
         step_id: str | None = None,
         expected_state_version: int | None = None,
     ) -> RecordRef:
+        return await self._put_recovery_record(
+            run_id,
+            state,
+            step_id=step_id,
+            expected_state_version=expected_state_version,
+            snapshot_keep_last=None,
+        )
+
+    async def _put_recovery_record(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        *,
+        step_id: str | None,
+        expected_state_version: int | None,
+        snapshot_keep_last: int | None,
+    ) -> RecordRef:
         state_version_value = state.get("state_version")
         state_version = int(state_version_value) if state_version_value is not None else None
+        deleted_record_ids: set[str] = set()
+        deleted_link_ids: set[str] = set()
         async with self._lock:
             record_id = (await self._identity_catalog.allocate("record")).entity_id
             with self._connect(write=True) as connection:
@@ -731,7 +758,15 @@ class LocalRecordStore:
                     """,
                     (run_id, record_id, state_version, created_at),
                 )
+                if snapshot_keep_last is not None:
+                    deleted_record_ids, deleted_link_ids, _ = self._prune_snapshot_records(
+                        connection,
+                        run_id=run_id,
+                        keep_last=snapshot_keep_last,
+                    )
                 connection.commit()
+        if deleted_record_ids or deleted_link_ids:
+            await self._identity_catalog.discard([*sorted(deleted_record_ids), *sorted(deleted_link_ids)])
         self._materialized_components.update({"records", "recovery"})
         return ref
 
@@ -742,8 +777,128 @@ class LocalRecordStore:
         *,
         step_id: str | None = None,
         expected_state_version: int | None = None,
+        retention: SnapshotRetentionPolicy | None = None,
     ) -> RecordRef:
-        return await self.put_checkpoint(run_id, state, step_id=step_id, expected_state_version=expected_state_version)
+        resolved_retention = normalize_snapshot_retention(
+            retention,
+            default_keep_last=self._snapshot_retention["keep_last"],
+        )
+        return await self._put_recovery_record(
+            run_id,
+            state,
+            step_id=step_id,
+            expected_state_version=expected_state_version,
+            snapshot_keep_last=resolved_retention["keep_last"],
+        )
+
+    def _prune_snapshot_records(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        keep_last: int,
+    ) -> tuple[set[str], set[str], int]:
+        rows = connection.execute(
+            """
+            SELECT record_id FROM checkpoints
+            WHERE run_id = ?
+            ORDER BY id DESC
+            LIMIT -1 OFFSET ?
+            """,
+            (run_id, keep_last),
+        ).fetchall()
+        record_ids = {str(row["record_id"]) for row in rows}
+        if not record_ids:
+            return set(), set(), 0
+
+        placeholders = ",".join("?" for _ in record_ids)
+        parameters = tuple(sorted(record_ids))
+        size_row = connection.execute(
+            f"SELECT COALESCE(SUM(size), 0) AS value FROM records WHERE id IN ({placeholders})",
+            parameters,
+        ).fetchone()
+        deleted_bytes = int(size_row["value"] or 0) if size_row is not None else 0
+        link_ids: set[str] = set()
+        if self._table_exists(connection, "records_fts"):
+            connection.execute(
+                f"DELETE FROM records_fts WHERE id IN ({placeholders})",
+                parameters,
+            )
+        if self._table_exists(connection, "record_store_vectors"):
+            connection.execute(
+                f"DELETE FROM record_store_vectors WHERE record_id IN ({placeholders})",
+                parameters,
+            )
+        if self._table_exists(connection, "links"):
+            link_rows = connection.execute(
+                f"SELECT id FROM links WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                (*parameters, *parameters),
+            ).fetchall()
+            link_ids.update(str(row["id"]) for row in link_rows)
+            connection.execute(
+                f"DELETE FROM links WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+                (*parameters, *parameters),
+            )
+        connection.execute(
+            f"DELETE FROM checkpoints WHERE record_id IN ({placeholders})",
+            parameters,
+        )
+        connection.execute(
+            f"DELETE FROM records WHERE id IN ({placeholders})",
+            parameters,
+        )
+        return record_ids, link_ids, deleted_bytes
+
+    async def prune_snapshots(
+        self,
+        run_id: str,
+        *,
+        keep_last: int,
+    ) -> SnapshotPruneResult:
+        resolved_retention = normalize_snapshot_retention(
+            {"keep_last": keep_last},
+            default_keep_last=None,
+        )
+        resolved_keep_last = resolved_retention["keep_last"]
+        if resolved_keep_last is None:
+            raise TypeError("snapshot prune keep_last must be a positive integer.")
+        if not self.db_path.exists():
+            return {
+                "run_id": run_id,
+                "keep_last": resolved_keep_last,
+                "retained_records": 0,
+                "deleted_records": 0,
+                "deleted_bytes": 0,
+            }
+
+        deleted_record_ids: set[str] = set()
+        deleted_link_ids: set[str] = set()
+        deleted_bytes = 0
+        retained_records = 0
+        async with self._lock:
+            with self._connect(write=True) as connection:
+                if self._table_exists(connection, "checkpoints"):
+                    deleted_record_ids, deleted_link_ids, deleted_bytes = self._prune_snapshot_records(
+                        connection,
+                        run_id=run_id,
+                        keep_last=resolved_keep_last,
+                    )
+                    retained_row = connection.execute(
+                        "SELECT COUNT(*) AS value FROM checkpoints WHERE run_id = ?",
+                        (run_id,),
+                    ).fetchone()
+                    retained_records = int(retained_row["value"] or 0) if retained_row is not None else 0
+                connection.commit()
+
+        if deleted_record_ids or deleted_link_ids:
+            await self._identity_catalog.discard([*sorted(deleted_record_ids), *sorted(deleted_link_ids)])
+        return {
+            "run_id": run_id,
+            "keep_last": resolved_keep_last,
+            "retained_records": retained_records,
+            "deleted_records": len(deleted_record_ids),
+            "deleted_bytes": deleted_bytes,
+        }
 
     async def latest_checkpoint(self, run_id: str) -> RecordRef | None:
         if not self.db_path.exists():

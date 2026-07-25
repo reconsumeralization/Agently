@@ -22,6 +22,7 @@ from .contract import (
     TriggerFlowExecutionLoadReport,
     TriggerFlowExecutionSnapshot,
     TriggerFlowExecutionSnapshotStore,
+    TriggerFlowExecutionSnapshotRetentionStore,
     TriggerFlowExternalWaitRequest,
     TriggerFlowIntervention,
     TriggerFlowInterventionConsumer,

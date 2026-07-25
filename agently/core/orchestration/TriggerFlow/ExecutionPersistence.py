@@ -362,6 +362,9 @@ class TriggerFlowExecutionPersistence:
             "last_signal": last_signal,
             "signal_net": signal_net,
             "snapshot_projection": snapshot_projection,
+            "snapshot_retention_policy": execution._to_serializable_value(
+                execution._snapshot_retention_policy
+            ),
             "result": result_state,
             "durable_system_state": durable_system_state,
             "resource_requirements": resource_requirements,
@@ -538,6 +541,12 @@ class TriggerFlowExecutionPersistence:
                 execution._snapshot_projection_policy = execution._to_serializable_value(
                     saved_projection_policy
                 )
+        saved_retention_policy = snapshot_state.get("snapshot_retention_policy")
+        execution._snapshot_retention_policy = (
+            execution._normalize_snapshot_retention_policy(saved_retention_policy)
+            if saved_retention_policy is not None
+            else None
+        )
         execution._runtime_stream_stopped = lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED
         if lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED:
             close_result = execution._build_close_snapshot()
@@ -1989,3 +1998,7 @@ class TriggerFlowExecutionPersistence:
             raise TypeError(
                 f"Can not load key 'run_context', expect dictionary/None but got: { type(run_context_state) }"
             )
+
+        snapshot_retention_policy = snapshot_state.get("snapshot_retention_policy")
+        if snapshot_retention_policy is not None:
+            self._execution._normalize_snapshot_retention_policy(snapshot_retention_policy)

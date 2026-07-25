@@ -44,6 +44,18 @@ class RecordLink(TypedDict):
 RecordStoreMode = Literal["read_only", "read_write"]
 
 
+class SnapshotRetentionPolicy(TypedDict):
+    keep_last: int | None
+
+
+class SnapshotPruneResult(TypedDict):
+    run_id: str
+    keep_last: int
+    retained_records: int
+    deleted_records: int
+    deleted_bytes: int
+
+
 class RecordStoreCapabilities(TypedDict):
     root: str
     mode: RecordStoreMode

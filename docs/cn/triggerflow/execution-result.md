@@ -41,7 +41,7 @@ meta = result.get_meta()
 | `execution.result.get_final_result(timeout=None)` | `async_get_final_result(...)` 的同步包装。 |
 | `execution.result.get_interventions(...)` | 启用 intervention ledger 时返回 ledger 记录；否则返回空列表。 |
 | `execution.result.get_latest_intervention(default=None, **filters)` | 最后一条匹配的 intervention 记录，或 `default`。 |
-| `execution.result.get_meta()` | execution id、flow name、status、lifecycle state、时间戳、close reason、state version 等 metadata。 |
+| `execution.result.get_meta()` | execution id、恢复用 `run_id`、flow name、status、lifecycle state、时间戳、close reason、state version 等 metadata。 |
 
 ## Snapshot 与 Final Result
 

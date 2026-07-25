@@ -2313,6 +2313,57 @@ async def test_trigger_flow_distributed_snapshot_fails_closed_for_missing_provid
 
 
 @pytest.mark.asyncio
+async def test_trigger_flow_distributed_snapshot_requires_retention_method():
+    class MissingRetentionMethodStore:
+        def capabilities(self):
+            return {
+                "features": {
+                    "supports_cas": True,
+                    "supports_lease": True,
+                    "supports_artifact_refs": True,
+                    "supports_event_sequence": True,
+                    "supports_range_read": True,
+                    "supports_retention": True,
+                }
+            }
+
+        async def get_snapshot(self, run_id: str):
+            return None
+
+        async def put_snapshot(
+            self,
+            run_id: str,
+            state: dict[str, Any],
+            *,
+            step_id: str | None = None,
+            expected_state_version: int | None = None,
+        ):
+            return {"id": "snapshot-1", "run_id": run_id, "step_id": step_id}
+
+        async def claim_lease(self, *args: Any, **kwargs: Any):
+            return {"lease_token": "lease-1"}
+
+        async def heartbeat_lease(self, *args: Any, **kwargs: Any):
+            return {"lease_token": "lease-1"}
+
+        async def release_lease(self, *args: Any, **kwargs: Any):
+            return {"lease_token": "lease-1"}
+
+        async def put_artifact_ref(self, *args: Any, **kwargs: Any):
+            return {"id": "artifact-1"}
+
+        async def append_runtime_event(self, *args: Any, **kwargs: Any):
+            return {"id": "event-1"}
+
+    store = MissingRetentionMethodStore()
+    flow = TriggerFlow(name="distributed-retention-method-check")
+    execution = flow.create_execution(runtime_resources={"runtime_event_store": cast(Any, store)})
+
+    with pytest.raises(RuntimeError, match="missing methods: prune_snapshots"):
+        await execution.async_save(store, require_distributed_provider=True)
+
+
+@pytest.mark.asyncio
 async def test_trigger_flow_distributed_snapshot_accepts_capable_provider():
     class DistributedStore:
         def __init__(self):
@@ -2360,6 +2411,15 @@ async def test_trigger_flow_distributed_snapshot_accepts_capable_provider():
         async def release_lease(self, *args: Any, **kwargs: Any):
             return {"lease_token": "lease-1"}
 
+        async def prune_snapshots(self, run_id: str, *, keep_last: int):
+            return {
+                "run_id": run_id,
+                "keep_last": keep_last,
+                "retained_records": keep_last,
+                "deleted_records": 0,
+                "deleted_bytes": 0,
+            }
+
         async def put_artifact_ref(self, *args: Any, **kwargs: Any):
             return {"id": "artifact-1"}
 
@@ -2368,9 +2428,7 @@ async def test_trigger_flow_distributed_snapshot_accepts_capable_provider():
 
     store = DistributedStore()
     flow = TriggerFlow(name="distributed-capable-provider")
-    execution = flow.create_execution(
-        runtime_resources={"runtime_event_store": cast(Any, store)}
-    )
+    execution = flow.create_execution(runtime_resources={"runtime_event_store": cast(Any, store)})
 
     ref = await execution.async_save(store, require_distributed_provider=True)
 

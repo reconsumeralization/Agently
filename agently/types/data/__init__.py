@@ -295,6 +295,8 @@ from .skill import (
 from .record_store import (
     RecordStoreCapabilities,
     RecordStoreMode,
+    SnapshotPruneResult,
+    SnapshotRetentionPolicy,
     RecordContentSegment,
     RecordRetrievalItem,
     RecordRetrievalMethod,

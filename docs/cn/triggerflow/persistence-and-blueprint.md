@@ -142,9 +142,9 @@ interrupt、resume-ledger 或 SignalNet sections。
 
 ```python
 execution.claim_lease("worker-a", lease_ttl=30)
-await execution.async_save(store, run_id=execution.id)
+await execution.async_save(store)
 
-saved = await store.get_snapshot(execution.id)
+saved = await store.get_snapshot(execution.run_id)
 assert saved is not None
 restored = flow.create_execution(auto_close=False)
 await restored.async_load(
@@ -152,6 +152,55 @@ await restored.async_load(
     runtime_resources={"approval_service": approval_service},
 )
 ```
+
+底层 store API 必须显式传 `run_id`，因为 store 并不拥有 execution context。
+`execution.async_save(...)` 的 `run_id` 则不是必要输入：execution 会默认使用
+`execution.run_id`，该值也会出现在 `execution.result.get_meta()` 中。只有宿主
+明确拥有另一套恢复身份时，才需要显式传 `run_id=...`。
+
+内置 local RecordStore 默认按每个 `run_id` 只保留最新 3 份 execution snapshot。
+可在创建 RecordStore 时配置 provider policy：
+
+```python
+store = RecordStore(
+    "./recovery",
+    mode="read_write",
+    snapshot_retention={"keep_last": 5},
+)
+```
+
+`{"keep_last": None}` 会关闭自动清理。Execution 也可以覆盖 provider policy；该
+override 本身会随 save/load 保存和恢复：
+
+```python
+execution.set_snapshot_retention_policy(keep_last=2)
+await execution.async_save(store)
+```
+
+Execution policy 优先于 provider policy。自动清理只应用于 execution snapshot
+写入；普通 `put_checkpoint(...)` 不会被隐式裁剪。
+
+如果要在保持 execution 可恢复的同时主动回收旧版本：
+
+```python
+# 自动使用 execution.run_id，并要求 execution 当前处于 idle。
+report = await execution.async_prune_recovery_snapshots(keep_last=1)
+
+# 离线/provider 管理必须显式给出 identity。
+report = await store.prune_snapshots(execution.run_id, keep_last=1)
+```
+
+两个 API 都会保留指定数量的最新恢复点，并返回删除 record 数和回收字节数；它们
+不会 close 或 cancel execution。完整删除恢复数据仍使用明确的 provider 操作
+`store.delete_snapshot(run_id)`；正常 terminal `async_close()` 也会清理该
+execution 的恢复 snapshots。
+
+应把 execution snapshot 视作运行时恢复数据：用于进程重启、worker handoff，以及
+断开式等待后的继续执行。它不是订单、审批或其他领域对象的业务审计日志，也不应成为
+业务事实的持久化 source of truth。确定性的业务状态应写入应用自己的数据库或其他
+业务 owner 存储；持久历史使用 RuntimeEvents 或专门的审计记录。Snapshot
+projection、snapshot 物理版本 retention 与 RuntimeEvent compaction 是三套独立
+policy。
 
 execution snapshot 刻意基于 resource key。可序列化的 resource requirements 可以被
 持久化和检查，但 client、callback、task、semaphore 与 coroutine frame 必须由恢复端重新创建。
