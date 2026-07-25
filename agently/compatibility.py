@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.4.3"
-CURRENT_RELEASE_TRAIN = "2026-07-4.1.4.3"
+CURRENT_FRAMEWORK_VERSION = "4.1.4.4"
+CURRENT_RELEASE_TRAIN = "2026-07-4.1.4.4"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -15,12 +15,13 @@ DOCS_PUBLIC_SURFACE_PROTOCOL = "agently-docs.public-surface.v1"
 
 _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
  'framework': 'agently',
- 'framework_version': '4.1.4.3',
- 'release_train': '2026-07-4.1.4.3',
- 'released_at': '2026-07-22',
- 'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.3. This patch makes direct Pydantic v2 '
-          'BaseModel classes first-class ModelRequest and AgentExecution output contracts, including nested models, '
-          'while preserving the 4.1.4.2 owner boundaries and runtime protocols.',
+ 'framework_version': '4.1.4.4',
+ 'release_train': '2026-07-4.1.4.4',
+ 'released_at': '2026-07-25',
+ 'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.4. This patch strengthens Pydantic output '
+          'constraints and correction retries, adds recovery-aware TriggerFlow snapshot projection and bounded local '
+          'snapshot retention, and moves default release validation away from local Ollama dependencies while '
+          'preserving existing owner boundaries and companion protocols.',
  'companions': {'devtools': {'companion_package': 'agently-devtools',
                              'runtime_protocol': 'agently-devtools.observation-runtime.v1',
                              'event_naming': {'preferred_event_type': 'RuntimeEvent',
@@ -130,7 +131,12 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                 'explicit opt-in carriers.'},
                 'docs': {'repository': 'docs', 'public_surface_protocol': 'agently-docs.public-surface.v1'},
                 'action_runtime': {'task_workspace_contract': 'TaskWorkspace Actions own bounded file '
-                                                              'read/search/write/edit/patch/export operations.',
+                                                              'read/search/write/edit/patch/export operations. A '
+                                                              'TaskWorkspace-bound shell resolves relative workdir '
+                                                              'values inside the injected root and consumes an already '
+                                                              'root-prefixed logical .agently/files/<execution-id> '
+                                                              'locator exactly once; paths outside the root fail '
+                                                              'closed.',
                                    'record_store_contract': 'Action persistence is explicit and does not follow from a '
                                                             'TaskWorkspace binding.',
                                    'code_execution_contract': 'TaskWorkspace grant -> ordered provider '
@@ -174,6 +180,34 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                 'task_workspace_contract': 'TriggerFlow does not create or infer a TaskWorkspace.',
                                 'durability_contract': 'RecordStore or another explicit provider supplies snapshot, '
                                                        'runtime-event, lease, and artifact-ref ports.',
+                                'snapshot_projection_contract': 'Execution snapshots use schema v2 and load full '
+                                                                'schema-v1 snapshots. Full values remain the default; '
+                                                                'set_snapshot_projection_policy(...) opts into '
+                                                                'idle-only digest projection for eligible terminal '
+                                                                'interrupt values and completed SignalNet resume '
+                                                                'metadata while pending recovery state remains '
+                                                                'complete. Canonical SHA-256 digest plus encoded size '
+                                                                'preserves duplicate/conflicting resume_request_id '
+                                                                'checks. This projection is separate from RuntimeEvent '
+                                                                'compaction and does not promise a whole-snapshot byte '
+                                                                'limit.',
+                                'snapshot_retention_contract': 'The built-in local RecordStore keeps the latest three '
+                                                               'execution snapshot versions per run_id by default; '
+                                                               'RecordStore(snapshot_retention={"keep_last": N|None}) '
+                                                               'configures or disables provider pruning, while '
+                                                               'execution.set_snapshot_retention_policy(...) is the '
+                                                               'persisted higher-precedence override. '
+                                                               'execution.async_prune_recovery_snapshots(keep_last=...) '
+                                                               'uses execution.run_id and preserves recovery; '
+                                                               'store.prune_snapshots(run_id, keep_last=...) is the '
+                                                               'explicit provider boundary. Generic '
+                                                               'put_checkpoint(...) writes are not automatically '
+                                                               'pruned. Providers declaring supports_retention for '
+                                                               'distributed recovery must expose prune_snapshots. This '
+                                                               'is an intentional 4.1.4.4 default behavior change and '
+                                                               'is separate from snapshot projection, RuntimeEvent '
+                                                               'compaction, business-state persistence, and full '
+                                                               'delete_snapshot(run_id) cleanup.',
                                 'active_sub_flow_control': 'Running to_sub_flow children register serializable frames '
                                                            'before start. Explicit parent executions may signal or '
                                                            'cancel one live child by frame id; cancelled children skip '
@@ -234,25 +268,32 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                  'staged candidates through verifier acceptance, then '
                                                                  'use atomic target promotion and complete '
                                                                  'post-promotion readback; failure blocks delivery '
-                                                                 'without overwriting the prior accepted target'},
+                                                                 'without overwriting the prior accepted target. A '
+                                                                 'sufficient completed control result with a draftable '
+                                                                 'manifest but no body enters the dedicated '
+                                                                 'artifact-draft stage with the same bounded canonical '
+                                                                 'evidence ledger; framework-owned materialization is '
+                                                                 'not semantic remaining work.'},
                 'record_store': {'surface': ['RecordStore',
                                              'RecordStoreRegistry',
                                              'Agent.use_record_store',
                                              'TriggerFlow.create_execution(record_store=...)'],
                                  'local_state': '<root>/.agently/records/records.db',
-                                 'ownership': 'Records, indexes, links, checkpoints, snapshots, runtime events, '
-                                              'leases, and memory persistence'},
+                                 'ownership': 'Records, indexes, links, checkpoints, snapshots, snapshot version '
+                                              'retention and cleanup, runtime events, leases, and memory persistence'},
                 'session_memory': {'storage_owner': 'RecordStore',
                                    'strategy_owner': 'SessionMemory plugin',
                                    'recall_owner': 'TaskContext via AgentlyMemoryContextSource',
                                    'task_file_dependency': False}},
  'request_input': {'structured_output': {'surface': ['ModelRequest.output',
-                                                       'AgentExecution.output',
-                                                       'ModelRequestResult.get_data_object'],
-                                          'contract': 'A Pydantic v2 BaseModel class is expanded recursively for '
-                                                      'prompt/schema generation and preserved as the final output '
-                                                      'model; successful object reads return an instance of the '
-                                                      'original class.'},
+                                                     'AgentExecution.output',
+                                                     'ModelRequestResult.get_data_object'],
+                                         'contract': 'Pydantic v2 BaseModel classes are recursively projected into '
+                                                     'prompt schemas; required, nullability, length, count, numeric '
+                                                     'range, pattern, enum, and format constraints are rendered as '
+                                                     'output requirements. Final Pydantic validation failures feed '
+                                                     'bounded correction feedback into retries, and accepted typed '
+                                                     'results remain reusable through object, data, and text readers.'},
                    'agent_execution_request_scope': {'surface': ['AgentExecution', 'AgentExecutionResult'],
                                                      'contract': 'Each call owns an isolated AgentExecution draft. '
                                                                  'Completed executions are immutable run records; '
@@ -290,13 +331,20 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                                      'canonicalized before prompt '
                                                                                      'construction; prompt projection, '
                                                                                      'host binding validation, '
-                                                                                     'acceptance indexing, and result '
-                                                                                     'persistence share one live '
-                                                                                     'ledger identity domain. A '
-                                                                                     'control result with '
+                                                                                     'acceptance indexing, result '
+                                                                                     'persistence, and a dedicated '
+                                                                                     'manifest-to-body artifact draft '
+                                                                                     'share one live ledger identity '
+                                                                                     'domain. A control result with '
                                                                                      'sufficient=false cannot become '
                                                                                      'completed through '
-                                                                                     'next_board_action=finalize.'},
+                                                                                     'next_board_action=finalize; a '
+                                                                                     'sufficient completed draftable '
+                                                                                     'manifest may hand '
+                                                                                     'framework-owned materialization '
+                                                                                     'to the artifact-draft stage '
+                                                                                     'without being blocked by '
+                                                                                     'semantic remaining_work.'},
                    'skills': {'surface': ['AgentExecution.use_skills',
                                           'AgentExecution.require_skills',
                                           'AgentExecution.use_skills_packs',

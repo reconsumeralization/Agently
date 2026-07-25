@@ -1,6 +1,11 @@
 import asyncio
+import sys
 import tempfile
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from agently import TriggerFlow, TriggerFlowRuntimeData
 from agently.core.storage import RecordStore
