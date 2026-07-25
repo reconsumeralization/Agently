@@ -77,6 +77,32 @@ opt-in 格式，不进入 auto；`flat_markdown` 仅作为显式兼容模式保�
 | `json` | 支持，走增量 JSON parser。 | 适合数组或嵌套对象的路径级更新。流式阶段更依赖模型及时输出合法 JSON 片段；完成后仍会做最终 repair/parse。 |
 | 纯文本 / `text` | 不提供结构化 instant path。 | 用 `type="delta"` 做文本增量流式，或完成后 `get_text()`。只有调试 provider 级原始事件时才使用 `original` / `original_delta` 视图。 |
 
+对延迟敏感的结构化生成，把紧凑、彼此独立的触发记录放在长解释或大结构前面。
+一个实用顺序是：
+
+```text
+retrieval_tasks
+-> 有界 generation_plan / risk_checks
+-> 简短、用户可读的 progress_message
+-> large_artifact
+```
+
+这样完整的 `retrieval_tasks[*]` 可以提前启动有界准备工作；观察到
+`large_artifact` 的第一个事件时，也可以映射成宿主拥有的稳定
+`generating_artifact` 状态。先统一生成所有独立触发记录；除非解释是下一项的真实
+前置条件，否则不要在每一项后插入长解释。
+
+`generation_plan`、`evidence_assessment` 或 `risk_checks` 只有在后续字段、
+workflow 阶段或用户过程视图会消费这个有界产物时，才可能改善复杂结果。必须定义其
+类型、边界、可见性、保留策略和失败行为。不要要求隐藏思维链，也不要增加没有消费者
+的通用 `reasoning`、`analysis` 或 `thinking` 字段。
+
+当较大的未完成 JSON buffer 超过配置的安全阈值时，增量 JSON parser 可能发出
+`$status.status == "streaming_parse_deferred"`。因此应保持前置控制字段紧凑。
+deferred streaming 只会失去渐进优化，不会改变最终正确性；最终 parse 与 validation
+仍是权威。hybrid 的 typed JSON block 在流式阶段是 block text，finalization 时才成为
+typed value；需要嵌套 path 级提前触发时使用 JSON。
+
 ### 当前格式契约
 
 当前指导基于已经实现的 parser / prompt 契约。大规模生产推荐前，应使用代表性目标模型
