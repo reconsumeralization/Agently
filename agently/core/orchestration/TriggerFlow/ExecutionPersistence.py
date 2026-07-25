@@ -33,6 +33,7 @@ from agently.types.trigger_flow.runtime_keys import (
     DURABLE_SYSTEM_STATE_KEYS,
     TRIGGER_FLOW_EXECUTION_SNAPSHOT_KIND,
     TRIGGER_FLOW_SNAPSHOT_SCHEMA_VERSION,
+    TRIGGER_FLOW_SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS,
 )
 from .Control import (
     TRIGGER_FLOW_LIFECYCLE_CLOSED,
@@ -43,6 +44,12 @@ from .Control import (
     TRIGGER_FLOW_STATUS_FAILED,
 )
 from .ExecutionState import INTERVENTIONS_STATE_KEY, TriggerFlowInterventionMode
+from .SnapshotProjection import (
+    TRIGGER_FLOW_SNAPSHOT_PROJECTION_VERSION,
+    TriggerFlowSnapshotProjector,
+    is_value_digest_projection,
+    validate_value_digest_projection,
+)
 
 if TYPE_CHECKING:
     from .Execution import TriggerFlowExecution
@@ -86,6 +93,13 @@ class TriggerFlowExecutionPersistence:
             "value": execution._to_serializable_value(result) if result_ready else None,
         }
         signal_net = execution._signal_net.to_snapshot()
+        interrupts, signal_net, snapshot_projection = TriggerFlowSnapshotProjector(
+            execution._serializable_snapshot_projection_policy()
+        ).project(
+            interrupts=interrupts,
+            signal_net=signal_net,
+            execution_idle=execution.is_idle(),
+        )
         resource_keys = sorted(str(key) for key in execution.get_runtime_resources().keys())
         managed_resource_keys = sorted(
             str(handle.get("resource_key", ""))
@@ -114,6 +128,7 @@ class TriggerFlowExecutionPersistence:
             last_signal=last_signal,
             result_state=result_state,
             signal_net=signal_net,
+            snapshot_projection=snapshot_projection,
             resource_keys=resource_keys,
             managed_resource_keys=managed_resource_keys,
             execution_resource_requirement_ids=execution_resource_requirement_ids,
@@ -313,6 +328,7 @@ class TriggerFlowExecutionPersistence:
         last_signal: dict[str, Any] | None,
         result_state: dict[str, Any],
         signal_net: dict[str, Any],
+        snapshot_projection: dict[str, Any],
         resource_keys: list[str],
         managed_resource_keys: list[str],
         execution_resource_requirement_ids: list[str],
@@ -345,6 +361,10 @@ class TriggerFlowExecutionPersistence:
             "sub_flow_frames": sub_flow_frames,
             "last_signal": last_signal,
             "signal_net": signal_net,
+            "snapshot_projection": snapshot_projection,
+            "snapshot_retention_policy": execution._to_serializable_value(
+                execution._snapshot_retention_policy
+            ),
             "result": result_state,
             "durable_system_state": durable_system_state,
             "resource_requirements": resource_requirements,
@@ -514,6 +534,19 @@ class TriggerFlowExecutionPersistence:
         execution._snapshot_artifact_refs = compaction_state["artifact_refs"]
         execution._compaction_policy = compaction_state["policy"]
         execution._load_policy = compaction_state["load_policy"]
+        snapshot_projection = snapshot_state.get("snapshot_projection", {})
+        if isinstance(snapshot_projection, dict):
+            saved_projection_policy = snapshot_projection.get("policy")
+            if isinstance(saved_projection_policy, dict):
+                execution._snapshot_projection_policy = execution._to_serializable_value(
+                    saved_projection_policy
+                )
+        saved_retention_policy = snapshot_state.get("snapshot_retention_policy")
+        execution._snapshot_retention_policy = (
+            execution._normalize_snapshot_retention_policy(saved_retention_policy)
+            if saved_retention_policy is not None
+            else None
+        )
         execution._runtime_stream_stopped = lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED
         if lifecycle_state == TRIGGER_FLOW_LIFECYCLE_CLOSED:
             close_result = execution._build_close_snapshot()
@@ -912,19 +945,25 @@ class TriggerFlowExecutionPersistence:
             )
 
         schema_version = snapshot_state.get("schema_version")
-        if schema_version != TRIGGER_FLOW_SNAPSHOT_SCHEMA_VERSION:
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version not in TRIGGER_FLOW_SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS
+        ):
             diagnostics.append(
                 {
                     "code": "triggerflow.snapshot.invalid_schema_version",
                     "severity": "error",
                     "message": (
-                        "TriggerFlow execution snapshot schema_version does not match "
-                        f"{ TRIGGER_FLOW_SNAPSHOT_SCHEMA_VERSION }."
+                        "TriggerFlow execution snapshot schema_version is not supported. "
+                        f"Supported versions: { TRIGGER_FLOW_SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS }."
                     ),
-                    "expected": TRIGGER_FLOW_SNAPSHOT_SCHEMA_VERSION,
+                    "expected": list(TRIGGER_FLOW_SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS),
                     "actual": schema_version,
                 }
             )
+        elif schema_version >= 2:
+            diagnostics.extend(self._snapshot_projection_diagnostics(snapshot_state))
 
         snapshot_fingerprint = snapshot_state.get("flow_definition_fingerprint")
         current_fingerprint = self._current_flow_definition_fingerprint()
@@ -961,6 +1000,159 @@ class TriggerFlowExecutionPersistence:
         diagnostics.extend(self._snapshot_when_join_diagnostics(snapshot_state))
         diagnostics.extend(self._task_dag_snapshot_diagnostics(snapshot_state))
         diagnostics.extend(self._compaction_snapshot_diagnostics(snapshot_state))
+        return diagnostics
+
+    def _snapshot_projection_diagnostics(self, snapshot_state: dict[str, Any]):
+        projection_state = snapshot_state.get("snapshot_projection")
+        if not isinstance(projection_state, dict):
+            return [
+                {
+                    "code": "triggerflow.snapshot.missing_projection_state",
+                    "severity": "error",
+                    "message": (
+                        "TriggerFlow execution snapshot schema_version 2 requires "
+                        "snapshot_projection metadata."
+                    ),
+                }
+            ]
+
+        diagnostics: list[dict[str, Any]] = []
+        if projection_state.get("version") != TRIGGER_FLOW_SNAPSHOT_PROJECTION_VERSION:
+            diagnostics.append(
+                {
+                    "code": "triggerflow.snapshot.invalid_projection_version",
+                    "severity": "error",
+                    "message": (
+                        "TriggerFlow snapshot projection version is not supported."
+                    ),
+                    "expected": TRIGGER_FLOW_SNAPSHOT_PROJECTION_VERSION,
+                    "actual": projection_state.get("version"),
+                }
+            )
+        if not isinstance(projection_state.get("applied"), bool):
+            diagnostics.append(
+                {
+                    "code": "triggerflow.snapshot.invalid_projection_state",
+                    "severity": "error",
+                    "message": "TriggerFlow snapshot projection applied flag must be boolean.",
+                }
+            )
+        deferred_reason = projection_state.get("deferred_reason")
+        if deferred_reason is not None and not isinstance(deferred_reason, str):
+            diagnostics.append(
+                {
+                    "code": "triggerflow.snapshot.invalid_projection_state",
+                    "severity": "error",
+                    "message": (
+                        "TriggerFlow snapshot projection deferred_reason must be "
+                        "a string or None."
+                    ),
+                }
+            )
+        projected_interrupt_ids = projection_state.get("projected_terminal_interrupt_ids")
+        if not isinstance(projected_interrupt_ids, list) or not all(
+            isinstance(interrupt_id, str) for interrupt_id in projected_interrupt_ids
+        ):
+            diagnostics.append(
+                {
+                    "code": "triggerflow.snapshot.invalid_projection_state",
+                    "severity": "error",
+                    "message": (
+                        "TriggerFlow snapshot projected_terminal_interrupt_ids "
+                        "must be a list of strings."
+                    ),
+                }
+            )
+        for key in (
+            "projected_value_count",
+            "original_value_bytes",
+            "projected_value_bytes",
+        ):
+            value = projection_state.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                diagnostics.append(
+                    {
+                        "code": "triggerflow.snapshot.invalid_projection_state",
+                        "severity": "error",
+                        "message": (
+                            f"TriggerFlow snapshot projection '{ key }' "
+                            "must be a non-negative integer."
+                        ),
+                    }
+                )
+        policy = projection_state.get("policy")
+        if not isinstance(policy, dict):
+            diagnostics.append(
+                {
+                    "code": "triggerflow.snapshot.invalid_projection_policy",
+                    "severity": "error",
+                    "message": "TriggerFlow snapshot projection policy must be a mapping.",
+                }
+            )
+        else:
+            mode = policy.get("terminal_value_mode")
+            minimum_bytes = policy.get("min_value_bytes")
+            if mode not in {"full", "digest"}:
+                diagnostics.append(
+                    {
+                        "code": "triggerflow.snapshot.invalid_projection_policy",
+                        "severity": "error",
+                        "message": (
+                            "TriggerFlow snapshot projection terminal_value_mode must be "
+                            "'full' or 'digest'."
+                        ),
+                    }
+                )
+            if (
+                not isinstance(minimum_bytes, int)
+                or isinstance(minimum_bytes, bool)
+                or minimum_bytes < 0
+            ):
+                diagnostics.append(
+                    {
+                        "code": "triggerflow.snapshot.invalid_projection_policy",
+                        "severity": "error",
+                        "message": (
+                            "TriggerFlow snapshot projection min_value_bytes must be "
+                            "a non-negative integer."
+                        ),
+                    }
+                )
+            for key in ("enabled", "project_terminal_signal_attempts"):
+                if not isinstance(policy.get(key), bool):
+                    diagnostics.append(
+                        {
+                            "code": "triggerflow.snapshot.invalid_projection_policy",
+                            "severity": "error",
+                            "message": (
+                                f"TriggerFlow snapshot projection policy '{ key }' "
+                                "must be boolean."
+                            ),
+                        }
+                    )
+
+        def validate_projected_values(value: Any, path: str):
+            if is_value_digest_projection(value):
+                try:
+                    validate_value_digest_projection(value)
+                except ValueError as exc:
+                    diagnostics.append(
+                        {
+                            "code": "triggerflow.snapshot.invalid_value_digest",
+                            "severity": "error",
+                            "message": str(exc),
+                            "path": path,
+                        }
+                    )
+                return
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    validate_projected_values(item, f"{ path }.{ key }")
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    validate_projected_values(item, f"{ path }[{ index }]")
+
+        validate_projected_values(snapshot_state, "$")
         return diagnostics
 
     def _snapshot_lease_diagnostics(self, snapshot_state: dict[str, Any]):
@@ -1806,3 +1998,7 @@ class TriggerFlowExecutionPersistence:
             raise TypeError(
                 f"Can not load key 'run_context', expect dictionary/None but got: { type(run_context_state) }"
             )
+
+        snapshot_retention_policy = snapshot_state.get("snapshot_retention_policy")
+        if snapshot_retention_policy is not None:
+            self._execution._normalize_snapshot_retention_policy(snapshot_retention_policy)

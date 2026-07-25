@@ -33,6 +33,10 @@ from .Control import (
     TriggerFlowPauseSignal,
 )
 from .Signal import TriggerFlowSignal
+from .SnapshotProjection import (
+    is_value_digest_projection,
+    value_matches_digest_projection,
+)
 
 if TYPE_CHECKING:
     from .Execution import TriggerFlowExecution
@@ -705,7 +709,14 @@ class TriggerFlowExecutionInterrupts:
         }
 
     def _same_resume_request_value(self, record: dict[str, Any], value: Any):
-        return record.get("value") == self._execution._to_serializable_value(value)
+        stored_value = record.get("value")
+        serializable_value = self._execution._to_serializable_value(value)
+        if is_value_digest_projection(stored_value):
+            return value_matches_digest_projection(
+                serializable_value,
+                stored_value,
+            )
+        return stored_value == serializable_value
 
     def _write_interrupt_state(
         self,

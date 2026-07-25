@@ -121,6 +121,23 @@ does not select task routes or execute Skills. See
 
 The middle lifecycle state. `execution.seal()` / `execution.async_seal()` stops the execution from accepting new external events but lets already-accepted events, internal emit chains, and registered tasks finish. It does **not** close the runtime stream and does **not** freeze the close snapshot — that happens on `close()`.
 
+## Snapshot projection
+
+A TriggerFlow-owned, versioned representation policy applied by
+`execution.save()` to eligible terminal execution history. Digest projection
+can replace large completed interrupt values and completed SignalNet resume
+metadata while preserving pending recovery state and resume idempotency.
+It is distinct from provider-owned snapshot retention/TTL and from durable
+RuntimeEvent compaction.
+
+## Snapshot retention
+
+A snapshot-provider-owned policy that bounds the physical execution snapshot
+versions retained per `run_id`. The built-in local RecordStore defaults to the
+latest three. It is operational recovery hygiene, not business-state archival;
+it is also independent of TriggerFlow snapshot projection and RuntimeEvent
+compaction.
+
 ## Schema as Prompt
 
 The current name for Agently's prompt-side structured authoring style: nested dicts of leaves, where each leaf is `(TypeExpr, "description", True)` and the third slot is `ensure`. The older "Agently DSL" framing — which tried to be a unified IR for `.output()`, TriggerFlow contracts, and external schemas — is archived.

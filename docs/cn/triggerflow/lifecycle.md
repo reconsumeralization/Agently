@@ -171,6 +171,11 @@ execution snapshot 记录：
   ExecutionResource requirement。
 - `resume_ledger`：已接受的 `continue_with(..., resume_request_id=...)`
   请求，避免外部 resume 重试重复 dispatch 图。
+- `snapshot_projection`：snapshot schema v2 使用的 typed policy、实际应用或
+  defer 状态、已投影 terminal interrupt id，以及 byte/count facts。
+
+Snapshot schema v2 loader 兼容读取完整的 schema v1 snapshot。v2 snapshot
+始终包含 `snapshot_projection`，即使 projection 未启用。
 
 live resource 对象不会被序列化。`runtime_resources`、受管 ExecutionResource
 handle、client、callback 以及其他 live object 都不进入 saved state。
@@ -342,10 +347,10 @@ await execution.async_save(
 ```
 
 被选中的 snapshot provider 必须报告 CAS、lease、range-read 和 retention
-能力，并暴露对应的 snapshot、lease 和 artifact methods；execution 也必须配置一个
-报告 event sequencing 的 RuntimeEvent store。local RecordStore backend 会通过这个
-fail-closed provider check，用于单节点开发和本地重启恢复，但它不是生产级跨 worker
-Redis/Postgres/object-storage backend。
+能力，并暴露对应的 snapshot read/write/prune、lease 和 artifact methods；execution 也必须配置一个
+报告 event sequencing 的 RuntimeEvent store。local RecordStore backend 适合单节点
+开发和本地重启恢复，但它不声明完整的分布式 capability 集，因此不会通过这个生产级
+provider check。
 
 如果需要持久诊断，可以在 execution 上配置 RuntimeEvent store：
 
@@ -439,6 +444,43 @@ stream item 发出：path 为 `exchange.pending` 或 `exchange.resolved`，
 
 不调用模型或外部服务的最小 provider smoke 见
 `examples/step_by_step/11-triggerflow-23_execution_exchange_provider.py`。
+
+### Terminal snapshot projection
+
+Execution snapshot 默认继续保存完整值。如果 interrupt 完成后不需要读取完整历史
+request/response 正文，可以显式启用 digest projection：
+
+```python
+execution.set_snapshot_projection_policy(
+    terminal_value_mode="digest",
+    min_value_bytes=4096,
+)
+
+saved = execution.save(require_idle=True)
+```
+
+该 policy 由 TriggerFlow recovery 语义负责：
+
+- waiting interrupt、active resume claim、未完成 resume request、join 以及
+  其他 active recovery state 始终保持完整；
+- 只有 `resumed` / `cancelled` interrupt value 与 completed SignalNet resume
+  metadata 可以被投影；
+- `resume_request_id` 重放仍通过 canonical SHA-256 digest 区分相同 callback
+  value 和冲突 value；
+- execution 仍有 active work 时不执行投影，并记录
+  `snapshot_projection.deferred_reason == "execution_not_idle"`；
+- digest projection 会明确放弃完整历史正文的直接回读。如果正文必须保留，应放进
+  application state 或 provider artifact ref。
+
+`min_value_bytes` 作用于每一个可投影的序列化 value。该 policy 不承诺整个
+snapshot 的硬上限：pending payload、当前 execution state 和 `last_signal` 都可能
+合法地更大。可以读取 `snapshot_projection.projected_value_count`、
+`original_value_bytes` 和 `projected_value_bytes` 检查实际投影效果。
+
+该 policy 与 `set_compaction_policy(...)` 相互独立。Snapshot projection 改变
+符合条件的 terminal execution-history 表示；`set_compaction_policy(...)` 只把
+durable RuntimeEvent records 归约成 segments、lineage anchors 与 artifact refs，
+不会投影 `interrupts`、`resume_ledger` 或 `signal_net`。
 
 长运行 execution 应把大 payload 放在 provider ref 后面，execution snapshot 中只保存
 compaction facts；为此配置 host-owned reducer policy。TriggerFlow 负责按阈值选择

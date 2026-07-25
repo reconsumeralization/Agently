@@ -3,7 +3,7 @@
   "framework": "agently",
   "target_version": "4.1.4.3",
   "release_train": "2026-07-4.1.4.3-dev",
-  "notes": "4.1.4.3 patch line: direct Pydantic v2 BaseModel classes are first-class ModelRequest and AgentExecution output contracts, including nested models, while preserving the 4.1.4.2 owner boundaries. TaskContext owns progressive disclosure and one internal derived ContextIndex lifecycle; ContextReader owns consumer-bound exact readback and ContextPackage construction. TaskWorkspace owns task files and code-execution grants, including verifier-gated atomic terminal promotion; RecordStore owns records and durability; SkillLibrary owns immutable installed Skill revisions and authorized remote-source snapshots; SessionMemory recall enters through a TaskContext source; AgentExecution owns task-scoped Skill binding. Workspace-backed code execution selects provider-neutral ExecutionResource providers after immutable bundle materialization. AgentTask process state stays in memory/logs by default and record_store_recovery is opt-in. The former combined Workspace, ContextBuilder, SkillsManager, Skills execution route/strategies, skill_activation, and workspace_operation are removed without shims.",
+  "notes": "4.1.4.3 patch line: direct Pydantic v2 BaseModel classes are first-class ModelRequest and AgentExecution output contracts, including nested models, while preserving the 4.1.4.2 owner boundaries. TaskContext owns progressive disclosure and one internal derived ContextIndex lifecycle; ContextReader owns consumer-bound exact readback and ContextPackage construction. TaskWorkspace owns task files and code-execution grants, including verifier-gated atomic terminal promotion; RecordStore owns records and durability; SkillLibrary owns immutable installed Skill revisions and authorized remote-source snapshots; SessionMemory recall enters through a TaskContext source; AgentExecution owns task-scoped Skill binding. Workspace-backed code execution selects provider-neutral ExecutionResource providers after immutable bundle materialization. AgentTask process state stays in memory/logs by default and record_store_recovery is opt-in. TriggerFlow execution snapshots are recovery data rather than business archives; the built-in local provider now bounds physical versions to the latest three by default and exposes explicit prune controls. The former combined Workspace, ContextBuilder, SkillsManager, Skills execution route/strategies, skill_activation, and workspace_operation are removed without shims.",
   "companions": {
     "devtools": {
       "companion_package": "agently-devtools",
@@ -126,6 +126,8 @@
       "record_store_resource": "flow.create_execution(record_store=...); record_store=False opts out",
       "task_workspace_contract": "TriggerFlow does not create or infer a TaskWorkspace.",
       "durability_contract": "RecordStore or another explicit provider supplies snapshot, runtime-event, lease, and artifact-ref ports.",
+      "snapshot_projection_contract": "Execution snapshots use schema v2 and load full schema-v1 snapshots. Full values remain the default; set_snapshot_projection_policy(...) opts into idle-only digest projection for eligible terminal interrupt values and completed SignalNet resume metadata while pending recovery state remains complete. Canonical SHA-256 digest plus encoded size preserves duplicate/conflicting resume_request_id checks. This projection is separate from RuntimeEvent compaction and does not promise a whole-snapshot byte limit.",
+      "snapshot_retention_contract": "The built-in local RecordStore keeps the latest three execution snapshot versions per run_id by default; RecordStore(snapshot_retention={\"keep_last\": N|None}) configures or disables provider pruning, while execution.set_snapshot_retention_policy(...) is the persisted higher-precedence override. execution.async_prune_recovery_snapshots(keep_last=...) uses execution.run_id and preserves recovery; store.prune_snapshots(run_id, keep_last=...) is the explicit provider boundary. Generic put_checkpoint(...) writes are not automatically pruned. Providers declaring supports_retention for distributed recovery must expose prune_snapshots. This is an intentional in-development default behavior change and is separate from snapshot projection, RuntimeEvent compaction, business-state persistence, and full delete_snapshot(run_id) cleanup.",
       "active_sub_flow_control": "Running to_sub_flow children register serializable frames before start. Explicit parent executions may signal or cancel one live child by frame id; cancelled children skip write-back and continuation. Live child handles are process-local, so active-frame snapshots fail closed on load while waiting interrupt frames remain resumable."
     },
     "task_context": {
@@ -163,7 +165,7 @@
         "TriggerFlow.create_execution(record_store=...)"
       ],
       "local_state": "<root>/.agently/records/records.db",
-      "ownership": "Records, indexes, links, checkpoints, snapshots, runtime events, leases, and memory persistence"
+      "ownership": "Records, indexes, links, checkpoints, snapshots, snapshot version retention and cleanup, runtime events, leases, and memory persistence"
     },
     "session_memory": {
       "storage_owner": "RecordStore",

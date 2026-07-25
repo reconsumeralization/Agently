@@ -108,6 +108,17 @@ def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:
     )
 
 
+def test_in_development_triggerflow_snapshot_projection_contract() -> None:
+    triggerflow = _development_manifest()["companions"]["triggerflow"]
+    contract = triggerflow["snapshot_projection_contract"]
+
+    assert "schema v2" in contract
+    assert "schema-v1" in contract
+    assert "set_snapshot_projection_policy" in contract
+    assert "pending recovery state remains complete" in contract
+    assert "whole-snapshot byte limit" in contract
+
+
 def test_in_development_code_execution_and_evidence_replan_contracts() -> None:
     manifest = _development_manifest()
     action_runtime = manifest["companions"]["action_runtime"]

@@ -42,7 +42,7 @@ meta = result.get_meta()
 | `execution.result.get_final_result(timeout=None)` | Sync wrapper for `async_get_final_result(...)`. |
 | `execution.result.get_interventions(...)` | Intervention ledger records when that ledger is enabled; otherwise an empty list. |
 | `execution.result.get_latest_intervention(default=None, **filters)` | Last matching intervention record or `default`. |
-| `execution.result.get_meta()` | Execution metadata such as id, flow name, status, lifecycle state, timestamps, close reason, and state version. |
+| `execution.result.get_meta()` | Execution metadata such as execution id, recovery `run_id`, flow name, status, lifecycle state, timestamps, close reason, and state version. |
 
 ## Snapshot vs Final Result
 
