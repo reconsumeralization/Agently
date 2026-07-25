@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from agently import Agently
 from agently.core import ModelRequest, PluginManager
-from agently.types.data import AgentlyRequestData
+from agently.types.data import AgentlyRequestData, OutputValidateResult
 from agently.utils import Settings
 
 
@@ -211,7 +211,7 @@ async def test_validate_failure_reason_is_added_to_retry_prompt_without_payload(
     request.output({"status": (str,)}, format="json")
     validation_reason = "status must be ready before publication" + ("." * 300) + "UNBOUNDED_TAIL"
 
-    def require_ready(result, context):
+    def require_ready(result, context) -> OutputValidateResult:
         del context
         if result["status"] == "ready":
             return True
