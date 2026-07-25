@@ -238,6 +238,12 @@ Before recommending a release:
   rewriting the example and ask the maintainer whether this release should
   accept that usage update
 
+Live model calls are explicit release experiments, not default `pytest`
+dependencies. The deterministic suite must not require a local Ollama service
+or a preinstalled local model. Local Ollama may still be used for developer
+diagnostics, but final release evidence should use the declared online
+provider/model unless the maintainer records a one-off waiver and limitations.
+
 The release PR body or review notes should list the pinned examples that were
 run, the reason each one was included, and whether the result preserved the
 existing developer-facing usage shape. Do not silently replace a pinned example

@@ -12,9 +12,10 @@ def test_release_workflows_require_foundation_example_effect_gate():
         assert "Foundation Example Effect Gate" in text
         assert "examples/" in text
         assert "DeepSeek" in text
-        assert "Ollama" in text
+        assert "online model" in text or "线上模型" in text
         assert "pyright" in text
         assert "pytest" in text
+        assert "default `pytest`" in text or "默认 `pytest`" in text
         assert "fail closed" in text or "fails closed" in text
         assert "Foundation example effect checks" in text
         assert "Pinned Developer Usage Example Gate" in text or "锁定开发者用法 Example Gate" in text

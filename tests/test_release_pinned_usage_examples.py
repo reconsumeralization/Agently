@@ -31,7 +31,7 @@ def test_release_pinned_usage_manifest_paths_exist() -> None:
     assert model_examples
     for example in model_examples:
         assert (ROOT / example["path"]).is_file()
-        assert example["provider"] == "DeepSeek or local Ollama"
+        assert example["provider"] == "Explicitly configured online model"
 
 
 def test_release_pinned_usage_readme_records_confirmation_policy() -> None:

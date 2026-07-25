@@ -196,6 +196,11 @@ waiver 和残余风险。
 - 如果失败说明推荐用法本身必须改变，必须先暂停，不要直接重写 example；先请示维护者是否接受
   在本 release 更新该用法
 
+真实模型调用属于显式 release experiment，不是默认 `pytest` 依赖。默认确定性测试套件
+不得依赖本地 Ollama 服务或预装本地模型。本地 Ollama 仍可用于显式开发诊断，但最终
+release 证据应使用声明的线上 provider/model；若例外，维护者必须记录一次性 waiver 与
+局限。
+
 release PR body 或 review notes 应列出本次运行的锁定 examples、纳入原因，以及结果是否
 保留了既有开发者可见用法形态。不要为了让 release gate 通过而静默把锁定 example 替换成
 新模式。
