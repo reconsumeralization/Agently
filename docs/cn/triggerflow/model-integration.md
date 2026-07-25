@@ -76,6 +76,23 @@ async def draft_with_streaming(data: TriggerFlowRuntimeData):
 消费者可以在 `body` 还在生成时先渲染 `title` delta。stream 结束后，
 `async_get_data()` 返回同一个 result 的最终缓存解析 dict（不再发请求）。
 
+## 让生成与下游 fan-out 重叠
+
+当靠前的完整字段能够启动独立检索或准备工作时，优先采用 TriggerFlow 可见的
+start/cache/reconcile 模式：
+
+- 把紧凑触发项放在长 progress prose 与最终 artifact 前；
+- 完整项到达时，根据 payload 生成宿主拥有的 key，只调用一次
+  `await data.async_emit_nowait(...)`；
+- 继续 instant loop，不让后续项和进度被阻塞；
+- `async_get_data()` 返回后，按最终接受项集合对账：复用匹配项、补发缺失项、
+  取消或丢弃多余项；
+- 只 join 最终接受的 key，再提交最终状态。
+
+临时分支必须是只读或其他可幂等/可取消工作。execution `concurrency`、
+model/provider limit 与外部 adapter quota 分别拥有各自的压力控制。原始 parser path
+应转换成稳定 workflow status/event，不应直接暴露给前端。
+
 ## 在一个 chunk 内复用 result
 
 调一次 `get_result()`，从 `result` 读 text + data + meta 不再发请求。详见 [模型结果](../requests/model-response.md)：

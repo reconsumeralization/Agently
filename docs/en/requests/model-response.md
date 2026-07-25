@@ -282,6 +282,27 @@ asyncio.run(stream_triage_card(
 Prefer async consumption for services. Synchronous `get_generator(type="instant")`
 is fine for scripts and notebooks.
 
+### Start downstream work early, then reconcile
+
+An early completed field may start read-only or otherwise
+idempotent/cancelable work while the model continues generating. Use this
+contract:
+
+1. react only to a complete canonical field or list item, such as
+   `wildcard_path == "retrieval_tasks[*]" and is_complete`;
+2. derive a host-owned key from the task-relevant payload and dispatch through
+   a bounded async owner without awaiting the long operation in the stream loop;
+3. keep consuming the model stream;
+4. read the final validated object with `async_get_data()`;
+5. reuse matching work, start accepted items missed by streaming, and cancel or
+   discard provisional extras.
+
+Final reconciliation is required because parsing, ensure, or custom validation
+may accept a replacement attempt after the original instant stream. Retry
+events and repeated deltas must converge on the same host key rather than repeat
+retrievals. Irreversible effects and final decisions still wait for the final
+accepted object.
+
 ### Specific example (events)
 
 ```python
