@@ -109,6 +109,35 @@ class TriggerFlowCompactionState(TypedDict):
     load_policy: dict[str, Any]
 
 
+TriggerFlowValueDigestProjection = TypedDict(
+    "TriggerFlowValueDigestProjection",
+    {
+        "$triggerflow_projection": Literal["value_digest"],
+        "algorithm": Literal["sha256"],
+        "sha256": str,
+        "serialized_bytes": int,
+    },
+)
+
+
+class TriggerFlowSnapshotProjectionPolicy(TypedDict):
+    enabled: bool
+    terminal_value_mode: Literal["full", "digest"]
+    min_value_bytes: int
+    project_terminal_signal_attempts: bool
+
+
+class TriggerFlowSnapshotProjectionState(TypedDict):
+    version: int
+    policy: TriggerFlowSnapshotProjectionPolicy
+    applied: bool
+    deferred_reason: str | None
+    projected_terminal_interrupt_ids: list[str]
+    projected_value_count: int
+    original_value_bytes: int
+    projected_value_bytes: int
+
+
 class TriggerFlowExecutionSnapshot(TypedDict, total=False):
     schema_version: int
     kind: Literal["triggerflow.execution_snapshot"]
@@ -130,6 +159,7 @@ class TriggerFlowExecutionSnapshot(TypedDict, total=False):
     sub_flow_frames: dict[str, Any]
     last_signal: dict[str, Any] | None
     signal_net: dict[str, Any]
+    snapshot_projection: TriggerFlowSnapshotProjectionState
     result: dict[str, Any]
     durable_system_state: dict[str, Any]
     resource_requirements: list[TriggerFlowResourceRequirement]

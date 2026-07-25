@@ -32,6 +32,9 @@ from .contract import (
     TriggerFlowRecoveryDiagnostic,
     TriggerFlowResourceRequirement,
     TriggerFlowSnapshotArtifactRef,
+    TriggerFlowSnapshotProjectionPolicy,
+    TriggerFlowSnapshotProjectionState,
+    TriggerFlowValueDigestProjection,
     TriggerFlowRuntimeEventProjection,
     TriggerFlowSystemStreamEvent,
     TriggerFlowSystemStreamMetadata,
@@ -47,6 +50,7 @@ from .runtime_keys import (
     TRANSIENT_AGGREGATION_STATE_KEYS,
     TRIGGER_FLOW_EXECUTION_SNAPSHOT_KIND,
     TRIGGER_FLOW_SNAPSHOT_SCHEMA_VERSION,
+    TRIGGER_FLOW_SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS,
 )
 from .trigger_flow import (
     TriggerFlowBlockData,

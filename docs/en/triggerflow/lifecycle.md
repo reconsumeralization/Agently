@@ -176,6 +176,11 @@ The execution snapshot records:
   requirements needed before the restored graph can safely continue.
 - `resume_ledger`: accepted `continue_with(..., resume_request_id=...)` requests
   so an external resume retry does not dispatch the graph twice.
+- `snapshot_projection`: the typed policy, application/defer state, projected
+  terminal interrupt ids, and byte/count facts for snapshot schema v2.
+
+Snapshot schema v2 loaders accept full schema v1 snapshots. A v2 snapshot
+always carries `snapshot_projection`, including when projection is disabled.
 
 Live resource objects are not serialized. `runtime_resources`, managed
 ExecutionResource handles, clients, callbacks, and other live objects remain
@@ -467,6 +472,48 @@ exchanges are emitted as stream items with path `exchange.pending` or
 
 For a minimal provider smoke that does not call a model or external service, see
 `examples/step_by_step/11-triggerflow-23_execution_exchange_provider.py`.
+
+### Terminal snapshot projection
+
+Execution snapshots preserve complete values by default. Applications that do
+not need full historical request/response bodies after an interrupt has
+completed can opt into digest projection:
+
+```python
+execution.set_snapshot_projection_policy(
+    terminal_value_mode="digest",
+    min_value_bytes=4096,
+)
+
+saved = execution.save(require_idle=True)
+```
+
+The policy is owned by TriggerFlow recovery semantics:
+
+- waiting interrupts, active resume claims, incomplete resume requests, joins,
+  and other active recovery state stay complete;
+- only `resumed` / `cancelled` interrupt values and completed SignalNet resume
+  metadata are eligible;
+- `resume_request_id` replay still distinguishes the same callback value from a
+  conflicting value by comparing a canonical SHA-256 digest;
+- projection is deferred with
+  `snapshot_projection.deferred_reason == "execution_not_idle"` while the
+  execution has active work;
+- digest projection intentionally gives up full historical body readback. Use
+  application state or provider artifact refs when that body must remain
+  available.
+
+`min_value_bytes` applies to each eligible serialized value. The policy does
+not impose a hard limit on the whole snapshot: pending payloads, current
+execution state, and `last_signal` may legitimately be larger. Inspect
+`snapshot_projection.projected_value_count`, `original_value_bytes`, and
+`projected_value_bytes` to measure the applied projection.
+
+This policy is separate from `set_compaction_policy(...)`. Snapshot projection
+changes eligible terminal execution-history representation.
+`set_compaction_policy(...)` compacts durable RuntimeEvent records into
+segments, lineage anchors, and artifact refs; it does not project
+`interrupts`, `resume_ledger`, or `signal_net`.
 
 For long-running executions, keep large payloads behind provider refs and store
 only compaction facts in the execution snapshot by configuring a host-owned

@@ -570,7 +570,7 @@ async def test_trigger_flow_execution_snapshot_restores_scoped_when_join_progres
     saved_state = execution.save()
 
     snapshot = saved_state
-    assert snapshot["schema_version"] == 1
+    assert snapshot["schema_version"] == 2
     durable_when_states = snapshot["durable_system_state"]["when_states"]
     signal_scope_keys = [
         scope_key

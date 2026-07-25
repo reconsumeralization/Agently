@@ -126,6 +126,7 @@
       "record_store_resource": "flow.create_execution(record_store=...); record_store=False opts out",
       "task_workspace_contract": "TriggerFlow does not create or infer a TaskWorkspace.",
       "durability_contract": "RecordStore or another explicit provider supplies snapshot, runtime-event, lease, and artifact-ref ports.",
+      "snapshot_projection_contract": "Execution snapshots use schema v2 and load full schema-v1 snapshots. Full values remain the default; set_snapshot_projection_policy(...) opts into idle-only digest projection for eligible terminal interrupt values and completed SignalNet resume metadata while pending recovery state remains complete. Canonical SHA-256 digest plus encoded size preserves duplicate/conflicting resume_request_id checks. This projection is separate from RuntimeEvent compaction and does not promise a whole-snapshot byte limit.",
       "active_sub_flow_control": "Running to_sub_flow children register serializable frames before start. Explicit parent executions may signal or cancel one live child by frame id; cancelled children skip write-back and continuation. Live child handles are process-local, so active-frame snapshots fail closed on load while waiting interrupt frames remain resumable."
     },
     "task_context": {

@@ -109,6 +109,29 @@ snapshot = await restored.async_close()
 Webhook、队列或审批回调应传入稳定的 `resume_request_id`，这样重复投递可以被重放，
 但不会把同一次 resume 派发两次。
 
+### 投影已完成的 interrupt 历史
+
+`save()` 默认保存完整值。对于 payload 较大、运行时间较长的 execution，可以显式
+启用 schema v2 terminal-history digest projection：
+
+```python
+execution.set_snapshot_projection_policy(
+    terminal_value_mode="digest",
+    min_value_bytes=4096,
+)
+saved = execution.save(require_idle=True)
+```
+
+Pending recovery state 始终保持完整。只有 terminal interrupt value 与 completed
+SignalNet resume metadata 可以被投影；canonical digest 会在 load 后继续保护相同与
+冲突 `resume_request_id` callback 的判断。Execution 仍有 active work 时会 defer
+投影。该配置不是整个 snapshot 的 byte 硬上限，也不会 compact 当前 state 或
+`last_signal`。
+
+`set_compaction_policy(...)` 的作用域不同：它压缩 durable RuntimeEvent records，
+并记录 segment、anchor 和 artifact facts；它不会压缩 execution snapshot 中的
+interrupt、resume-ledger 或 SignalNet sections。
+
 ### Snapshot stores
 
 `execution.async_save(store, ...)` 会把当前 snapshot 写入任何实现了

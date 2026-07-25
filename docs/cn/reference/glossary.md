@@ -112,6 +112,14 @@ SkillLibrary 不选择任务 route，也不“执行 Skill”。详见
 
 中间生命周期状态。`execution.seal()` / `execution.async_seal()` 拒收新外部事件，但允许已接受事件、内部 emit 链与已注册 task 继续 drain。它**不**关 runtime stream，也**不**冻结 close snapshot——后两者发生在 `close()`。
 
+## Snapshot projection
+
+TriggerFlow 自身拥有的、由 `execution.save()` 对符合条件的 terminal execution
+history 应用的版本化表示策略。Digest projection 可以替换大体积 completed
+interrupt value 与 completed SignalNet resume metadata，同时保留 pending recovery
+state 和 resume idempotency。它不同于 provider 拥有的 snapshot retention/TTL，
+也不同于 durable RuntimeEvent compaction。
+
 ## Schema as Prompt
 
 Agently prompt 侧结构化 authoring 的当前命名方式：嵌套 dict + 叶子 `(TypeExpr, "description", True)`，第三槽是 `ensure`。旧版「Agently DSL」试图把 `.output()`、TriggerFlow contract、外部 schema 统一成同一 IR 的方向已归档。

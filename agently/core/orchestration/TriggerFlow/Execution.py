@@ -193,6 +193,12 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self._retained_lineage_anchors: list[dict[str, Any]] = []
         self._snapshot_artifact_refs: list[dict[str, Any]] = []
         self._compaction_policy: dict[str, Any] = {}
+        self._snapshot_projection_policy: dict[str, Any] = {
+            "enabled": False,
+            "terminal_value_mode": "digest",
+            "min_value_bytes": 4096,
+            "project_terminal_signal_attempts": True,
+        }
         self._load_policy: dict[str, Any] = {}
         self._heartbeat_at: float | None = None
         self._lease_until: float | None = self._created_at + lease_ttl if lease_ttl is not None else None
@@ -259,6 +265,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self.clear_runtime_resources = self._clear_runtime_resources
         self.declare_resource_requirement = self._declare_resource_requirement
         self.set_compaction_policy = self._set_compaction_policy
+        self.set_snapshot_projection_policy = self._set_snapshot_projection_policy
 
         # Runtime Stream
         self.put_into_stream = FunctionShifter.syncify(self.async_put_into_stream)
@@ -2143,6 +2150,33 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         }
         self._bump_state_version()
         return self
+
+    def _set_snapshot_projection_policy(
+        self,
+        *,
+        terminal_value_mode: Literal["full", "digest"] = "digest",
+        min_value_bytes: int = 4096,
+        project_terminal_signal_attempts: bool = True,
+        enabled: bool = True,
+    ) -> "TriggerFlowExecution[InputT, StreamT, ResultT]":
+        if terminal_value_mode not in {"full", "digest"}:
+            raise ValueError(
+                "snapshot projection terminal_value_mode must be one of: "
+                "'full', 'digest'."
+            )
+        if not isinstance(min_value_bytes, int) or isinstance(min_value_bytes, bool) or min_value_bytes < 0:
+            raise ValueError("snapshot projection min_value_bytes must be a non-negative integer.")
+        self._snapshot_projection_policy = {
+            "enabled": bool(enabled),
+            "terminal_value_mode": terminal_value_mode,
+            "min_value_bytes": min_value_bytes,
+            "project_terminal_signal_attempts": bool(project_terminal_signal_attempts),
+        }
+        self._bump_state_version()
+        return self
+
+    def _serializable_snapshot_projection_policy(self):
+        return self._to_serializable_value(self._snapshot_projection_policy)
 
     def _set_load_read_limit(self, limit: int | None):
         if limit is not None and limit < 0:

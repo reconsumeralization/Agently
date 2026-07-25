@@ -113,6 +113,31 @@ snapshot = await restored.async_close()
 Use a stable `resume_request_id` for webhook, queue, or approval callbacks so a
 duplicate delivery can be replayed without dispatching the same resume twice.
 
+### Projecting completed interrupt history
+
+`save()` preserves full values by default. For payload-heavy, long-lived
+executions, opt into schema v2 terminal-history digest projection:
+
+```python
+execution.set_snapshot_projection_policy(
+    terminal_value_mode="digest",
+    min_value_bytes=4096,
+)
+saved = execution.save(require_idle=True)
+```
+
+Pending recovery state remains complete. Only terminal interrupt values and
+completed SignalNet resume metadata are eligible, and canonical digests
+preserve same-versus-conflicting `resume_request_id` callback validation after
+load. Projection is deferred while execution work is active. This is not a
+whole-snapshot byte limit and it does not compact current state or
+`last_signal`.
+
+`set_compaction_policy(...)` has a different scope: it compacts durable
+RuntimeEvent records and records segment/anchor/artifact facts. It does not
+compact the execution snapshot's interrupt, resume-ledger, or SignalNet
+sections.
+
 ### Snapshot stores
 
 `execution.async_save(store, ...)` writes the current snapshot to any
