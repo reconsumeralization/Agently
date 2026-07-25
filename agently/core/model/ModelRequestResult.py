@@ -296,7 +296,7 @@ class ModelRequestResult:
     async def async_get_data_object(
         self,
         *,
-        ensure_keys: None,
+        ensure_keys: list[str] | None = None,
         validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,
@@ -338,7 +338,7 @@ class ModelRequestResult:
     def get_data_object(
         self,
         *,
-        ensure_keys: None,
+        ensure_keys: list[str] | None = None,
         validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
         max_retries: int = 3,

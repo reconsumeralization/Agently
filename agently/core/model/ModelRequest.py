@@ -453,7 +453,7 @@ class ModelRequest:
     def get_data_object(
         self,
         *,
-        ensure_keys: None,
+        ensure_keys: list[str] | None = None,
         ensure_all_keys: bool | None = None,
         validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None" = None,
         key_style: Literal["dot", "slash"] = "dot",
