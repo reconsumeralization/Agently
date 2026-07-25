@@ -12,6 +12,26 @@ from types import SimpleNamespace
 import pytest
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_EXPERIMENT_RUNNERS = (
+    REPOSITORY_ROOT
+    / "spec"
+    / "experiments"
+    / "agent-task-block-carrier"
+    / "round-001"
+    / "run_round.py",
+    REPOSITORY_ROOT
+    / "spec"
+    / "experiments"
+    / "flat-react-taskboard-real-samples"
+    / "flat_react_taskboard_real_samples.py",
+)
+pytestmark = pytest.mark.skipif(
+    not all(path.is_file() for path in LOCAL_EXPERIMENT_RUNNERS),
+    reason="requires the maintainer-local nested spec experiment repository",
+)
+
+
 @pytest.fixture(autouse=True)
 def _restore_runner_sys_path():
     original = list(sys.path)
