@@ -55,17 +55,17 @@
     {
       "path": "examples/agent_auto_orchestration/22_unified_agent_execution_result.py",
       "reason": "Real-model AgentExecution quick prompt plus task-loop result usage.",
-      "provider": "DeepSeek or local Ollama"
+      "provider": "Explicitly configured online model"
     },
     {
       "path": "examples/agent_auto_orchestration/23_agent_execution_auto_dispatch.py",
       "reason": "Real-model AgentExecution route dispatch and task evidence usage.",
-      "provider": "DeepSeek or local Ollama"
+      "provider": "Explicitly configured online model"
     },
     {
       "path": "examples/skills_executor/08_architecture_diagram_skill.py",
       "reason": "Real-model Skills task compatibility facade and artifact-producing skill usage.",
-      "provider": "DeepSeek or local Ollama"
+      "provider": "Explicitly configured online model"
     }
   ]
 }
