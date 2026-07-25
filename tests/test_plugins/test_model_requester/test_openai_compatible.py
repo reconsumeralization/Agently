@@ -1,30 +1,20 @@
 import pytest
 import asyncio
 
-import os
 from httpx import RemoteProtocolError
 from httpx_sse import SSEError
-from dotenv import find_dotenv, load_dotenv
-
-load_dotenv(find_dotenv())
 
 from typing import Any, cast
 from agently import Agently
 from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.model.Prompt import Prompt
-from agently.utils import SerializableStateDataNamespace
 from agently.utils import Settings
 from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
     OpenAICompatible,
-    ModelRequesterSettings,
 )
 import agently.builtins.plugins.ModelRequester.OpenAICompatible.plugin as openai_module
 from collections import Counter
 from types import SimpleNamespace
-
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
-
 
 def build_plugin(config: dict, prompt_values: dict | None = None):
     settings = Settings(parent=Agently.settings)
@@ -435,36 +425,6 @@ async def test_broadcast_response_handles_usage_only_final_chunk_without_choices
     assert original_done["choices"][0]["message"]["content"] == "hello world"
     meta = next(payload for event, payload in events if event == "meta")
     assert meta["usage"]["total_tokens"] == 44
-
-
-@pytest.mark.asyncio
-async def test_main(require_ollama):
-    request_settings = cast(
-        ModelRequesterSettings,
-        SerializableStateDataNamespace(Agently.settings, "plugins.ModelRequester.OpenAICompatible"),
-    )
-    request_settings["base_url"] = OLLAMA_BASE_URL
-    request_settings["model"] = OLLAMA_MODEL
-    request_settings["model_type"] = "chat"
-    request_settings["auth"] = None
-    prompt = Agently.create_prompt()
-
-    openai_compatible = OpenAICompatible(
-        prompt,
-        Agently.settings,
-    )
-
-    try:
-        prompt.set("input", "ni hao")
-        request_data = openai_compatible.generate_request_data()
-        request_response = openai_compatible.request_model(request_data)
-        response = openai_compatible.broadcast_response(request_response)
-        async for event, message in response:
-            print(event, message)
-    except Exception as e:
-        raise e
-
-
 def test_plugin_root_options_are_treated_as_request_options():
     request = generate_request(
         {
