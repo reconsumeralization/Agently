@@ -267,6 +267,23 @@ asyncio.run(stream_triage_card(
 服务里优先用 async 消费。同步 `get_generator(type="instant")` 适合脚本和
 notebook。
 
+### 提前启动下游工作，再以最终结果对账
+
+一个靠前且已完成的字段，可以在模型继续生成时启动只读或其他可幂等/可取消的工作。
+使用下面的契约：
+
+1. 只响应完整的规范字段或列表项，例如
+   `wildcard_path == "retrieval_tasks[*]" and is_complete`；
+2. 根据任务相关 payload 生成宿主拥有的 key，通过有界 async owner 派发，不在
+   stream loop 内等待耗时工作；
+3. 继续消费模型 stream；
+4. 用 `async_get_data()` 读取最终通过校验的对象；
+5. 复用匹配工作，补发流式阶段没有观察到的最终项，取消或丢弃多余临时项。
+
+必须做最终对账，因为 parse、ensure 或自定义校验可能在原始 instant stream
+结束后接受一个替换 attempt。retry event 与重复 delta 必须收敛到同一个宿主 key，
+不能重复检索。不可逆副作用与最终业务决策仍要等待最终接受对象。
+
 ### Specific 例子（事件）
 
 ```python

@@ -78,6 +78,24 @@ tokens. Consumers can render `title` deltas while `body` is still generating.
 After the stream ends, `async_get_data()` returns the cached final parsed dict
 from the same result (no second request).
 
+## Overlap generation with downstream fan-out
+
+When a complete early field can start independent retrieval or preparation,
+prefer a TriggerFlow-visible start/cache/reconcile pattern:
+
+- put compact trigger items before long progress prose and the final artifact;
+- on a complete item, derive a host-owned payload key and call
+  `await data.async_emit_nowait(...)` once;
+- continue the instant loop so later items and progress are not blocked;
+- after `async_get_data()` returns, reconcile the accepted final item set:
+  reuse matches, emit missing items, and cancel or discard extras;
+- join only accepted keys before committing the final state.
+
+The provisional branch must be read-only or otherwise idempotent/cancelable.
+Execution `concurrency`, model/provider limits, and external-adapter quotas own
+pressure independently. Raw parser paths should be translated into stable
+workflow statuses and events rather than exposed to the frontend.
+
 ## Reusing one result across the chunk
 
 Call `get_result()` once, then read text + data + meta from `result` without re-issuing. See [Model Result](../requests/model-response.md):

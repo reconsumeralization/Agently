@@ -94,6 +94,36 @@ request.
 | `json` | Yes, via incremental JSON parsing. | Best when arrays or nested objects need path-level updates. More sensitive to malformed or delayed JSON syntax while streaming; final repair still happens at completion. |
 | Plain text / `text` | No structured instant paths. | Use `type="delta"` for text-increment streaming, or `get_text()` after completion. Use `original` / `original_delta` views only when debugging provider-level raw events. |
 
+For latency-sensitive structured generation, put compact independent trigger
+records before long explanations or artifacts. A useful order is:
+
+```text
+retrieval_tasks
+-> bounded generation_plan / risk_checks
+-> short user-safe progress_message
+-> large_artifact
+```
+
+This lets complete `retrieval_tasks[*]` items start bounded preparation early
+and lets the first `large_artifact` event map to a stable host-owned
+`generating_artifact` status. Generate all independent trigger records first;
+do not interleave a long explanation after every item unless that explanation
+is a real prerequisite.
+
+`generation_plan`, `evidence_assessment`, or `risk_checks` may improve a complex
+result only when a later field, workflow stage, or user-process view consumes
+the bounded artifact. Define its type, bounds, visibility, retention, and
+failure behavior. Do not request hidden chain-of-thought or add an unconsumed
+generic `reasoning`, `analysis`, or `thinking` field.
+
+Incremental JSON parsing can emit
+`$status.status == "streaming_parse_deferred"` when a large incomplete buffer
+crosses the configured safety threshold. Keep early control fields compact.
+Deferred streaming removes the progressive optimization, not final
+correctness; final parse and validation remain authoritative. Hybrid typed JSON
+blocks stream as block text and become typed values at finalization, so use JSON
+when nested path-level early triggers are required.
+
 ### Current Format Contracts
 
 Current guidance is based on the implemented parser/prompt contracts and should
