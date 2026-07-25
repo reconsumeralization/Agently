@@ -16,10 +16,18 @@ if project_root_str not in sys.path:
 def is_ollama_available() -> bool:
     try:
         base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+        model = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
         parsed = urlparse(base_url)
-        root = f"{parsed.scheme}://{parsed.netloc}/"
-        response = httpx.get(root, timeout=2.0)
-        return response.status_code < 500
+        if not parsed.scheme or not parsed.netloc:
+            return False
+        response = httpx.get(f"{base_url.rstrip('/')}/models", timeout=2.0)
+        if not response.is_success:
+            return False
+        payload = response.json()
+        models = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(models, list):
+            return False
+        return any(isinstance(item, dict) and item.get("id") == model for item in models)
     except Exception:
         return False
 
