@@ -42,6 +42,25 @@ agent 在模块层创建以便跨 execution 复用。`await ... async_start()` �
 
 周围 flow 是 async。chunk 内调 sync `start()` 能跑但会阻塞 event loop，损失并发。用 `async_start()` / `async_get_data()` / `get_async_generator(...)`。详见 [Async First](../start/async-first.md)。
 
+## 显式表达新信息边界
+
+后置字段只使用请求发出时的输入快照和同一响应里较早产出的有界字段时，可以保留在
+同一个 ModelRequest 中。如果后置模型阶段需要请求发出后才产生的新事实，应显式
+表达这条必须串行的值依赖：
+
+```text
+R1 -> Action/系统工作 -> 宿主校验/readback -> R2
+```
+
+这包括检索结果、API/数据库响应、文件或 artifact readback、approval/resume
+payload，以及必须先由确定性代码算出、再交给模型判断的数据。高层 Agent execution
+可以代为管理这个循环，但逻辑模型拓扑仍然跨越了不同请求。
+
+`instant` 可以在 R1 完成前提前启动可取消、幂等的工作，让它与无关的后续生成重叠；
+它不是向 R1 回传新信息的通道。如果 R2 需要该结果，应继续消费完 R1，对账最终接受
+的触发集合，等待并校验工作结果，然后才发出 R2。这个必要 join 两侧的独立分支仍可
+并发执行。
+
 ## 把结构化字段流向 runtime stream
 
 消费 runtime stream 的 UI 受益于增量更新时，把模型 result 的结构化字段 patch

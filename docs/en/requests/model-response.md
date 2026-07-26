@@ -39,6 +39,32 @@ treat it as one independent run; after it starts, prompt/config methods such as
 from `agent.input(...)`, `agent.create_execution(...)`, or
 `execution.create_execution(...)` for the next request boundary.
 
+## Decide whether one request is enough
+
+A ModelRequest starts from the prompt, settings, and information available when
+it is dispatched. Combine supporting semantic steps in one ordered output
+contract when later fields need only that request-time input/evidence snapshot
+and earlier bounded fields in the same response. This can avoid repeated
+context and lets a conclusion reuse a task-specific assessment produced
+earlier in the same generation.
+
+Start a later ModelRequest when its semantic output needs a fact that appears
+only after an Action, tool, API/database read, artifact readback,
+approval/resume, or host computation runs:
+
+```text
+R1 search plan
+-> execute retrieval and validate its observed result
+-> R2 grounded answer
+```
+
+Reading text, data, and metadata from one cached result does not issue another
+request. Conversely, reusing that result cannot add information that did not
+exist at dispatch time. `instant` may start cancelable/idempotent work from a
+complete early field, but it cannot feed the work's later result into the
+already-running request. If later model generation needs that result, reconcile
+and join first, then pass the validated observation to a new request.
+
 ## Reader methods
 
 | Method | Returns |
