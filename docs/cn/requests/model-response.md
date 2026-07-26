@@ -37,6 +37,29 @@ meta = result.get_meta()
 `agent.input(...)`、`agent.create_execution(...)` 或
 `execution.create_execution(...)` 创建新的 execution。
 
+## 判断一次请求是否足够
+
+ModelRequest 只能从发出时已有的 prompt、settings 和信息快照开始。后续字段只依赖
+这个请求时输入/证据快照，以及同一响应里前面已生成的有界字段时，可以把多个语义
+步骤合并进一个有序 output contract。这样既能避免重复传递上下文，也能让结论复用
+同一次生成中较早产出的、任务相关的结构化分析。
+
+如果后置语义输出所需事实，只有在 Action、tool、API/数据库访问、artifact
+readback、approval/resume 或宿主计算执行后才会出现，就必须启动后续
+ModelRequest：
+
+```text
+R1 检索计划
+-> 执行检索并校验观测结果
+-> R2 基于证据的回答
+```
+
+从同一个缓存 result 读取 text、data 和 metadata 不会重发请求；反过来，复用这个
+result 也不能加入请求发出时尚不存在的信息。`instant` 可以根据已经完整生成的前置
+字段提前启动可取消、幂等的工作，但不能把该工作稍后返回的结果送回仍在生成的同一次
+请求。如果后续模型生成需要这个结果，应先完成最终对账与汇合，再把校验后的观测结果
+传给新请求。
+
 ## 读取方法
 
 | 方法 | 返回 |

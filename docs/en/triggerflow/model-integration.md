@@ -42,6 +42,28 @@ The agent is created at module scope so it's reused across executions. `await ..
 
 The surrounding flow is async. Calling sync `start()` inside a chunk works but blocks the event loop while the model request is in flight, hurting concurrency. Use `async_start()` / `async_get_data()` / `get_async_generator(...)`. See [Async First](../start/async-first.md).
 
+## Make new-information boundaries visible
+
+A later field may stay in the same ModelRequest when it uses only the
+request-time input snapshot and earlier bounded fields from that response.
+When a later model stage needs a fact produced after dispatch, represent the
+required serial value edge explicitly:
+
+```text
+R1 -> Action/system work -> host validation/readback -> R2
+```
+
+This includes retrieval results, API/database responses, file or artifact
+readback, approval/resume payloads, and deterministic calculations that the
+later semantic step must inspect. A high-level Agent execution may manage this
+loop for you, but the logical model topology still crosses separate requests.
+
+`instant` can start cancelable/idempotent work before R1 finishes and overlap it
+with independent generation. It is not a back-channel into R1. If R2 needs the
+new result, keep consuming R1, reconcile its final accepted trigger set, await
+and validate the work, and only then dispatch R2. Independent branches can
+still fan out concurrently around this required join.
+
 ## Streaming structured fields into the runtime stream
 
 When the UI consuming the runtime stream benefits from incremental updates,
