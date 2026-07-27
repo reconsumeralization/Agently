@@ -161,6 +161,14 @@ When you audit or author guidance for Agently `4.1+`, these are the defaults cod
 
 - API shape: apply Occam's razor. Do not add a new entity, method, facade, or compatibility patch when an existing surface already expresses the concept. If a name is unclear, prefer a narrow alias or documentation clarification over another overlapping method.
 - Structured output: for fixed required leaves, mark `(TypeExpr, "description", True)` directly in `.output(...)`. Use `(TypeExpr, "description", "not_null")` only when empty values must retry. Use manual `ensure_keys=` only for conditional or runtime-dependent paths.
+- Rule-first validation: if the model is expected to satisfy a business validator,
+  state every non-sensitive, model-satisfiable rule in the initial
+  `input` / `info` / `instruct` / `output` contract. Keep deterministic
+  validation authoritative, but never use hard rejection and retry as the
+  model's rule-discovery loop. When a requested production gate cannot be
+  stated safely or concretely, warn about the affected output, cost, latency,
+  nondeterminism, liveness, alternatives, and terminal behavior, then require a
+  new explicit developer confirmation for that named gate before implementation.
 - Identifier joins: when the model judges, selects, ranks, or references host
   records, give each candidate one host-issued trusted `selection_key` plus only
   the facts relevant to the task. The model should return that one key with its

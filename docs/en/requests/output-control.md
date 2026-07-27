@@ -34,6 +34,40 @@ necessary output control rather than business-logic intrusion. Parsing and
 `ensure` checks do not replace deterministic DTO/Pydantic/SDK validation before
 a real call or side effect.
 
+## Rule-first business validation
+
+When the model is expected to satisfy a post-generation business validator,
+give it every non-sensitive, model-satisfiable acceptance rule before the first
+attempt. Put runtime candidates and limits in `input(...)`, authoritative
+policy or interface material in `info(...)`, behavior and transformation rules
+in `instruct(...)`, and field-level type, requiredness, enum, format, range,
+nullability, and cross-field constraints in `output(...)`.
+
+The host-side validator remains authoritative. Pydantic models, `.validate(...)`,
+DTO/SDK validation, authorization checks, and side-effect guards must still
+reject invalid output. Retry feedback should repair a declared contract; it
+must not be the first place where the model learns the rule. An underspecified
+generation followed by hard rejection and repeated retries is blind gate
+discovery, not a validation strategy.
+
+Security, authorization, anti-abuse, integrity, and holdout gates may keep
+sensitive implementation details host-side when disclosure would weaken the
+gate or leak an expected answer. Give the model the safe public contract, then
+fail closed, stop without retry, require review, or use an explicit fallback;
+do not repeatedly reveal hidden rules through correction prompts.
+
+If a requested production gate cannot be stated safely or concretely but the
+developer still asks to enforce it, the coding agent must stop before
+implementation and explain:
+
+- which rule is missing or intentionally hidden, and which output it affects;
+- the expected retry, cost, latency, nondeterminism, and liveness risks;
+- safer alternatives and the proposed retry and terminal behavior.
+
+Implementation may continue only after a new developer response explicitly
+confirms that named gate and its risks. A previous general instruction to
+proceed is not that second confirmation.
+
 ## Choosing An Output Format
 
 `.output(...)` reads its omitted format default from
