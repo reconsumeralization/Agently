@@ -1035,6 +1035,78 @@ resume facade when the result carries resumable `task_refs`; otherwise it
 returns an unsupported resume response. `resume_task(...)` remains only as a
 compatibility alias for `resume(...)`.
 
+### Route a user's "continue" request
+
+An application interface should not treat the word "continue" as a deterministic
+resume command. A structured UI action, such as a **Resume this task** button,
+may route directly after the host validates the task reference, authorization,
+snapshot compatibility, and live execution status. A reply bound to one task
+card identifies a candidate, but its free-form text remains a semantic intent
+decision.
+
+For a free-form message, the host should first project only authorized,
+resumable candidates with one short selection key and bounded task facts. Ask
+one structured ModelRequest to choose among `resume_existing`, `start_new`, and
+`clarify`; then validate the returned key and lifecycle facts before dispatch:
+
+```python
+from typing import Literal
+
+from pydantic import BaseModel
+
+
+class ContinuationRoute(BaseModel):
+    decision: Literal["resume_existing", "start_new", "clarify"]
+    selection_key: str | None = None
+    clarification_question: str | None = None
+
+
+route = await (
+    agent.create_request()
+    .input(
+        {
+            "user_message": user_message,
+            "resumable_candidates": [
+                {
+                    "selection_key": "c1",
+                    "goal_summary": "Complete the supplier risk report.",
+                    "last_progress": "Evidence collection completed; report drafting remains.",
+                }
+            ],
+        }
+    )
+    .info(
+        {
+            "routing_contract": {
+                "resume_existing": "Continue the same unfinished goal and success criteria.",
+                "start_new": "Start follow-up work or change the goal, criteria, or deliverable.",
+                "clarify": "The intended task or lifecycle action is ambiguous.",
+            }
+        }
+    )
+    .instruct(
+        "When selection_key is present, return only an offered key. "
+        "Do not create or reproduce task ids."
+    )
+    .output(ContinuationRoute, format="json")
+    .get_response()
+    .async_get_data_object()
+)
+```
+
+The model owns the prose-derived relationship between the message and the
+offered tasks. Host code owns candidate discovery, authorization, offered-key
+membership, snapshot/version checks, canonical `task_id` lookup, and the actual
+call to `agent.async_resume(...)` or `agent.create_task(...)`.
+
+Resume only when the selected task is non-terminal, is not already running, has
+a compatible snapshot, and the user is continuing the same goal and success
+criteria. A completed task, a changed goal or output contract, or new follow-up
+work starts a fresh task; the host may bind the prior result or evidence into
+the new TaskContext without presenting that task as a resume. When candidates
+or intent remain ambiguous, ask the user instead of falling back to keyword
+routing or silently starting duplicate work.
+
 For examples that validate model-owned semantic content, combine deterministic
 smoke checks with a second Agently model-judge request. Structural checks such
 as file existence, question count, and visible source labels are useful smoke

@@ -778,7 +778,7 @@ AgentTask 暴露成第二套公开生命周期。
 
 ### 崩溃后恢复任务
 
-TaskWorkspace 恢复需要显式启用。原始任务必须使用稳定的 `task_id` 并设置
+RecordStore 恢复需要显式启用。原始任务必须使用稳定的 `task_id` 并设置
 `record_store_recovery=True`：
 
 ```python
@@ -799,11 +799,74 @@ result = await execution.async_start()              # 从第 N+1 次迭代继续
 meta = await execution.async_get_meta()
 ```
 
-恢复会从 TaskWorkspace 读取该任务最新快照，还原迭代历史与累计的 required 能力进度；若不存在
+恢复会从 RecordStore 读取该任务最新快照，还原迭代历史与累计的 required 能力进度；若不存在
 可恢复快照则抛出 `ValueError`。崩溃时正在执行中的那次迭代会被重新规划，因此非
 replay-safe 的 step 副作用由宿主负责。当 result 带有可恢复的 `task_refs` 时，
 `AgentExecutionResult.resume()` 会委托同一个 Agent resume facade；否则返回不支持恢复的
 响应。`resume_task(...)` 只保留为 `resume(...)` 的兼容别名。
+
+### 路由用户的“继续”请求
+
+应用 Interface 不应把“继续”这个词直接当成确定性的恢复命令。“恢复此任务”按钮等
+结构化 UI 操作可以在 host 校验任务引用、权限、快照兼容性和当前运行状态后直接路由。
+回复到某个任务卡片只能确定候选任务，其中的自由文本仍然属于语义意图判断。
+
+处理自由文本时，host 应先只投影当前用户有权访问的可恢复候选，为每个候选提供一个短
+selection key 和有界任务事实。使用一次结构化 ModelRequest 在
+`resume_existing`、`start_new`、`clarify` 中选择，再由 host 校验返回 key 和生命周期事实：
+
+```python
+from typing import Literal
+
+from pydantic import BaseModel
+
+
+class ContinuationRoute(BaseModel):
+    decision: Literal["resume_existing", "start_new", "clarify"]
+    selection_key: str | None = None
+    clarification_question: str | None = None
+
+
+route = await (
+    agent.create_request()
+    .input(
+        {
+            "user_message": user_message,
+            "resumable_candidates": [
+                {
+                    "selection_key": "c1",
+                    "goal_summary": "完成供应商风险报告。",
+                    "last_progress": "资料收集已完成，报告撰写尚未完成。",
+                }
+            ],
+        }
+    )
+    .info(
+        {
+            "routing_contract": {
+                "resume_existing": "继续同一个未完成目标和成功标准。",
+                "start_new": "启动后续工作，或改变目标、成功标准或交付物。",
+                "clarify": "目标任务或生命周期操作仍不明确。",
+            }
+        }
+    )
+    .instruct(
+        "存在 selection_key 时只能返回已提供的 key；不要创建或复述 task id。"
+    )
+    .output(ContinuationRoute, format="json")
+    .get_response()
+    .async_get_data_object()
+)
+```
+
+模型负责判断用户文本与候选任务之间的语义关系。host 负责候选发现、权限、offered-key
+成员关系、快照/版本校验、canonical `task_id` 重建，以及实际调用
+`agent.async_resume(...)` 或 `agent.create_task(...)`。
+
+只有当选中任务尚未终止、当前没有继续运行、存在兼容快照，并且用户仍在继续同一目标和成功
+标准时才恢复。任务已经完成、目标或输出契约发生变化，或用户要求新的后续工作时，应创建新的
+task；host 可以把旧结果或证据绑定进新 TaskContext，但不能把它描述成恢复。候选或意图仍然
+不明确时，应向用户澄清，不能退化成关键词路由，也不能静默启动重复任务。
 
 当示例需要验证模型生成内容的语义质量时，应组合 deterministic smoke check 和第二个
 Agently model-judge request。文件存在、问题数量、source label 可见等结构检查只能作为
