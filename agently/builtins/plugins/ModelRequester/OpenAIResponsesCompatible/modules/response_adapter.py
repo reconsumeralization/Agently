@@ -228,7 +228,7 @@ class OpenAIResponsesCompatibleResponseAdapterMixin:
                             )
                 continue
 
-            if payload_type == "response.completed":
+            if payload_type in {"response.completed", "response.incomplete"}:
                 response_payload = loaded_message.get("response", loaded_message)
                 if isinstance(response_payload, dict):
                     response_record.update(response_payload)

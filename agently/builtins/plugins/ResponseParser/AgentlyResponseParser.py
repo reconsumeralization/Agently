@@ -668,6 +668,17 @@ class AgentlyResponseParser(ResponseParser):
     def _record_streaming_snapshot(self, streaming_data: StreamingData) -> None:
         if not streaming_data.is_complete or streaming_data.path.startswith("$"):
             return
+        if (
+            streaming_data.completion_source == "observed_boundary"
+            and self._final_json_parse_result is not None
+            and self._final_json_parse_result[1] is not None
+        ):
+            # The provider-complete payload has already been parsed in full.
+            # Observed-boundary events may carry an older incremental
+            # ``full_data`` snapshot when large-JSON parsing was deferred; do
+            # not let that provisional snapshot replace the authoritative
+            # final value.
+            return
         snapshot = self.full_result_data.get("parsed_result")
         if not isinstance(snapshot, dict):
             snapshot = {}
@@ -724,7 +735,7 @@ class AgentlyResponseParser(ResponseParser):
             async for item in self.response_generator:
                 try:
                     event, data = item
-                except:
+                except (TypeError, ValueError):
                     warnings.warn(f"\n⚠️ Incorrect response data from Agently Response Generator: { item }")
                     continue
                 if event == "status":
@@ -969,6 +980,13 @@ class AgentlyResponseParser(ResponseParser):
                             if event == "tool_calls":
                                 yield StreamingData(path="$tool_calls", value=data)
                             elif event == "done":
+                                async for streaming_data in (
+                                    streaming_json_parser.flush_observed_boundaries()
+                                ):
+                                    yield self._prepare_streaming_data_for_yield(
+                                        streaming_data,
+                                        _streaming_parse_path_style,
+                                    )
                                 async for streaming_data in self._flush_streaming_json_events(streaming_json_parser):
                                     yield self._prepare_streaming_data_for_yield(
                                         streaming_data,
@@ -1165,6 +1183,13 @@ class AgentlyResponseParser(ResponseParser):
                         if event == "tool_calls":
                             yield StreamingData(path="$tool_calls", value=data)
                         elif event == "done":
+                            for streaming_data in FunctionShifter.syncify_async_generator(
+                                streaming_json_parser.flush_observed_boundaries()
+                            ):
+                                yield self._prepare_streaming_data_for_yield(
+                                    streaming_data,
+                                    _streaming_parse_path_style,
+                                )
                             for streaming_data in FunctionShifter.syncify_async_generator(
                                 self._flush_streaming_json_events(streaming_json_parser)
                             ):

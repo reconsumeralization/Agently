@@ -44,15 +44,14 @@ def test_companion_views_still_derive_from_released_manifest() -> None:
     assert skills["authoring_protocol"] == current["companions"]["skills"]["authoring_protocol"]
 
 
-def test_in_development_manifest_declares_breaking_owner_split() -> None:
+def test_in_development_manifest_declares_4_1_4_5_owner_boundaries() -> None:
     manifest = _development_manifest()
 
-    assert manifest["target_version"] == "4.1.4.4"
-    assert manifest["release_train"] == "2026-07-4.1.4.4-dev"
-    assert "TaskContext" in manifest["notes"]
-    assert "TaskWorkspace owns task files" in manifest["notes"]
-    assert "RecordStore owns records and durability" in manifest["notes"]
-    assert "without shims" in manifest["notes"]
+    assert manifest["target_version"] == "4.1.4.5"
+    assert manifest["release_train"] == "2026-07-4.1.4.5-dev"
+    assert "ensure_long_output()" in manifest["notes"]
+    assert "TriggerFlow-visible continuation" in manifest["notes"]
+    assert "TaskWorkspace owns staged file truth" in manifest["notes"]
 
     companions = manifest["companions"]
     assert companions["task_context"]["reader"] == "ContextReader"
@@ -74,6 +73,13 @@ def test_in_development_manifest_declares_breaking_owner_split() -> None:
         ".agently/records/records.db"
     )
     assert companions["session_memory"]["storage_owner"] == "RecordStore"
+
+    execution_contract = manifest["request_input"]["agent_execution_request_scope"]
+    assert "AgentExecution.ensure_long_output" in execution_contract["surface"]
+    assert "first request keeps its original contract" in execution_contract["contract"]
+    assert "cannot be combined with an explicit AgentTask strategy" in execution_contract[
+        "contract"
+    ]
 
 
 def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:

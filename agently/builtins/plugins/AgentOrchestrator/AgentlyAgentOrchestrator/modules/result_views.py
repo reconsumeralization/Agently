@@ -108,6 +108,8 @@ async def async_get_data_object(
         raise_ensure_failure=raise_ensure_failure,
         parent_run_context=parent_run_context,
     )
+    if owner._ensure_long_output_enabled and owner._long_output_result_object is not None:
+        return owner._long_output_result_object
     model_result = getattr(owner, "_model_request_result", None)
     if model_result is None:
         return None
