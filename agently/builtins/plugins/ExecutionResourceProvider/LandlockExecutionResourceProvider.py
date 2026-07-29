@@ -129,6 +129,7 @@ _BASE_READ_DIRS: list[str] = [
     "/dev/null",
     "/dev/urandom",
     "/dev/zero",
+    "/proc/self/exe",  # some programs need to read themselves
 ]
 
 # Exit codes used by _apply_landlock preexec_fn to signal Landlock failures.
@@ -351,7 +352,11 @@ class LandlockCodeExecutionResource:
         seen: set[str] = set()
 
         def _add(path: str, access: int) -> None:
-            resolved = str(Path(path).resolve())
+            # /proc paths are kernel virtual — must not be resolved
+            if path.startswith("/proc/"):
+                resolved = path
+            else:
+                resolved = str(Path(path).resolve())
             if resolved not in seen and Path(resolved).exists():
                 seen.add(resolved)
                 rules.append((resolved, access))

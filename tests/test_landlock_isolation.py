@@ -363,42 +363,8 @@ class TestProviderIntegration:
         assert result["available"] is True
         assert result["abi_version"] >= 1
 
-    def test_base_read_dirs_defined(self):
-        """Verify _BASE_READ_DIRS includes essential system paths."""
-        from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
-            _BASE_READ_DIRS,
-        )
-
-        # P0-2: essential paths must be present
-        assert "/usr" in _BASE_READ_DIRS
-        assert "/lib" in _BASE_READ_DIRS
-        assert "/dev/null" in _BASE_READ_DIRS
-        assert "/dev/urandom" in _BASE_READ_DIRS
-
-    def test_path_resolution_in_init(self):
-        """Verify __init__ resolves paths to prevent escape."""
-        import asyncio
-        from unittest.mock import MagicMock
-        from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
-            LandlockCodeExecutionResource,
-        )
-
-        grant = MagicMock()
-        grant.roots = []
-
-        # P1-3: paths with .. should be resolved
-        resource = LandlockCodeExecutionResource(
-            grant=grant,
-            allowed_read_dirs=["/usr/../etc"],
-            allowed_write_dirs=["/tmp/../tmp"],
-        )
-        # /usr/../etc should resolve to /etc
-        assert "/etc" in resource.allowed_read_dirs[0]
-        # /tmp/../tmp should resolve to /tmp
-        assert "/tmp" in resource.allowed_write_dirs[0]
-
-    def test_build_rules_includes_base_paths(self):
-        """Verify _build_landlock_rules auto-injects base read dirs."""
+    def test_default_base_paths_included(self):
+        """Spec: 验证 /usr, /lib 等自动加入规则。"""
         from unittest.mock import MagicMock
         from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
             LandlockCodeExecutionResource,
@@ -414,21 +380,48 @@ class TestProviderIntegration:
         rule_paths = [r[0] for r in rules]
         # /usr should be auto-injected
         assert any("/usr" in p for p in rule_paths), f"Missing /usr in {rule_paths}"
+        # /lib should be auto-injected
+        assert any("/lib" in p for p in rule_paths), f"Missing /lib in {rule_paths}"
+        # /proc/self/exe should be auto-injected
+        assert any("/proc/self/exe" in p for p in rule_paths), f"Missing /proc/self/exe in {rule_paths}"
         # cwd should be auto-injected
         assert any("/tmp" in p for p in rule_paths), f"Missing cwd /tmp in {rule_paths}"
 
-    def test_landlock_exit_codes_defined(self):
-        """Verify Landlock failure exit codes are defined."""
+    def test_silent_failure_no_longer_silent(self):
+        """Spec: 验证 Landlock 失败时子进程非零退出。"""
         from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
             _LANDLOCK_EXIT_LIB_NOT_FOUND,
             _LANDLOCK_EXIT_CREATE_FAILED,
             _LANDLOCK_EXIT_RESTRICT_FAILED,
         )
 
-        # P0-1: exit codes must be distinct and in 125-127 range
+        # Exit codes must be distinct and in 125-127 range
         assert _LANDLOCK_EXIT_LIB_NOT_FOUND == 127
         assert _LANDLOCK_EXIT_CREATE_FAILED == 126
         assert _LANDLOCK_EXIT_RESTRICT_FAILED == 125
+
+    def test_path_escape_validation(self):
+        """Spec: 验证 ../etc/shadow 被拒绝（路径被 resolve）。"""
+        from unittest.mock import MagicMock
+        from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
+            LandlockCodeExecutionResource,
+        )
+
+        grant = MagicMock()
+        grant.roots = []
+
+        # paths with .. should be resolved, not passed through
+        resource = LandlockCodeExecutionResource(
+            grant=grant,
+            allowed_read_dirs=["/usr/../etc"],
+            allowed_write_dirs=["/tmp/../tmp"],
+        )
+        # /usr/../etc should resolve to /etc
+        assert "/etc" in resource.allowed_read_dirs[0]
+        assert ".." not in resource.allowed_read_dirs[0]
+        # /tmp/../tmp should resolve to /tmp
+        assert "/tmp" in resource.allowed_write_dirs[0]
+        assert ".." not in resource.allowed_write_dirs[0]
 
 
 if __name__ == "__main__":
