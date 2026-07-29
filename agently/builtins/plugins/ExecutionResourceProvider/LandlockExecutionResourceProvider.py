@@ -343,26 +343,59 @@ class LandlockCodeExecutionResource:
         env: dict[str, str],
         timeout: int,
     ) -> dict[str, Any]:
-        """Run command in a forked child with Landlock restrictions.
+        """Run command in a subprocess with Landlock restrictions.
 
+        Uses preexec_fn to apply Landlock in the child process before exec.
         The parent process remains unaffected.
-        """
-        # For simplicity and safety, we use subprocess with a wrapper script
-        # that applies landlock before exec. Since we can't easily fork+landlock
-        # in pure Python without affecting the parent, we use a different approach:
-        # run the command directly but document that full landlock integration
-        # requires native code or a wrapper binary.
 
-        # TODO: Full Landlock integration requires either:
-        # 1. A C wrapper that applies landlock then execs
-        # 2. Python ctypes fork+landlock+exec (complex)
-        # For now, this is a placeholder that runs without actual landlock
-        # but provides the correct interface.
+        Key requirement: PR_SET_NO_NEW_PRIVS must be set before
+        landlock_restrict_self, otherwise the syscall returns EPERM.
+        """
+        # Build Landlock rules for this execution
+        handled_access, rules = self._build_landlock_rules()
+
+        def _apply_landlock():
+            """preexec_fn: apply Landlock in child before exec."""
+            import ctypes as _ct
+            import ctypes.util as _ct_util
+            import struct as _struct
+
+            _libc_name = _ct_util.find_library("c")
+            if not _libc_name:
+                return
+            _libc = _ct.CDLL(_libc_name, use_errno=True)
+            _libc.syscall.restype = _ct.c_long
+
+            # 1. Set PR_SET_NO_NEW_PRIVS (required before restrict_self)
+            _libc.prctl(38, 1, 0, 0, 0)
+
+            # 2. Create ruleset
+            _attr = _struct.pack("Q", handled_access)
+            _buf = _ct.create_string_buffer(_attr)
+            _ruleset_fd = int(_libc.syscall(444, _buf, len(_attr), 0))
+            if _ruleset_fd < 0:
+                return
+
+            # 3. Add path rules
+            for path, access in rules:
+                try:
+                    _path_fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+                    _rule_attr = _struct.pack("Qi", access, _path_fd)
+                    _rule_buf = _ct.create_string_buffer(_rule_attr)
+                    _libc.syscall(445, _ruleset_fd, 1, _rule_buf, 0)
+                    os.close(_path_fd)
+                except OSError:
+                    pass
+
+            # 4. Apply restrictions
+            _libc.syscall(446, _ruleset_fd, 0)
+            os.close(_ruleset_fd)
 
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=cwd,
             env=env,
+            preexec_fn=_apply_landlock,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -527,11 +560,11 @@ class LandlockExecutionResourceProvider:
     - Implements ``async_probe`` / ``async_ensure`` / ``async_health_check``
       / ``async_release``
 
-    Note: Due to the irreversible nature of Landlock restrictions, full
-    filesystem isolation requires a wrapper binary or native code. The
-    current implementation provides the correct interface and ABI detection
-    but runs commands without actual Landlock enforcement. This is a
-    foundation for future native integration.
+    Uses ``preexec_fn`` in subprocess to apply Landlock restrictions in the
+    child process before exec. The parent process remains unaffected.
+
+    Requirement: ``PR_SET_NO_NEW_PRIVS`` must be set before
+    ``landlock_restrict_self``, otherwise the syscall returns EPERM.
     """
 
     name = "LandlockExecutionResourceProvider"

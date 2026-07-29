@@ -121,6 +121,15 @@ def restrict_self(ruleset_fd: int) -> int:
     return int(libc.syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0))
 
 
+def set_no_new_privs() -> int:
+    """Set PR_SET_NO_NEW_PRIVS. Required before landlock_restrict_self."""
+    libc = _get_libc()
+    if libc is None:
+        return -1
+    # PR_SET_NO_NEW_PRIVS = 38
+    return int(libc.prctl(38, 1, 0, 0, 0))
+
+
 # ---------------------------------------------------------------------------
 # Skip condition
 # ---------------------------------------------------------------------------
@@ -155,13 +164,10 @@ class TestLandlockAvailability:
 class TestFilesystemWriteIsolation:
     """Test that Landlock blocks unauthorized writes.
 
-    Note: These tests verify Landlock enforcement. If they fail, it may indicate:
-    - Landlock is compiled in but not fully enabled in kernel config
-    - Another LSM (AppArmor/SELinux) is taking precedence
-    - The kernel version has different Landlock behavior
+    Key requirement: PR_SET_NO_NEW_PRIVS must be set before
+    landlock_restrict_self, otherwise the syscall returns EPERM.
     """
 
-    @pytest.mark.xfail(reason="Landlock enforcement may not work in all environments")
     def test_write_blocked_after_restrict(self):
         """After restrict_self, writing to non-whitelisted path should fail."""
         handled = LANDLOCK_ACCESS_FS_ALL_READ | LANDLOCK_ACCESS_FS_ALL_WRITE
@@ -179,6 +185,7 @@ class TestFilesystemWriteIsolation:
             if pid == 0:
                 # Child process
                 os.close(r_fd)
+                set_no_new_privs()  # Required before restrict_self
                 restrict_self(fd)
                 os.close(fd)
 
@@ -216,6 +223,7 @@ class TestFilesystemWriteIsolation:
 
             if pid == 0:
                 os.close(r_fd)
+                set_no_new_privs()  # Required before restrict_self
                 restrict_self(fd)
                 os.close(fd)
 
@@ -241,7 +249,6 @@ class TestFilesystemWriteIsolation:
 class TestFilesystemReadIsolation:
     """Test that Landlock blocks unauthorized reads."""
 
-    @pytest.mark.xfail(reason="Landlock enforcement may not work in all environments")
     def test_read_blocked_sensitive_file(self):
         """Reading non-whitelisted file should fail after restriction."""
         # Only allow read access to /usr (a safe read-only dir)
@@ -258,9 +265,10 @@ class TestFilesystemReadIsolation:
 
         if pid == 0:
             os.close(r_fd)
+            set_no_new_privs()  # Required before restrict_self
             restrict_self(fd)
             os.close(fd)
-
+            
             # Try to read /etc/passwd (not whitelisted)
             try:
                 content = Path("/etc/passwd").read_text()
@@ -297,6 +305,7 @@ class TestLandlockIrreversibility:
             if pid == 0:
                 # Child: apply restriction
                 os.close(r_fd)
+                set_no_new_privs()  # Required before restrict_self
                 restrict_self(fd)
                 os.close(fd)
                 os.write(w_fd, b"CHILD_RESTRICTED")
