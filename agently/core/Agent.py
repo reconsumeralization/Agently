@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         StreamingData,
         TaskDAG,
     )
+    from agently.types.config import AgentlyConfigModel
     from agently.core.model import ModelRequestResult
     from agently.types.options import ExecutionOptions
     from agently.types.plugins import AgentExecution
@@ -197,7 +198,7 @@ class BaseAgent:
 
     def set_settings(
         self,
-        key: Any,
+        key: "str | AgentlyConfigModel",
         value: "SerializableValue | object" = _UNSET,
         *,
         auto_load_env: bool = False,
