@@ -411,6 +411,7 @@ class OpenAICompatibleTransportMixin:
                             yield sse.event, sse.data
                             if sse.data.strip() == "[DONE]":
                                 has_done = True
+                                break
                         if not has_done:
                             yield "message", "[DONE]"
                         break

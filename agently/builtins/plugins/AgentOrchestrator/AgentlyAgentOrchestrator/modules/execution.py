@@ -253,6 +253,9 @@ class AgentExecution:
         self._terminal_error_projection: dict[str, Any] | None = None
         self._terminal_status: Literal["completed", "failed", "cancelled"] | None = None
         self._model_request_result: Any = None
+        self._ensure_long_output_enabled = False
+        self._long_output_result_object: Any = None
+        self._long_output_meta: dict[str, Any] = {}
         self.status = "created"
         self._started = False
         self._completed = False
@@ -725,6 +728,13 @@ class AgentExecution:
         target = self._reconfiguration_target()
         target._draft.output(*args, **kwargs)
         return target._refresh_prompt_snapshot()
+
+    def ensure_long_output(self, enabled: bool = True) -> "AgentExecution":
+        """Require this execution to preserve and validate output across model windows."""
+
+        target = self._reconfiguration_target()
+        target._ensure_long_output_enabled = bool(enabled)
+        return target
 
     def attachment(self, *args: Any, **kwargs: Any) -> "AgentExecution":
         target = self._reconfiguration_target()
@@ -1536,6 +1546,11 @@ class AgentExecution:
                 "goals": list(self.goal_items),
                 "success_criteria": list(self.success_criteria_items),
                 "generated_success_criteria": list(self.generated_success_criteria),
+            }
+        elif self._ensure_long_output_enabled:
+            route, route_meta = "model_request", {
+                "strategy": "direct",
+                "selected_by": "ensure_long_output",
             }
         elif self.required_action_ids() and self.route_planner.route_allowed("model_request"):
             route, route_meta = "model_request", {

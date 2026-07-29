@@ -323,6 +323,56 @@ def test_broadcast_response_maps_text_stream_and_meta():
     assert ("meta", {"id": "resp_1", "model": "gpt-5.5", "status": "completed", "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}, "finish_reason": "stop"}) in events
 
 
+def test_broadcast_response_maps_incomplete_terminal_to_length():
+    plugin = build_plugin({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
+    incomplete_response = {
+        "id": "resp_incomplete",
+        "object": "response",
+        "status": "incomplete",
+        "model": "gpt-5.5",
+        "output": [
+            {
+                "id": "msg_incomplete",
+                "type": "message",
+                "status": "incomplete",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "partial output"}],
+            }
+        ],
+        "incomplete_details": {"reason": "max_output_tokens"},
+    }
+    events = collect_events(
+        plugin,
+        [
+            (
+                "response.output_text.delta",
+                json.dumps({"type": "response.output_text.delta", "delta": "partial output"}),
+            ),
+            (
+                "response.incomplete",
+                json.dumps(
+                    {
+                        "type": "response.incomplete",
+                        "response": incomplete_response,
+                    }
+                ),
+            ),
+        ],
+    )
+
+    assert ("done", "partial output") in events
+    assert ("original_done", incomplete_response) in events
+    assert (
+        "meta",
+        {
+            "id": "resp_incomplete",
+            "model": "gpt-5.5",
+            "status": "incomplete",
+            "finish_reason": "length",
+        },
+    ) in events
+
+
 def test_broadcast_response_preserves_core_status_record():
     plugin = build_plugin({"base_url": "https://api.example.com/v1"}, {"input": "hello"})
 
