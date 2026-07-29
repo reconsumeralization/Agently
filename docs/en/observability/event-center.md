@@ -117,6 +117,14 @@ deliveries or summary buffers exist: each new event refreshes the idle timer,
 and a quiet period triggers bounded flushing. This is a long-lived-loop safety
 net, not a replacement for explicit flush before CLI/script shutdown.
 
+Implementation note for framework integrators: Event Center retains its native
+background-task tracking in Agently 4.1.4.5. A Stage-backed candidate preserved
+behavior but added measurable elapsed, p95, and traced-memory cost in the
+background-event benchmark, so it was not adopted. Event Center continues to
+own RuntimeEvent normalization, filtering, coalescing, hook identity,
+fail-open behavior, and flush policy. No Stage type, status, or event is part of
+the Event Center API.
+
 ## Emit a runtime event
 
 Agently-owned event types such as `model.*`, `request.*`, `action.*`,

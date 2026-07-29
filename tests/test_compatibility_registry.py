@@ -52,6 +52,16 @@ def test_in_development_manifest_declares_4_1_4_5_owner_boundaries() -> None:
     assert "ensure_long_output()" in manifest["notes"]
     assert "TriggerFlow-visible continuation" in manifest["notes"]
     assert "TaskWorkspace owns staged file truth" in manifest["notes"]
+    assert "Agently-Stage >=0.3.2,<0.4.0" in manifest["notes"]
+
+    stage_support = manifest["runtime_support"]["agently_stage"]
+    assert stage_support["version_specifier"] == ">=0.3.2,<0.4.0"
+    assert stage_support["public_runtime_surface"] is False
+    assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
+    assert "EventCenter background task settlement" in stage_support[
+        "rejected_mechanism_replacements"
+    ]
+    assert stage_support["semantic_owners_unchanged"] is True
 
     companions = manifest["companions"]
     assert companions["task_context"]["reader"] == "ContextReader"
