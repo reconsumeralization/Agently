@@ -45,6 +45,7 @@ if TYPE_CHECKING:
         ChatMessageDict,
         ResultContentType,
         RunContext,
+        SerializableValue,
         SpecificEvents,
         StreamingData,
         TaskDAG,
@@ -192,8 +193,30 @@ class BaseAgent:
         self.request_prompt = self.request.prompt
         self.prompt = self.request_prompt
 
-        self.set_settings = self.settings.set_settings
         self.load_settings = self.settings.load
+
+    def set_settings(
+        self,
+        key: Any,
+        value: "SerializableValue | object" = _UNSET,
+        *,
+        auto_load_env: bool = False,
+        raise_empty: bool = False,
+    ) -> Self:
+        if value is _UNSET:
+            self.settings.set_settings(
+                key,
+                auto_load_env=auto_load_env,
+                raise_empty=raise_empty,
+            )
+        else:
+            self.settings.set_settings(
+                key,
+                value,
+                auto_load_env=auto_load_env,
+                raise_empty=raise_empty,
+            )
+        return self
 
     def configure_policy_approval(self, *, handler: str | None = None) -> Self:
         if handler is not None:

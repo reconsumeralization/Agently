@@ -7,6 +7,8 @@ from typing import Any, cast
 
 import pytest
 import yaml
+from typing_extensions import assert_type
+
 from agently import Agent, Agently, TaskWorkspace, TriggerFlow
 from agently.compatibility import (
     get_current_release_manifest,
@@ -89,6 +91,17 @@ def _restore_runtime_log_settings(snapshot):
 async def test_settings():
     Agently.set_settings("test", "test")
     assert Agently.settings["test"] == "test"
+
+
+def test_agent_set_settings_preserves_fluent_agent_contract():
+    agent = Agently.create_agent("settings-chain")
+
+    configured_agent = agent.set_settings("custom.enabled", True)
+
+    assert_type(configured_agent, Agent)
+    assert configured_agent is agent
+    assert configured_agent.settings.get("custom.enabled") is True
+    assert callable(configured_agent.input)
 
 
 def test_agently_set_api_key_and_alias_mapping():
