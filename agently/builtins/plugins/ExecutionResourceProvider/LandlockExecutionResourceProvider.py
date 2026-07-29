@@ -723,6 +723,7 @@ class LandlockExecutionResourceProvider:
             }
             for fact in facts.values()
         }
+        abi_version = availability.get("abi_version", 0)
         return {
             "provider_id": self.provider_id,
             "available": available and bool(languages),
@@ -736,17 +737,73 @@ class LandlockExecutionResourceProvider:
                     "privilege_escalation_blocked": True,  # PR_SET_NO_NEW_PRIVS
                     "syscalls_restricted": False,
                     "mechanism": "landlock",
-                    "abi_version": availability.get("abi_version", 0),
-                    "landlock_version": f"ABI v{availability.get('abi_version', 0)}",
+                    "abi_version": abi_version,
+                    "landlock_version": f"ABI v{abi_version}",
                     "filesystem_only": True,
                     "auto_base_paths": True,
+                },
+                # Describe configurable restriction scope
+                "configurable_restrictions": {
+                    "description": "Landlock allows fine-grained filesystem access control",
+                    "config_params": {
+                        "allowed_read_dirs": {
+                            "type": "list[str]",
+                            "description": "Additional directories to whitelist for read access",
+                            "default": [],
+                        },
+                        "allowed_write_dirs": {
+                            "type": "list[str]",
+                            "description": "Directories to whitelist for write access. If empty, auto-creates temp dir",
+                            "default": "[] (auto-creates temp dir)",
+                        },
+                        "abi_version": {
+                            "type": "int",
+                            "description": "Force specific Landlock ABI version (0=auto-detect)",
+                            "default": 0,
+                        },
+                    },
+                    "supported_access_rights": [
+                        "execute",       # LANDLOCK_ACCESS_FS_EXECUTE
+                        "read_file",     # LANDLOCK_ACCESS_FS_READ_FILE
+                        "read_dir",      # LANDLOCK_ACCESS_FS_READ_DIR
+                        "write_file",    # LANDLOCK_ACCESS_FS_WRITE_FILE
+                        "remove_dir",    # LANDLOCK_ACCESS_FS_REMOVE_DIR
+                        "remove_file",   # LANDLOCK_ACCESS_FS_REMOVE_FILE
+                        "make_char",     # LANDLOCK_ACCESS_FS_MAKE_CHAR
+                        "make_dir",      # LANDLOCK_ACCESS_FS_MAKE_DIR
+                        "make_reg",      # LANDLOCK_ACCESS_FS_MAKE_REG
+                        "make_sock",     # LANDLOCK_ACCESS_FS_MAKE_SOCK
+                        "make_fifo",     # LANDLOCK_ACCESS_FS_MAKE_FIFO
+                        "make_block",    # LANDLOCK_ACCESS_FS_MAKE_BLOCK
+                        "make_sym",      # LANDLOCK_ACCESS_FS_MAKE_SYM
+                        "refer",         # LANDLOCK_ACCESS_FS_REFER (ABI v2+)
+                        "truncate",      # LANDLOCK_ACCESS_FS_TRUNCATE (ABI v3+)
+                    ],
+                    "access_rights_by_abi": {
+                        "v1": ["execute", "read_file", "read_dir", "write_file",
+                               "remove_dir", "remove_file", "make_char", "make_dir",
+                               "make_reg", "make_sock", "make_fifo", "make_block", "make_sym"],
+                        "v2": ["refer"],
+                        "v3": ["truncate"],
+                    },
+                },
+                # Describe auto-injected base paths
+                "auto_injected_base_paths": {
+                    "read_only": _BASE_READ_DIRS,
+                    "cwd": "Automatically added as read-only for execution",
+                    "temp_write": "Auto-created if allowed_write_dirs is empty",
                 },
                 "workspace_access_modes": ["snapshot", "read_only", "read_write"],
                 "network": "inherited",  # Landlock doesn't control network
                 "safety_class": "filesystem_only",
             },
             "reason": reason,
-            "meta": {"availability": availability, "toolchains": facts},
+            "meta": {
+                "availability": availability,
+                "toolchains": facts,
+                "base_read_dirs": _BASE_READ_DIRS,
+                "supported_abi_range": f"v1-v{abi_version}" if abi_version else "none",
+            },
         }
 
     async def async_ensure(self, *, requirement, policy):
