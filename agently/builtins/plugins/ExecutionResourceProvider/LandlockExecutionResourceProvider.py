@@ -44,6 +44,7 @@ import platform
 import shutil
 import struct
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -112,6 +113,30 @@ LANDLOCK_ACCESS_FS_ALL_WRITE = (
     LANDLOCK_ACCESS_FS_REFER |
     LANDLOCK_ACCESS_FS_TRUNCATE
 )
+
+# Base read-only paths automatically injected so that basic commands
+# (python3, shared libraries, dynamic linker, etc.) work out of the box.
+_BASE_READ_DIRS: list[str] = [
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/usr/lib",
+    "/usr/lib64",
+    "/usr/local/lib",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+    "/dev/null",
+    "/dev/urandom",
+    "/dev/zero",
+]
+
+# Exit codes used by _apply_landlock preexec_fn to signal Landlock failures.
+# The parent process inspects these to distinguish "Landlock setup failed" from
+# "user command failed".
+_LANDLOCK_EXIT_LIB_NOT_FOUND = 127  # ctypes.util.find_library("c") failed
+_LANDLOCK_EXIT_CREATE_FAILED = 126  # landlock_create_ruleset failed
+_LANDLOCK_EXIT_RESTRICT_FAILED = 125  # landlock_restrict_self failed
 
 
 # ---------------------------------------------------------------------------
@@ -258,11 +283,17 @@ class LandlockCodeExecutionResource:
     ) -> None:
         self.grant = grant
         self.max_output_bytes = max(1, int(max_output_bytes))
-        self.allowed_read_dirs = [str(p) for p in (allowed_read_dirs or [])]
-        self.allowed_write_dirs = [str(p) for p in (allowed_write_dirs or [])]
+        # P1-3: resolve paths to prevent escape via ../ or symlinks
+        self.allowed_read_dirs = [
+            str(Path(p).resolve()) for p in (allowed_read_dirs or [])
+        ]
+        self.allowed_write_dirs = [
+            str(Path(p).resolve()) for p in (allowed_write_dirs or [])
+        ]
         self.abi_version = abi_version
         self._active_executions: set[asyncio.Task[Any]] = set()
         self._closed = False
+        self._temp_write_dir: str | None = None  # P1-4: auto-created temp dir
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -296,10 +327,14 @@ class LandlockCodeExecutionResource:
                 raise PermissionError("Materialized bundle file digest changed before execution.")
         return area
 
-    def _build_landlock_rules(self) -> tuple[int, list[tuple[str, int]]]:
+    def _build_landlock_rules(
+        self, *, cwd: str | None = None,
+    ) -> tuple[int, list[tuple[str, int]]]:
         """Build Landlock ruleset and return (handled_access, rules_list).
 
         rules_list is a list of (path, allowed_access) tuples.
+        Automatically injects _BASE_READ_DIRS and cwd so that basic
+        commands work out of the box.
         """
         # Determine ABI version
         kernel_ab = landlock_probe_abi_version()
@@ -313,25 +348,41 @@ class LandlockCodeExecutionResource:
         write_access = (LANDLOCK_ACCESS_FS_ALL_READ | LANDLOCK_ACCESS_FS_ALL_WRITE) & handled
 
         rules: list[tuple[str, int]] = []
+        seen: set[str] = set()
 
-        # Add read rules for allowed_read_dirs
+        def _add(path: str, access: int) -> None:
+            resolved = str(Path(path).resolve())
+            if resolved not in seen and Path(resolved).exists():
+                seen.add(resolved)
+                rules.append((resolved, access))
+
+        # P0-2: auto-inject base read-only paths
+        for path in _BASE_READ_DIRS:
+            _add(path, read_access)
+
+        # P0-2: auto-inject cwd as read-only (must be traversable)
+        if cwd:
+            _add(cwd, read_access)
+
+        # Add user-specified read dirs
         for path in self.allowed_read_dirs:
-            if Path(path).exists():
-                rules.append((path, read_access))
+            _add(path, read_access)
 
-        # Add read+write rules for allowed_write_dirs
+        # Add user-specified write dirs
         for path in self.allowed_write_dirs:
-            if Path(path).exists():
-                rules.append((path, write_access))
+            _add(path, write_access)
+
+        # Add temp write dir (P1-4)
+        if self._temp_write_dir:
+            _add(self._temp_write_dir, write_access)
 
         # Add grant roots
         for root in self.grant.roots:
             path = root.host_path
-            if Path(path).exists():
-                if root.access_mode == "read_write":
-                    rules.append((path, write_access))
-                else:
-                    rules.append((path, read_access))
+            if root.access_mode == "read_write":
+                _add(path, write_access)
+            else:
+                _add(path, read_access)
 
         return handled, rules
 
@@ -351,18 +402,23 @@ class LandlockCodeExecutionResource:
         Key requirement: PR_SET_NO_NEW_PRIVS must be set before
         landlock_restrict_self, otherwise the syscall returns EPERM.
         """
-        # Build Landlock rules for this execution
-        handled_access, rules = self._build_landlock_rules()
+        # Build Landlock rules for this execution (pass cwd for auto-inject)
+        handled_access, rules = self._build_landlock_rules(cwd=cwd)
 
         def _apply_landlock():
-            """preexec_fn: apply Landlock in child before exec."""
+            """preexec_fn: apply Landlock in child before exec.
+
+            On any failure the child calls os._exit() with a diagnostic
+            exit code so the parent can detect that Landlock was NOT
+            applied (instead of silently running unrestricted).
+            """
             import ctypes as _ct
             import ctypes.util as _ct_util
             import struct as _struct
 
             _libc_name = _ct_util.find_library("c")
             if not _libc_name:
-                return
+                os._exit(_LANDLOCK_EXIT_LIB_NOT_FOUND)
             _libc = _ct.CDLL(_libc_name, use_errno=True)
             _libc.syscall.restype = _ct.c_long
 
@@ -374,7 +430,7 @@ class LandlockCodeExecutionResource:
             _buf = _ct.create_string_buffer(_attr)
             _ruleset_fd = int(_libc.syscall(444, _buf, len(_attr), 0))
             if _ruleset_fd < 0:
-                return
+                os._exit(_LANDLOCK_EXIT_CREATE_FAILED)
 
             # 3. Add path rules
             for path, access in rules:
@@ -388,8 +444,10 @@ class LandlockCodeExecutionResource:
                     pass
 
             # 4. Apply restrictions
-            _libc.syscall(446, _ruleset_fd, 0)
+            _rc = int(_libc.syscall(446, _ruleset_fd, 0))
             os.close(_ruleset_fd)
+            if _rc != 0:
+                os._exit(_LANDLOCK_EXIT_RESTRICT_FAILED)
 
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -419,6 +477,31 @@ class LandlockCodeExecutionResource:
 
         stdout_bytes = stdout or b""
         stderr_bytes = stderr or b""
+
+        # P0-1: detect Landlock setup failures by exit code
+        _landlock_errors = {
+            _LANDLOCK_EXIT_LIB_NOT_FOUND: (
+                "Landlock setup failed: libc not found in child process"
+            ),
+            _LANDLOCK_EXIT_CREATE_FAILED: (
+                "Landlock setup failed: landlock_create_ruleset returned error"
+            ),
+            _LANDLOCK_EXIT_RESTRICT_FAILED: (
+                "Landlock setup failed: landlock_restrict_self returned error"
+            ),
+        }
+        if proc.returncode in _landlock_errors:
+            diag = _landlock_errors[proc.returncode]
+            stderr_bytes = (stderr_bytes + diag.encode()).strip()
+            return {
+                "ok": False,
+                "status": "error",
+                "returncode": proc.returncode,
+                "stdout": stdout_bytes.decode("utf-8", errors="replace"),
+                "stderr": stderr_bytes.decode("utf-8", errors="replace"),
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+            }
 
         # Truncate output
         stdout_truncated = len(stdout_bytes) > self.max_output_bytes
@@ -545,6 +628,13 @@ class LandlockCodeExecutionResource:
             task.cancel()
         if active:
             await asyncio.gather(*active, return_exceptions=True)
+        # P1-4: clean up auto-created temp write dir
+        if self._temp_write_dir:
+            try:
+                shutil.rmtree(self._temp_write_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self._temp_write_dir = None
 
 
 # ---------------------------------------------------------------------------
@@ -638,10 +728,13 @@ class LandlockExecutionResourceProvider:
                 "isolation": {
                     "process_contained": False,  # Landlock only restricts filesystem
                     "host_filesystem_restricted": True,
-                    "privilege_escalation_blocked": False,
+                    "privilege_escalation_blocked": True,  # PR_SET_NO_NEW_PRIVS
                     "syscalls_restricted": False,
                     "mechanism": "landlock",
                     "abi_version": availability.get("abi_version", 0),
+                    "landlock_version": f"ABI v{availability.get('abi_version', 0)}",
+                    "filesystem_only": True,
+                    "auto_base_paths": True,
                 },
                 "workspace_access_modes": ["snapshot", "read_only", "read_write"],
                 "network": "inherited",  # Landlock doesn't control network
@@ -673,15 +766,25 @@ class LandlockExecutionResourceProvider:
                 payload={"provider_id": self.provider_id, "availability": availability},
             )
 
+        # P1-4: auto-create temp write dir if none specified
+        write_dirs = [str(p) for p in config.get("allowed_write_dirs", [])]
+        temp_write_dir: str | None = None
+        if not write_dirs:
+            temp_write_dir = tempfile.mkdtemp(prefix="landlock_")
+            write_dirs = [temp_write_dir]
+
+        resource = LandlockCodeExecutionResource(
+            grant=grant,
+            max_output_bytes=int(policy.get("max_output_bytes", 20000)),
+            allowed_read_dirs=[str(p) for p in config.get("allowed_read_dirs", [])],
+            allowed_write_dirs=write_dirs,
+            abi_version=int(config.get("abi_version", 0)),
+        )
+        resource._temp_write_dir = temp_write_dir
+
         return {
             "handle_id": f"landlock:{uuid.uuid4().hex}",
-            "resource": LandlockCodeExecutionResource(
-                grant=grant,
-                max_output_bytes=int(policy.get("max_output_bytes", 20000)),
-                allowed_read_dirs=[str(p) for p in config.get("allowed_read_dirs", [])],
-                allowed_write_dirs=[str(p) for p in config.get("allowed_write_dirs", [])],
-                abi_version=int(config.get("abi_version", 0)),
-            ),
+            "resource": resource,
             "status": "ready",
             "meta": {
                 "provider": self.name,
@@ -689,13 +792,17 @@ class LandlockExecutionResourceProvider:
                 "platform": "linux",
                 "abi_version": availability.get("abi_version", 0),
                 "grant_id": grant.grant_id if isinstance(grant, TaskWorkspaceAccessGrant) else None,
+                "temp_write_dir": temp_write_dir,
             },
         }
 
     async def async_health_check(self, handle):
-        return "ready" if isinstance(
-            handle.get("resource"), LandlockCodeExecutionResource
-        ) else "unhealthy"
+        resource = handle.get("resource")
+        if not isinstance(resource, LandlockCodeExecutionResource):
+            return "unhealthy"
+        # P2-5: also verify Landlock is still available on this kernel
+        abi = await asyncio.to_thread(landlock_probe_abi_version)
+        return "ready" if abi > 0 else "unhealthy"
 
     async def async_release(self, handle) -> None:
         resource = handle.get("resource")

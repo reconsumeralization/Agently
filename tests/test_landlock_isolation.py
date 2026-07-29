@@ -329,18 +329,106 @@ class TestLandlockIrreversibility:
 class TestProviderIntegration:
     """Test the actual provider implementation.
 
-    Note: These tests require being on the landlock-provider branch.
+    These tests require being on the landlock-provider branch.
     """
 
-    @pytest.mark.skip(reason="Requires landlock-provider branch")
     def test_provider_probe(self):
         """Test LandlockExecutionResourceProvider.async_probe."""
-        pass
+        import asyncio
+        from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
+            LandlockExecutionResourceProvider,
+        )
 
-    @pytest.mark.skip(reason="Requires landlock-provider branch")
+        provider = LandlockExecutionResourceProvider()
+        result = asyncio.get_event_loop().run_until_complete(
+            provider.async_probe(requirement={}, policy={})
+        )
+        assert result["provider_id"] == "landlock"
+        assert result["available"] is True
+        assert "code_execution" in result["supported_kinds"]
+        # P2-6: verify enhanced isolation capabilities
+        isolation = result["capabilities"]["isolation"]
+        assert isolation["mechanism"] == "landlock"
+        assert isolation["filesystem_only"] is True
+        assert isolation["auto_base_paths"] is True
+        assert isolation["abi_version"] >= 1
+
     def test_availability_probe(self):
         """Test inspect_landlock_availability function."""
-        pass
+        from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
+            inspect_landlock_availability,
+        )
+
+        result = inspect_landlock_availability()
+        assert result["available"] is True
+        assert result["abi_version"] >= 1
+
+    def test_base_read_dirs_defined(self):
+        """Verify _BASE_READ_DIRS includes essential system paths."""
+        from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
+            _BASE_READ_DIRS,
+        )
+
+        # P0-2: essential paths must be present
+        assert "/usr" in _BASE_READ_DIRS
+        assert "/lib" in _BASE_READ_DIRS
+        assert "/dev/null" in _BASE_READ_DIRS
+        assert "/dev/urandom" in _BASE_READ_DIRS
+
+    def test_path_resolution_in_init(self):
+        """Verify __init__ resolves paths to prevent escape."""
+        import asyncio
+        from unittest.mock import MagicMock
+        from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
+            LandlockCodeExecutionResource,
+        )
+
+        grant = MagicMock()
+        grant.roots = []
+
+        # P1-3: paths with .. should be resolved
+        resource = LandlockCodeExecutionResource(
+            grant=grant,
+            allowed_read_dirs=["/usr/../etc"],
+            allowed_write_dirs=["/tmp/../tmp"],
+        )
+        # /usr/../etc should resolve to /etc
+        assert "/etc" in resource.allowed_read_dirs[0]
+        # /tmp/../tmp should resolve to /tmp
+        assert "/tmp" in resource.allowed_write_dirs[0]
+
+    def test_build_rules_includes_base_paths(self):
+        """Verify _build_landlock_rules auto-injects base read dirs."""
+        from unittest.mock import MagicMock
+        from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
+            LandlockCodeExecutionResource,
+            _BASE_READ_DIRS,
+        )
+
+        grant = MagicMock()
+        grant.roots = []
+
+        resource = LandlockCodeExecutionResource(grant=grant)
+        handled, rules = resource._build_landlock_rules(cwd="/tmp")
+
+        rule_paths = [r[0] for r in rules]
+        # /usr should be auto-injected
+        assert any("/usr" in p for p in rule_paths), f"Missing /usr in {rule_paths}"
+        # cwd should be auto-injected
+        assert any("/tmp" in p for p in rule_paths), f"Missing cwd /tmp in {rule_paths}"
+
+    def test_landlock_exit_codes_defined(self):
+        """Verify Landlock failure exit codes are defined."""
+        from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
+            _LANDLOCK_EXIT_LIB_NOT_FOUND,
+            _LANDLOCK_EXIT_CREATE_FAILED,
+            _LANDLOCK_EXIT_RESTRICT_FAILED,
+        )
+
+        # P0-1: exit codes must be distinct and in 125-127 range
+        assert _LANDLOCK_EXIT_LIB_NOT_FOUND == 127
+        assert _LANDLOCK_EXIT_CREATE_FAILED == 126
+        assert _LANDLOCK_EXIT_RESTRICT_FAILED == 125
 
 
 if __name__ == "__main__":
