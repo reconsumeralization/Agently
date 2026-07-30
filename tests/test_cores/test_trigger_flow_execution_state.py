@@ -4,12 +4,12 @@ import json
 from pathlib import Path
 
 import pytest
+from agently_stage import default_stage_call_bridge
 
 from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.types.data import RunContext
 from agently.types.data.event import normalize_triggerflow_event_type
 from agently.types.trigger_flow import AGGREGATION_SCOPE_META_KEY
-from agently.utils import FunctionShifter
 
 
 def test_trigger_flow_sync_start_returns_close_snapshot():
@@ -257,10 +257,10 @@ async def test_trigger_flow_defers_handler_awaitable_creation_until_concurrency_
         handler_started.set()
         await release_handler.wait()
 
-    original_asyncify = FunctionShifter.asyncify
+    original_asyncify = default_stage_call_bridge.as_async
 
-    def tracking_asyncify(func):
-        async_func = original_asyncify(func)
+    def tracking_asyncify(func, **options):
+        async_func = original_asyncify(func, **options)
         if func is not dynamic_handler:
             return async_func
 
@@ -271,7 +271,7 @@ async def test_trigger_flow_defers_handler_awaitable_creation_until_concurrency_
 
         return create_awaitable
 
-    monkeypatch.setattr(FunctionShifter, "asyncify", staticmethod(tracking_asyncify))
+    monkeypatch.setattr(default_stage_call_bridge, "as_async", tracking_asyncify)
     flow.to(prepare)
     execution = flow.create_execution(auto_close=False, concurrency=1)
     execution.on(
@@ -1126,3 +1126,30 @@ async def test_trigger_flow_runtime_stream_propagates_parent_run_context():
     assert event.run.agent_id == "agent-stream"
     assert event.run.agent_name == "stream-owner"
     assert event.run.session_id == "stream-session"
+
+
+@pytest.mark.asyncio
+async def test_hidden_runtime_stream_settles_and_closes_its_stage_tasks():
+    flow = TriggerFlow(name="stream-hidden-close")
+
+    async def stream_once(data: TriggerFlowRuntimeData):
+        await data.async_put_into_stream(data.value)
+        await data.async_stop_stream()
+
+    flow.to(stream_once)
+    execution = flow.create_execution(
+        auto_close_timeout=0.0,
+        resume_handle_exposed=False,
+    )
+
+    items = [
+        item
+        async for item in execution.get_async_runtime_stream(
+            "settled",
+            timeout=1,
+        )
+    ]
+
+    assert items == ["settled"]
+    assert execution.is_closed()
+    assert execution._task_stage.adopted_tasks == ()

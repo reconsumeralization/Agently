@@ -16,6 +16,17 @@ Agently settings are a hierarchical key-value store. Three scopes:
 
 Lower-scope keys override higher-scope keys; keys you don't override inherit through.
 
+`agent.set_settings(...)` returns the same Agent, so inline overrides can stay
+in a fluent Agent chain:
+
+```python
+agent = (
+    Agently.create_agent()
+    .set_settings("OpenAICompatible", {"model": "deepseek-chat"})
+    .set_settings("debug", True)
+)
+```
+
 ## Setting paths
 
 The first argument to `set_settings(...)` is a dotted path. Common paths:

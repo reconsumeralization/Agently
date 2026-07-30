@@ -55,18 +55,26 @@ When to use:
 - Mapping UI updates to schema paths.
 
 ### FunctionShifter
-Purpose: bridge sync/async code and run async work safely from sync contexts.
+Purpose: deprecated compatibility facade over Agently-Stage `StageCallBridge`.
 
 Key methods:
-- `syncify(func)`: wrap an async function so it can be called in sync code. Uses `asyncio.run` or a thread when a loop is running.
-- `asyncify(func)`: wrap a sync function so it can be awaited via `asyncio.to_thread`.
-- `future(func)`: return a `Future` for the function execution; ensures there is a loop.
-- `syncify_async_generator(async_gen)`: consume an async generator from sync code via a background thread.
-- `auto_options_func(func)`: drop extra kwargs that the function does not accept.
+- `syncify(func)`: delegates to `StageCallBridge.as_sync()`.
+- `asyncify(func)`: delegates to `StageCallBridge.as_async()`.
+- `future(func)`: returns a loop-neutral `StageHandle`.
+- `syncify_async_generator(async_gen)`: delegates to `StageCallBridge.iter_sync()`.
+- `asyncify_sync_generator(sync_gen)`: delegates to `StageCallBridge.iter_async()`.
+- `auto_options_func(func)`: delegates to the pure `filter_callable_options()` helper.
+
+`syncify()` and `asyncify()` use the light bridge. They do not claim ownership
+of descendant tasks or wait for a blocking thread after cancellation. Runtime
+schedulers that own that lifecycle use `StageCallBridge(..., managed=True)`
+directly instead of changing `FunctionShifter` compatibility semantics.
 
 When to use:
-- Tool functions that may be sync or async.
-- Adapters between streaming generators and sync APIs.
+- Only for compatibility with existing integrations.
+- New runtime code should import `default_stage_call_bridge` from
+  `agently_stage`; signature-only option filtering should use
+  `filter_callable_options` from `agently.utils`.
 
 ### GeneratorConsumer
 Purpose: fan out a generator or async generator to multiple consumers, replay history, and handle errors.

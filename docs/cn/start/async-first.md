@@ -8,7 +8,12 @@ keywords: Agently, async, async_get, get_async_generator, async_start
 
 > 语言：[English](../../en/start/async-first.md) · **中文**
 
-Agently 在运行时层是 async-native。Sync 方法是通过 `FunctionShifter.syncify()` 从 async 方法生成的便捷封装。一旦做真实服务，async 应该是默认路径。
+Agently 在运行时层是 async-native。Sync 方法通过 Agently-Stage 的
+`StageCallBridge` 跨越同步/异步边界，在不为每次调用创建独立 event-loop thread
+的前提下保持 loop affinity。普通调用形态转换默认采用轻桥接；只有真正拥有调度
+生命周期的 TriggerFlow 与 EventCenter 边界才显式启用 managed settlement。
+`FunctionShifter` 仅保留为指向轻桥接的 deprecated 兼容 facade。一旦做真实服务，
+async 应该是默认路径。
 
 ## 什么时候 sync 也行
 
@@ -83,6 +88,7 @@ Agently 在运行时层是 async-native。Sync 方法是通过 `FunctionShifter.
 | `flow.start()` | `flow.async_start()` |
 | `execution.start()` / `execution.close()` | `execution.async_start()` / `execution.async_close()` |
 | `data.set_state(...)` / `data.emit(...)` | `data.async_set_state(...)` / `data.async_emit(...)` |
+| `agent.add_chat_history(...)` | `await agent.async_add_chat_history(...)` |
 
 ## 最小 async 示例
 

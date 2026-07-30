@@ -18,6 +18,17 @@ Agently 设置是一个分层 key-value 存储，分三个 scope：
 
 低 scope 覆盖高 scope；没显式覆盖的 key 沿用上层。
 
+`agent.set_settings(...)` 返回同一个 Agent，因此内联覆盖可以直接留在 Agent
+链式表达式里：
+
+```python
+agent = (
+    Agently.create_agent()
+    .set_settings("OpenAICompatible", {"model": "deepseek-chat"})
+    .set_settings("debug", True)
+)
+```
+
 ## 设置路径
 
 `set_settings(...)` 的第一个参数是点路径，常用：

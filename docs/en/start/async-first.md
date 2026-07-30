@@ -6,7 +6,13 @@ keywords: Agently, async, async_get, get_async_generator, async_start
 
 # Async First
 
-Agently is async-native at the runtime layer. Sync methods are convenience wrappers generated from the async ones via `FunctionShifter.syncify()`. For real services, async should be the default path.
+Agently is async-native at the runtime layer. Sync methods cross the boundary
+through Agently-Stage's `StageCallBridge` without creating one event-loop
+thread per call. Ordinary call-shape conversion is intentionally light;
+TriggerFlow and EventCenter opt into managed settlement only where they own the
+scheduled work's lifecycle. `FunctionShifter` remains a deprecated
+compatibility facade over the light bridge. For real services, async should be
+the default path.
 
 ## When sync is fine
 
@@ -89,6 +95,7 @@ data namespace.
 | `flow.start()` | `flow.async_start()` |
 | `execution.start()` / `execution.close()` | `execution.async_start()` / `execution.async_close()` |
 | `data.set_state(...)` / `data.emit(...)` | `data.async_set_state(...)` / `data.async_emit(...)` |
+| `agent.add_chat_history(...)` | `await agent.async_add_chat_history(...)` |
 
 ## Minimal async example
 

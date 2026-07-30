@@ -33,6 +33,21 @@ def test_current_release_manifest_matches_registry_release_file() -> None:
     assert current_manifest["release_train"] == release_manifest["release_train"]
 
 
+def test_4_1_4_5_release_manifest_pins_stage_native_runtime_contract() -> None:
+    manifest = get_current_release_manifest()
+
+    assert CURRENT_FRAMEWORK_VERSION == "4.1.4.5"
+    assert CURRENT_RELEASE_TRAIN == "2026-07-4.1.4.5"
+    stage_support = manifest["runtime_support"]["agently_stage"]
+    assert stage_support["version_specifier"] == ">=0.3.5,<0.4.0"
+    assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
+    assert stage_support["public_runtime_surface"] is False
+    assert "EventCenter background task settlement" in stage_support[
+        "rejected_mechanism_replacements"
+    ]
+    assert stage_support["semantic_owners_unchanged"] is True
+
+
 def test_companion_views_still_derive_from_released_manifest() -> None:
     current = get_current_release_manifest()
     devtools = get_devtools_compatibility_manifest()
@@ -44,15 +59,24 @@ def test_companion_views_still_derive_from_released_manifest() -> None:
     assert skills["authoring_protocol"] == current["companions"]["skills"]["authoring_protocol"]
 
 
-def test_in_development_manifest_declares_breaking_owner_split() -> None:
+def test_in_development_manifest_declares_4_1_4_5_owner_boundaries() -> None:
     manifest = _development_manifest()
 
-    assert manifest["target_version"] == "4.1.4.4"
-    assert manifest["release_train"] == "2026-07-4.1.4.4-dev"
-    assert "TaskContext" in manifest["notes"]
-    assert "TaskWorkspace owns task files" in manifest["notes"]
-    assert "RecordStore owns records and durability" in manifest["notes"]
-    assert "without shims" in manifest["notes"]
+    assert manifest["target_version"] == "4.1.4.5"
+    assert manifest["release_train"] == "2026-07-4.1.4.5-dev"
+    assert "ensure_long_output()" in manifest["notes"]
+    assert "TriggerFlow-visible continuation" in manifest["notes"]
+    assert "TaskWorkspace owns staged file truth" in manifest["notes"]
+    assert "Agently-Stage >=0.3.5,<0.4.0" in manifest["notes"]
+
+    stage_support = manifest["runtime_support"]["agently_stage"]
+    assert stage_support["version_specifier"] == ">=0.3.5,<0.4.0"
+    assert stage_support["public_runtime_surface"] is False
+    assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
+    assert "EventCenter background task settlement" in stage_support[
+        "rejected_mechanism_replacements"
+    ]
+    assert stage_support["semantic_owners_unchanged"] is True
 
     companions = manifest["companions"]
     assert companions["task_context"]["reader"] == "ContextReader"
@@ -74,6 +98,13 @@ def test_in_development_manifest_declares_breaking_owner_split() -> None:
         ".agently/records/records.db"
     )
     assert companions["session_memory"]["storage_owner"] == "RecordStore"
+
+    execution_contract = manifest["request_input"]["agent_execution_request_scope"]
+    assert "AgentExecution.ensure_long_output" in execution_contract["surface"]
+    assert "first request keeps its original contract" in execution_contract["contract"]
+    assert "cannot be combined with an explicit AgentTask strategy" in execution_contract[
+        "contract"
+    ]
 
 
 def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:

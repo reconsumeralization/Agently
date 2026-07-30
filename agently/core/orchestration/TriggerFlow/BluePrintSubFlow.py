@@ -23,7 +23,6 @@ from typing import Any, Literal, TYPE_CHECKING, Sequence, cast
 
 from agently.core.runtime.RuntimeContext import resolve_parent_run_context
 from agently.types.data import EMPTY, SerializableMapping
-from agently.types.trigger_flow import RUNTIME_STREAM_STOP
 from .Control import (
     TRIGGER_FLOW_STATUS_CANCELLED,
     TRIGGER_FLOW_STATUS_FAILED,
@@ -316,11 +315,15 @@ class TriggerFlowBlueprintSubFlow:
         child_execution: TriggerFlowExecution,
         parent_execution: TriggerFlowExecution,
     ):
-        while True:
-            stream_item = await child_execution._runtime_stream_queue.get()
-            if stream_item is RUNTIME_STREAM_STOP:
-                return
-            await parent_execution.async_put_into_stream(stream_item)
+        subscription = child_execution._runtime_stream_transport.subscribe(
+            start="earliest",
+            timeout=None,
+        )
+        try:
+            async for stream_item in subscription:
+                await parent_execution.async_put_into_stream(stream_item)
+        finally:
+            await subscription.async_close()
 
     def build_resource_bindings(
         self,

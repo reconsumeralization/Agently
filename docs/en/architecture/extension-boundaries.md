@@ -54,6 +54,33 @@ Core should not directly become the feature catalog. For example,
 requirement, but it should not be the user-facing API for "do coding work in my
 repo".
 
+Agently-Stage is a private mechanism dependency at this boundary. TriggerFlow
+directly owns one Stage structured scope for caller-loop task creation,
+ownership, cancellation delivery, origin diagnostics, and settlement; Stage
+selects the caller loop lazily when the first task enters. TriggerFlow-created
+managed work uses `Stage.create_task(...)`; a genuinely pre-existing external
+task may use `Stage.adopt(...)`. Stage remains the single live task/origin
+registry. TriggerFlow retains only its business error projection, one-deadline
+close policy, and RuntimeEvent mapping; there is no Agently task-scope adapter
+or shadow registry. Stage's Tunnel supports
+TriggerFlow's process-local execution stream transport. EventCenter keeps its
+native background-task mechanism because the Stage-backed candidate had a
+measurable hot-path cost. EventCenter, RuntimeEvent, SignalNet,
+TriggerFlowExecution, and AgentExecution remain the semantic owners.
+Applications and plugins should not select a "Stage runtime" or place Stage
+objects in execution state. Stage EventEmitter does not replace
+EventCenter/SignalNet. Agently's internal sync/async call adaptation uses
+`StageCallBridge`; `FunctionShifter` remains only as a deprecated public
+compatibility facade that delegates to the same bridge.
+Call-shape conversion is light by default. Only a scheduling owner such as
+TriggerFlow or EventCenter requests `managed=True`; this prevents compatibility
+helpers from changing error or cancellation semantics merely because they adapt
+sync and async call shapes.
+
+Agently depends on Agently-Stage 0.3.5 or newer in the 0.3 compatibility line.
+`LocalTaskScope` is not an Agently integration surface; it is a deprecated
+Agently-Stage compatibility shim scheduled for removal in Agently-Stage 0.4.
+
 Core also should not own plugin output prompts, provider-specific defaults, or
 Agent Component convenience behavior when a lower layer already has a contract
 for them. Plugins can import core contracts; core cannot depend on built-in
