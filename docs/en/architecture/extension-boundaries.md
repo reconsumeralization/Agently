@@ -68,10 +68,15 @@ measurable hot-path cost. EventCenter, RuntimeEvent, SignalNet,
 TriggerFlowExecution, and AgentExecution remain the semantic owners.
 Applications and plugins should not select a "Stage runtime" or place Stage
 objects in execution state. Stage EventEmitter does not replace
-EventCenter/SignalNet, and Stage carrier handles do not replace the broad
-`FunctionShifter` compatibility surface.
+EventCenter/SignalNet. Agently's internal sync/async call adaptation uses
+`StageCallBridge`; `FunctionShifter` remains only as a deprecated public
+compatibility facade that delegates to the same bridge.
+Call-shape conversion is light by default. Only a scheduling owner such as
+TriggerFlow or EventCenter requests `managed=True`; this prevents compatibility
+helpers from changing error or cancellation semantics merely because they adapt
+sync and async call shapes.
 
-Agently depends on Agently-Stage 0.3.3 or newer in the 0.3 compatibility line.
+Agently depends on Agently-Stage 0.3.4 or newer in the 0.3 compatibility line.
 `LocalTaskScope` is not an Agently integration surface; it is a deprecated
 Agently-Stage compatibility shim scheduled for removal in Agently-Stage 0.4.
 

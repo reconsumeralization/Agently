@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from agently_stage import default_stage_call_bridge
+
 import asyncio
 import inspect
 import time
@@ -22,7 +24,6 @@ from typing import TYPE_CHECKING, Any, Mapping, cast
 
 from agently.types.data import ErrorInfo, EventDeliveryPolicy, ObservationEvent, RuntimeEvent
 from agently.types.data.event import matches_runtime_event_type
-from agently.utils import FunctionShifter
 
 if TYPE_CHECKING:
     from agently.types.data import EventHook, ObservationEventLevel, RunContext
@@ -183,8 +184,16 @@ class EventCenter:
         self._background_timeout = background_timeout
         self._idle_flush_generation = 0
         self._idle_flush_task: asyncio.Task[Any] | None = None
-        self.emit = FunctionShifter.syncify(self.async_emit)
-        self.flush = FunctionShifter.syncify(self.async_flush)
+        self.emit = default_stage_call_bridge.as_sync(self.async_emit)
+        self.flush = default_stage_call_bridge.as_sync(self.async_flush)
+
+    def emit_nowait(self, event: "Mapping[str, Any] | ObservationEvent | RuntimeEvent"):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return default_stage_call_bridge.submit(self.async_emit, event)
+        task = loop.create_task(self.async_emit(event))
+        return self._track_background_task(task, hook_name="$event_center.emit")
 
     def register_hook(
         self,
@@ -292,7 +301,7 @@ class EventCenter:
         return None
 
     def _create_hook_task(self, registration: _HookRegistration, event: RuntimeEvent) -> asyncio.Task[Any]:
-        coro = FunctionShifter.asyncify(registration.callback)
+        coro = default_stage_call_bridge.as_async(registration.callback, managed=True)
         return asyncio.create_task(coro(event))
 
     def _track_background_task(self, task: asyncio.Task[Any], *, hook_name: str):
@@ -451,12 +460,12 @@ class ObservationEventEmitter:
         self._base_meta = base_meta if base_meta is not None else {}
         self._base_run = base_run
 
-        self.emit = FunctionShifter.syncify(self.async_emit)
-        self.debug = FunctionShifter.syncify(self.async_debug)
-        self.info = FunctionShifter.syncify(self.async_info)
-        self.warning = FunctionShifter.syncify(self.async_warning)
-        self.error = FunctionShifter.syncify(self.async_error)
-        self.critical = FunctionShifter.syncify(self.async_critical)
+        self.emit = default_stage_call_bridge.as_sync(self.async_emit)
+        self.debug = default_stage_call_bridge.as_sync(self.async_debug)
+        self.info = default_stage_call_bridge.as_sync(self.async_info)
+        self.warning = default_stage_call_bridge.as_sync(self.async_warning)
+        self.error = default_stage_call_bridge.as_sync(self.async_error)
+        self.critical = default_stage_call_bridge.as_sync(self.async_critical)
 
     def update_base_meta(self, update_dict: dict[str, Any]):
         self._base_meta.update(update_dict)

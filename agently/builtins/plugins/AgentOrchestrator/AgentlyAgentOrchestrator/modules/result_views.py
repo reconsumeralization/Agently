@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from agently_stage import default_stage_call_bridge
+
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Generator, Mapping
@@ -30,7 +32,7 @@ from agently.core.application.AgentExecution.Stream import (
     project_agent_execution_text_delta,
 )
 from agently.types.data import AgentExecutionStreamData
-from agently.utils import DataFormatter, FunctionShifter
+from agently.utils import DataFormatter
 
 from .diagnostics import build_execution_meta
 
@@ -394,4 +396,4 @@ def _retrieve_generator_start_exception(task: "asyncio.Task[Any]") -> None:
 
 
 def sync_generator(owner: "AgentExecution", *args: Any, **kwargs: Any) -> Generator[Any, None, None]:
-    return FunctionShifter.syncify_async_generator(owner.get_async_generator(*args, **kwargs))
+    return default_stage_call_bridge.iter_sync(owner.get_async_generator(*args, **kwargs))

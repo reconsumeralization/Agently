@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from agently_stage import default_stage_call_bridge
+
 import asyncio
 import contextlib
 import html
@@ -28,7 +30,6 @@ from agently.utils import (
     DataFormatter,
     StateDataNamespace,
     GeneratorConsumer,
-    FunctionShifter,
     StreamingJSONParser,
     DeprecationWarnings,
 )
@@ -211,10 +212,10 @@ class AgentlyResponseParser(ResponseParser):
 
         self._streaming_canceled = False
 
-        self.get_meta = FunctionShifter.syncify(self.async_get_meta)
-        self.get_text = FunctionShifter.syncify(self.async_get_text)
-        self.get_data = FunctionShifter.syncify(self.async_get_data)
-        self.get_data_object = FunctionShifter.syncify(self.async_get_data_object)
+        self.get_meta = default_stage_call_bridge.as_sync(self.async_get_meta)
+        self.get_text = default_stage_call_bridge.as_sync(self.async_get_text)
+        self.get_data = default_stage_call_bridge.as_sync(self.async_get_data)
+        self.get_data_object = default_stage_call_bridge.as_sync(self.async_get_data_object)
 
     @staticmethod
     def _on_register():
@@ -1173,7 +1174,7 @@ class AgentlyResponseParser(ResponseParser):
                         continue
                     if streaming_json_parser is not None:
                         if event == "delta":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_json_parser.parse_chunk(str(data))
                             ):
                                 yield self._prepare_streaming_data_for_yield(
@@ -1183,14 +1184,14 @@ class AgentlyResponseParser(ResponseParser):
                         if event == "tool_calls":
                             yield StreamingData(path="$tool_calls", value=data)
                         elif event == "done":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_json_parser.flush_observed_boundaries()
                             ):
                                 yield self._prepare_streaming_data_for_yield(
                                     streaming_data,
                                     _streaming_parse_path_style,
                                 )
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 self._flush_streaming_json_events(streaming_json_parser)
                             ):
                                 yield self._prepare_streaming_data_for_yield(
@@ -1199,7 +1200,7 @@ class AgentlyResponseParser(ResponseParser):
                                 )
                     if streaming_flat_markdown_parser is not None:
                         if event == "delta":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_flat_markdown_parser.parse_chunk(str(data))
                             ):
                                 yield self._prepare_streaming_data_for_yield(
@@ -1207,7 +1208,7 @@ class AgentlyResponseParser(ResponseParser):
                                     _streaming_parse_path_style,
                                 )
                         elif event == "done":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_flat_markdown_parser.flush_final_data(
                                     self.full_result_data.get("parsed_result")
                                 )
@@ -1218,7 +1219,7 @@ class AgentlyResponseParser(ResponseParser):
                                 )
                     if streaming_hybrid_parser is not None:
                         if event == "delta":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_hybrid_parser.parse_chunk(str(data))
                             ):
                                 yield self._prepare_streaming_data_for_yield(
@@ -1226,7 +1227,7 @@ class AgentlyResponseParser(ResponseParser):
                                     _streaming_parse_path_style,
                                 )
                         elif event == "done":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_hybrid_parser.flush()
                             ):
                                 yield self._prepare_streaming_data_for_yield(
@@ -1235,7 +1236,7 @@ class AgentlyResponseParser(ResponseParser):
                                 )
                     if streaming_xml_field_parser is not None:
                         if event == "delta":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_xml_field_parser.parse_chunk(str(data))
                             ):
                                 yield self._prepare_streaming_data_for_yield(
@@ -1243,7 +1244,7 @@ class AgentlyResponseParser(ResponseParser):
                                     _streaming_parse_path_style,
                                 )
                         elif event == "done":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_xml_field_parser.flush()
                             ):
                                 yield self._prepare_streaming_data_for_yield(
@@ -1252,7 +1253,7 @@ class AgentlyResponseParser(ResponseParser):
                                 )
                     if streaming_yaml_literal_parser is not None:
                         if event == "delta":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_yaml_literal_parser.parse_chunk(str(data))
                             ):
                                 yield self._prepare_streaming_data_for_yield(
@@ -1260,7 +1261,7 @@ class AgentlyResponseParser(ResponseParser):
                                     _streaming_parse_path_style,
                                 )
                         elif event == "done":
-                            for streaming_data in FunctionShifter.syncify_async_generator(
+                            for streaming_data in default_stage_call_bridge.iter_sync(
                                 streaming_yaml_literal_parser.flush()
                             ):
                                 yield self._prepare_streaming_data_for_yield(

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from agently_stage import default_stage_call_bridge
+
 import json
 import os
 import uuid
@@ -27,7 +29,7 @@ from agently.core.model import ModelRequest, Prompt, _resolve_quick_prompt_input
 from agently.core.model.ModelRequestResult import DEFAULT_SPECIFIC_EVENTS
 from agently.core.runtime import resolve_parent_run_context
 from agently.core.TaskWorkspace import TaskWorkspace
-from agently.utils import DataFormatter, FunctionShifter, Settings
+from agently.utils import DataFormatter, Settings
 from agently.utils.LanguagePolicy import apply_language_policy_to_prompt, resolve_language_policy
 
 if TYPE_CHECKING:
@@ -1220,7 +1222,7 @@ class BaseAgent:
         *,
         task_workspace: str | os.PathLike[str] | None = None,
     ) -> "AgentExecution":
-        return FunctionShifter.syncify(self.async_resume)(task_id, task_workspace=task_workspace)
+        return default_stage_call_bridge.as_sync(self.async_resume)(task_id, task_workspace=task_workspace)
 
     async def async_resume_task(
         self,

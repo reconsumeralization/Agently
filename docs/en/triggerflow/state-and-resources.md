@@ -38,7 +38,10 @@ API:
 - `data.async_append_state(key, value)` / `data.append_state(key, value)` — for list-valued state
 - `data.async_del_state(key)` / `data.del_state(key)`
 
-Reading state is a local sync operation. Writes, appends, and deletes have async variants so async chunks can stay async-first.
+Reading state is a local sync operation. Async chunks must await the async
+write, append, delete, emit, and stream methods so execution stays on its owner
+loop. Sync facades remain compatible from other contexts, but they block the
+calling thread and are intended for sync chunks and sync callers.
 
 `set_state(...)` is replacement, including for lists, mappings, sets, and empty
 collections. Use `append_state(...)` only when list accumulation is intended.

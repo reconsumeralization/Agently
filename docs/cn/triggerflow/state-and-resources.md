@@ -38,7 +38,9 @@ API：
 - `data.async_append_state(key, value)` / `data.append_state(key, value)` —— list 类型 state
 - `data.async_del_state(key)` / `data.del_state(key)`
 
-读取 state 是本地同步操作；写入、追加、删除有 async 版本，方便在 async chunk 里保持一致。
+读取 state 是本地同步操作。Async chunk 必须 await 对应的 async 写入、追加、删除、
+emit 与 stream 方法，让 execution 留在 owner loop。Sync facade 仍可在其他上下文
+兼容使用，但会阻塞调用线程，主要面向 sync chunk 与 sync caller。
 
 `set_state(...)` 表示完整替换；list、mapping、set 和空集合都不会与旧值合并。只有
 确实需要 list 累加时才使用 `append_state(...)`。mapping 状态迁移应先构造完整的新

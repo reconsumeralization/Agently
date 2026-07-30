@@ -60,10 +60,14 @@ Tunnel 支撑 TriggerFlow 的进程内 execution stream 传输。Event Center �
 EventCenter、RuntimeEvent、SignalNet、
 TriggerFlowExecution 与 AgentExecution 仍是语义 owner。应用与插件不应选择
 所谓“Stage runtime”，也不应把 Stage 对象放入 execution state。Stage
-EventEmitter 不替换 EventCenter/SignalNet，Stage carrier handle 也不替换
-使用面广泛的 `FunctionShifter` 兼容层。
+EventEmitter 不替换 EventCenter/SignalNet。Agently 内部的同步/异步调用适配
+统一使用 `StageCallBridge`；`FunctionShifter` 只作为 deprecated 公共兼容
+facade 保留，并委托给同一个 bridge。
+调用形态转换默认使用轻桥接。只有 TriggerFlow、EventCenter 这类真正拥有调度
+生命周期的边界才请求 `managed=True`，避免兼容 helper 仅仅因为转换 sync/async
+形态就改变业务错误或取消语义。
 
-Agently 依赖 Agently-Stage 0.3.x 兼容线中的 0.3.3 或更高版本。
+Agently 依赖 Agently-Stage 0.3.x 兼容线中的 0.3.4 或更高版本。
 `LocalTaskScope` 不是 Agently 的集成接口；它只是 Agently-Stage 中为兼容保留、
 并计划在 Agently-Stage 0.4 移除的 deprecated shim。
 

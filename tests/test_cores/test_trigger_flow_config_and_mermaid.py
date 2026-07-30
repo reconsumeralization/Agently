@@ -66,7 +66,7 @@ def test_trigger_flow_config_and_mermaid_include_contract_metadata():
     )
 
     async def worker(data: TriggerFlowRuntimeData[Any, ContractConfigStream, ContractConfigResult]):
-        data.put(ContractConfigStream(stage="working"))
+        await data.async_put(ContractConfigStream(stage="working"))
         data.set_result(ContractConfigResult(answer=data.value.topic.upper()))
 
     flow.to(worker).end()
@@ -257,7 +257,7 @@ async def test_trigger_flow_stream_and_result_events_include_origin_chunk():
         flow = TriggerFlow(name="origin-chunk-flow")
 
         async def emit_and_complete(data: TriggerFlowRuntimeData):
-            data.put({"stage": "working"})
+            await data.async_put({"stage": "working"})
             data.set_result({"answer": data.value})
 
         flow.to(emit_and_complete).end()

@@ -146,6 +146,20 @@ await Agently.event_center.async_emit({
 })
 ```
 
+同步代码不能等待 hook 投递时，使用受跟踪的 nowait 入口：
+
+```python
+dispatch = Agently.event_center.emit_nowait({
+    "event_type": "runtime.info",
+    "source": "Docs",
+    "message": "tracked nowait event",
+})
+```
+
+存在 running loop 时，`dispatch` 是 `asyncio.Task`；不存在时则是 loop-neutral
+Stage handle。`emit_nowait()` 不代表投递已经完成，owner 应在关闭或观察 barrier
+调用 `await Agently.event_center.async_flush()`。
+
 顶层便捷 API：
 
 ```python

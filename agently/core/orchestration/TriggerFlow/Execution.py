@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from agently_stage import default_stage_call_bridge
+
 
 import uuid
 import asyncio
@@ -38,7 +40,7 @@ if TYPE_CHECKING:
     from agently.types.plugins import RuntimeEventStore
     from agently.types.trigger_flow import TriggerFlowExecutionSnapshotStore
 
-from agently.utils import DeprecationWarnings, StateData, FunctionShifter, Settings
+from agently.utils import DeprecationWarnings, StateData, Settings
 from agently.core.runtime.RuntimeContext import bind_runtime_context, get_current_chunk_run_context
 from agently.core.runtime._task_support import (
     StageManagedTaskScope,
@@ -243,7 +245,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self.load_settings = self.settings.load
 
         # Emit
-        self.emit = FunctionShifter.syncify(self.async_emit)
+        self.emit = default_stage_call_bridge.as_sync(self.async_emit)
         self.emit_nowait = self._emit_nowait
 
         # Flow Data
@@ -264,13 +266,13 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
 
         # Runtime Data
         self.get_state = self._get_state
-        self.set_state = FunctionShifter.syncify(self.async_set_state)
-        self.append_state = FunctionShifter.syncify(self.async_append_state)
-        self.del_state = FunctionShifter.syncify(self.async_del_state)
+        self.set_state = default_stage_call_bridge.as_sync(self.async_set_state)
+        self.append_state = default_stage_call_bridge.as_sync(self.async_append_state)
+        self.del_state = default_stage_call_bridge.as_sync(self.async_del_state)
         self.get_runtime_data = self._deprecated_get_runtime_data
-        self.set_runtime_data = FunctionShifter.syncify(self.async_set_runtime_data)
-        self.append_runtime_data = FunctionShifter.syncify(self.async_append_runtime_data)
-        self.del_runtime_data = FunctionShifter.syncify(self.async_del_runtime_data)
+        self.set_runtime_data = default_stage_call_bridge.as_sync(self.async_set_runtime_data)
+        self.append_runtime_data = default_stage_call_bridge.as_sync(self.async_append_runtime_data)
+        self.del_runtime_data = default_stage_call_bridge.as_sync(self.async_del_runtime_data)
         self.set_runtime_resource = self._set_runtime_resource
         self.get_runtime_resource = self._get_runtime_resource
         self.del_runtime_resource = self._del_runtime_resource
@@ -282,24 +284,24 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         self.set_snapshot_retention_policy = self._set_snapshot_retention_policy
 
         # Runtime Stream
-        self.put_into_stream = FunctionShifter.syncify(self.async_put_into_stream)
-        self.stop_stream = FunctionShifter.syncify(self.async_stop_stream)
+        self.put_into_stream = default_stage_call_bridge.as_sync(self.async_put_into_stream)
+        self.stop_stream = default_stage_call_bridge.as_sync(self.async_stop_stream)
 
         # Pause / Continue
-        self.pause_for = FunctionShifter.syncify(self.async_pause_for)
-        self.continue_with = FunctionShifter.syncify(self.async_continue_with)
-        self.intervene = FunctionShifter.syncify(self.async_intervene)
-        self.mark_intervention_consumed = FunctionShifter.syncify(self.async_mark_intervention_consumed)
-        self.emit_to_sub_flow = FunctionShifter.syncify(self.async_emit_to_sub_flow)
-        self.cancel_sub_flow = FunctionShifter.syncify(self.async_cancel_sub_flow)
+        self.pause_for = default_stage_call_bridge.as_sync(self.async_pause_for)
+        self.continue_with = default_stage_call_bridge.as_sync(self.async_continue_with)
+        self.intervene = default_stage_call_bridge.as_sync(self.async_intervene)
+        self.mark_intervention_consumed = default_stage_call_bridge.as_sync(self.async_mark_intervention_consumed)
+        self.emit_to_sub_flow = default_stage_call_bridge.as_sync(self.async_emit_to_sub_flow)
+        self.cancel_sub_flow = default_stage_call_bridge.as_sync(self.async_cancel_sub_flow)
 
         # Result
-        self.get_result = FunctionShifter.syncify(self.async_get_result)
+        self.get_result = default_stage_call_bridge.as_sync(self.async_get_result)
 
         # Lifecycle
-        self.seal = FunctionShifter.syncify(self.async_seal)
-        self.unseal = FunctionShifter.syncify(self.async_unseal)
-        self.close = FunctionShifter.syncify(self.async_close)
+        self.seal = default_stage_call_bridge.as_sync(self.async_seal)
+        self.unseal = default_stage_call_bridge.as_sync(self.async_unseal)
+        self.close = default_stage_call_bridge.as_sync(self.async_close)
 
         # Execution Status
         self._started = False
@@ -615,7 +617,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
     async def _async_auto_intervention_ids(self, context: dict[str, Any]):
         if self._intervention_policy is None:
             return self._builtin_auto_intervention_ids(context)
-        result = await FunctionShifter.asyncify(self._intervention_policy)(context)
+        result = await default_stage_call_bridge.as_async(self._intervention_policy, managed=True)(context)
         if result is None:
             return []
         if isinstance(result, str):
@@ -3067,7 +3069,8 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            return FunctionShifter.future(self.async_emit)(
+            return default_stage_call_bridge.submit(
+                self.async_emit,
                 trigger_event,
                 value,
                 _layer_marks,
@@ -3254,7 +3257,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                         self._active_handler_count -= 1
                         self._mark_activity()
 
-                handler_func = FunctionShifter.asyncify(handler)
+                handler_func = default_stage_call_bridge.as_async(handler, managed=True)
                 handler_data = TriggerFlowRuntimeData(
                     trigger_event=signal.trigger_event,
                     trigger_type=signal.trigger_type,
@@ -3534,7 +3537,7 @@ class TriggerFlowExecution(Generic[InputT, StreamT, ResultT]):
                 "TriggerFlowExecution.start() with auto_close=False is not supported in sync mode. "
                 "Use await execution.async_start(...) and close the execution explicitly."
             )
-        return FunctionShifter.syncify(self.async_start)(
+        return default_stage_call_bridge.as_sync(self.async_start)(
             initial_value,
             wait_for_result=wait_for_result,
             timeout=timeout,

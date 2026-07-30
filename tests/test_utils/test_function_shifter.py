@@ -2,7 +2,7 @@ import asyncio
 import threading
 
 import pytest
-from agently.utils import FunctionShifter
+from agently.utils import FunctionShifter, filter_callable_options
 
 
 def test_kwargs():
@@ -20,6 +20,14 @@ def test_kwargs():
 
     new_test_func = FunctionShifter.auto_options_func(test_func)
     assert new_test_func(**options) == 3
+
+
+def test_filter_callable_options_is_the_non_runtime_owner():
+    def test_func(*, a: str, b: int):
+        return int(a) + b
+
+    filtered = filter_callable_options(test_func)
+    assert filtered(a="1", b=2, ignored=True) == 3
 
 
 @pytest.mark.asyncio

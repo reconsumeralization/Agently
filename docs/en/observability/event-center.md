@@ -163,6 +163,22 @@ await Agently.event_center.async_emit({
 })
 ```
 
+When synchronous code cannot wait for hook delivery, use the tracked nowait
+entry:
+
+```python
+dispatch = Agently.event_center.emit_nowait({
+    "event_type": "runtime.info",
+    "source": "Docs",
+    "message": "tracked nowait event",
+})
+```
+
+On a running loop, `dispatch` is an `asyncio.Task`; without one it is a
+loop-neutral Stage handle. `emit_nowait()` does not claim delivery completion.
+Use `await Agently.event_center.async_flush()` at the owning shutdown or
+observation barrier.
+
 For top-level convenience APIs:
 
 ```python

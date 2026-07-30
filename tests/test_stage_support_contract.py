@@ -13,6 +13,7 @@ from packaging.version import Version
 
 import agently
 from agently import TriggerFlow
+from agently_stage import StageHandle
 from agently.core import EventCenter
 from agently.core.runtime._task_support import StageManagedTaskScope
 from agently.types.data import RuntimeEvent
@@ -41,11 +42,28 @@ def test_private_stage_runtime_stream_transport_exists() -> None:
 def test_project_declares_supported_stage_dependency() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert "agently-stage (>=0.3.3,<0.4.0)" in pyproject
-    assert Version(importlib.metadata.version("agently-stage")) >= Version("0.3.3")
+    assert "agently-stage (>=0.3.4,<0.4.0)" in pyproject
+    assert Version(importlib.metadata.version("agently-stage")) >= Version("0.3.4")
     assert not hasattr(agently, "Stage")
     assert not hasattr(agently, "Tunnel")
     assert not hasattr(agently, "LocalTaskScope")
+
+
+def test_triggerflow_sync_emit_nowait_returns_loop_neutral_stage_handle() -> None:
+    delivered: list[int] = []
+    execution = TriggerFlow(name="stage-handle-nowait").create_execution(auto_close=False)
+
+    async def handle(data: TriggerFlowRuntimeData) -> None:
+        delivered.append(data.value)
+
+    execution.on("probe", handle, binding_id="test.stage_handle_nowait")
+    submitted = execution.emit_nowait("probe", 7)
+
+    assert isinstance(submitted, StageHandle)
+    assert submitted.result(timeout=1) == [None]
+    submitted.wait_settled(timeout=1)
+    assert delivered == [7]
+    execution.close(timeout=1)
 
 
 @pytest.mark.asyncio
