@@ -54,8 +54,10 @@ Core should not directly become the feature catalog. For example,
 requirement, but it should not be the user-facing API for "do coding work in my
 repo".
 
-Agently-Stage is a private mechanism dependency at this boundary. Its local
-task scope supports TriggerFlow task settlement, and its Tunnel supports
+Agently-Stage is a private mechanism dependency at this boundary. TriggerFlow
+attaches its caller-loop tasks to a Stage structured scope for ownership,
+cancellation delivery, origin diagnostics, and settlement; Stage selects the
+caller loop lazily when the first task enters. Stage's Tunnel supports
 TriggerFlow's process-local execution stream transport. EventCenter keeps its
 native background-task mechanism because the Stage-backed candidate had a
 measurable hot-path cost. EventCenter, RuntimeEvent, SignalNet,
@@ -64,6 +66,10 @@ Applications and plugins should not select a "Stage runtime" or place Stage
 objects in execution state. Stage EventEmitter does not replace
 EventCenter/SignalNet, and Stage carrier handles do not replace the broad
 `FunctionShifter` compatibility surface.
+
+Agently depends on Agently-Stage 0.3.3 or newer in the 0.3 compatibility line.
+`LocalTaskScope` is not an Agently integration surface; it is a deprecated
+Agently-Stage compatibility shim scheduled for removal in Agently-Stage 0.4.
 
 Core also should not own plugin output prompts, provider-specific defaults, or
 Agent Component convenience behavior when a lower layer already has a contract

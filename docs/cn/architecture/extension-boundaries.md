@@ -49,14 +49,20 @@ Core 负责：
 
 Core 不应该直接变成能力目录。例如，`ExecutionResourceManager` 应该知道如何管理 environment requirement，但它不应该成为“让模型在我的 repo 里做 coding 工作”的用户入口。
 
-Agently-Stage 在这个边界上属于私有机制依赖：它的 local task scope 支撑
-TriggerFlow 的任务结算，Tunnel 支撑 TriggerFlow 的进程内 execution stream
-传输。Event Center 保留原生后台任务机制，因为 Stage-backed 候选在热路径上
-存在可测量的额外开销。EventCenter、RuntimeEvent、SignalNet、
+Agently-Stage 在这个边界上属于私有机制依赖：TriggerFlow 把自己在 caller loop
+上创建的 task 纳入 Stage structured scope，由 Stage 支撑 ownership、取消传递、
+origin 诊断与 settlement；Stage 在首个任务进入时才 lazy 选择 caller loop。
+Tunnel 支撑 TriggerFlow 的进程内 execution stream 传输。Event Center 保留原生
+后台任务机制，因为 Stage-backed 候选在热路径上存在可测量的额外开销。
+EventCenter、RuntimeEvent、SignalNet、
 TriggerFlowExecution 与 AgentExecution 仍是语义 owner。应用与插件不应选择
 所谓“Stage runtime”，也不应把 Stage 对象放入 execution state。Stage
 EventEmitter 不替换 EventCenter/SignalNet，Stage carrier handle 也不替换
 使用面广泛的 `FunctionShifter` 兼容层。
+
+Agently 依赖 Agently-Stage 0.3.x 兼容线中的 0.3.3 或更高版本。
+`LocalTaskScope` 不是 Agently 的集成接口；它只是 Agently-Stage 中为兼容保留、
+并计划在 Agently-Stage 0.4 移除的 deprecated shim。
 
 当 plugin 或 Agent Component 层已经有相应职责时，Core 也不应该拥有 plugin output
 prompt、provider-specific default，或 Agent Component 的便利行为。Plugin 可以导入 core

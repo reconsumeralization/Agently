@@ -24,9 +24,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_private_stage_support_module_exists() -> None:
     module = importlib.import_module("agently.core.runtime._task_support")
+    source = (ROOT / "agently/core/runtime/_task_support.py").read_text(encoding="utf-8")
 
     assert hasattr(module, "StageManagedTaskScope")
     assert hasattr(module, "ManagedTaskOutcome")
+    assert "LocalTaskScope" not in source
+    assert "LocalTaskOutcome" not in source
 
 
 def test_private_stage_runtime_stream_transport_exists() -> None:
@@ -38,8 +41,8 @@ def test_private_stage_runtime_stream_transport_exists() -> None:
 def test_project_declares_supported_stage_dependency() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert "agently-stage (>=0.3.2,<0.4.0)" in pyproject
-    assert Version(importlib.metadata.version("agently-stage")) >= Version("0.3.2")
+    assert "agently-stage (>=0.3.3,<0.4.0)" in pyproject
+    assert Version(importlib.metadata.version("agently-stage")) >= Version("0.3.3")
     assert not hasattr(agently, "Stage")
     assert not hasattr(agently, "Tunnel")
     assert not hasattr(agently, "LocalTaskScope")
@@ -69,6 +72,51 @@ async def test_stage_managed_scope_preserves_loop_origin_and_retained_error() ->
     assert isinstance(outcomes[0].error, ValueError)
     assert scope.pending_count == 0
     await scope.close(timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_stage_managed_scope_wait_returns_after_agently_projection_is_complete() -> None:
+    scope = StageManagedTaskScope()
+
+    async def fail() -> None:
+        raise ValueError("wait projection")
+
+    scope.spawn(
+        fail(),
+        origin="triggerflow:emit:wait-projection",
+        retain_outcome=True,
+    )
+
+    await scope.wait_settled(timeout=1)
+
+    outcomes = scope.take_retained_outcomes()
+    assert len(outcomes) == 1
+    assert outcomes[0].origin == "triggerflow:emit:wait-projection"
+    assert isinstance(outcomes[0].error, ValueError)
+    assert scope.pending_count == 0
+    await scope.close(timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_stage_managed_scope_close_returns_after_agently_projection_is_complete() -> None:
+    scope = StageManagedTaskScope()
+
+    async def fail() -> None:
+        raise ValueError("close projection")
+
+    scope.spawn(
+        fail(),
+        origin="triggerflow:emit:close-projection",
+        retain_outcome=True,
+    )
+
+    await scope.close(timeout=1)
+
+    outcomes = scope.take_retained_outcomes()
+    assert len(outcomes) == 1
+    assert outcomes[0].origin == "triggerflow:emit:close-projection"
+    assert isinstance(outcomes[0].error, ValueError)
+    assert scope.pending_count == 0
 
 
 @pytest.mark.asyncio

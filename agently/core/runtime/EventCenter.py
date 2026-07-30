@@ -299,14 +299,13 @@ class EventCenter:
         self._background_tasks.add(task)
         self._background_task_hooks[task] = hook_name
         self._schedule_idle_flush()
-
-        def _forget_task(done_task: asyncio.Task[Any]):
-            self._background_tasks.discard(done_task)
-            self._background_task_hooks.pop(done_task, None)
-            _consume_task_exception(done_task)
-
-        task.add_done_callback(_forget_task)
+        task.add_done_callback(self._forget_background_task)
         return task
+
+    def _forget_background_task(self, done_task: asyncio.Task[Any]):
+        self._background_tasks.discard(done_task)
+        self._background_task_hooks.pop(done_task, None)
+        _consume_task_exception(done_task)
 
     def _has_buffered_events(self) -> bool:
         return any(registration.buffer is not None and bool(registration.buffer.events) for registration in self._hooks.values())
@@ -410,6 +409,9 @@ class EventCenter:
                     await asyncio.gather(*pending, return_exceptions=True)
                 if done:
                     await asyncio.gather(*done, return_exceptions=True)
+            for task in tasks:
+                if task.done() and task in self._background_tasks:
+                    self._forget_background_task(task)
 
     def create_emitter(
         self,
