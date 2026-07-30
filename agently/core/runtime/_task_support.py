@@ -46,14 +46,12 @@ class StageManagedTaskScope:
     ) -> None:
         self._retained_tasks: set[asyncio.Task[Any]] = set()
         self._retained_outcomes: deque[ManagedTaskOutcome] = deque()
-        self._origins: dict[asyncio.Task[Any], str] = {}
         self._on_done = on_done
-        self._stage = Stage()
+        self._stage = Stage(on_adopted_done=self._handle_task_done)
         self._closed = False
         self._close_completed = False
 
-    def _handle_task_done(self, task: asyncio.Task[Any]) -> None:
-        origin = self._origins.pop(task, "<unknown>")
+    def _handle_task_done(self, task: asyncio.Task[Any], origin: str) -> None:
         retained = task in self._retained_tasks
         cancelled = task.cancelled()
         error = None if cancelled else task.exception()
@@ -103,8 +101,8 @@ class StageManagedTaskScope:
             raise StageClosedError(
                 "Cannot adopt work into a closed Agently managed-task scope"
             )
-        if task in self._origins:
-            registered_origin = self._origins[task]
+        registered_origin = self._stage.origin_for_adopted(task)
+        if registered_origin is not None:
             if registered_origin != origin:
                 raise RuntimeError(
                     f"An Agently managed task cannot have two origins: {registered_origin!r} and {origin!r}"
@@ -119,8 +117,6 @@ class StageManagedTaskScope:
         except BaseException:
             self._retained_tasks.discard(task)
             raise
-        self._origins[task] = origin
-        task.add_done_callback(self._handle_task_done)
         return task
 
     def suppress_retained_outcome(self, tasks: Iterable[asyncio.Task[Any]]) -> None:
@@ -134,18 +130,24 @@ class StageManagedTaskScope:
 
     @property
     def pending_count(self) -> int:
-        return len(self._origins)
+        return self._stage.adopted_count
 
     @property
     def pending_tasks(self) -> tuple[asyncio.Task[Any], ...]:
-        return tuple(self._origins)
+        return self._stage.adopted_tasks
 
     @property
     def pending_origins(self) -> tuple[str, ...]:
-        return tuple(sorted(self._origins.values()))
+        return tuple(
+            sorted(
+                origin
+                for task in self._stage.adopted_tasks
+                if (origin := self._stage.origin_for_adopted(task)) is not None
+            )
+        )
 
     def origin_for(self, task: asyncio.Task[Any]) -> str | None:
-        return self._origins.get(task)
+        return self._stage.origin_for_adopted(task)
 
     async def wait_settled(self, timeout: float | None = None) -> None:
         await self._stage.async_wait_settled(timeout=timeout)

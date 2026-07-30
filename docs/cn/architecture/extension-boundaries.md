@@ -52,6 +52,9 @@ Core 不应该直接变成能力目录。例如，`ExecutionResourceManager` 应
 Agently-Stage 在这个边界上属于私有机制依赖：TriggerFlow 把自己在 caller loop
 上创建的 task 纳入 Stage structured scope，由 Stage 支撑 ownership、取消传递、
 origin 诊断与 settlement；Stage 在首个任务进入时才 lazy 选择 caller loop。
+Stage 是唯一的实时 task/origin registry，只提供只读 adopted-task inventory
+和同步 completion observation seam；TriggerFlow 的私有 adapter 继续拥有业务
+错误保留与生命周期策略，不再安装第二套 task registry 和 done callback。
 Tunnel 支撑 TriggerFlow 的进程内 execution stream 传输。Event Center 保留原生
 后台任务机制，因为 Stage-backed 候选在热路径上存在可测量的额外开销。
 EventCenter、RuntimeEvent、SignalNet、

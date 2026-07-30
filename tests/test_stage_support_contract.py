@@ -51,6 +51,7 @@ def test_project_declares_supported_stage_dependency() -> None:
 @pytest.mark.asyncio
 async def test_stage_managed_scope_preserves_loop_origin_and_retained_error() -> None:
     scope = StageManagedTaskScope()
+    assert not hasattr(scope, "_origins")
     caller_loop = asyncio.get_running_loop()
 
     async def fail() -> None:

@@ -57,7 +57,11 @@ repo".
 Agently-Stage is a private mechanism dependency at this boundary. TriggerFlow
 attaches its caller-loop tasks to a Stage structured scope for ownership,
 cancellation delivery, origin diagnostics, and settlement; Stage selects the
-caller loop lazily when the first task enters. Stage's Tunnel supports
+caller loop lazily when the first task enters. Stage remains the single live
+task/origin registry and exposes only read-only adopted-task inventory plus a
+synchronous completion observation seam; TriggerFlow's private adapter keeps
+business error retention and lifecycle policy without installing a second task
+registry or done callback. Stage's Tunnel supports
 TriggerFlow's process-local execution stream transport. EventCenter keeps its
 native background-task mechanism because the Stage-backed candidate had a
 measurable hot-path cost. EventCenter, RuntimeEvent, SignalNet,
