@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Literal, Type, TYPE_CHECKING, TypeVar, Generic, cast
 
 from agently.builtins.hookers.RuntimeConsoleSinkHooker import coerce_runtime_log_profile
-from agently._version import version as package_version
+from agently._version import __version__ as package_version
 from agently.utils import DeprecationWarnings, LazyImport, Settings, create_logger
 from agently.utils.RequestScheduler import RequestScheduler
 from agently.core import (
@@ -258,7 +258,7 @@ A = TypeVar("A", bound=Agent)
 
 
 class AgentlyMain(Generic[A]):
-    version = package_version
+    __version__ = package_version
 
     def __init__(self, AgentType: Type[A] = Agent):
         self.settings = settings

@@ -71,16 +71,18 @@ Agently's internal call-shape bridges use Agently-Stage `StageCallBridge`.
 delegates to the same bridge; new framework code should not use it as a task
 lifecycle owner.
 
-## Package version inspection
+## Package version inspection known issue
 
-The package and the default `Agently` facade expose the same release version:
+4.1.4.5 mistakenly exposed the non-standard `agently.version` and
+`Agently.version` attributes. Do not depend on them. The 4.1.4.6 development
+line removes those attributes and exposes only the standard spelling:
 
 ```python
 import agently
 from agently import Agently
 
-assert agently.version == "4.1.4.5"
-assert Agently.version == agently.version
+assert agently.__version__ == "4.1.4.6"
+assert Agently.__version__ == agently.__version__
 ```
 
 ## Performance characterization
@@ -107,7 +109,7 @@ makes provider-bound model requests faster.
 | Direct long output | Added opt-in, append-only continuation after an observed length/incomplete terminal | Call `.ensure_long_output()` before starting a direct `AgentExecution` | Additive and disabled by default; not compatible with explicit AgentTask strategy | Deterministic protocol suite, real DeepSeek structured run, public example |
 | TriggerFlow task lifecycle | A real Agently-Stage 0.3.5 instance directly owns execution-managed local tasks | Keep using existing TriggerFlow execution APIs; no Stage object is exposed publicly by Agently | Internal owner change with bounded measured overhead; EventCenter remains native | Stage ownership/settlement tests, full suite, performance A/B |
 | Sync/async bridge | Internal bridges delegate to `StageCallBridge`; `FunctionShifter` remains a deprecated facade | New framework code should use Stage bridges directly | Existing imports remain available | FunctionShifter compatibility tests |
-| Package metadata | Added `agently.version` and `Agently.version` | Read either attribute for the installed Agently release version | Additive | Source/package metadata consistency and installed-wheel smoke |
+| Package metadata | 4.1.4.5 mistakenly added `agently.version` and `Agently.version`; the 4.1.4.6 development line replaces them with `__version__` | Use `agently.__version__` or `Agently.__version__` on 4.1.4.6+ | Breaking correction; the mistaken attributes are not retained | Source/package metadata consistency and absence tests |
 
 ## Compatibility
 

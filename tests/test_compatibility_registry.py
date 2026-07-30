@@ -59,11 +59,14 @@ def test_companion_views_still_derive_from_released_manifest() -> None:
     assert skills["authoring_protocol"] == current["companions"]["skills"]["authoring_protocol"]
 
 
-def test_in_development_manifest_declares_4_1_4_5_owner_boundaries() -> None:
+def test_in_development_manifest_declares_4_1_4_6_owner_boundaries() -> None:
     manifest = _development_manifest()
 
-    assert manifest["target_version"] == "4.1.4.5"
-    assert manifest["release_train"] == "2026-07-4.1.4.5-dev"
+    assert manifest["target_version"] == "4.1.4.6"
+    assert manifest["release_train"] == "2026-07-4.1.4.6-dev"
+    assert "agently.__version__" in manifest["notes"]
+    assert "agently.version" in manifest["notes"]
+    assert "removed rather than retained as compatibility aliases" in manifest["notes"]
     assert "ensure_long_output()" in manifest["notes"]
     assert "TriggerFlow-visible continuation" in manifest["notes"]
     assert "TaskWorkspace owns staged file truth" in manifest["notes"]

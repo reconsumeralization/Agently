@@ -64,16 +64,17 @@ Agently 内部的调用形态桥接使用 Agently-Stage `StageCallBridge`。
 `FunctionShifter` 仍可导入，但只作为 deprecated 兼容 facade，并委托给同一个
 bridge；新的框架代码不应让它负责 task 生命周期。
 
-## 包版本查询
+## 包版本查询已知问题
 
-包和默认 `Agently` facade 暴露相同的发布版本：
+4.1.4.5 错误暴露了非标准的 `agently.version` 和 `Agently.version` 属性，
+请勿依赖。4.1.4.6 开发线会删除这些属性，只保留标准写法：
 
 ```python
 import agently
 from agently import Agently
 
-assert agently.version == "4.1.4.5"
-assert Agently.version == agently.version
+assert agently.__version__ == "4.1.4.6"
+assert Agently.__version__ == agently.__version__
 ```
 
 ## 性能特征
@@ -99,7 +100,7 @@ variant 共记录 18 个样本：
 | Direct 长输出 | 在观察到 length/incomplete terminal 后增加可选的 append-only continuation | 在 direct `AgentExecution` 启动前调用 `.ensure_long_output()` | 增量能力且默认关闭；不能与显式 AgentTask strategy 同时使用 | 确定性协议测试、真实 DeepSeek 结构化运行、公开示例 |
 | TriggerFlow 任务生命周期 | 由真实 Agently-Stage 0.3.5 实例直接持有 execution-managed 本地任务 | 继续使用现有 TriggerFlow execution API；Agently 不公开暴露 Stage 对象 | 内部 owner 变化且实测开销受控；EventCenter 保持原生实现 | Stage ownership/settlement 测试、全量测试、性能 A/B |
 | 同步/异步桥接 | 内部 bridge 委托到 `StageCallBridge`；`FunctionShifter` 保留为 deprecated facade | 新框架代码直接使用 Stage bridge | 现有导入仍然可用 | FunctionShifter 兼容测试 |
-| 包元数据 | 增加 `agently.version` 和 `Agently.version` | 使用任一属性读取当前安装的 Agently 发布版本 | 增量能力 | 源码/包元数据一致性测试和安装 wheel smoke |
+| 包元数据 | 4.1.4.5 错误增加了 `agently.version` 和 `Agently.version`；4.1.4.6 开发线用 `__version__` 纠正 | 4.1.4.6+ 使用 `agently.__version__` 或 `Agently.__version__` | 破坏式纠正；不保留错误属性 | 源码/包元数据一致性测试与不存在性测试 |
 
 ## 兼容性
 

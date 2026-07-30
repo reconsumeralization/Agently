@@ -1,5 +1,9 @@
 # Development
 
+当前开发目标：`4.1.4.6`。该版本把包版本入口纠正为
+`agently.__version__` 和 `Agently.__version__`，并删除误引入的非标准
+`version` 属性。
+
 建议按这个顺序读：
 
 1. [Coding Agents](coding-agents.md)：用 Agently-Skills companion repo 帮 Codex、Claude Code、Cursor 等工具获得当前 Agently 指引。

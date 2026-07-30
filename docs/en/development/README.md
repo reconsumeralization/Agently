@@ -1,5 +1,9 @@
 # Development
 
+Current development target: `4.1.4.6`. This line corrects the package version
+surface to `agently.__version__` and `Agently.__version__`; the mistakenly
+introduced non-standard `version` attributes are removed.
+
 Read in this order:
 
 1. [Coding Agents](coding-agents.md): using the Agently-Skills companion repo with Codex, Claude Code, Cursor, and similar tools.
