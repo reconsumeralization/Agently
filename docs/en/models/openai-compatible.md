@@ -47,6 +47,27 @@ Agently.set_settings("OpenAIResponsesCompatible", {
 
 `OpenAIResponsesCompatible` is a sibling of `OpenAICompatible`; pick whichever matches the protocol your endpoint exposes. Both plugins directly implement `ModelRequester`; neither plugin inherits from the other.
 
+Responses reasoning options pass through `request_options`, for example:
+
+```python
+Agently.set_settings("OpenAIResponsesCompatible.request_options", {
+    "reasoning": {"effort": "low", "summary": "auto"},
+})
+```
+
+When the endpoint returns reasoning summaries, the plugin maps
+`response.reasoning_summary_text.delta` to Agently `reasoning_delta` events
+and the final `reasoning` output item's `summary_text` parts to
+`reasoning_done`. The complete Responses object remains available through
+`original_done`. Terminal `response.completed` and `response.incomplete`
+events close the provider stream while allowing Agently's final lifecycle
+status to propagate.
+
+DeepSeek currently exposes Chat Completions and Anthropic Messages
+compatibility, not a Responses endpoint. Use one of those two requesters for
+DeepSeek; this Responses mapping applies to OpenAI and compatible gateways
+that actually expose `/responses`.
+
 ## What "OpenAI-compatible" actually covers
 
 A provider qualifies as OpenAI-compatible when its endpoint:

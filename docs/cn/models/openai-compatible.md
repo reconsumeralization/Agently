@@ -47,6 +47,25 @@ Agently.set_settings("OpenAIResponsesCompatible", {
 
 `OpenAIResponsesCompatible` 是 `OpenAICompatible` 的兄弟；按你端点暴露的协议选。两个插件都直接实现 `ModelRequester`，彼此不继承。
 
+Responses 的 reasoning 配置会通过 `request_options` 原样传递，例如：
+
+```python
+Agently.set_settings("OpenAIResponsesCompatible.request_options", {
+    "reasoning": {"effort": "low", "summary": "auto"},
+})
+```
+
+当端点返回 reasoning summary 时，插件会把
+`response.reasoning_summary_text.delta` 映射为 Agently
+`reasoning_delta`，并把最终 `reasoning` output item 中的
+`summary_text` 合并为 `reasoning_done`；完整 Responses 对象仍通过
+`original_done` 保留。`response.completed` 与 `response.incomplete`
+终态事件会结束 provider stream，同时继续传递 Agently 的最终生命周期状态。
+
+DeepSeek 当前提供 Chat Completions 与 Anthropic Messages 兼容入口，没有
+Responses endpoint。DeepSeek 应选择前两种 requester；这里的 Responses 映射适用于
+OpenAI 以及确实暴露 `/responses` 的兼容网关。
+
 ## 「OpenAI 兼容」实际覆盖什么
 
 provider 满足 OpenAI 兼容当其端点：

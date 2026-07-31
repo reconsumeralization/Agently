@@ -262,6 +262,8 @@ class OpenAIResponsesCompatibleTransportMixin:
                                 continue
                             stream_started = True
                             yield sse.event, sse.data
+                            if sse.event in {"response.completed", "response.incomplete"}:
+                                break
                         break
                     except SSEError:
                         response = await client.post(
