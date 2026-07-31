@@ -1,9 +1,11 @@
 import asyncio
 import json
+from contextlib import asynccontextmanager
 
 import pytest
+import stamina
 
-from httpx import RemoteProtocolError
+from httpx import ReadError, RemoteProtocolError
 from httpx_sse import SSEError
 
 from typing import Any, cast
@@ -16,6 +18,9 @@ from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
     OpenAICompatible,
 )
 import agently.builtins.plugins.ModelRequester.OpenAICompatible.plugin as openai_module
+import agently.builtins.plugins.ModelRequester.OpenAICompatible.modules.transport as openai_transport_module
+import agently.builtins.plugins.ModelRequester.AnthropicCompatible.modules.transport as anthropic_transport_module
+import agently.builtins.plugins.ModelRequester.OpenAIResponsesCompatible.modules.transport as responses_transport_module
 from collections import Counter
 from types import SimpleNamespace
 
@@ -68,6 +73,195 @@ def _install_sse_source(monkeypatch: pytest.MonkeyPatch, source_factory):
         "_aiter_sse_with_retry",
         fake_aiter_sse_with_retry,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_retry",
+    [False, {"max_attempts": 1}],
+)
+async def test_request_retry_disabled_owns_physical_sse_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    request_retry,
+):
+    connections = 0
+
+    class FailingEventSource:
+        async def aiter_sse(self):
+            raise ReadError("dropped SSE connection")
+            yield
+
+    @asynccontextmanager
+    async def fake_aconnect_sse(*_args, **_kwargs):
+        nonlocal connections
+        connections += 1
+        yield FailingEventSource()
+
+    monkeypatch.setattr(openai_module, "AsyncClient", _FakeStreamingAsyncClient)
+    monkeypatch.setattr(
+        openai_transport_module,
+        "aconnect_sse",
+        fake_aconnect_sse,
+    )
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": True,
+            "request_retry": request_retry,
+        },
+        {"input": "hello"},
+    )
+
+    with stamina.set_testing(True, attempts=2):
+        events = [
+            item
+            async for item in plugin.request_model(
+                plugin.generate_request_data()
+            )
+        ]
+
+    assert connections == 1
+    assert any(
+        event == "error" and isinstance(payload, ReadError)
+        for event, payload in events
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport_module", "mixin_type"),
+    [
+        (
+            openai_transport_module,
+            openai_transport_module.OpenAICompatibleTransportMixin,
+        ),
+        (
+            anthropic_transport_module,
+            anthropic_transport_module.AnthropicCompatibleTransportMixin,
+        ),
+        (
+            responses_transport_module,
+            responses_transport_module.OpenAIResponsesCompatibleTransportMixin,
+        ),
+    ],
+)
+async def test_compatible_sse_transports_do_not_hide_physical_reconnects(
+    monkeypatch: pytest.MonkeyPatch,
+    transport_module,
+    mixin_type,
+):
+    connections = 0
+
+    class FailingEventSource:
+        async def aiter_sse(self):
+            raise ReadError("dropped SSE connection")
+            yield
+
+    @asynccontextmanager
+    async def fake_aconnect_sse(*_args, **_kwargs):
+        nonlocal connections
+        connections += 1
+        yield FailingEventSource()
+
+    monkeypatch.setattr(transport_module, "aconnect_sse", fake_aconnect_sse)
+    generator = await mixin_type()._aiter_sse_with_retry(
+        object(),
+        "POST",
+        "https://example.invalid/v1/stream",
+        headers={},
+        json={},
+    )
+
+    with stamina.set_testing(True, attempts=2):
+        with pytest.raises(ReadError, match="dropped SSE connection"):
+            await anext(generator)
+
+    assert connections == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("after_output", "expected_connections", "expected_retry"),
+    [(False, 1, False), (True, 2, True)],
+)
+async def test_request_retry_after_output_owns_physical_sse_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    after_output: bool,
+    expected_connections: int,
+    expected_retry: bool,
+):
+    connections = 0
+
+    class EventSource:
+        def __init__(self, connection_index: int):
+            self.connection_index = connection_index
+
+        async def aiter_sse(self):
+            if self.connection_index == 1:
+                yield _FakeSSE(
+                    '{"choices":[{"delta":{"content":"partial"}}]}'
+                )
+                raise ReadError("dropped SSE connection after output")
+            yield _FakeSSE(
+                '{"choices":[{"delta":{"content":"replacement"}}]}'
+            )
+            yield _FakeSSE("[DONE]")
+
+    @asynccontextmanager
+    async def fake_aconnect_sse(*_args, **_kwargs):
+        nonlocal connections
+        connections += 1
+        yield EventSource(connections)
+
+    monkeypatch.setattr(openai_module, "AsyncClient", _FakeStreamingAsyncClient)
+    monkeypatch.setattr(
+        openai_transport_module,
+        "aconnect_sse",
+        fake_aconnect_sse,
+    )
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "stream": True,
+            "request_retry": {
+                "max_attempts": 2,
+                "after_output": after_output,
+            },
+        },
+        {"input": "hello"},
+    )
+
+    events = [
+        item
+        async for item in plugin.request_model(
+            plugin.generate_request_data()
+        )
+    ]
+
+    retry_statuses = [
+        payload
+        for event, payload in events
+        if event == "status" and payload.get("retry") is True
+    ]
+    assert connections == expected_connections
+    assert bool(retry_statuses) is expected_retry
+    if expected_retry:
+        assert retry_statuses == [
+            {
+                "status": "failed",
+                "attempt_index": 1,
+                "retry": True,
+                "next_attempt_index": 2,
+                "reason": "dropped SSE connection after output",
+                "error_type": "ReadError",
+            }
+        ]
+        assert events[-1] == (
+            "status",
+            {"status": "completed", "attempt_index": 2, "retry": False},
+        )
 
 
 def generate_request(config: dict, prompt_values: dict | None = None):

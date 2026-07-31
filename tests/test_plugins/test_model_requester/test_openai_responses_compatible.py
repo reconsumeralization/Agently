@@ -3,6 +3,7 @@ import json
 from typing import Any
 
 import pytest
+from httpx import ReadError
 from httpx_sse import SSEError
 
 from types import SimpleNamespace
@@ -29,6 +30,51 @@ def build_plugin(config: dict, prompt_values: dict | None = None):
 
 def generate_request(config: dict, prompt_values: dict | None = None):
     return build_plugin(config, prompt_values).generate_request_data().model_dump()
+
+
+@pytest.mark.asyncio
+async def test_request_retry_uses_public_attempt_boundary(monkeypatch):
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "m1",
+            "request_retry": {"max_attempts": 2, "after_output": True},
+        },
+        {"input": "hello"},
+    )
+    calls = 0
+
+    async def fake_legacy(_request_data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield "response.output_text.delta", '{"delta":"partial"}'
+            yield "error", ReadError("responses SSE disconnected")
+            return
+        yield "response.completed", '{"response":{"status":"completed"}}'
+
+    monkeypatch.setattr(plugin, "_request_model_legacy", fake_legacy)
+    events = [
+        item
+        async for item in plugin.request_model(plugin.generate_request_data())
+    ]
+
+    assert calls == 2
+    assert events[1] == (
+        "status",
+        {
+            "status": "failed",
+            "attempt_index": 1,
+            "retry": True,
+            "next_attempt_index": 2,
+            "reason": "responses SSE disconnected",
+            "error_type": "ReadError",
+        },
+    )
+    assert events[-1] == (
+        "status",
+        {"status": "completed", "attempt_index": 2, "retry": False},
+    )
 
 
 async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict, prompt_values: dict | None = None):
@@ -785,6 +831,7 @@ async def test_first_token_timeout_returns_timeout_error_event(monkeypatch: pyte
             "base_url": "https://api.example.com/v1",
             "model": "m1",
             "stream": True,
+            "request_retry": {"max_attempts": 1},
             "timeout": {"connect": 1.0, "read": 0.01, "write": 2.0, "pool": 3.0},
         },
         {"input": "hello"},

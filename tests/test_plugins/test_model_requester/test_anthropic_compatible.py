@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from httpx import ReadError
 from httpx_sse import SSEError
 
 from agently import Agently
@@ -28,6 +29,51 @@ def build_plugin(config: dict, prompt_values: dict | None = None):
 
 def generate_request(config: dict, prompt_values: dict | None = None):
     return build_plugin(config, prompt_values).generate_request_data().model_dump()
+
+
+@pytest.mark.asyncio
+async def test_request_retry_uses_public_attempt_boundary(monkeypatch):
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.deepseek.com/anthropic",
+            "model": "deepseek-v4-flash",
+            "request_retry": {"max_attempts": 2, "after_output": True},
+        },
+        {"input": "hello"},
+    )
+    calls = 0
+
+    async def fake_legacy(_request_data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield "content_block_delta", '{"delta":{"text":"partial"}}'
+            yield "error", ReadError("anthropic SSE disconnected")
+            return
+        yield "message_stop", '{"type":"message_stop"}'
+
+    monkeypatch.setattr(plugin, "_request_model_legacy", fake_legacy)
+    events = [
+        item
+        async for item in plugin.request_model(plugin.generate_request_data())
+    ]
+
+    assert calls == 2
+    assert events[1] == (
+        "status",
+        {
+            "status": "failed",
+            "attempt_index": 1,
+            "retry": True,
+            "next_attempt_index": 2,
+            "reason": "anthropic SSE disconnected",
+            "error_type": "ReadError",
+        },
+    )
+    assert events[-1] == (
+        "status",
+        {"status": "completed", "attempt_index": 2, "retry": False},
+    )
 
 
 async def capture_request_headers(monkeypatch: pytest.MonkeyPatch, config: dict, prompt_values: dict | None = None):

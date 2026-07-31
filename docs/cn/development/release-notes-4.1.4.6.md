@@ -11,6 +11,8 @@ Agently 4.1.4.6 是基于 4.1.4.5 的聚焦兼容性补丁：
 - 通过标准 `__version__` 名称公开包版本；
 - 统一 OpenAI-compatible Chat Completions、Anthropic-compatible Messages 和
   Responses adapter 的生成 reasoning 生命周期；
+- 让公开 compatible-request 重试策略在 Chat Completions、Anthropic Messages 和
+  Responses 中独占物理 SSE 重连；
 - live runtime resource 穿过 TriggerFlow sub-flow 边界时保持对象身份。
 
 [#342](https://github.com/AgentEra/Agently/issues/342) 管理的 sandbox provider
@@ -60,6 +62,17 @@ block、signature、tool-use continuation，以及空或非空的 terminal reaso
 
 这是 adapter 层的通用规范化，不是 DeepSeek 特例；使用相应兼容协议的 provider
 会获得相同的生命周期行为。
+
+## 唯一、可观测的 SSE 重试生命周期
+
+`OpenAICompatible`、`AnthropicCompatible` 和 `OpenAIResponsesCompatible` 的
+`request_retry` 现在管理每一次物理流式请求。transport 不再在一个公开 attempt 内
+额外执行 stamina 重连。因此 `request_retry=False` 和 `max_attempts=1` 都最多只建立
+一次物理 SSE 连接；`after_output=False` 也会阻止 partial 输出后的重放。启用重放时，
+每个替换连接都对应公开递增的 `attempt_index` 和 retry boundary。
+
+移除内部重连也同时移除了异步事件循环中的同步 SSE retry-delay sleep。`[DONE]`
+仍是逻辑终止标记；`[DONE]` 前断流仍作为 transport failure 交给公开策略处理。
 
 ## TriggerFlow sub-flow runtime resource
 

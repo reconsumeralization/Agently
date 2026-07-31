@@ -129,6 +129,11 @@ request. Core `model.requester.error` RuntimeEvents retain structured
 `payload.request_data` for protected cold diagnostics, while the request stream
 propagates the provider error once through its normal terminal path.
 
+The three compatible requesters also share one public transport-retry
+lifecycle. `request_retry=False` or `max_attempts=1` means one physical SSE
+connection; enabled replays receive public, incrementing attempt indexes and
+retry boundaries. No requester performs a hidden inner SSE reconnect.
+
 ## Where the plugin code lives
 
 - [agently/builtins/plugins/ModelRequester/OpenAICompatible/](../../../agently/builtins/plugins/ModelRequester/OpenAICompatible/)

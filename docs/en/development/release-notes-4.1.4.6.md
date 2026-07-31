@@ -11,6 +11,8 @@ Agently 4.1.4.6 is a focused compatibility patch over 4.1.4.5. It:
 - exposes the package version through the standard `__version__` spelling;
 - normalizes generated reasoning across OpenAI-compatible Chat Completions,
   Anthropic-compatible Messages, and Responses adapters;
+- makes the public compatible-request retry policy the sole owner of physical
+  SSE reconnection across Chat Completions, Anthropic Messages, and Responses;
 - keeps live runtime resources live when they cross a TriggerFlow sub-flow
   boundary.
 
@@ -63,6 +65,21 @@ completed-output reasoning items without exposing request configuration such as
 
 This is adapter-level normalization, not a DeepSeek-only branch. Providers that
 use the corresponding compatible protocol inherit the same lifecycle behavior.
+
+## One observable SSE retry lifecycle
+
+`request_retry` now owns every physical streaming request across
+`OpenAICompatible`, `AnthropicCompatible`, and `OpenAIResponsesCompatible`.
+The transports no longer perform an additional stamina reconnect inside one
+public attempt. Therefore `request_retry=False` and `max_attempts=1` both make
+at most one physical SSE connection; `after_output=False` also prevents replay
+after partial output. When replay is enabled, each replacement connection has
+the public, incrementing `attempt_index` and retry boundary.
+
+The removed inner reconnect also removes its synchronous SSE retry-delay sleep
+from the async event loop. `[DONE]` remains the logical terminal marker; a
+disconnect before `[DONE]` remains a transport failure governed by the public
+policy.
 
 ## TriggerFlow sub-flow runtime resources
 

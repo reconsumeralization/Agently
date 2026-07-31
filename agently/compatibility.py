@@ -20,8 +20,9 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
  'released_at': '2026-07-31',
  'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.6. This patch exposes the standard '
           'agently.__version__ and Agently.__version__ surfaces, normalizes reasoning lifecycle events across '
-          'OpenAI-compatible Chat Completions, Anthropic-compatible Messages, and Responses adapters, and preserves '
-          'live runtime-resource identity across TriggerFlow sub-flow boundaries.',
+          'OpenAI-compatible Chat Completions, Anthropic-compatible Messages, and Responses adapters, makes the '
+          'public request retry lifecycle the sole owner of physical SSE connections across all three compatible '
+          'adapters, and preserves live runtime-resource identity across TriggerFlow sub-flow boundaries.',
  'runtime_support': {'agently_stage': {'version_specifier': '>=0.3.5,<0.4.0',
                                        'public_runtime_surface': False,
                                        'task_mechanism_owners': ['TriggerFlowExecution'],

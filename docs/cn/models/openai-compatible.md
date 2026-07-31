@@ -112,6 +112,8 @@ agent.set_settings("OpenAICompatible", {"model": "${ENV.OPENAI_MODEL_FAST}"})
 发生的断流，因此 stream 消费者必须处理保留的 `$status` 记录、处理纯文本 delta 的
 `"<$retry>{reason}</$retry>"` 标记，或只读取最终结果。设置
 `"request_retry": {"max_attempts": 1}` 或 `"request_retry": False` 可以关闭这次重放。
+这也会关闭物理 SSE 重连：每次物理连接都由同一套公开 attempt 生命周期管理，transport
+不会执行未报告的内部重连。
 只有当消费者无法在 retry 边界清空临时输出时，才设置 `request_retry.after_output=False`：
 
 ```python
