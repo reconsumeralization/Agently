@@ -154,6 +154,28 @@ The generic OpenAI-compatible adapter emits reasoning through
 `reasoning_delta` / `reasoning_done` specific events and preserves
 `reasoning_content` in `original_done`.
 
+DeepSeek V4 also exposes an Anthropic Messages endpoint. Activate the separate
+Anthropic-compatible plugin when that protocol is required:
+
+```python
+Agently.set_settings("plugins.ModelRequester.activate", "AnthropicCompatible")
+Agently.set_settings("AnthropicCompatible", {
+    "base_url": "https://api.deepseek.com/anthropic",
+    "model": "deepseek-v4-flash",
+    "auth": {"api_key": "${ENV.DEEPSEEK_API_KEY}"},
+    "request_options": {
+        "thinking": {"type": "enabled"},
+        "output_config": {"effort": "high"},
+    },
+})
+```
+
+This path emits Anthropic `thinking` blocks as the same Agently
+`reasoning_delta` / `reasoning_done` events and preserves the original block
+and signature for tool-call continuation. With DeepSeek thinking enabled, use
+automatic tool selection; the current endpoint rejects a forced named
+`tool_choice`.
+
 Built-in provider helpers live in `agently.types.settings`. Third-party plugins
 can expose their own settings classes from their plugin package and register
 them through the plugin's `SETTINGS_SCHEMAS`.
