@@ -257,6 +257,8 @@ class AnthropicCompatibleTransportMixin:
                         async for sse in sse_generator:
                             stream_started = True
                             yield sse.event, sse.data
+                            if sse.event == "message_stop":
+                                break
                         break
                     except SSEError:
                         response = await client.post(
