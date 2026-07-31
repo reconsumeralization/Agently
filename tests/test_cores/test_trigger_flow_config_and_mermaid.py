@@ -530,6 +530,105 @@ async def test_trigger_flow_sub_flow_capture_and_write_back_round_trip():
 
 
 @pytest.mark.asyncio
+async def test_trigger_flow_sub_flow_resource_capture_preserves_identity_without_deepcopy():
+    class LiveResource:
+        def __init__(self):
+            self.deepcopy_calls = 0
+
+        def __deepcopy__(self, memo):
+            _ = memo
+            self.deepcopy_calls += 1
+            raise RuntimeError("live resources must not be deep-copied")
+
+    resource = LiveResource()
+    observed_resources = []
+    child_flow = TriggerFlow(name="child-resource-identity-flow")
+
+    async def child_collect(data: TriggerFlowRuntimeData):
+        observed_resources.extend(
+            [
+                data.require_resource("primary_service"),
+                data.require_resource("secondary_service"),
+            ]
+        )
+
+    child_flow.to(child_collect)
+    parent_flow = TriggerFlow(name="parent-resource-identity-flow")
+    parent_flow.to_sub_flow(
+        child_flow,
+        capture={
+            "resources": {
+                "primary_service": "resources.parent_service",
+                "secondary_service": "resources.parent_service",
+            },
+        },
+    )
+    execution = parent_flow.create_execution(
+        auto_close=False,
+        runtime_resources={"parent_service": resource},
+    )
+
+    await execution.async_start("start")
+    await execution.async_close()
+
+    assert observed_resources == [resource, resource]
+    assert resource.deepcopy_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_sub_flow_template_resources_preserve_identity_without_deepcopy():
+    class LiveResource:
+        def __init__(self):
+            self.deepcopy_calls = 0
+
+        def __deepcopy__(self, memo):
+            _ = memo
+            self.deepcopy_calls += 1
+            raise RuntimeError("live resources must not be deep-copied")
+
+    resource = LiveResource()
+    observed_resources = []
+    child_flow = TriggerFlow(name="child-template-resource-flow")
+    child_flow.update_runtime_resources(service=resource)
+
+    async def child_collect(data: TriggerFlowRuntimeData):
+        observed_resources.append(data.require_resource("service"))
+
+    child_flow.to(child_collect)
+    parent_flow = TriggerFlow(name="parent-template-resource-flow")
+    parent_flow.to_sub_flow(child_flow)
+    execution = parent_flow.create_execution(auto_close=False)
+
+    await execution.async_start("start")
+    await execution.async_close()
+
+    assert observed_resources == [resource]
+    assert resource.deepcopy_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_trigger_flow_sub_flow_non_resource_capture_remains_isolated():
+    parent_value = {"items": ["original"]}
+    child_flow = TriggerFlow(name="child-value-isolation-flow")
+
+    async def child_mutate(data: TriggerFlowRuntimeData):
+        data.value["items"].append("child")
+
+    child_flow.to(child_mutate)
+    parent_flow = TriggerFlow(name="parent-value-isolation-flow")
+    parent_flow.to_sub_flow(
+        child_flow,
+        capture={"input": "value"},
+    )
+    execution = parent_flow.create_execution(auto_close=False)
+
+    await execution.async_start(parent_value)
+    await execution.async_close()
+
+    assert parent_value == {"items": ["original"]}
+
+
+@pytest.mark.asyncio
 async def test_trigger_flow_sub_flow_write_back_can_read_close_snapshot_state():
     child_flow = TriggerFlow(name="child-close-snapshot-flow")
 

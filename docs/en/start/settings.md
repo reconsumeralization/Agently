@@ -22,7 +22,10 @@ in a fluent Agent chain:
 ```python
 agent = (
     Agently.create_agent()
-    .set_settings("OpenAICompatible", {"model": "deepseek-chat"})
+    .set_settings("OpenAICompatible", {
+        "model": "deepseek-v4-flash",
+        "request_options": {"thinking": {"type": "disabled"}},
+    })
     .set_settings("debug", True)
 )
 ```
@@ -70,7 +73,8 @@ Agently.set_settings(
     OpenAICompatibleSettings(
         base_url="https://api.deepseek.com/v1",
         api_key="${ENV.DEEPSEEK_API_KEY}",
-        model="deepseek-chat",
+        model="deepseek-v4-flash",
+        request_options={"thinking": {"type": "disabled"}},
     )
 )
 ```
@@ -81,7 +85,8 @@ The old form stays valid and is the right choice for generated config files:
 Agently.set_settings("OpenAICompatible", {
     "base_url": "https://api.deepseek.com/v1",
     "api_key": "${ENV.DEEPSEEK_API_KEY}",
-    "model": "deepseek-chat",
+    "model": "deepseek-v4-flash",
+    "request_options": {"thinking": {"type": "disabled"}},
 })
 ```
 

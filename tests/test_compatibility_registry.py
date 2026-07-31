@@ -33,11 +33,11 @@ def test_current_release_manifest_matches_registry_release_file() -> None:
     assert current_manifest["release_train"] == release_manifest["release_train"]
 
 
-def test_4_1_4_5_release_manifest_pins_stage_native_runtime_contract() -> None:
+def test_4_1_4_6_release_manifest_pins_stage_native_runtime_contract() -> None:
     manifest = get_current_release_manifest()
 
-    assert CURRENT_FRAMEWORK_VERSION == "4.1.4.5"
-    assert CURRENT_RELEASE_TRAIN == "2026-07-4.1.4.5"
+    assert CURRENT_FRAMEWORK_VERSION == "4.1.4.6"
+    assert CURRENT_RELEASE_TRAIN == "2026-07-4.1.4.6"
     stage_support = manifest["runtime_support"]["agently_stage"]
     assert stage_support["version_specifier"] == ">=0.3.5,<0.4.0"
     assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
@@ -59,11 +59,14 @@ def test_companion_views_still_derive_from_released_manifest() -> None:
     assert skills["authoring_protocol"] == current["companions"]["skills"]["authoring_protocol"]
 
 
-def test_in_development_manifest_declares_4_1_4_5_owner_boundaries() -> None:
+def test_in_development_manifest_declares_4_1_4_6_owner_boundaries() -> None:
     manifest = _development_manifest()
 
-    assert manifest["target_version"] == "4.1.4.5"
-    assert manifest["release_train"] == "2026-07-4.1.4.5-dev"
+    assert manifest["target_version"] == "4.1.4.6"
+    assert manifest["release_train"] == "2026-07-4.1.4.6-dev"
+    assert "agently.__version__" in manifest["notes"]
+    assert "agently.version" in manifest["notes"]
+    assert "removed rather than retained as compatibility aliases" in manifest["notes"]
     assert "ensure_long_output()" in manifest["notes"]
     assert "TriggerFlow-visible continuation" in manifest["notes"]
     assert "TaskWorkspace owns staged file truth" in manifest["notes"]
