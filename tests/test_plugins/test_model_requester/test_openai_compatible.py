@@ -405,6 +405,70 @@ async def test_broadcast_response_maps_non_stream_chat_message_content():
 
 
 @pytest.mark.asyncio
+async def test_broadcast_response_maps_non_stream_chat_reasoning_content():
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "reasoning-model",
+            "stream": False,
+        },
+        {"input": "hello"},
+    )
+
+    async def response_generator():
+        yield "message", json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "reasoning_content": "model reasoning",
+                            "content": "done text",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        )
+        yield "message", "[DONE]"
+
+    events = [item async for item in plugin.broadcast_response(response_generator())]
+
+    assert ("reasoning_done", "model reasoning") in events
+    original_done = next(payload for event, payload in events if event == "original_done")
+    assert original_done["choices"][0]["message"]["reasoning_content"] == "model reasoning"
+
+
+@pytest.mark.asyncio
+async def test_broadcast_response_preserves_streamed_reasoning_in_original_done():
+    plugin = build_plugin(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "reasoning-model",
+            "stream": True,
+        },
+        {"input": "hello"},
+    )
+
+    async def response_generator():
+        yield "message", '{"choices":[{"delta":{"role":"assistant","reasoning_content":"model "}}]}'
+        yield "message", '{"choices":[{"delta":{"reasoning_content":"reasoning"}}]}'
+        yield "message", '{"choices":[{"delta":{"content":"done text"}}]}'
+        yield "message", '{"choices":[{"delta":{},"finish_reason":"stop"}]}'
+        yield "message", "[DONE]"
+
+    events = [item async for item in plugin.broadcast_response(response_generator())]
+
+    assert ("reasoning_done", "model reasoning") in events
+    original_done = next(payload for event, payload in events if event == "original_done")
+    assert original_done["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": "done text",
+        "reasoning_content": "model reasoning",
+    }
+
+
+@pytest.mark.asyncio
 async def test_broadcast_response_preserves_core_status_record():
     plugin = build_plugin({"base_url": "https://api.example.com/v1", "model": "m1"}, {"input": "hello"})
 
@@ -495,6 +559,19 @@ def test_request_options_override_legacy_plugin_root_options():
     )
 
     assert request["request_options"] == {"temperature": 0.2, "top_p": 0.5, "model": "m1", "stream": True}
+
+
+def test_nested_thinking_request_option_is_preserved():
+    request = generate_request(
+        {
+            "base_url": "https://api.example.com/v1",
+            "model": "reasoning-model",
+            "request_options": {"thinking": {"type": "enabled"}},
+        },
+        {"input": "hello"},
+    )
+
+    assert request["request_options"]["thinking"] == {"type": "enabled"}
 
 
 def test_client_options_disable_environment_proxy_by_default():
