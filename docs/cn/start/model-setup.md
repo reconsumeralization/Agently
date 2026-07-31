@@ -131,11 +131,29 @@ Agently.set_settings(
     OpenAICompatibleSettings(
         base_url="https://api.deepseek.com/v1",
         api_key="${ENV.DEEPSEEK_API_KEY}",
-        model="deepseek-chat",
-        request_options={"temperature": 0},
+        model="deepseek-v4-flash",
+        request_options={
+            "thinking": {"type": "disabled"},
+            "temperature": 0,
+        },
     )
 )
 ```
+
+DeepSeek V4 Flash 默认开启 thinking。若应用依赖 `temperature` 等采样参数，应
+显式关闭 thinking；DeepSeek 在 thinking 开启时会忽略这些参数。需要显式启用
+推理时可使用：
+
+```python
+Agently.set_settings("OpenAICompatible.request_options", {
+    "thinking": {"type": "enabled"},
+    "reasoning_effort": "high",
+})
+```
+
+通用 OpenAI-Compatible 适配器会通过 `reasoning_delta` / `reasoning_done`
+specific 事件输出推理内容，并在 `original_done` 中保留
+`reasoning_content`。
 
 内置 provider helper 位于 `agently.types.settings`。第三方插件可以从自己的插件包
 导出 settings class，并通过插件的 `SETTINGS_SCHEMAS` 注册。
@@ -150,23 +168,27 @@ Agently.set_settings(
 
 ```python
 Agently.set_settings("model_pool", {
-    "support-chat": "deepseek-chat-prod",
+    "support-chat": "deepseek-v4-flash-prod",
     "reasoning": "deepseek-reason-prod",
 })
 
 Agently.set_settings("model_profiles", {
-    "deepseek-chat-prod": {
+    "deepseek-v4-flash-prod": {
         "provider": "OpenAICompatible",
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "api_key_pool": "deepseek-prod",
+        "request_options": {"thinking": {"type": "disabled"}},
     },
     "deepseek-reason-prod": {
         "provider": "OpenAICompatible",
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-reasoner",
+        "model": "deepseek-v4-flash",
         "api_key_pool": "deepseek-prod",
-        "request_options": {"temperature": 0},
+        "request_options": {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+        },
     },
 })
 

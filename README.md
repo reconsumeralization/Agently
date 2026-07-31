@@ -102,10 +102,13 @@ Agently.set_settings(
     "OpenAICompatible",
     {
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "api_key": "${ENV.DEEPSEEK_API_KEY}",
         "model_type": "chat",
-        "request_options": {"temperature": 0.2},
+        "request_options": {
+            "thinking": {"type": "disabled"},
+            "temperature": 0.2,
+        },
     },
 )
 
@@ -150,22 +153,26 @@ Use a Model Pool when the same application needs multiple models:
 
 ```python
 Agently.set_settings("model_pool", {
-    "support-chat": "deepseek-chat-prod",
+    "support-chat": "deepseek-v4-flash-prod",
     "reasoning": "deepseek-reason-prod",
 })
 Agently.set_settings("model_profiles", {
-    "deepseek-chat-prod": {
+    "deepseek-v4-flash-prod": {
         "provider": "OpenAICompatible",
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "api_key_pool": "deepseek-prod",
+        "request_options": {"thinking": {"type": "disabled"}},
     },
     "deepseek-reason-prod": {
         "provider": "OpenAICompatible",
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-reasoner",
+        "model": "deepseek-v4-flash",
         "api_key_pool": "deepseek-prod",
-        "request_options": {"temperature": 0},
+        "request_options": {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+        },
     },
 })
 Agently.set_settings("api_key_pools", {

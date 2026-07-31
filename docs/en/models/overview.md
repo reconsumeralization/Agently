@@ -86,7 +86,7 @@ The alias can be concrete and operational, such as `ollama-qwen2.5` or
 ```python
 agent.set_settings("model_pool", {
     "ollama-qwen2.5": "qwen2.5:7b",
-    "deepseek-v4": "deepseek-chat",
+    "deepseek-v4": "deepseek-v4-flash",
 })
 agent.set_settings("key_pool", {
     "local": "ollama",
@@ -95,7 +95,7 @@ agent.set_settings("key_pool", {
 })
 agent.set_settings("key_pool_strategy", {
     "qwen2.5:7b": {"mode": "fixed", "pool": ["local"]},
-    "deepseek-chat": {"mode": "round_robin", "pool": ["deepseek-main", "deepseek-backup"]},
+    "deepseek-v4-flash": {"mode": "round_robin", "pool": ["deepseek-main", "deepseek-backup"]},
 })
 
 result = (
