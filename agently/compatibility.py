@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.4.5"
-CURRENT_RELEASE_TRAIN = "2026-07-4.1.4.5"
+CURRENT_FRAMEWORK_VERSION = "4.1.4.6"
+CURRENT_RELEASE_TRAIN = "2026-07-4.1.4.6"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -15,13 +15,13 @@ DOCS_PUBLIC_SURFACE_PROTOCOL = "agently-docs.public-surface.v1"
 
 _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
  'framework': 'agently',
- 'framework_version': '4.1.4.5',
- 'release_train': '2026-07-4.1.4.5',
- 'released_at': '2026-07-30',
- 'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.5. This patch adds opt-in lossless '
-          'continuation for direct long-output AgentExecution runs, makes Agently-Stage 0.3.5 the direct owner of '
-          'TriggerFlow process-local managed tasks, and keeps EventCenter, SignalNet, TriggerFlow, RuntimeEvent, and '
-          'AgentExecution semantic ownership unchanged.',
+ 'framework_version': '4.1.4.6',
+ 'release_train': '2026-07-4.1.4.6',
+ 'released_at': '2026-07-31',
+ 'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.6. This patch exposes the standard '
+          'agently.__version__ and Agently.__version__ surfaces, normalizes reasoning lifecycle events across '
+          'OpenAI-compatible Chat Completions, Anthropic-compatible Messages, and Responses adapters, and preserves '
+          'live runtime-resource identity across TriggerFlow sub-flow boundaries.',
  'runtime_support': {'agently_stage': {'version_specifier': '>=0.3.5,<0.4.0',
                                        'public_runtime_surface': False,
                                        'task_mechanism_owners': ['TriggerFlowExecution'],

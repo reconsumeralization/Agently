@@ -33,11 +33,11 @@ def test_current_release_manifest_matches_registry_release_file() -> None:
     assert current_manifest["release_train"] == release_manifest["release_train"]
 
 
-def test_4_1_4_5_release_manifest_pins_stage_native_runtime_contract() -> None:
+def test_4_1_4_6_release_manifest_pins_stage_native_runtime_contract() -> None:
     manifest = get_current_release_manifest()
 
-    assert CURRENT_FRAMEWORK_VERSION == "4.1.4.5"
-    assert CURRENT_RELEASE_TRAIN == "2026-07-4.1.4.5"
+    assert CURRENT_FRAMEWORK_VERSION == "4.1.4.6"
+    assert CURRENT_RELEASE_TRAIN == "2026-07-4.1.4.6"
     stage_support = manifest["runtime_support"]["agently_stage"]
     assert stage_support["version_specifier"] == ">=0.3.5,<0.4.0"
     assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
