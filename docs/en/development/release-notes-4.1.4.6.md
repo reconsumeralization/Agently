@@ -20,6 +20,16 @@ The sandbox-provider drafts tracked in
 [#342](https://github.com/AgentEra/Agently/issues/342) are not part of this
 release.
 
+## Core changes
+
+| Area | What changed | Recommended usage | Compatibility / risk | Evidence |
+|---|---|---|---|---|
+| Package version | Added the standard `agently.__version__` and `Agently.__version__` surfaces; removed the mistaken 4.1.4.5 `version` attributes | Inspect either `__version__` surface | Intentional breaking correction only for code that adopted the mistaken 4.1.4.5 attributes | Package/version tests, built wheel and clean-install smoke |
+| Compatible model reasoning | Chat Completions, Anthropic Messages, and Responses now converge generated reasoning into `reasoning_delta`, `reasoning_done`, and provider-native `original_done` | Keep provider controls in `request_options`; consume the public reasoning lifecycle | Additive response normalization; provider request options remain unchanged | Adapter suites plus real `deepseek-v4-flash` Chat Completions and Anthropic Messages probes |
+| Compatible SSE retry | Removed hidden transport reconnects and made `request_retry` / `AttemptRunner` the sole physical-request retry owner across all three adapters | Use `request_retry=False` or `max_attempts=1` for one physical connection; use `after_output=False` when provisional output cannot be reset | Default bounded replay remains; newly observable boundaries prevent uncounted requests and mixed output | Physical-connection, retry-boundary, attempt-index, `[DONE]`, and EDA TransportGuard regression tests |
+| TriggerFlow sub-flow resources | Resource capture and isolated child templates preserve live runtime-resource object identity | Pass clients, locks, callbacks, and services through `resources`; re-inject them after restoring a saved root execution | Resource capture is shared by identity; ordinary input/value capture remains copy-isolated | TriggerFlow resource-identity tests and sub-flow foundation example |
+| Sandbox provider contributions | No sandbox provider draft is merged in 4.1.4.6 | Coordinate and consolidate the contributor work through issue #342 | Explicitly deferred; no runtime or dependency change in this release | Issue #342 and unchanged optional-provider surface |
+
 ## Standard package version
 
 Use either public version surface:

@@ -18,6 +18,16 @@ Agently 4.1.4.6 是基于 4.1.4.5 的聚焦兼容性补丁：
 [#342](https://github.com/AgentEra/Agently/issues/342) 管理的 sandbox provider
 草案不进入本次发布。
 
+## 核心变化
+
+| 区域 | 变化 | 推荐用法 | 兼容性 / 风险 | 证据 |
+|---|---|---|---|---|
+| 包版本 | 新增标准 `agently.__version__` 与 `Agently.__version__`，移除 4.1.4.5 误引入的 `version` 属性 | 使用任一 `__version__` 入口检查版本 | 仅对已经采用 4.1.4.5 错误属性的代码构成有意纠正 | 包/版本测试、wheel 构建与全新环境安装 smoke |
+| Compatible model reasoning | Chat Completions、Anthropic Messages 与 Responses 将模型生成 reasoning 统一收敛为 `reasoning_delta`、`reasoning_done` 和 provider-native `original_done` | Provider 控制项继续放在 `request_options`，消费公开 reasoning 生命周期 | 响应归一化为增量能力；provider 请求参数不变 | 三类 adapter 套件及真实 `deepseek-v4-flash` Chat Completions、Anthropic Messages 探针 |
+| Compatible SSE retry | 移除 transport 隐式重连，让三个 adapter 的 `request_retry` / `AttemptRunner` 独占物理请求重试 | 需要单次物理连接时使用 `request_retry=False` 或 `max_attempts=1`；不能清空临时输出时使用 `after_output=False` | 默认有界重放保留；公开边界避免请求漏计和输出混合 | 物理连接、retry boundary、attempt index、`[DONE]` 与 EDA TransportGuard 回归 |
+| TriggerFlow sub-flow resource | Resource capture 与隔离 child template 保持 live runtime resource 对象身份 | client、lock、callback、service 通过 `resources` 传递；恢复保存的 root execution 后重新注入 | Resource 按身份共享；普通 input/value capture 仍复制隔离 | TriggerFlow resource identity 测试与 sub-flow foundation example |
+| Sandbox provider 贡献 | 4.1.4.6 不合入 sandbox provider 草案 | 通过 issue #342 集中协调与整合贡献者工作 | 明确延期；本版本不改变 runtime 或依赖 | Issue #342 与未变化的 optional-provider surface |
+
 ## 标准包版本入口
 
 可以使用以下任一公开入口：
