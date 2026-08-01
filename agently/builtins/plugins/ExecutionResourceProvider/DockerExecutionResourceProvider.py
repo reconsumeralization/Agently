@@ -1073,6 +1073,18 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
                     if not fact.get("available"):
                         available = False
                         reason = f"required toolchain is unavailable in runtime image: {tool}"
+        isolation: dict[str, Any] = {
+            **self._isolation_capabilities(default_args),
+            "network_mode": str(runtime_profile.get("network_mode", "disabled")),
+        }
+        # When gVisor/runsc is selected, the Sentry user-space kernel enforces
+        # strict syscall filtering regardless of what default_args request.
+        # Override the static isolation report so downstream consumers see the
+        # stronger guarantee without examining the opaque runtime field.
+        if runtime != "runc":
+            isolation["syscalls_restricted"] = True
+            isolation["mechanism"] = "gvisor_container"
+            isolation["container_runtime"] = "gvisor/runsc"
         return {
             "provider_id": self.provider_id,
             "available": available,
@@ -1080,12 +1092,7 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
             "capabilities": {
                 "languages": ["python", "nodejs", "go", "cpp"],
                 "toolchains": toolchain_facts,
-                "isolation": {
-                    **self._isolation_capabilities(default_args),
-                    "network_mode": str(
-                        runtime_profile.get("network_mode", "disabled")
-                    ),
-                },
+                "isolation": isolation,
                 "workspace_access_modes": ["snapshot", "read_only", "read_write"],
                 "network": "configurable",
                 "safety_class": "isolated",

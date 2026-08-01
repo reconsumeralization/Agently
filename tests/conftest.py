@@ -9,6 +9,11 @@ project_root_str = str(PROJECT_ROOT)
 if project_root_str not in sys.path:
     sys.path.insert(0, project_root_str)
 
+_STUB_ROOT = PROJECT_ROOT.parent / "agently_stage_stub"
+stub_root_str = str(_STUB_ROOT)
+if _STUB_ROOT.is_dir() and stub_root_str not in sys.path:
+    sys.path.insert(0, stub_root_str)
+
 @pytest.fixture(autouse=True)
 def reset_deprecation_warning_registry():
     from agently.utils import reset_deprecation_warning_registry as reset_registry
