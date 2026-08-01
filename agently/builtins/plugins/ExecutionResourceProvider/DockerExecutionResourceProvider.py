@@ -77,6 +77,7 @@ class DockerExecutionResource:
         runtime_profile: dict[str, Any] | None = None,
         workspace_grant: TaskWorkspaceAccessGrant | None = None,
         max_output_bytes: int = 20000,
+        runtime: str = "runc",
     ):
         self.docker_binary = docker_binary
         self.timeout = timeout
@@ -84,6 +85,7 @@ class DockerExecutionResource:
         self.runtime_profile = dict(runtime_profile or {})
         self.workspace_grant = workspace_grant
         self.max_output_bytes = max(1, int(max_output_bytes))
+        self.runtime = runtime
         self._prepared_images: dict[str, dict[str, Any]] = {}
         self._active_containers: set[str] = set()
         self._closed = False
@@ -282,6 +284,48 @@ class DockerExecutionResource:
     def is_binary_available(self):
         return shutil.which(self.docker_binary) is not None
 
+    def _inspect_runsc_availability(self) -> dict[str, Any]:
+        """Check whether the runsc binary is available and reachable.
+
+        Called by ``inspect_availability`` when ``self.runtime != "runc"``
+        so the combined result can fail closed.
+        """
+        runsc_binary = shutil.which("runsc")
+        if runsc_binary is None:
+            return {
+                "available": False,
+                "reason": "runsc_binary_missing",
+                "runtime": "gvisor",
+            }
+        try:
+            result = subprocess.run(
+                [runsc_binary, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception as error:
+            return {
+                "available": False,
+                "reason": "runsc_unavailable",
+                "runtime": "gvisor",
+                "error": str(error),
+            }
+        if result.returncode != 0:
+            return {
+                "available": False,
+                "reason": "runsc_unavailable",
+                "runtime": "gvisor",
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        return {
+            "available": True,
+            "reason": "ready",
+            "runtime": self.runtime,
+            "runsc_version": result.stdout.strip(),
+        }
+
     def inspect_availability(self) -> dict[str, Any]:
         if not self.is_binary_available():
             return {
@@ -311,12 +355,27 @@ class DockerExecutionResource:
                 "stdout": result.stdout,
                 "stderr": result.stderr,
             }
-        return {
+        base: dict[str, Any] = {
             "available": True,
             "reason": "ready",
             "docker_binary": self.docker_binary,
             "server_version": result.stdout.strip(),
+            "container_runtime": self.runtime,
         }
+        # When the user has opted into a non-default OCI runtime, verify
+        # that the runtime binary is actually present and reachable so
+        # the caller can fail closed instead of silently falling back.
+        if self.runtime != "runc":
+            runsc = self._inspect_runsc_availability()
+            if not runsc.get("available"):
+                return {
+                    **base,
+                    "available": False,
+                    "reason": runsc.get("reason", "runtime_unavailable"),
+                    "runsc": runsc,
+                }
+            base["runsc"] = runsc
+        return base
 
     def is_available(self):
         return bool(self.inspect_availability().get("available", False))
@@ -597,6 +656,8 @@ class DockerExecutionResource:
             "--pids-limit",
             "256",
         ]
+        if self.runtime != "runc" and "--runtime" not in " ".join(self.default_args):
+            args.extend(["--runtime", self.runtime])
         network_mode = str(profile.get("network_mode", "disabled"))
         if network_mode == "disabled":
             args.extend(["--network", "none"])
@@ -875,6 +936,7 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
         runtime_profile: dict[str, Any] | None = None,
         workspace_grant: TaskWorkspaceAccessGrant | None = None,
         max_output_bytes: int = 20000,
+        runtime: str = "runc",
     ) -> DockerExecutionResource:
         """Construct the provider-owned resource used by probe and ensure.
 
@@ -892,6 +954,7 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
             runtime_profile=runtime_profile,
             workspace_grant=workspace_grant,
             max_output_bytes=max_output_bytes,
+            runtime=runtime,
         )
 
     @staticmethod
@@ -960,11 +1023,13 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
         default_args = default_args if isinstance(default_args, list) else []
         runtime_profile = config.get("runtime_profile", {})
         runtime_profile = runtime_profile if isinstance(runtime_profile, dict) else {}
+        runtime = str(config.get("runtime", "runc"))
         resource = self.create_resource(
             docker_binary=str(config.get("docker_binary", "docker")),
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 60))),
             default_args=[str(item) for item in default_args],
             runtime_profile=runtime_profile,
+            runtime=runtime,
         )
         availability = await asyncio.to_thread(resource.inspect_availability)
         available = bool(availability.get("available"))
@@ -1024,7 +1089,7 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
                 "workspace_access_modes": ["snapshot", "read_only", "read_write"],
                 "network": "configurable",
                 "safety_class": "isolated",
-                "container_runtime": "runc",
+                "container_runtime": runtime,
             },
             "reason": reason,
             "meta": {"availability": availability, "runtime_image": image_fact},
@@ -1073,6 +1138,7 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
                 "image": DockerExecutionResource._default_image(language),
                 **runtime_profile,
             }
+        runtime = str(config.get("runtime", "runc"))
         resource = self.create_resource(
             docker_binary=str(config.get("docker_binary", "docker")),
             timeout=int(policy.get("timeout_seconds", config.get("timeout", 60))),
@@ -1080,6 +1146,7 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
             runtime_profile=runtime_profile,
             workspace_grant=grant if isinstance(grant, TaskWorkspaceAccessGrant) else None,
             max_output_bytes=int(policy.get("max_output_bytes", 20000)),
+            runtime=runtime,
         )
         availability = await asyncio.to_thread(resource.ensure_available)
         active_profile = resource._profile()
@@ -1102,6 +1169,7 @@ class DockerExecutionResourceProvider(BuiltinExecutionResourceProvider):
                 "availability": availability,
                 "runtime_profile": active_profile,
                 "image_preparation": image_preparation,
+                "container_runtime": resource.runtime,
             },
         }
 

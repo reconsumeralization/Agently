@@ -38,13 +38,15 @@ class ActionResourceRegistrar:
         self._action = action
 
     @staticmethod
-    def _normalize_code_sandbox(value: Literal["auto", "docker", "trusted_local"] | str) -> Literal["auto", "docker", "trusted_local"]:
+    def _normalize_code_sandbox(value: Literal["auto", "docker", "gvisor", "trusted_local"] | str) -> Literal["auto", "docker", "gvisor", "trusted_local"]:
         normalized = str(value or "trusted_local").strip().lower().replace("-", "_")
         if normalized in {"local", "python", "node", "bash"}:
             normalized = "trusted_local"
-        if normalized not in {"auto", "docker", "trusted_local"}:
-            raise ValueError("sandbox must be one of: 'auto', 'docker', 'trusted_local'.")
-        return cast(Literal["auto", "docker", "trusted_local"], normalized)
+        if normalized in {"gvisor", "runsc", "gvisor/runsc"}:
+            normalized = "gvisor"
+        if normalized not in {"auto", "docker", "gvisor", "trusted_local"}:
+            raise ValueError("sandbox must be one of: 'auto', 'docker', 'gvisor', 'trusted_local'.")
+        return cast(Literal["auto", "docker", "gvisor", "trusted_local"], normalized)
 
     @staticmethod
     def _normalize_dependency_policy(value: Literal["deny", "request", "install"] | dict[str, Any] | str) -> dict[str, Any]:
@@ -104,6 +106,7 @@ class ActionResourceRegistrar:
         provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
         image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
         runtime_profile: dict[str, Any] | None = None,
+        runtime: str = "runc",
     ) -> "ExecutionResourceRequirement":
         normalized_provisioning_profile = self._normalize_provisioning_profile(provisioning_profile)
         normalized_dependency_policy = (
@@ -144,6 +147,7 @@ class ActionResourceRegistrar:
                 "timeout": timeout,
                 "default_args": docker_default_args or [],
                 "runtime_profile": profile,
+                "runtime": runtime,
             },
             "policy": self._docker_policy(default_policy, timeout=timeout),
         })
@@ -318,7 +322,7 @@ class ActionResourceRegistrar:
         preset_objects: dict[str, object] | None = None,
         base_vars: dict[str, Any] | None = None,
         allowed_return_types: list[type] | None = None,
-        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "gvisor", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -336,12 +340,16 @@ class ActionResourceRegistrar:
         providers: list[str] | None = None
         unsafe_fallback = False
         isolation: Literal["required", "preferred", "none"] = "required"
+        docker_runtime: str = "runc"
         if sandbox_mode == "trusted_local":
             providers = ["trusted_local"]
             unsafe_fallback = True
             isolation = "none"
         elif sandbox_mode == "docker":
             providers = ["docker"]
+        elif sandbox_mode == "gvisor":
+            providers = ["docker"]
+            docker_runtime = "runsc"
         return self.register_code_runtime_action(
             language="python",
             action_id=action_id,
@@ -359,6 +367,7 @@ class ActionResourceRegistrar:
             provisioning_profile=provisioning_profile,
             image_pull_policy=image_pull_policy,
             timeout=timeout,
+            docker_runtime=docker_runtime,
         )
 
     def register_bash_sandbox_action(
@@ -376,7 +385,7 @@ class ActionResourceRegistrar:
         max_output_chars: int = 20000,
         output_artifact_dir: str | Path | None = None,
         task_workspace_mounts: list[dict[str, str]] | None = None,
-        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "gvisor", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -414,6 +423,7 @@ class ActionResourceRegistrar:
             ])
         else:
             roots = [str(Path(root).expanduser().resolve()) for root in (allowed_workdir_roots or [])]
+            docker_runtime = "runsc" if sandbox_mode == "gvisor" else "runc"
             execution_resources = [
                 self._docker_runtime_requirement(
                     action_id=action_id,
@@ -434,6 +444,7 @@ class ActionResourceRegistrar:
                         "output_artifact_dir": str(output_artifact_dir) if output_artifact_dir is not None else None,
                         "task_workspace_mounts": [dict(item) for item in (task_workspace_mounts or [])],
                     },
+                    runtime=docker_runtime,
                 )
             ]
         action.register_action(
@@ -477,7 +488,7 @@ class ActionResourceRegistrar:
         cwd: str | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
-        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "gvisor", "trusted_local"] = "trusted_local",
         docker_image: str = "node:22-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -494,12 +505,16 @@ class ActionResourceRegistrar:
         providers: list[str] | None = None
         unsafe_fallback = False
         isolation: Literal["required", "preferred", "none"] = "required"
+        docker_runtime: str = "runc"
         if sandbox_mode == "trusted_local":
             providers = ["trusted_local"]
             unsafe_fallback = True
             isolation = "none"
         elif sandbox_mode == "docker":
             providers = ["docker"]
+        elif sandbox_mode == "gvisor":
+            providers = ["docker"]
+            docker_runtime = "runsc"
         return self.register_code_runtime_action(
             language="nodejs",
             action_id=action_id,
@@ -517,6 +532,7 @@ class ActionResourceRegistrar:
             provisioning_profile=provisioning_profile,
             image_pull_policy=image_pull_policy,
             timeout=timeout,
+            docker_runtime=docker_runtime,
         )
 
     def register_code_runtime_action(
@@ -538,6 +554,7 @@ class ActionResourceRegistrar:
         provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
         image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
         timeout: int = 60,
+        docker_runtime: str = "runc",
     ):
         from agently.builtins.plugins.CodeRuntimeAdapter import get_code_runtime_adapter
 
@@ -594,6 +611,7 @@ class ActionResourceRegistrar:
                     "docker_binary": docker_binary,
                     "timeout": timeout,
                     "default_args": list(docker_default_args or []),
+                    "runtime": docker_runtime,
                     **candidate_config,
                     "runtime_profile": {
                         **runtime_profile,
