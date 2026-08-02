@@ -64,6 +64,8 @@ class AgentlyModelResult(TypedDict):
     meta: dict[str, Any]
     original_delta: list[dict[str, Any]]
     original_done: dict[str, Any]
+    reasoning_delta: list[str]
+    reasoning: str | None
     text_result: str
     cleaned_result: str | None
     parsed_result: "SerializableValue"

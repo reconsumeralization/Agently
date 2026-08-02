@@ -360,9 +360,16 @@ before structured parsing:
 - `reasoning_delta` / `reasoning_done` carry reasoning text.
 - `delta` / `done` carry only the answer payload that parsers should consume.
 - `original_delta` / `original_done` keep the provider's raw content unchanged.
+- `get_data(type="all")` keeps `reasoning_delta` as the accepted attempt's list
+  of reasoning chunks and `reasoning` as its final joined text. `reasoning` is
+  `None` when the provider emitted no reasoning content.
 - Only a complete leading outer `<think>...</think>` before the answer payload is
   normalized. `<think>` inside a field, code block, or long text payload remains
   ordinary answer content.
+
+These fields preserve provider-supplied content; Agently does not infer hidden
+chain-of-thought. A retry that replaces an attempt also replaces its accumulated
+reasoning fields.
 
 ## Async streaming
 
