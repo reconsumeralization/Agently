@@ -62,6 +62,18 @@ bridge.watch(agent)
 
 `ObservationBridge` 会通过后台队列上传，并在发送到 listener 前合并 `model.streaming` 这类高频 observation event，避免被动观测进入请求/输出的同步路径。短脚本如果在运行结束后马上退出，而你需要确保缓冲事件全部上传，可以在退出前调用 `await bridge.flush()`。
 
+DevTools listener 另有一条有界接收管线。它按 run 分区，因此并发 ingest
+请求不会仅仅因为某个事件正在等待异步 sink，就打乱同一个 run 的事件顺序。
+Agently-Stage 私有地负责 dispatcher 和 worker 的任务生命周期；队列压力、
+顺序、acknowledgement、错误、存储和订阅仍由 DevTools 负责。HTTP ingest
+成功仍表示事件已经处理完成，不是只进入了内存队列。
+
+接收端配置包括 `observation.ingest.worker_count`（默认 `4`）、
+`observation.ingest.queue_limit`（默认 `64`，分别约束 intake/partition
+队列）和 `observation.ingest.shutdown_timeout_seconds`（默认 `5.0`）。正常
+shutdown 会排空已接收批次；超时后会给出 warning 并取消可协作的 worker，
+外部阻塞 sink 仍需提供自己的 timeout/cancellation 契约。
+
 ## EvaluationBridge
 
 [`03_scenario_evaluations.py`](../../../examples/devtools/03_scenario_evaluations.py) 会构建一个小 TriggerFlow，用 `EvaluationBinding` 绑定，再通过 `EvaluationRunner` 跑多个 `EvaluationCase`。它适合可重复的场景检查，不适合当作应用请求内的实时校验。
@@ -87,6 +99,12 @@ AgentTask 可能会从 bounded execution 的 Action logs 投影 `agent_task.acti
 ## Model request usage
 
 DevTools 应优先从 `payload.model_request_telemetry.usage_summary` 消费 model request usage；兼容情况下可回退到 model meta 或终态事件里的 provider `usage` 元数据。展示范围分两层：单次 model request，以及当前选中 run 分支向下聚合的 descendant model requests。
+
+存在 `model.reasoning.delta` 时，DevTools 会渐进重建 reasoning，并以
+`model.reasoning.completed` 作为最终 provider reasoning 文本。每个模型请求卡片用
+独立 Reasoning tab 展示；没有 reasoning 时 tab 仍保留并明确提示本次输出不包含
+provider reasoning。可空的 `reasoning_tokens` 会独立展示和聚合，不会再次加到
+provider 的 output/completion/total 中。
 
 当 provider token 计数不可得时，token 字段展示为未知，例如 `NaN`，同时把输入/输出字符长度估算作为诊断信息展示。Usage telemetry 只属于 observation，不应成为框架预算卡控、retry 规则、route 决策、质量评分、verifier 结果或任务完成验收依据。
 

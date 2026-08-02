@@ -235,7 +235,16 @@ async def test_leading_think_is_reasoning_event_not_parser_content(monkeypatch):
     all_data = await parser.async_get_data(type="all")
     assert all_data["original_delta"] == [{"raw": payload}]
     assert all_data["original_done"] == {"raw": payload}
+    assert all_data["reasoning_delta"] == ["model reasoning"]
+    assert all_data["reasoning"] == "model reasoning"
     assert all_data["text_result"].startswith("<agently_output>")
+    observations = parser.drain_runtime_observations()
+    assert [observation["kind"] for observation in observations] == [
+        "reasoning_delta",
+        "reasoning_completed",
+        "streaming",
+        "completed",
+    ]
 
 
 @pytest.mark.asyncio
@@ -257,6 +266,29 @@ async def test_payload_think_is_preserved_when_not_leading_reasoning():
 
     assert not any(event.startswith("reasoning") for event, _data in events)
     assert await parser.async_get_data() == {"notes": "Keep <think>literal tag</think> in payload."}
+
+
+@pytest.mark.asyncio
+async def test_retried_attempt_replaces_reasoning_result_fields():
+    parser = create_parser(
+        [
+            ("reasoning_delta", "discarded reasoning"),
+            ("reasoning_done", "discarded reasoning"),
+            ("status", {"status": "failed", "retry": True, "reason": "transport replay"}),
+            ("reasoning_delta", "accepted reasoning"),
+            ("reasoning_done", ""),
+            ("delta", "accepted answer"),
+            ("done", "accepted answer"),
+        ],
+        {},
+        "markdown",
+    )
+
+    all_data = await parser.async_get_data(type="all")
+
+    assert all_data["reasoning_delta"] == ["accepted reasoning"]
+    assert all_data["reasoning"] == "accepted reasoning"
+    assert all_data["text_result"] == "accepted answer"
 
 
 @pytest.mark.asyncio

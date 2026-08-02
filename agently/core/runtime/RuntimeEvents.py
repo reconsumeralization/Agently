@@ -108,6 +108,18 @@ def _first_usage_number(usage: Mapping[str, Any], *keys: str) -> int | float | N
     return None
 
 
+def _reasoning_usage_number(usage: Mapping[str, Any]) -> int | float | None:
+    direct = _first_usage_number(usage, "reasoning_tokens", "thinking_tokens")
+    if direct is not None:
+        return direct
+    for details_key in ("completion_tokens_details", "output_tokens_details"):
+        details = _mapping(usage.get(details_key))
+        nested = _first_usage_number(details, "reasoning_tokens", "thinking_tokens")
+        if nested is not None:
+            return nested
+    return None
+
+
 def _normalize_usage(usage: Any) -> dict[str, int | float | None]:
     usage_mapping = _mapping(usage)
     prompt_tokens = _first_usage_number(
@@ -138,6 +150,7 @@ def _normalize_usage(usage: Any) -> dict[str, int | float | None]:
             "completion_tokens",
             "output_token_count",
         ),
+        "reasoning_tokens": _reasoning_usage_number(usage_mapping),
     }
 
 
@@ -370,6 +383,8 @@ async def async_emit_response_parser_observation(
         "parse_failed": "model.parse_failed",
         "streaming": "model.streaming",
         "streaming_canceled": "model.streaming_canceled",
+        "reasoning_delta": "model.reasoning.delta",
+        "reasoning_completed": "model.reasoning.completed",
         "meta": "model.meta",
         "failed": "model.failed",
     }
@@ -397,6 +412,7 @@ async def async_emit_response_parser_observation(
             "payload": resolved_payload,
             "error": observation.get("error"),
             "run": run,
+            "meta": {"high_frequency": True} if event_type == "model.reasoning.delta" else {},
         }
     )
 

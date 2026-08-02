@@ -39,7 +39,8 @@
         },
         "record_store_contract": "RecordStore may persist canonical RuntimeEvent records when explicitly bound as runtime_event_store; TaskWorkspace is never an event store.",
         "task_context_contract": "ContextPackage and ContextConsumption projections are bounded observation facts only and never drive route selection, verification, or task acceptance.",
-        "model_request_telemetry_contract": "Existing model RuntimeEvents may carry payload.model_request_telemetry observation facts; telemetry remains observation-only.",
+        "model_request_telemetry_contract": "Existing model RuntimeEvents may carry payload.model_request_telemetry observation facts. usage_summary.provider may add nullable reasoning_tokens only when provider usage explicitly reports reasoning/thinking token detail; completion/output/total values retain provider semantics and reasoning_tokens is not added again. Telemetry remains observation-only.",
+        "model_reasoning_observation_contract": "Provider-supplied reasoning is preserved in ModelRequestResult type=all as reasoning_delta plus nullable reasoning, and projected through high-frequency model.reasoning.delta plus terminal model.reasoning.completed RuntimeEvents. Missing content and usage remain unknown/null; the framework does not infer hidden chain-of-thought or estimate reasoning tokens from text.",
         "model_request_result_stream_status_contract": "ModelRequestResult reserves $status for completed, failed, and cancelled outcomes.",
         "agent_execution_stream_completion_provenance": "StreamingData and AgentExecutionStreamData may add optional completion_source values observed_boundary, final_reconciliation, or synthetic_repair. The field is observation-only and additive.",
         "agent_execution_limits": [
