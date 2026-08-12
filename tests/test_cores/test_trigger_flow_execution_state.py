@@ -64,6 +64,53 @@ def test_sync_chunk_can_wrap_async_provider_with_stage_and_reenter_execution_sta
     }
 
 
+def test_async_chunk_can_call_sync_stage_wrappers_and_sync_state_facade():
+    flow = TriggerFlow(name="async-chunk-sync-provider-stage-roundtrip")
+
+    async def provider(value: str) -> str:
+        await asyncio.sleep(0)
+        return value.upper()
+
+    def registered_action(value: str) -> str:
+        with Stage() as stage:
+            return stage.get(provider, value)
+
+    def sync_provider(value: str) -> str:
+        with Stage() as stage:
+            return stage.get(registered_action, value)
+
+    async def transform(data: TriggerFlowRuntimeData):
+        result = sync_provider(data.value)
+        data.set_state("result", result, emit=False)
+        return result
+
+    flow.to(transform)
+
+    assert flow.start("stage") == {"result": "STAGE"}
+
+
+@pytest.mark.asyncio
+async def test_sync_chunk_worker_can_reenter_async_owner_loop_state_listener():
+    flow = TriggerFlow(name="sync-chunk-owner-loop-state-listener")
+
+    def transform(data: TriggerFlowRuntimeData):
+        data.set_state("result", data.value.upper())
+
+    async def observe_result(data: TriggerFlowRuntimeData):
+        await asyncio.sleep(0)
+        await data.async_set_state("observed", data.value, emit=False)
+
+    flow.to(transform)
+    flow.when({"runtime_data": "result"}).to(observe_result)
+
+    result = await flow.async_start("stage")
+
+    assert result == {
+        "result": "STAGE",
+        "observed": "STAGE",
+    }
+
+
 def test_trigger_flow_start_waits_for_auto_close_snapshot_without_end():
     flow = TriggerFlow()
 

@@ -62,7 +62,7 @@ def test_in_development_manifest_declares_4_1_4_7_owner_boundaries() -> None:
 
     assert manifest["target_version"] == "4.1.4.7"
     assert manifest["release_train"] == "2026-08-4.1.4.7-dev"
-    assert "Agently-Stage >=0.3.6,<0.4.0" in manifest["notes"]
+    assert "Agently-Stage >=0.3.7,<0.4.0" in manifest["notes"]
     assert "physically safe carrier" in manifest["notes"]
     assert "provider-owned sync wrapper" in manifest["notes"]
     assert "FunctionShifter.syncify/asyncify" in manifest["notes"]
@@ -71,7 +71,7 @@ def test_in_development_manifest_declares_4_1_4_7_owner_boundaries() -> None:
     assert "TriggerFlowExecution remains the semantic lifecycle owner" in manifest["notes"]
 
     stage_support = manifest["runtime_support"]["agently_stage"]
-    assert stage_support["version_specifier"] == ">=0.3.6,<0.4.0"
+    assert stage_support["version_specifier"] == ">=0.3.7,<0.4.0"
     assert stage_support["public_runtime_surface"] is False
     assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
     assert "EventCenter background task settlement" in stage_support[
