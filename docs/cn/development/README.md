@@ -1,7 +1,7 @@
 # Development
 
-当前开发目标：`4.1.4.7`。该版本把 Agently-Stage 0.3.6 的混合同步/异步 carrier
-自动路由集成到 TriggerFlow。
+当前开发目标：`4.1.4.7`。该版本要求 Agently-Stage 0.3.8，包含混合同步/异步
+carrier 自动路由和 Python 3.14 task factory 兼容修复。
 
 建议按这个顺序读：
 

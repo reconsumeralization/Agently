@@ -31,7 +31,7 @@ def search(query: str):
         return stage.get(search_tool.search, query)
 ```
 
-Agently-Stage 0.3.6 automatically reuses or selects a physically safe carrier,
+Agently-Stage 0.3.8 automatically reuses or selects a physically safe carrier,
 including when this method runs inside a synchronous TriggerFlow chunk. The
 provider does not need to know that TriggerFlow also uses Stage, and may call
 sync execution-data methods such as `data.set_state(...)` afterward. This is a

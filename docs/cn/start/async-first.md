@@ -31,7 +31,7 @@ def search(query: str):
         return stage.get(search_tool.search, query)
 ```
 
-Agently-Stage 0.3.6 会自动复用或选择物理上安全的 carrier；这个方法即使运行在同步
+Agently-Stage 0.3.8 会自动复用或选择物理上安全的 carrier；这个方法即使运行在同步
 TriggerFlow chunk 内也无需知道 TriggerFlow 底层同样使用 Stage，返回后仍可继续调用
 `data.set_state(...)` 等同步 execution-data 方法。这个边界会同步阻塞所在 worker；
 如果外层 async API 也由你控制，仍优先直接 `await` 和 Agently 原生 async 方法。

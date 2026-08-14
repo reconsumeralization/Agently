@@ -2,14 +2,14 @@
 
 [[package]]
 name = "agently-stage"
-version = "0.3.7"
+version = "0.3.8"
 description = "Agently Stage - Efficient Convenient Asynchronous and Multithreaded Programming"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "agently_stage-0.3.7-py3-none-any.whl", hash = "sha256:da55c711d68fac13ec4c1b9ac02c8d2e8d9a0af6953217e731f586adbb4e0087"},
-    {file = "agently_stage-0.3.7.tar.gz", hash = "sha256:1f9a4860cc7ac9180aebb8d74366e1863d58b084c893130a49adf3d1b16d7846"},
+    {file = "agently_stage-0.3.8-py3-none-any.whl", hash = "sha256:f1436607c53e0316de9daee260c2906d5cda4a389a590d7814ce1c5faf288957"},
+    {file = "agently_stage-0.3.8.tar.gz", hash = "sha256:d2c677280f24ffe4c92bfe61c6b16a8e50dfb657f6e68ffd224742cbe62db5f6"},
 ]
 
 [[package]]
@@ -745,4 +745,4 @@ typing-extensions = ">=4.12.0"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10"
-content-hash = "16edd78e518ff3e012bb576cd471663ffc50d1cd313695e009153d755f621d54"
+content-hash = "ab2dfb8f20c2e491f5a2f225b618556db6bbb8a1a5a71e0e85f6bd21a4f8bc71"

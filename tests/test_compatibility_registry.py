@@ -62,7 +62,8 @@ def test_in_development_manifest_declares_4_1_4_7_owner_boundaries() -> None:
 
     assert manifest["target_version"] == "4.1.4.7"
     assert manifest["release_train"] == "2026-08-4.1.4.7-dev"
-    assert "Agently-Stage >=0.3.7,<0.4.0" in manifest["notes"]
+    assert "Agently-Stage >=0.3.8,<0.4.0" in manifest["notes"]
+    assert "Python 3.14 task-factory keyword arguments" in manifest["notes"]
     assert "physically safe carrier" in manifest["notes"]
     assert "provider-owned sync wrapper" in manifest["notes"]
     assert "FunctionShifter.syncify/asyncify" in manifest["notes"]
@@ -71,7 +72,14 @@ def test_in_development_manifest_declares_4_1_4_7_owner_boundaries() -> None:
     assert "TriggerFlowExecution remains the semantic lifecycle owner" in manifest["notes"]
 
     stage_support = manifest["runtime_support"]["agently_stage"]
-    assert stage_support["version_specifier"] == ">=0.3.7,<0.4.0"
+    assert stage_support["repository"] == "Agently-Stage"
+    assert stage_support["package"] == "agently-stage"
+    assert stage_support["role"] == "required_runtime_dependency"
+    assert stage_support["version_specifier"] == ">=0.3.8,<0.4.0"
+    assert stage_support["release_order"] == (
+        "publish_and_verify_stage_before_raising_agently_minimum"
+    )
+    assert stage_support["skills_guidance_required"] is True
     assert stage_support["public_runtime_surface"] is False
     assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
     assert "EventCenter background task settlement" in stage_support[
@@ -110,6 +118,7 @@ def test_in_development_manifest_declares_4_1_4_7_owner_boundaries() -> None:
 
 def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
     manifest = _development_manifest()
+    stage_support = manifest["runtime_support"]["agently_stage"]
     skills = manifest["companions"]["skills"]
     contract = skills["runtime_contract"]
 
@@ -125,6 +134,10 @@ def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
     assert "AgentExecution.use_skills" in request_contract["surface"]
     assert "Agent.run_skills_task" in request_contract["surface"]
     assert "result-shaped adapter" in request_contract["contract"]
+
+    stage_guidance = skills["runtime_dependency_guidance"]["agently_stage"]
+    assert stage_guidance["skill"] == "agently-stage"
+    assert stage_guidance["version_specifier"] == stage_support["version_specifier"]
 
 
 def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:

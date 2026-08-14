@@ -45,7 +45,7 @@ calling thread and are intended for sync chunks and sync callers.
 
 A sync chunk may call a provider-owned synchronous wrapper that internally
 uses `with Stage()` to await an async SDK, then continue with
-`data.set_state(...)`. Agently-Stage 0.3.6 detects the surrounding physical
+`data.set_state(...)`. Agently-Stage 0.3.8 detects the surrounding physical
 runtime automatically; providers do not need to discover TriggerFlow's private
 Stage usage or redesign their public method as async.
 

@@ -1,7 +1,7 @@
 # Development
 
-Current development target: `4.1.4.7`. This line integrates Agently-Stage 0.3.6
-automatic mixed sync/async carrier routing with TriggerFlow.
+Current development target: `4.1.4.7`. This line requires Agently-Stage 0.3.8,
+including automatic mixed sync/async carrier routing and Python 3.14 task-factory compatibility.
 
 Read in this order:
 
