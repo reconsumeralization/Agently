@@ -39,5 +39,6 @@ jobs:
 
       - name: Run deterministic and observed Landlock tests
         run: |
+          python -c 'import json; from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import inspect_landlock_availability; print(json.dumps(inspect_landlock_availability(), indent=2))'
           python -W error::RuntimeWarning -m pytest tests/test_landlock_isolation.py -q
           python -m pytest tests/test_landlock_execution_provider_integration.py -q -rs
