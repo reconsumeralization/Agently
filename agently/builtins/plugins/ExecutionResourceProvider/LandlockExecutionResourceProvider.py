@@ -45,6 +45,12 @@ def is_linux() -> bool:
     return platform.system() == "Linux"
 
 
+def _canonical_landlock_path(path: str) -> str:
+    if path.startswith("/proc/"):
+        return path
+    return str(Path(path).resolve())
+
+
 def _system_read_roots() -> list[str]:
     candidates = [
         "/usr",
@@ -61,6 +67,7 @@ def _system_read_roots() -> list[str]:
         "/dev/null",
         "/dev/urandom",
         "/dev/zero",
+        "/proc/self/exe",
         sys.executable,
     ]
     roots: list[str] = []
@@ -68,7 +75,7 @@ def _system_read_roots() -> list[str]:
         path = Path(candidate)
         if not path.exists():
             continue
-        resolved = str(path.resolve())
+        resolved = _canonical_landlock_path(candidate)
         if resolved not in roots:
             roots.append(resolved)
     return roots
@@ -211,7 +218,7 @@ class LandlockCodeExecutionResource:
             candidate = Path(path)
             if not candidate.exists():
                 return
-            resolved = str(candidate.resolve())
+            resolved = _canonical_landlock_path(path)
             if rules.get(resolved) == "write":
                 return
             rules[resolved] = access

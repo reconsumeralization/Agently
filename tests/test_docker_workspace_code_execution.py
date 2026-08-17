@@ -20,7 +20,39 @@ from agently.types.data import CodeExecutionRequest, TaskWorkspaceAccessRequirem
 
 
 @pytest.mark.asyncio
-async def test_docker_provider_exposes_code_execution_capabilities() -> None:
+async def test_docker_provider_exposes_code_execution_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        DockerExecutionResource,
+        "inspect_availability",
+        lambda _self: {
+            "available": True,
+            "reason": "ready",
+            "docker_binary": "docker",
+            "server_version": "29.0.0",
+        },
+    )
+    monkeypatch.setattr(
+        DockerExecutionResource,
+        "inspect_image",
+        lambda _self, image: {"exists": True, "image": image, "image_id": "sha256:test"},
+    )
+
+    async def inspect_toolchain(_self, *, image, tool, profile, timeout):
+        _ = image, profile, timeout
+        return {
+            "tool": tool,
+            "available": True,
+            "version": "3.12.0",
+            "raw_version": "Python 3.12.0",
+        }
+
+    monkeypatch.setattr(
+        DockerExecutionResource,
+        "inspect_toolchain",
+        inspect_toolchain,
+    )
     provider = DockerExecutionResourceProvider()
     probe = await provider.async_probe(
         requirement={
@@ -47,9 +79,14 @@ async def test_docker_provider_exposes_code_execution_capabilities() -> None:
 
 @pytest.mark.asyncio
 async def test_docker_executes_materialized_workspace_bundle(tmp_path: Path) -> None:
-    availability = DockerExecutionResource().inspect_availability()
+    docker_resource = DockerExecutionResource()
+    availability = docker_resource.inspect_availability()
     if not availability["available"]:
         pytest.skip(f"Docker is unavailable: {availability}")
+    image = "python:3.12-slim"
+    image_fact = docker_resource.inspect_image(image)
+    if not image_fact.get("exists"):
+        pytest.skip(f"required local Docker image is unavailable: {image}")
 
     workspace = TaskWorkspace(tmp_path / "workspace", execution_id="run-1")
     grant = workspace.issue_execution_access(
@@ -77,7 +114,7 @@ async def test_docker_executes_materialized_workspace_bundle(tmp_path: Path) -> 
             "task_workspace_access_grant": grant,
             "config": {
                 "runtime_profile": {
-                    "image": "python:3.12-slim",
+                    "image": image,
                     "image_pull_policy": "never",
                     "network_mode": "disabled",
                 }

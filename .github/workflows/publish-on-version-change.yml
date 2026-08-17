@@ -6,6 +6,13 @@ on:
       - main
     paths:
       - pyproject.toml
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: "Publish the current version after a failed validated release"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   validate:
@@ -71,26 +78,31 @@ jobs:
               current = read_version_from_text(f.read().decode("utf-8"))
           
           before = os.environ.get("GITHUB_EVENT_BEFORE", "")
-          if not before or before == "0000000000000000000000000000000000000000":
-              print("publish=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
-              sys.exit(0)
-          
-          try:
-              previous_text = subprocess.check_output(
-                  ["git", "show", f"{before}:pyproject.toml"],
-                  text=True,
-              )
-              previous = read_version_from_text(previous_text)
-          except Exception:
-              print("publish=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
-              sys.exit(0)
-          
-          publish = "true" if current != previous else "false"
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+          force_publish = os.environ.get("FORCE_PUBLISH", "").strip().lower() == "true"
+          if event_name == "workflow_dispatch":
+              publish = "true" if force_publish else "false"
+          elif not before or before == "0000000000000000000000000000000000000000":
+              publish = "true"
+          else:
+              try:
+                  previous_text = subprocess.check_output(
+                      ["git", "show", f"{before}:pyproject.toml"],
+                      text=True,
+                  )
+                  previous = read_version_from_text(previous_text)
+              except Exception:
+                  publish = "true"
+              else:
+                  publish = "true" if current != previous else "false"
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               print(f"publish={publish}", file=f)
           PY
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.force_publish || 'false' }}
       - name: Install Poetry
         if: steps.version_check.outputs.publish == 'true'
         run: pipx install poetry

@@ -72,6 +72,6 @@ async def test_landlock_allows_granted_output_and_denies_ungranted_read(tmp_path
     )
 
     assert handle["meta"]["mechanism_verified"] is True
-    assert result["ok"] is True, result
+    assert result["ok"] is True, result.get("stderr", result)
     observed = json.loads((Path(grant.execution_area) / "output" / "result.json").read_text())
     assert observed == {"shadow_denied": True}
