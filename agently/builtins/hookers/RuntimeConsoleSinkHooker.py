@@ -31,6 +31,9 @@ RuntimeLogProfile: TypeAlias = Literal["off", "simple", "detail"]
 
 _VALID_RUNTIME_LOG_PROFILES = frozenset({"off", "simple", "detail"})
 _ALWAYS_VISIBLE_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})
+_VALIDATION_CONTEXT_MAX_CHARS = 500
+_VALIDATION_TRACEBACK_MAX_CHARS = 2000
+_VALIDATION_TRACEBACK_MAX_LINES = 8
 _CONSOLE_EVENT_FAMILIES = frozenset({"model", "action", "triggerflow", "runtime"})
 _RUNTIME_PRINT_EVENTS = frozenset({"runtime.print"})
 _SIMPLE_AGENT_EXECUTION_STREAM_KINDS = frozenset(
@@ -126,9 +129,7 @@ def coerce_runtime_log_profile(value: Any) -> RuntimeLogProfile:
     normalized = normalize_runtime_log_profile(value, default="")
     if normalized:
         return cast(RuntimeLogProfile, normalized)
-    raise ValueError(
-        '`debug` only accepts False | True | "simple" | "detail" | "off".'
-    )
+    raise ValueError('`debug` only accepts False | True | "simple" | "detail" | "off".')
 
 
 def resolve_runtime_event_family(event_type: str | None) -> str:
@@ -193,7 +194,10 @@ def is_simple_runtime_event(event: "ObservationEvent") -> bool:
 
 
 def should_render_console_event(event: "ObservationEvent", settings: Settings) -> bool:
-    if _is_compat_alias_event(event) and resolve_runtime_log_profile(settings, event.meta.get("compat_alias_for")) != "off":
+    if (
+        _is_compat_alias_event(event)
+        and resolve_runtime_log_profile(settings, event.meta.get("compat_alias_for")) != "off"
+    ):
         return False
     family = resolve_runtime_event_family(event.event_type)
     if family not in _CONSOLE_EVENT_FAMILIES:
@@ -332,6 +336,91 @@ def _model_result_detail(event: "ObservationEvent", *, indent: int | None = None
     return ""
 
 
+def _non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _bounded_head(text: str, *, max_chars: int) -> str:
+    marker = "... [truncated]"
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - len(marker)]}{marker}"
+
+
+def _bounded_traceback_tail(text: str) -> str:
+    lines = [line for line in text.splitlines() if line.strip()]
+    tail = "\n".join(lines[-_VALIDATION_TRACEBACK_MAX_LINES:])
+    marker = "[truncated] ...\n"
+    if len(tail) <= _VALIDATION_TRACEBACK_MAX_CHARS:
+        return tail
+    return f"{marker}{tail[-(_VALIDATION_TRACEBACK_MAX_CHARS - len(marker)):]}"
+
+
+def _model_validation_detail(event: "ObservationEvent", profile: RuntimeLogProfile) -> str:
+    validator = _payload_value(event, "validator_name")
+    validator = validator.strip() if isinstance(validator, str) and validator.strip() else "unknown validator"
+    reason = _payload_value(event, "reason")
+    reason = (
+        reason.strip() if isinstance(reason, str) and reason.strip() else (event.message or "Output validation failed.")
+    )
+
+    attempt_index = _non_negative_int(_payload_value(event, "attempt_index"))
+    max_retries = _non_negative_int(_payload_value(event, "max_retries"))
+    attempt = ""
+    if attempt_index is not None and attempt_index > 0 and max_retries is not None:
+        attempt = f" (attempt {attempt_index}/{max_retries + 1})"
+
+    error_type = event.error.type if event.error is not None else _payload_value(event, "error_kind")
+    if isinstance(error_type, str) and error_type:
+        error_message = event.error.message if event.error is not None else reason
+        lines = [f"{validator} raised {error_type}: {error_message}{attempt}"]
+    else:
+        lines = [f"{validator}: {reason}{attempt}"]
+
+    stop = _payload_value(event, "stop") is True
+    no_retry = _payload_value(event, "no_retry") is True
+    if stop or no_retry:
+        flags = ", ".join(flag for flag, enabled in (("stop=true", stop), ("no_retry=true", no_retry)) if enabled)
+        lines.append(f"[Decision]: no retry ({flags})")
+
+    context = _payload_value(event, "validation_payload")
+    if profile == "detail" and isinstance(context, dict) and context:
+        context_text = _bounded_head(_stringify_payload(context), max_chars=_VALIDATION_CONTEXT_MAX_CHARS)
+        lines.append(f"[Context]: {context_text}")
+
+    if profile == "detail" and event.error is not None and event.error.traceback:
+        traceback_tail = _bounded_traceback_tail(event.error.traceback)
+        if traceback_tail:
+            lines.append(f"[Traceback]:\n{traceback_tail}")
+    return "\n".join(lines)
+
+
+def _model_retry_detail(event: "ObservationEvent", profile: RuntimeLogProfile) -> str:
+    retry_count = _payload_value(event, "retry_count")
+    if _payload_value(event, "retry_reason") != "validate":
+        if profile == "simple":
+            retry_label = f" (retry={retry_count})" if retry_count is not None else ""
+            return f"{event.message or 'Model response retrying.'}{retry_label}"
+        response_text = _payload_value(event, "response_text")
+        return f"[Response]: {response_text}\n[Retried Times]: {retry_count}"
+
+    attempt_index = _non_negative_int(_payload_value(event, "attempt_index"))
+    next_attempt_index = _non_negative_int(_payload_value(event, "next_attempt_index"))
+    if profile == "simple" and next_attempt_index is not None and next_attempt_index > 0:
+        return f"Validation retry -> attempt {next_attempt_index}"
+    if (
+        profile == "detail"
+        and attempt_index is not None
+        and attempt_index > 0
+        and next_attempt_index is not None
+        and next_attempt_index > 0
+    ):
+        return f"Validation retry: attempt {attempt_index} -> {next_attempt_index}"
+    return event.message or "Output validation failed. Preparing retry."
+
+
 def _resolve_tool_stage(event: "ObservationEvent") -> str:
     stage_mapping = {
         "tool.loop_started": "Started",
@@ -360,7 +449,12 @@ def _is_tool_loop_event(event: "ObservationEvent") -> bool:
 
 
 def _is_action_loop_event(event: "ObservationEvent") -> bool:
-    return event.event_type in {"action.loop_started", "action.loop_completed", "action.loop_failed", "action.plan_ready"}
+    return event.event_type in {
+        "action.loop_started",
+        "action.loop_completed",
+        "action.loop_failed",
+        "action.plan_ready",
+    }
 
 
 def _resolve_tool_name(event: "ObservationEvent") -> str | None:
@@ -566,14 +660,22 @@ class RuntimeConsoleSinkHooker(EventHooker):
         }
         detail = event.message or ""
         if profile == "simple":
-            if event.event_type == "model.retrying":
-                retry_count = _payload_value(event, "retry_count")
-                retry_label = f" (retry={ retry_count })" if retry_count is not None else ""
-                detail = f"{ event.message or 'Model response retrying.' }{ retry_label }"
+            if event.event_type in {"model.validation_error", "model.validation_failed"}:
+                detail = _model_validation_detail(event, profile)
+            elif event.event_type == "model.retrying":
+                detail = _model_retry_detail(event, profile)
             elif event.event_type == "model.requesting":
-                detail = _model_request_detail(event) or event.message or stage_mapping.get(event.event_type, event.event_type)
+                detail = (
+                    _model_request_detail(event)
+                    or event.message
+                    or stage_mapping.get(event.event_type, event.event_type)
+                )
             elif event.event_type == "model.completed":
-                detail = _model_result_detail(event) or event.message or stage_mapping.get(event.event_type, event.event_type)
+                detail = (
+                    _model_result_detail(event)
+                    or event.message
+                    or stage_mapping.get(event.event_type, event.event_type)
+                )
             elif event.error is not None:
                 detail = event.error.message
             else:
@@ -582,16 +684,18 @@ class RuntimeConsoleSinkHooker(EventHooker):
             detail = _model_request_detail(event, indent=2)
         elif event.event_type == "model.completed":
             detail = _model_result_detail(event, indent=2) or detail
+        elif event.event_type in {"model.validation_error", "model.validation_failed"}:
+            detail = _model_validation_detail(event, profile)
         elif event.event_type == "model.retrying":
-            response_text = _payload_value(event, "response_text")
-            retry_count = _payload_value(event, "retry_count")
-            detail = f"[Response]: { response_text }\n[Retried Times]: { retry_count }"
+            detail = _model_retry_detail(event, profile)
         elif event.error is not None:
             detail = event.error.message
         if not detail:
             detail = _stringify_payload(event.payload, indent=2)
         detail_color = "red" if event.level in ("WARNING", "ERROR", "CRITICAL") else "gray"
-        _render_block(response_label, stage_mapping.get(event.event_type, event.event_type), detail, detail_color=detail_color)
+        _render_block(
+            response_label, stage_mapping.get(event.event_type, event.event_type), detail, detail_color=detail_color
+        )
 
     @staticmethod
     def _handle_agent_execution_event(event: "ObservationEvent", profile: "RuntimeLogProfile"):
@@ -651,7 +755,9 @@ class RuntimeConsoleSinkHooker(EventHooker):
         if execution_id:
             prefix = f"{ prefix } [Execution-{ execution_id }]"
         detail = event.message or event.event_type if profile == "simple" else _event_detail(event, pretty_payload=True)
-        color = "red" if event.level in ("WARNING", "ERROR", "CRITICAL") else "yellow" if event.level == "DEBUG" else "gray"
+        color = (
+            "red" if event.level in ("WARNING", "ERROR", "CRITICAL") else "yellow" if event.level == "DEBUG" else "gray"
+        )
         _render_line(prefix, detail, color=color)
 
     @staticmethod

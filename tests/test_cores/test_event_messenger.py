@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,7 +17,7 @@ from agently.builtins.hookers.RuntimeConsoleSinkHooker import (
 )
 from agently.core import EventCenter, ObservationEventEmitter, RuntimeEventEmitter
 from agently.core.runtime.RuntimeContext import bind_runtime_context
-from agently.types.data import ObservationEvent, RuntimeEvent
+from agently.types.data import ErrorInfo, ObservationEvent, RuntimeEvent
 from agently.utils import Settings
 
 if TYPE_CHECKING:
@@ -516,11 +517,15 @@ def test_runtime_log_profiles_keep_default_off_quiet():
     assert not should_render_console_event(RuntimeEvent(event_type="tool.loop_started"), settings)
     assert not should_render_console_event(RuntimeEvent(event_type="triggerflow.execution_started"), settings)
     assert not should_render_console_event(RuntimeEvent(event_type="request.completed"), settings)
-    assert not should_render_console_event(RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings)
+    assert not should_render_console_event(
+        RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings
+    )
 
     assert not should_render_storage_event(RuntimeEvent(event_type="model.requesting", level="INFO"), settings)
     assert not should_render_storage_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)
-    assert should_render_storage_event(RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings)
+    assert should_render_storage_event(
+        RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings
+    )
     assert should_render_storage_event(RuntimeEvent(event_type="model.requester.error", level="ERROR"), settings)
     assert should_render_storage_event(RuntimeEvent(event_type="request.failed", level="WARNING"), settings)
 
@@ -529,7 +534,9 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
     settings = _build_runtime_log_settings("simple")
 
     assert should_render_console_event(RuntimeEvent(event_type="model.requesting", message="requesting"), settings)
-    assert should_render_console_event(RuntimeEvent(event_type="model.completed", payload={"raw_text": "done"}), settings)
+    assert should_render_console_event(
+        RuntimeEvent(event_type="model.completed", payload={"raw_text": "done"}), settings
+    )
     assert not should_render_console_event(RuntimeEvent(event_type="model.streaming", message="delta"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="model.request_failed", level="ERROR"), settings)
     assert should_render_console_event(RuntimeEvent(event_type="model.validation_failed", level="WARNING"), settings)
@@ -559,7 +566,9 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
     )
     assert should_render_console_event(RuntimeEvent(event_type="triggerflow.execution_failed", level="ERROR"), settings)
     assert not should_render_console_event(RuntimeEvent(event_type="triggerflow.signal", message="signal"), settings)
-    assert should_render_console_event(RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings)
+    assert should_render_console_event(
+        RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings
+    )
     assert should_render_console_event(RuntimeEvent(event_type="agent_execution.started", message="started"), settings)
     assert should_render_console_event(
         RuntimeEvent(
@@ -588,7 +597,9 @@ def test_runtime_log_profiles_simple_mode_uses_summary_whitelists():
     assert not should_render_storage_event(RuntimeEvent(event_type="model.requesting", level="INFO"), settings)
     assert not should_render_storage_event(RuntimeEvent(event_type="request.completed", level="INFO"), settings)
     assert not should_render_storage_event(RuntimeEvent(event_type="request.failed", level="ERROR"), settings)
-    assert not should_render_storage_event(RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings)
+    assert not should_render_storage_event(
+        RuntimeEvent(event_type="runtime.print", level="INFO", message="hello"), settings
+    )
     assert not should_render_storage_event(
         RuntimeEvent(
             event_type="tool.loop_failed",
@@ -797,6 +808,307 @@ def test_model_console_detail_keeps_structured_result_priority(monkeypatch):
     rendered = "\n".join(printed)
     assert "structured final result" in rendered
     assert "raw final text" not in rendered
+
+
+def test_model_console_simple_renders_validation_reason_and_retry_transition(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        _ = kwargs
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.validation_failed",
+            source="ModelRequestResult",
+            message="Output validation failed in require_ready.",
+            level="WARNING",
+            payload={
+                "agent_name": "publisher",
+                "response_id": "resp-1",
+                "validator_name": "require_ready",
+                "reason": "status must be ready before publication.",
+                "attempt_index": 1,
+                "max_retries": 1,
+                "stop": False,
+                "no_retry": False,
+                "validation_payload": {"expected_status": "ready", "actual_status": "draft"},
+                "response_text": '{"status":"draft"}',
+            },
+        ),
+        "simple",
+    )
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.retrying",
+            source="ModelRequestResult",
+            message="Output validation failed. Preparing retry.",
+            level="WARNING",
+            payload={
+                "agent_name": "publisher",
+                "response_id": "resp-1",
+                "retry_reason": "validate",
+                "attempt_index": 1,
+                "next_attempt_index": 2,
+                "validation_reason": "status must be ready before publication.",
+                "response_text": '{"status":"draft"}',
+            },
+        ),
+        "simple",
+    )
+
+    rendered = "\n".join(printed)
+    assert "require_ready: status must be ready before publication. (attempt 1/2)" in rendered
+    assert "Validation retry -> attempt 2" in rendered
+    assert "expected_status" not in rendered
+    assert rendered.count("status must be ready before publication.") == 1
+    assert '{"status":"draft"}' not in rendered
+
+
+def test_model_console_simple_renders_validation_error_without_traceback(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        _ = kwargs
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.validation_error",
+            source="ModelRequestResult",
+            message="Output validation failed in flaky_validator.",
+            level="ERROR",
+            payload={
+                "agent_name": "publisher",
+                "response_id": "resp-1",
+                "validator_name": "flaky_validator",
+                "reason": "validator boom",
+                "attempt_index": 1,
+                "max_retries": 1,
+                "error_kind": "RuntimeError",
+            },
+            error=ErrorInfo(
+                type="RuntimeError",
+                message="validator boom",
+                traceback="traceback must stay hidden in simple mode",
+            ),
+        ),
+        "simple",
+    )
+
+    rendered = "\n".join(printed)
+    assert "flaky_validator raised RuntimeError: validator boom (attempt 1/2)" in rendered
+    assert "traceback must stay hidden in simple mode" not in rendered
+
+
+def test_model_console_detail_validation_adds_only_new_facts(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        _ = kwargs
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.completed",
+            source="ModelRequestResult",
+            payload={
+                "agent_name": "publisher",
+                "response_id": "resp-1",
+                "result": {"status": "draft", "marker": "MODEL_RESPONSE_SENTINEL"},
+            },
+        ),
+        "detail",
+    )
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.validation_failed",
+            source="ModelRequestResult",
+            message="Output validation failed in require_ready.",
+            level="WARNING",
+            payload={
+                "agent_name": "publisher",
+                "response_id": "resp-1",
+                "validator_name": "require_ready",
+                "reason": "status must be ready before publication.",
+                "attempt_index": 1,
+                "max_retries": 1,
+                "stop": False,
+                "no_retry": False,
+                "validation_payload": {"expected_status": "ready", "actual_status": "draft"},
+                "response_text": '{"status":"draft","marker":"MODEL_RESPONSE_SENTINEL"}',
+            },
+        ),
+        "detail",
+    )
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.retrying",
+            source="ModelRequestResult",
+            message="Output validation failed. Preparing retry.",
+            level="WARNING",
+            payload={
+                "agent_name": "publisher",
+                "response_id": "resp-1",
+                "retry_reason": "validate",
+                "attempt_index": 1,
+                "next_attempt_index": 2,
+                "validation_reason": "status must be ready before publication.",
+                "validation_payload": {"expected_status": "ready", "actual_status": "draft"},
+                "response_text": '{"status":"draft","marker":"MODEL_RESPONSE_SENTINEL"}',
+            },
+        ),
+        "detail",
+    )
+
+    rendered = "\n".join(printed)
+    assert rendered.count("MODEL_RESPONSE_SENTINEL") == 1
+    assert rendered.count("status must be ready before publication.") == 1
+    assert rendered.count("require_ready") == 1
+    assert '[Context]: {"expected_status": "ready", "actual_status": "draft"}' in rendered
+    assert "Validation retry: attempt 1 -> 2" in rendered
+    assert "retryable=true" not in rendered
+    assert "stop=false" not in rendered
+    assert "no_retry=false" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("stop", "no_retry", "expected"),
+    [
+        (True, False, "[Decision]: no retry (stop=true)"),
+        (False, True, "[Decision]: no retry (no_retry=true)"),
+        (True, True, "[Decision]: no retry (stop=true, no_retry=true)"),
+    ],
+)
+def test_model_console_detail_validation_renders_only_non_default_decision(
+    monkeypatch,
+    stop: bool,
+    no_retry: bool,
+    expected: str,
+):
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "builtins.print",
+        lambda *args, **kwargs: printed.append(" ".join(str(arg) for arg in args)),
+    )
+
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.validation_failed",
+            source="ModelRequestResult",
+            message="Output validation failed in require_ready.",
+            level="WARNING",
+            payload={
+                "validator_name": "require_ready",
+                "reason": "publication is blocked by policy.",
+                "attempt_index": 1,
+                "max_retries": 3,
+                "stop": stop,
+                "no_retry": no_retry,
+            },
+        ),
+        "detail",
+    )
+
+    rendered = "\n".join(printed)
+    assert expected in rendered
+
+
+def test_model_console_detail_validation_bounds_context_and_traceback(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        _ = kwargs
+        printed.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.validation_failed",
+            source="ModelRequestResult",
+            message="Output validation failed in require_ready.",
+            level="WARNING",
+            payload={
+                "validator_name": "require_ready",
+                "reason": "invalid output",
+                "validation_payload": {"body": ("x" * 1000) + "CONTEXT_TAIL_SENTINEL"},
+            },
+        ),
+        "detail",
+    )
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.validation_error",
+            source="ModelRequestResult",
+            message="Output validation failed in flaky_validator.",
+            level="ERROR",
+            payload={
+                "validator_name": "flaky_validator",
+                "reason": "validator boom",
+                "error_kind": "RuntimeError",
+            },
+            error=ErrorInfo(
+                type="RuntimeError",
+                message="validator boom",
+                traceback="\n".join(
+                    [
+                        *(f"trace-line-{index:02d}" for index in range(1, 15)),
+                        "trace-line-15" + ("z" * 2500),
+                        "trace-line-16",
+                    ]
+                ),
+            ),
+        ),
+        "detail",
+    )
+
+    rendered = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(printed))
+    context_line = next(line for line in rendered.splitlines() if line.startswith("[Context]: "))
+    context_value = context_line.removeprefix("[Context]: ")
+    assert len(context_value) <= 500
+    assert context_value.endswith("... [truncated]")
+    assert "CONTEXT_TAIL_SENTINEL" not in context_value
+
+    traceback_value = rendered.split("[Traceback]:\n", 1)[1]
+    assert len(traceback_value) <= 2000
+    assert traceback_value.startswith("[truncated] ...\n")
+    assert "trace-line-01" not in traceback_value
+    assert "trace-line-16" in traceback_value
+
+
+def test_model_console_validation_fallback_tolerates_malformed_optional_payload(monkeypatch):
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "builtins.print",
+        lambda *args, **kwargs: printed.append(" ".join(str(arg) for arg in args)),
+    )
+
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.validation_failed",
+            source="ModelRequestResult",
+            message="Fallback validation message.",
+            level="WARNING",
+            payload={
+                "attempt_index": True,
+                "max_retries": False,
+                "validation_payload": "not-a-mapping",
+            },
+        ),
+        "detail",
+    )
+
+    rendered = "\n".join(printed)
+    assert "unknown validator: Fallback validation message." in rendered
+    assert "attempt" not in rendered
+    assert "[Context]" not in rendered
 
 
 def test_agent_execution_console_simple_renders_process_summary(monkeypatch):
