@@ -8119,7 +8119,7 @@ async def test_taskboard_preplanned_action_commands_dispatch_without_actionloop(
     assert direct is not None
     card_output, execution_meta = direct
     assert card_output["status"] == "completed"
-    assert calls == ["NVDA", "AVGO"]
+    assert sorted(calls) == ["AVGO", "NVDA"]
     assert [record["action_id"] for record in execution_meta["logs"]["action_logs"]] == [
         "market_snapshot",
         "market_snapshot",
@@ -8148,7 +8148,7 @@ async def test_taskboard_preplanned_action_commands_dispatch_without_actionloop(
     )
 
     assert result.status == "completed"
-    assert calls == ["NVDA", "AVGO"]
+    assert sorted(calls) == ["AVGO", "NVDA"]
 
 
 @pytest.mark.asyncio

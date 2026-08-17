@@ -13,6 +13,7 @@ from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourc
     LandlockCodeExecutionResource,
     LandlockExecutionResourceProvider,
     _canonical_landlock_path,
+    _toolchain_roots,
 )
 from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionHelper import (
     LANDLOCK_ACCESS_FS_MAKE_DIR,
@@ -38,6 +39,22 @@ landlock_module = importlib.import_module(
 
 def test_landlock_preserves_proc_self_exe_virtual_path() -> None:
     assert _canonical_landlock_path("/proc/self/exe") == "/proc/self/exe"
+
+
+def test_landlock_preserves_virtualenv_and_resolved_toolchain_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    virtualenv_root = tmp_path / "venv"
+    binary = virtualenv_root / "bin" / "python"
+    binary.parent.mkdir(parents=True)
+    binary.symlink_to(sys.executable)
+    monkeypatch.setattr(landlock_module.shutil, "which", lambda _command: str(binary))
+
+    roots = _toolchain_roots("python")
+
+    assert str(virtualenv_root) in roots
+    assert str(Path(sys.executable).resolve().parent.parent) in roots
 
 
 def _grant(tmp_path: Path) -> TaskWorkspaceAccessGrant:
