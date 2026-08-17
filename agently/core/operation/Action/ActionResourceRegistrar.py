@@ -38,15 +38,13 @@ class ActionResourceRegistrar:
         self._action = action
 
     @staticmethod
-    def _normalize_code_sandbox(value: Literal["auto", "docker", "gvisor", "landlock", "seatbelt", "trusted_local"] | str) -> Literal["auto", "docker", "gvisor", "landlock", "seatbelt", "trusted_local"]:
+    def _normalize_code_sandbox(value: Literal["auto", "docker", "trusted_local"] | str) -> Literal["auto", "docker", "trusted_local"]:
         normalized = str(value or "trusted_local").strip().lower().replace("-", "_")
         if normalized in {"local", "python", "node", "bash"}:
             normalized = "trusted_local"
-        if normalized in {"gvisor", "runsc", "gvisor/runsc"}:
-            normalized = "gvisor"
-        if normalized not in {"auto", "docker", "gvisor", "landlock", "seatbelt", "trusted_local"}:
-            raise ValueError("sandbox must be one of: 'auto', 'docker', 'gvisor', 'landlock', 'seatbelt', 'trusted_local'.")
-        return cast(Literal["auto", "docker", "gvisor", "landlock", "seatbelt", "trusted_local"], normalized)
+        if normalized not in {"auto", "docker", "trusted_local"}:
+            raise ValueError("sandbox must be one of: 'auto', 'docker', 'trusted_local'.")
+        return cast(Literal["auto", "docker", "trusted_local"], normalized)
 
     @staticmethod
     def _normalize_dependency_policy(value: Literal["deny", "request", "install"] | dict[str, Any] | str) -> dict[str, Any]:
@@ -106,7 +104,6 @@ class ActionResourceRegistrar:
         provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
         image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
         runtime_profile: dict[str, Any] | None = None,
-        provider_id: str = "docker",
     ) -> "ExecutionResourceRequirement":
         normalized_provisioning_profile = self._normalize_provisioning_profile(provisioning_profile)
         normalized_dependency_policy = (
@@ -148,7 +145,6 @@ class ActionResourceRegistrar:
                 "default_args": docker_default_args or [],
                 "runtime_profile": profile,
             },
-            "provider_id": provider_id,
             "policy": self._docker_policy(default_policy, timeout=timeout),
         })
         if normalized_dependency_policy.get("mode") == "request" or normalized_image_pull_policy == "request":
@@ -322,7 +318,7 @@ class ActionResourceRegistrar:
         preset_objects: dict[str, object] | None = None,
         base_vars: dict[str, Any] | None = None,
         allowed_return_types: list[type] | None = None,
-        sandbox: Literal["auto", "docker", "gvisor", "landlock", "seatbelt", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -346,14 +342,6 @@ class ActionResourceRegistrar:
             isolation = "none"
         elif sandbox_mode == "docker":
             providers = ["docker"]
-        elif sandbox_mode == "gvisor":
-            providers = ["gvisor"]
-        elif sandbox_mode == "seatbelt":
-            providers = ["seatbelt"]
-            isolation = "preferred"
-        elif sandbox_mode == "landlock":
-            providers = ["landlock"]
-            isolation = "preferred"
         return self.register_code_runtime_action(
             language="python",
             action_id=action_id,
@@ -388,7 +376,7 @@ class ActionResourceRegistrar:
         max_output_chars: int = 20000,
         output_artifact_dir: str | Path | None = None,
         task_workspace_mounts: list[dict[str, str]] | None = None,
-        sandbox: Literal["auto", "docker", "gvisor", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -398,10 +386,6 @@ class ActionResourceRegistrar:
     ):
         action = self._action
         sandbox_mode = self._normalize_code_sandbox(sandbox)
-        if sandbox_mode in {"seatbelt", "landlock"}:
-            raise ValueError(
-                f"{sandbox_mode} supports Workspace-bound code_execution helpers, not the broad Bash sandbox action."
-            )
         model_desc = self._format_bash_sandbox_desc(
             desc,
             allowed_cmd_prefixes=allowed_cmd_prefixes,
@@ -450,7 +434,6 @@ class ActionResourceRegistrar:
                         "output_artifact_dir": str(output_artifact_dir) if output_artifact_dir is not None else None,
                         "task_workspace_mounts": [dict(item) for item in (task_workspace_mounts or [])],
                     },
-                    provider_id="gvisor" if sandbox_mode == "gvisor" else "docker",
                 )
             ]
         action.register_action(
@@ -494,7 +477,7 @@ class ActionResourceRegistrar:
         cwd: str | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
-        sandbox: Literal["auto", "docker", "gvisor", "landlock", "seatbelt", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "trusted_local"] = "trusted_local",
         docker_image: str = "node:22-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -517,14 +500,6 @@ class ActionResourceRegistrar:
             isolation = "none"
         elif sandbox_mode == "docker":
             providers = ["docker"]
-        elif sandbox_mode == "gvisor":
-            providers = ["gvisor"]
-        elif sandbox_mode == "seatbelt":
-            providers = ["seatbelt"]
-            isolation = "preferred"
-        elif sandbox_mode == "landlock":
-            providers = ["landlock"]
-            isolation = "preferred"
         return self.register_code_runtime_action(
             language="nodejs",
             action_id=action_id,
@@ -611,7 +586,7 @@ class ActionResourceRegistrar:
         has_unsafe_candidate = False
         for candidate in provider_candidates:
             candidate_config = dict(candidate.get("config", {}))
-            if candidate["provider_id"] in {"docker", "gvisor"}:
+            if candidate["provider_id"] == "docker":
                 candidate_runtime_profile = candidate_config.get("runtime_profile", {})
                 if not isinstance(candidate_runtime_profile, dict):
                     raise TypeError("Docker candidate runtime_profile must be a mapping.")

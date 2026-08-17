@@ -196,9 +196,13 @@ async def test_gvisor_ensure_closes_unowned_resource_when_runtime_verification_i
     assert provider.created._closed is True
 
 
-def test_gvisor_sandbox_uses_only_the_gvisor_provider() -> None:
+def test_generic_selection_uses_only_the_gvisor_provider() -> None:
     action = _Action()
-    ActionResourceRegistrar(action).register_python_sandbox_action(sandbox="gvisor")
+    ActionResourceRegistrar(action).register_code_runtime_action(
+        language="python",
+        providers=["gvisor"],
+        isolation="required",
+    )
 
     requirement = action.registered["execution_resources"][0]
     assert requirement["kind"] == "code_execution"
