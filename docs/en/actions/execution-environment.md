@@ -81,7 +81,7 @@ The built-in providers are:
 | `mcp` | `agent.use_mcp(...)` / MCP actions | MCP transport resource |
 | `bash` | `sandbox="trusted_local"` shell actions | configured local command runner |
 | `docker` | isolated shell actions, direct Docker Actions, and one `code_execution` provider candidate | Docker CLI runner and image provisioning |
-| `code_execution` | `agent.enable_python(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and authorized Skill script Actions | provider-neutral Workspace-bound execution; built-ins include Docker and the explicit unsafe `trusted_local` fallback |
+| `code_execution` | `agent.enable_python(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and authorized Skill script Actions | provider-neutral Workspace-bound execution; built-ins include Docker, optional gVisor/runsc, and the explicit unsafe `trusted_local` fallback |
 | `browser` | Browse actions that opt into managed browser resources | managed browser/page/session wrapper |
 | `sqlite` | `agent.enable_sqlite(...)` / SQLite executor actions | SQLite connection |
 
@@ -147,6 +147,24 @@ axes. Preferred isolation first searches the ordered candidate set for a full
 match and only then uses an eligible fallback, recording that fallback in the
 handle metadata. A provider name or a string such as `"required"` is not safety
 evidence.
+
+### gVisor Docker runtime
+
+Use the explicit `gvisor` sandbox when the host Docker daemon is configured
+with the `runsc` runtime:
+
+```python
+agent.enable_python(sandbox="gvisor")
+```
+
+This chooses only the optional `gvisor` provider. Before a handle is ready,
+Agently verifies Docker availability, requires a registered `runsc` runtime,
+prepares the selected image under the configured image policy, and starts a
+bounded `runsc` container probe. A missing, malformed, unregistered, or
+non-executable runtime fails closed; this explicit choice never falls back to
+Docker/runc, `auto`, or `trusted_local`. The verified active runtime is retained
+in handle and code-execution result metadata. gVisor adds no default import
+dependency and does not make unsafe Docker arguments stronger safety evidence.
 
 Code requests declare at most 128 expected outputs. Each path is bounded,
 normalized, and must be under `output/`; missing declared outputs make the
