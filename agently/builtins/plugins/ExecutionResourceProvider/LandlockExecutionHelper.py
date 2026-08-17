@@ -113,6 +113,17 @@ def write_access(abi_version: int) -> int:
     return supported_access(abi_version)
 
 
+def access_for_path(*, abi_version: int, mode: str, path: Path) -> int:
+    if path.is_dir():
+        return write_access(abi_version) if mode == "write" else read_access(abi_version)
+    access = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE
+    if mode == "write":
+        access |= LANDLOCK_ACCESS_FS_WRITE_FILE
+        if abi_version >= 3:
+            access |= LANDLOCK_ACCESS_FS_TRUNCATE
+    return access & supported_access(abi_version)
+
+
 def _load_manifest(path: Path) -> list[tuple[str, str]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("version") != 1:
@@ -167,7 +178,11 @@ def apply_manifest(path: Path) -> int:
             path_fd = os.open(rule_path, os.O_PATH | os.O_CLOEXEC)
             try:
                 rule_attr = _PathBeneathAttr(
-                    allowed_access=write_access(abi) if mode == "write" else read_access(abi),
+                    allowed_access=access_for_path(
+                        abi_version=abi,
+                        mode=mode,
+                        path=Path(rule_path),
+                    ),
                     parent_fd=path_fd,
                 )
                 result = int(
@@ -217,4 +232,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

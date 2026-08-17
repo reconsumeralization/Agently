@@ -13,6 +13,11 @@ from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourc
     LandlockCodeExecutionResource,
     LandlockExecutionResourceProvider,
 )
+from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionHelper import (
+    LANDLOCK_ACCESS_FS_MAKE_DIR,
+    LANDLOCK_ACCESS_FS_READ_DIR,
+    access_for_path,
+)
 from agently.builtins.plugins.ExecutionResourceProvider._bounded_process import (
     BoundedProcessResult,
 )
@@ -75,6 +80,16 @@ def test_landlock_resource_accepts_no_arbitrary_path_or_abi_configuration(tmp_pa
 
     with pytest.raises(TypeError):
         LandlockCodeExecutionResource(grant=grant, allowed_write_dirs=["/"])  # type: ignore[call-arg]
+
+
+def test_landlock_regular_file_rule_excludes_directory_only_access_bits(tmp_path: Path) -> None:
+    path = tmp_path / "ld.so.cache"
+    path.write_bytes(b"cache")
+
+    access = access_for_path(abi_version=7, mode="read", path=path)
+
+    assert access & LANDLOCK_ACCESS_FS_READ_DIR == 0
+    assert access & LANDLOCK_ACCESS_FS_MAKE_DIR == 0
 
 
 @pytest.mark.asyncio
