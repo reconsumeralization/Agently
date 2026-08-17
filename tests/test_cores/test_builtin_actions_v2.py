@@ -170,6 +170,7 @@ def test_v2_default_plugins_are_registered():
         "TrustedLocalExecutionResourceProvider",
         "DockerExecutionResourceProvider",
         "GVisorDockerExecutionResourceProvider",
+        "LandlockExecutionResourceProvider",
         "SeatbeltExecutionResourceProvider",
         "BrowserExecutionResourceProvider",
         "SQLiteExecutionResourceProvider",

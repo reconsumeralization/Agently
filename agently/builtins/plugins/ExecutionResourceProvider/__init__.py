@@ -1,15 +1,10 @@
-import platform
-
 from .ACPExecutionResourceProvider import ACPExecutionResourceProvider
 from .BashExecutionResourceProvider import BashExecutionResourceProvider
 from .MCPExecutionResourceProvider import MCPExecutionResourceProvider
 from .DockerExecutionResourceProvider import DockerExecutionResourceProvider
 from .GVisorDockerExecutionResourceProvider import GVisorDockerExecutionResourceProvider
 from .SeatbeltExecutionResourceProvider import SeatbeltExecutionResourceProvider
+from .LandlockExecutionResourceProvider import LandlockExecutionResourceProvider
 from .BrowserExecutionResourceProvider import BrowserExecutionResourceProvider
 from .SQLiteExecutionResourceProvider import SQLiteExecutionResourceProvider
 from .TrustedLocalExecutionResourceProvider import TrustedLocalExecutionResourceProvider
-
-# Linux-only sandbox providers
-if platform.system() == "Linux":
-    from .LandlockExecutionResourceProvider import LandlockExecutionResourceProvider

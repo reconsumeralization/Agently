@@ -24,6 +24,7 @@ from .ExecutionResourceProvider import (
     ACPExecutionResourceProvider,
     BashExecutionResourceProvider,
     GVisorDockerExecutionResourceProvider,
+    LandlockExecutionResourceProvider,
     SeatbeltExecutionResourceProvider,
     MCPExecutionResourceProvider,
 )
