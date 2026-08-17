@@ -88,6 +88,16 @@ class GVisorDockerExecutionResource(DockerExecutionResource):
         availability = super().inspect_availability()
         if not availability.get("available"):
             return availability
+        try:
+            self._reject_runtime_default_args(self.default_args)
+        except ValueError as error:
+            return {
+                **availability,
+                "available": False,
+                "reason": "runsc_runtime_arguments_invalid",
+                "container_runtime": self.runtime_name,
+                "error": str(error),
+            }
         registry = self._docker_runtime_registry()
         if registry is None:
             return {
@@ -245,25 +255,29 @@ class GVisorDockerExecutionResourceProvider(DockerExecutionResourceProvider):
                 code="execution_resource.gvisor_runtime_unavailable",
                 payload={"reason": "runsc_resource_construction_failed"},
             )
-        profile = resource._profile()
-        image = str(profile.get("image", ""))
-        if not image:
-            raise ExecutionResourceError(
-                "gVisor provider has no runtime image to verify.",
-                code="execution_resource.gvisor_runtime_unavailable",
-                payload={"reason": "runsc_runtime_image_missing"},
-            )
-        verification = await resource.async_verify_runtime(image=image, profile=profile)
-        if not verification.get("verified"):
-            raise ExecutionResourceError(
-                "Docker registered runsc but could not execute the selected runtime.",
-                code="execution_resource.gvisor_runtime_unavailable",
-                payload={
-                    "reason": "runsc_runtime_execution_failed",
-                    "container_runtime": resource.runtime_name,
-                    "runtime_verification": verification,
-                },
-            )
+        try:
+            profile = resource._profile()
+            image = str(profile.get("image", ""))
+            if not image:
+                raise ExecutionResourceError(
+                    "gVisor provider has no runtime image to verify.",
+                    code="execution_resource.gvisor_runtime_unavailable",
+                    payload={"reason": "runsc_runtime_image_missing"},
+                )
+            verification = await resource.async_verify_runtime(image=image, profile=profile)
+            if not verification.get("verified"):
+                raise ExecutionResourceError(
+                    "Docker registered runsc but could not execute the selected runtime.",
+                    code="execution_resource.gvisor_runtime_unavailable",
+                    payload={
+                        "reason": "runsc_runtime_execution_failed",
+                        "container_runtime": resource.runtime_name,
+                        "runtime_verification": verification,
+                    },
+                )
+        except BaseException:
+            await resource.async_close()
+            raise
         meta = handle.get("meta")
         meta = dict(meta) if isinstance(meta, dict) else {}
         meta.update(
@@ -285,10 +299,20 @@ class GVisorDockerExecutionResourceProvider(DockerExecutionResourceProvider):
         if not isinstance(resource, GVisorDockerExecutionResource):
             return "unhealthy"
         meta = handle.get("meta")
-        if isinstance(meta, dict) and meta.get("active_runtime") not in {None, resource.runtime_name}:
+        if not isinstance(meta, dict) or meta.get("active_runtime") != resource.runtime_name:
+            return "unhealthy"
+        previous_verification = meta.get("runtime_verification")
+        if not isinstance(previous_verification, dict) or not previous_verification.get("verified"):
             return "unhealthy"
         availability = await asyncio.to_thread(resource.inspect_availability)
-        return "ready" if availability.get("available") else "unhealthy"
+        if not availability.get("available"):
+            return "unhealthy"
+        profile = resource._profile()
+        image = str(profile.get("image", ""))
+        if not image:
+            return "unhealthy"
+        verification = await resource.async_verify_runtime(image=image, profile=profile)
+        return "ready" if verification.get("verified") else "unhealthy"
 
 
 __all__ = [

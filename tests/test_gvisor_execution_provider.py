@@ -142,6 +142,60 @@ async def test_gvisor_ensure_rejects_registered_but_non_executable_runtime(monke
     assert raised.value.payload["reason"] == "runsc_runtime_execution_failed"
 
 
+@pytest.mark.asyncio
+async def test_gvisor_ensure_closes_unowned_resource_after_runtime_verification_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TrackingProvider(GVisorDockerExecutionResourceProvider):
+        created: GVisorDockerExecutionResource | None = None
+
+        def create_resource(self, **kwargs: Any) -> GVisorDockerExecutionResource:
+            self.created = super().create_resource(**kwargs)
+            return self.created
+
+    provider = _TrackingProvider()
+    monkeypatch.setattr(GVisorDockerExecutionResource, "ensure_available", lambda _self: _ready_docker())
+    monkeypatch.setattr(GVisorDockerExecutionResource, "ensure_image_ready", lambda _self, _image, *, profile: {"ready": True})
+
+    async def fail(_self: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"verified": False, "result": {"ok": False}}
+
+    monkeypatch.setattr(GVisorDockerExecutionResource, "async_verify_runtime", fail)
+
+    with pytest.raises(ExecutionResourceError):
+        await provider.async_ensure(requirement=_gvisor_requirement(), policy={})
+
+    assert provider.created is not None
+    assert provider.created._closed is True
+
+
+@pytest.mark.asyncio
+async def test_gvisor_ensure_closes_unowned_resource_when_runtime_verification_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TrackingProvider(GVisorDockerExecutionResourceProvider):
+        created: GVisorDockerExecutionResource | None = None
+
+        def create_resource(self, **kwargs: Any) -> GVisorDockerExecutionResource:
+            self.created = super().create_resource(**kwargs)
+            return self.created
+
+    provider = _TrackingProvider()
+    monkeypatch.setattr(GVisorDockerExecutionResource, "ensure_available", lambda _self: _ready_docker())
+    monkeypatch.setattr(GVisorDockerExecutionResource, "ensure_image_ready", lambda _self, _image, *, profile: {"ready": True})
+
+    async def cancel(_self: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(GVisorDockerExecutionResource, "async_verify_runtime", cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await provider.async_ensure(requirement=_gvisor_requirement(), policy={})
+
+    assert provider.created is not None
+    assert provider.created._closed is True
+
+
 def test_gvisor_sandbox_uses_only_the_gvisor_provider() -> None:
     action = _Action()
     ActionResourceRegistrar(action).register_python_sandbox_action(sandbox="gvisor")
@@ -162,6 +216,44 @@ async def test_gvisor_health_rejects_an_unregistered_runtime(monkeypatch: pytest
     monkeypatch.setattr(resource, "_docker_runtime_registry", lambda: {"runc": {}})
 
     assert await GVisorDockerExecutionResourceProvider().async_health_check({"resource": resource}) == "unhealthy"
+
+
+@pytest.mark.asyncio
+async def test_gvisor_health_rejects_registered_but_non_executable_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resource = GVisorDockerExecutionResource(runtime_profile={"image": "python:3.12-slim"})
+    monkeypatch.setattr(resource, "inspect_availability", lambda: _ready_docker())
+
+    async def fail(**_kwargs: Any) -> dict[str, Any]:
+        return {"verified": False, "result": {"ok": False}}
+
+    monkeypatch.setattr(resource, "async_verify_runtime", fail)
+
+    status = await GVisorDockerExecutionResourceProvider().async_health_check(
+        {
+            "resource": resource,
+            "meta": {
+                "active_runtime": "runsc",
+                "runtime_verification": {"verified": True},
+            },
+        }
+    )
+
+    assert status == "unhealthy"
+
+
+def test_gvisor_probe_rejects_conflicting_runtime_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(DockerExecutionResource, "inspect_availability", lambda _self: _ready_docker())
+    resource = GVisorDockerExecutionResource(default_args=["--runtime=runc"])
+    monkeypatch.setattr(resource, "_docker_runtime_registry", lambda: {"runsc": {}})
+
+    availability = resource.inspect_availability()
+
+    assert availability["available"] is False
+    assert availability["reason"] == "runsc_runtime_arguments_invalid"
 
 
 @pytest.mark.asyncio
