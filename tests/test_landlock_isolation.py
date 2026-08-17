@@ -196,9 +196,13 @@ async def test_landlock_health_rechecks_real_mechanism(
     assert status == "unhealthy"
 
 
-def test_landlock_sandbox_uses_only_the_landlock_provider() -> None:
+def test_generic_selection_uses_only_the_landlock_provider() -> None:
     action = _Action()
-    ActionResourceRegistrar(action).register_python_sandbox_action(sandbox="landlock")
+    ActionResourceRegistrar(action).register_code_runtime_action(
+        language="python",
+        providers=["landlock"],
+        isolation="preferred",
+    )
 
     requirement = action.registered["execution_resources"][0]
     assert [item["provider_id"] for item in requirement["provider_candidates"]] == ["landlock"]

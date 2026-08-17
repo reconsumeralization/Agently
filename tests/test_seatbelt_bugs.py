@@ -159,9 +159,13 @@ async def test_seatbelt_rejects_arbitrary_policy_configuration(
     assert raised.value.code == "execution_resource.seatbelt_config_invalid"
 
 
-def test_seatbelt_sandbox_uses_only_the_seatbelt_provider() -> None:
+def test_generic_selection_uses_only_the_seatbelt_provider() -> None:
     action = _Action()
-    ActionResourceRegistrar(action).register_python_sandbox_action(sandbox="seatbelt")
+    ActionResourceRegistrar(action).register_code_runtime_action(
+        language="python",
+        providers=["seatbelt"],
+        isolation="preferred",
+    )
 
     requirement = action.registered["execution_resources"][0]
     assert [item["provider_id"] for item in requirement["provider_candidates"]] == ["seatbelt"]

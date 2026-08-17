@@ -134,6 +134,13 @@ agent.settings.set(
 agent.enable_code_runtime(language="go")
 ```
 
+`sandbox=` on `enable_python(...)` and `enable_nodejs(...)` is a compatibility
+shortcut limited to `"auto"`, `"docker"`, and `"trusted_local"`. Optional
+isolation mechanisms are plugins: select them through the provider-neutral
+`providers=` and `isolation=` options shown below. A provider-specific
+configuration belongs in that provider's candidate descriptor, not in the core
+Action API.
+
 `trusted_local` executes host toolchains without isolation and accepts only a
 snapshot grant. It requires explicit host authorization and cannot satisfy
 `isolation="required"`. `unsafe_fallback=True` must therefore be paired with an
@@ -150,11 +157,15 @@ evidence.
 
 ### gVisor Docker runtime
 
-Use the explicit `gvisor` sandbox when the host Docker daemon is configured
-with the `runsc` runtime:
+When the host Docker daemon is configured with the `runsc` runtime, select the
+optional `gvisor` provider through the generic code-runtime API:
 
 ```python
-agent.enable_python(sandbox="gvisor")
+agent.enable_code_runtime(
+    language="python",
+    providers=["gvisor"],
+    isolation="required",
+)
 ```
 
 This chooses only the optional `gvisor` provider. Before a handle is ready,
@@ -171,7 +182,11 @@ dependency and does not make unsafe Docker arguments stronger safety evidence.
 On macOS, explicitly select the optional Seatbelt provider with:
 
 ```python
-agent.enable_python(sandbox="seatbelt")
+agent.enable_code_runtime(
+    language="python",
+    providers=["seatbelt"],
+    isolation="preferred",
+)
 ```
 
 Seatbelt uses the system `sandbox-exec` mechanism, denies network access by
@@ -188,7 +203,11 @@ On a Linux kernel with Landlock support, explicitly select the filesystem-only
 provider with:
 
 ```python
-agent.enable_python(sandbox="landlock")
+agent.enable_code_runtime(
+    language="python",
+    providers=["landlock"],
+    isolation="preferred",
+)
 ```
 
 Landlock runs a provider-owned helper process, applies `PR_SET_NO_NEW_PRIVS`

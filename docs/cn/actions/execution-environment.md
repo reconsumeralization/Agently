@@ -119,6 +119,11 @@ agent.settings.set(
 agent.enable_code_runtime(language="go")
 ```
 
+`enable_python(...)` 与 `enable_nodejs(...)` 的 `sandbox=` 只是兼容快捷入口，仅支持
+`"auto"`、`"docker"` 和 `"trusted_local"`。可选隔离机制属于插件，必须通过下面的
+provider-neutral `providers=` 与 `isolation=` 参数选择。机制专属配置应放在对应 provider
+候选描述符中，不进入 core Action API。
+
 `trusted_local` 直接使用宿主 toolchain，没有隔离，只接受 snapshot grant。它需要显式
 host 授权，且不能满足 `isolation="required"`。因此 `unsafe_fallback=True` 必须同时
 显式选择 `isolation="preferred"` 或 `"none"`，不能被隐式选中。
@@ -131,10 +136,15 @@ syscall 限制。required isolation 必须满足全部请求轴；preferred isol
 
 ### gVisor Docker runtime
 
-当宿主 Docker daemon 已配置 `runsc` runtime 时，可显式选择 `gvisor`：
+当宿主 Docker daemon 已配置 `runsc` runtime 时，通过通用 code-runtime API 选择可选的
+`gvisor` provider：
 
 ```python
-agent.enable_python(sandbox="gvisor")
+agent.enable_code_runtime(
+    language="python",
+    providers=["gvisor"],
+    isolation="required",
+)
 ```
 
 该选择只使用可选的 `gvisor` provider。handle 就绪前，Agently 会验证 Docker
@@ -150,7 +160,11 @@ result metadata 中。gVisor 不会增加默认 import 依赖，也不会把不�
 在 macOS 上可以显式选择可选的 Seatbelt provider：
 
 ```python
-agent.enable_python(sandbox="seatbelt")
+agent.enable_code_runtime(
+    language="python",
+    providers=["seatbelt"],
+    isolation="preferred",
+)
 ```
 
 Seatbelt 使用系统 `sandbox-exec`，默认禁止网络，并且所有可写文件系统规则都只从
@@ -164,7 +178,11 @@ isolation；需要宿主读取隔离时应选择 Docker/gVisor。
 在支持 Landlock 的 Linux kernel 上，可以显式选择 filesystem-only provider：
 
 ```python
-agent.enable_python(sandbox="landlock")
+agent.enable_code_runtime(
+    language="python",
+    providers=["landlock"],
+    isolation="preferred",
+)
 ```
 
 Landlock 通过 provider 自有 helper 进程设置 `PR_SET_NO_NEW_PRIVS`，应用仅由
