@@ -1,14 +1,9 @@
-import platform
-
 from .ACPExecutionResourceProvider import ACPExecutionResourceProvider
 from .BashExecutionResourceProvider import BashExecutionResourceProvider
 from .MCPExecutionResourceProvider import MCPExecutionResourceProvider
 from .DockerExecutionResourceProvider import DockerExecutionResourceProvider
 from .GVisorDockerExecutionResourceProvider import GVisorDockerExecutionResourceProvider
+from .SeatbeltExecutionResourceProvider import SeatbeltExecutionResourceProvider
 from .BrowserExecutionResourceProvider import BrowserExecutionResourceProvider
 from .SQLiteExecutionResourceProvider import SQLiteExecutionResourceProvider
 from .TrustedLocalExecutionResourceProvider import TrustedLocalExecutionResourceProvider
-
-# Seatbelt is macOS-only; only import when running on Darwin
-if platform.system() == "Darwin":
-    from .SeatbeltExecutionResourceProvider import SeatbeltExecutionResourceProvider

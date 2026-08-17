@@ -38,15 +38,15 @@ class ActionResourceRegistrar:
         self._action = action
 
     @staticmethod
-    def _normalize_code_sandbox(value: Literal["auto", "docker", "gvisor", "trusted_local"] | str) -> Literal["auto", "docker", "gvisor", "trusted_local"]:
+    def _normalize_code_sandbox(value: Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"] | str) -> Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"]:
         normalized = str(value or "trusted_local").strip().lower().replace("-", "_")
         if normalized in {"local", "python", "node", "bash"}:
             normalized = "trusted_local"
         if normalized in {"gvisor", "runsc", "gvisor/runsc"}:
             normalized = "gvisor"
-        if normalized not in {"auto", "docker", "gvisor", "trusted_local"}:
-            raise ValueError("sandbox must be one of: 'auto', 'docker', 'gvisor', 'trusted_local'.")
-        return cast(Literal["auto", "docker", "gvisor", "trusted_local"], normalized)
+        if normalized not in {"auto", "docker", "gvisor", "seatbelt", "trusted_local"}:
+            raise ValueError("sandbox must be one of: 'auto', 'docker', 'gvisor', 'seatbelt', 'trusted_local'.")
+        return cast(Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"], normalized)
 
     @staticmethod
     def _normalize_dependency_policy(value: Literal["deny", "request", "install"] | dict[str, Any] | str) -> dict[str, Any]:
@@ -322,7 +322,7 @@ class ActionResourceRegistrar:
         preset_objects: dict[str, object] | None = None,
         base_vars: dict[str, Any] | None = None,
         allowed_return_types: list[type] | None = None,
-        sandbox: Literal["auto", "docker", "gvisor", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -348,6 +348,9 @@ class ActionResourceRegistrar:
             providers = ["docker"]
         elif sandbox_mode == "gvisor":
             providers = ["gvisor"]
+        elif sandbox_mode == "seatbelt":
+            providers = ["seatbelt"]
+            isolation = "preferred"
         return self.register_code_runtime_action(
             language="python",
             action_id=action_id,
@@ -392,6 +395,10 @@ class ActionResourceRegistrar:
     ):
         action = self._action
         sandbox_mode = self._normalize_code_sandbox(sandbox)
+        if sandbox_mode == "seatbelt":
+            raise ValueError(
+                "Seatbelt supports Workspace-bound code_execution helpers, not the broad Bash sandbox action."
+            )
         model_desc = self._format_bash_sandbox_desc(
             desc,
             allowed_cmd_prefixes=allowed_cmd_prefixes,
@@ -484,7 +491,7 @@ class ActionResourceRegistrar:
         cwd: str | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
-        sandbox: Literal["auto", "docker", "gvisor", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"] = "trusted_local",
         docker_image: str = "node:22-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -509,6 +516,9 @@ class ActionResourceRegistrar:
             providers = ["docker"]
         elif sandbox_mode == "gvisor":
             providers = ["gvisor"]
+        elif sandbox_mode == "seatbelt":
+            providers = ["seatbelt"]
+            isolation = "preferred"
         return self.register_code_runtime_action(
             language="nodejs",
             action_id=action_id,
@@ -794,74 +804,6 @@ class ActionResourceRegistrar:
                     "config": {
                         "database": database,
                         "uri": uri,
-                    },
-                    "policy": cast(ExecutionResourcePolicy, merged_policy),
-                }
-            ]),
-        )
-        return action
-
-    # ------------------------------------------------------------------
-    # Seatbelt sandbox registration (macOS only)
-    # ------------------------------------------------------------------
-
-    def register_seatbelt_sandbox_action(
-        self,
-        *,
-        action_id: str = "seatbelt_sandbox",
-        desc: str = "Execute Python code inside a macOS Seatbelt sandbox (sandbox-exec + SBPL).",
-        tags: str | list[str] | None = None,
-        default_policy: "ActionPolicy | None" = None,
-        expose_to_model: bool = False,
-        network: bool = False,
-        writable_paths: list[str] | None = None,
-        protected_paths: list[str] | None = None,
-        deny_read_paths: list[str] | None = None,
-        extra_sbpl_rules: str = "",
-        timeout: int = 60,
-    ):
-        """Register a Python sandbox action backed by macOS Seatbelt.
-
-        SBPL Profile Design:
-        - File read: globally allowed (needed for system libs)
-        - File write: whitelist only (writable_paths + temp dirs)
-        - Protected paths: deny write (overrides writable_paths, last-match-wins)
-        - Deny-read paths: deny both read and write (for secrets)
-        - Network: optional outbound switch
-
-        Only available on macOS. On other platforms the provider will
-        report itself as unavailable at handle-creation time.
-        """
-        action = self._action.register_action(
-            action_id=action_id,
-            desc=desc,
-            tags=tags,
-            default_policy=default_policy,
-            expose_to_model=expose_to_model,
-        )
-
-        merged_policy = self._merge_action_policy(
-            action_policy=default_policy,
-            timeout=timeout,
-        )
-
-        action.bind_execution(
-            default_policy=merged_policy,
-            side_effect_level="read",
-            execution_resources=cast(list[ExecutionResourceRequirement], [
-                {
-                    "requirement_id": f"seatbelt:{ action_id }",
-                    "kind": "code_execution",
-                    "scope": "action_call",
-                    "resource_key": action_id,
-                    "config": {
-                        "provider_id": "seatbelt",
-                        "timeout": timeout,
-                        "network": network,
-                        "writable_paths": writable_paths or [],
-                        "protected_paths": protected_paths or [],
-                        "deny_read_paths": deny_read_paths or [],
-                        "extra_sbpl_rules": extra_sbpl_rules,
                     },
                     "policy": cast(ExecutionResourcePolicy, merged_policy),
                 }
