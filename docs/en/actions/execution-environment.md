@@ -81,7 +81,7 @@ The built-in providers are:
 | `mcp` | `agent.use_mcp(...)` / MCP actions | MCP transport resource |
 | `bash` | `sandbox="trusted_local"` shell actions | configured local command runner |
 | `docker` | isolated shell actions, direct Docker Actions, and one `code_execution` provider candidate | Docker CLI runner and image provisioning |
-| `code_execution` | `agent.enable_python(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and authorized Skill script Actions | provider-neutral Workspace-bound execution; built-ins include Docker, optional gVisor/runsc, optional macOS Seatbelt, and the explicit unsafe `trusted_local` fallback |
+| `code_execution` | `agent.enable_python(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and authorized Skill script Actions | provider-neutral Workspace-bound execution; built-ins include Docker, optional gVisor/runsc, optional macOS Seatbelt, optional Linux Landlock, and the explicit unsafe `trusted_local` fallback |
 | `browser` | Browse actions that opt into managed browser resources | managed browser/page/session wrapper |
 | `sqlite` | `agent.enable_sqlite(...)` / SQLite executor actions | SQLite connection |
 
@@ -181,6 +181,24 @@ falls back to Docker or `trusted_local`. To keep host toolchains and dynamic
 libraries usable, this initial profile permits broad host reads; it therefore
 reports `host_filesystem_restricted=false` and the helper records preferred,
 not required, isolation. Use Docker/gVisor when host-read isolation is required.
+
+### Linux Landlock
+
+On a Linux kernel with Landlock support, explicitly select the filesystem-only
+provider with:
+
+```python
+agent.enable_python(sandbox="landlock")
+```
+
+Landlock runs a provider-owned helper process, applies `PR_SET_NO_NEW_PRIVS`
+and ABI-aware rules derived only from provider system/toolchain roots and the
+TaskWorkspace grant, then executes the adapter argv. Output, timeout,
+cancellation, and cleanup remain bounded by the normal process carrier. It
+accepts no raw rule manifests, ABI overrides, or additional host paths and
+never falls back to Docker or `trusted_local`. Landlock does not isolate
+processes, networks, or general syscalls, so it uses preferred isolation and
+reports those limitations explicitly.
 
 Code requests declare at most 128 expected outputs. Each path is bounded,
 normalized, and must be under `output/`; missing declared outputs make the
