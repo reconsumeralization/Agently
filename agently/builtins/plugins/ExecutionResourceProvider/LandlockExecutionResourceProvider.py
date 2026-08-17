@@ -81,14 +81,17 @@ def _system_read_roots() -> list[str]:
     return roots
 
 
-def _toolchain_root(command: str) -> str | None:
+def _toolchain_roots(command: str) -> list[str]:
     binary = shutil.which(command)
     if binary is None:
-        return None
-    path = Path(binary).resolve()
-    if str(path).startswith("/usr/"):
-        return "/usr"
-    return str(path.parent.parent)
+        return []
+    binary_path = Path(binary)
+    roots: list[str] = []
+    for path in (binary_path.parent.parent, binary_path.resolve().parent.parent):
+        normalized = "/usr" if str(path).startswith("/usr/") else str(path)
+        if normalized not in roots:
+            roots.append(normalized)
+    return roots
 
 
 def _probe_manifest() -> dict[str, Any]:
@@ -226,8 +229,7 @@ class LandlockCodeExecutionResource:
         for path in _system_read_roots():
             add(path, "read")
         if argv:
-            toolchain_root = _toolchain_root(argv[0])
-            if toolchain_root:
+            for toolchain_root in _toolchain_roots(argv[0]):
                 add(toolchain_root, "read")
         add(cwd, "read")
         for root in self.grant.roots:
