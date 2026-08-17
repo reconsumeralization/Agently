@@ -23,8 +23,8 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
           'upstream carrier in a transitive synchronous wait chain; 0.3.8 preserves that contract while forwarding '
           'Python 3.14 task-factory keyword arguments. A synchronous TriggerFlow chunk may call a provider-owned sync '
           "wrapper that uses with Stage() for an async tool and may then re-enter TriggerFlow's synchronous state "
-          'facade without knowing that the framework already uses Stage. FunctionShifter.syncify/asyncify retain their '
-          'compatibility names and deprecation warnings but now delegate to Stage.as_sync/as_async; internal '
+          'facade without knowing that the framework already uses Stage. The deprecated syncify/asyncify adapters '
+          'retain their compatibility names and warnings but now delegate to Stage.as_sync/as_async; internal '
           'lightweight default_stage_call_bridge usage remains unchanged. Stage is the required-runtime companion and '
           'remains a private Agently mechanism dependency: TriggerFlowExecution remains the semantic lifecycle owner, '
           'and Stage types or carrier state do not enter public execution state. Built-in inactive gvisor, seatbelt, '

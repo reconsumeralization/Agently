@@ -68,7 +68,7 @@ def test_in_development_manifest_declares_4_1_4_7_owner_boundaries() -> None:
     assert "Python 3.14 task-factory keyword arguments" in manifest["notes"]
     assert "physically safe carrier" in manifest["notes"]
     assert "provider-owned sync wrapper" in manifest["notes"]
-    assert "FunctionShifter.syncify/asyncify" in manifest["notes"]
+    assert "deprecated syncify/asyncify adapters" in manifest["notes"]
     assert "Stage.as_sync/as_async" in manifest["notes"]
     assert "default_stage_call_bridge usage remains unchanged" in manifest["notes"]
     assert "TriggerFlowExecution remains the semantic lifecycle owner" in manifest["notes"]
