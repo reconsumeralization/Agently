@@ -48,17 +48,27 @@ schema 或 prompt 片段会被原样复用、由另一 owner 独立版本化或�
 
 ## 请求本地上下文
 
-每个 prompt 槽位只有在改变当前请求所要求、允许、禁止，或需要产出的内容时，才属于
-请求本地上下文。应有意识地使用五种角色：`agent` 提供稳定的角色与能力；`input` 提供
-当前事实；`info` 提供权威契约与证据；`instruct` 提供任务规则；`output` 提供所需结果
-结构。它们合在一起必须让模型获得对当前请求自包含的说明，而不是假定模型知道未解释的
-项目上下文。
+每个模型可见的 prompt 项都必须承担至少一种当前请求角色：
 
-对每个候选内容使用移除反事实：若移除它不会改变当前请求的有效任务、契约、证据或
-决策，就应移除或改写它。内容来自项目级并不是移除的理由：只要共享策略或事实会改变
-本次请求，就应保留。专有名称只有在标识会改变本次请求的真实领域契约、allowlist、
-证据项、输入事实或能力边界时才可保留。否则，应把未解释的实现名称改写为它与请求相关
-的角色，或直接移除。
+1. 解释已提供的输入；
+2. 提供权威事实、策略、schema 或证据项；
+3. 改变模型拥有的决策或转换；
+4. 定义输出、消费者、tool 或能力边界；
+5. 提供有用的用户可见过程上下文、状态或说明，并声明对应的用户或 UI 消费者。
+
+应有意识地使用 prompt 槽位：`agent` 提供稳定的角色与能力；`input` 提供当前事实；
+`info` 提供权威契约与证据；`instruct` 提供任务规则；`output` 提供所需结果结构。
+它们合在一起必须让模型获得对当前请求自包含的说明，而不是假定模型知道未解释的项目
+上下文。
+
+对每个候选内容使用移除反事实：若移除它不会改变当前请求的有效任务、契约、证据、
+决策、允许的 verdict，或已声明的用户/UI 投影，就应移除或改写它。内容来自项目级并
+不是移除的理由：只要共享策略或事实会改变本次请求，就应保留。当有效的上游调用方保证
+会改变模型拥有的决策或允许的 verdict 集合时，应保留它，或把它改写为行为约束。专有
+名称只有在标识会改变本次请求的真实领域契约、allowlist、证据项、输入事实或能力边界
+时才可保留。否则，应把未解释的实现名称改写为它与请求相关的角色，或直接移除。第五种
+角色不允许泛化的项目叙述：必须声明哪个用户或 UI 消费者会使用该过程上下文、状态或
+说明。
 
 | | `info` |
 |---|---|
@@ -66,9 +76,12 @@ schema 或 prompt 片段会被原样复用、由另一 owner 独立版本化或�
 | 好 | “允许的操作：批准或拒绝。证据：附带的请求及其策略记录。” |
 
 分两层审计：先按槽位角色和移除反事实检查每个槽位，再检查实际渲染的请求，包括
-mappings 和引用。发送前，`execution.get_prompt_text()` 会渲染当前 execution draft，
-以便确认上下文自包含且属于请求本地。execution 启动后，同一方法会优先返回为本次运行
-捕获的 prompt snapshot。
+mappings 和引用。发送前，`execution.get_prompt_text()` 审计的是已渲染的 execution
+draft，不是最终 ModelRequest prompt。当 TaskContext、Session、Skills、检索、Actions
+或其他 runtime extension 还可能注入内容时，应在有界测试中检查注入后发出或构建的最终
+ModelRequest `prompt_text`，例如 `prompt.built` 事件的 `payload.prompt_text`。不得把
+启动后的 execution snapshot 当成 late injection 的充分证据。保留 prompt 证据前必须
+脱敏秘密信息。
 
 ## 严格的外部接口契约
 
@@ -222,10 +235,11 @@ execution = agent.role("你是 Agently 助手。", always=True).input("打个招
 })
 print(execution.get_yaml_prompt())
 print(execution.get_json_prompt())
-print(execution.get_prompt_text())  # 模型实际看到的渲染文本
+print(execution.get_prompt_text())  # 用于发送前审计的已渲染 execution draft
 ```
 
-这种往返是把「我以为我在发」与「框架实际发的」对上的标准方式。
+这种往返用于审查已编写的 execution draft 及其 mappings；若 runtime extension 还会
+注入内容，它就不是最终 prompt 的证据。
 
 ## 占位符
 
@@ -247,15 +261,17 @@ agent.load_yaml_prompt(yaml_text, mappings={"product_name": "Agently"})
 
 ## 每层 prompt 的来源
 
-请求实际发出时，Agently 按以下顺序合并 prompt：
+请求实际发出时，Agently 从以下几层组成模型 prompt：
 
 1. Agent 级槽位（`always=True` 或 `set_agent_prompt`）
 2. Request 级槽位（不带 `always=True`）
 3. 框架扩展或应用代码填入的槽位（Session 注入 chat history；检索代码通常把片段放进本次请求的 `info(...)`）
 
-一次性链式调用后，用 `execution.get_prompt_text()` 看发送前的合并结果，例如
-`execution = agent.input(...).output(...)`。`agent.get_prompt_text()` 只查看保留在
-Agent 自身上的 prompt，例如通过 `always=True` 设置的持久槽位。
+一次性链式调用后，用 `execution.get_prompt_text()` 检查发送前已渲染的 execution
+draft，例如 `execution = agent.input(...).output(...)`。它不能证明 runtime 的 late
+injection 最终加入了什么。当第三层可能改变 prompt 时，应在有界测试中检查注入后的
+最终 ModelRequest `prompt_text`，并在保留前脱敏秘密信息。`agent.get_prompt_text()`
+只查看保留在 Agent 自身上的 prompt，例如通过 `always=True` 设置的持久槽位。
 
 ## 另见
 
