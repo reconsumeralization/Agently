@@ -4,6 +4,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_publish_workflow_has_an_explicit_failed_release_retry_path():
+    workflow = (ROOT / ".github/workflows/publish-on-version-change.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "workflow_dispatch:" in workflow
+    assert "force_publish:" in workflow
+    assert "FORCE_PUBLISH:" in workflow
+    assert "github.event_name == 'workflow_dispatch'" in workflow
+
+
 def test_release_workflows_require_foundation_example_effect_gate():
     english = (ROOT / "docs/en/development/release-workflows.md").read_text(encoding="utf-8")
     chinese = (ROOT / "docs/cn/development/release-workflows.md").read_text(encoding="utf-8")

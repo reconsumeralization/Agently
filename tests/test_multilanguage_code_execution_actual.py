@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, TypedDict, cast
 
 import pytest
 
@@ -12,7 +13,11 @@ from agently.builtins.plugins.ExecutionResourceProvider.TrustedLocalExecutionRes
 from agently.core.TaskWorkspace import TaskWorkspace
 from agently.core import ExecutionResourceManager
 from agently.core.runtime import bind_runtime_context
-from agently.types.data import CodeExecutionRequest, TaskWorkspaceAccessRequirement
+from agently.types.data import (
+    CodeExecutionRequest,
+    ExecutionResourceProviderProbe,
+    TaskWorkspaceAccessRequirement,
+)
 from agently.utils import Settings
 
 
@@ -40,6 +45,13 @@ CASES = {
 }
 
 
+class _ObservedProbe(TypedDict):
+    available: bool
+    supported_kinds: list[str]
+    capabilities: dict[str, Any]
+    meta: dict[str, Any]
+
+
 @pytest.mark.parametrize("language", ["python", "nodejs", "go", "cpp"])
 @pytest.mark.asyncio
 async def test_locally_installed_mainstream_toolchain_executes_workspace_bundle(
@@ -47,7 +59,10 @@ async def test_locally_installed_mainstream_toolchain_executes_workspace_bundle(
     language: str,
 ) -> None:
     provider = TrustedLocalExecutionResourceProvider()
-    probe = await provider.async_probe(requirement={"kind": "code_execution"}, policy={})
+    probe = cast(
+        _ObservedProbe,
+        await provider.async_probe(requirement={"kind": "code_execution"}, policy={}),
+    )
     if language not in probe["capabilities"]["languages"]:
         pytest.skip(f"{language} toolchain unavailable: {probe['meta']['toolchains'][language]}")
     workspace = TaskWorkspace(
@@ -88,6 +103,20 @@ async def test_locally_installed_mainstream_toolchain_executes_workspace_bundle(
         }
         for item in bundle.toolchains
     }
+    required_capabilities = {
+        "language": language,
+        "toolchains": toolchains,
+        "workspace_access_mode": "snapshot",
+    }
+    if not ExecutionResourceManager._probe_is_eligible(
+        cast(ExecutionResourceProviderProbe, probe),
+        kind="code_execution",
+        required_capabilities=required_capabilities,
+    ):
+        pytest.skip(
+            f"{language} toolchain does not satisfy the bundle contract: "
+            f"{probe['meta']['toolchains'][language]}"
+        )
     manager = ExecutionResourceManager(
         plugin_manager=Agently.plugin_manager,
         settings=Settings(name=f"actual-{language}", parent=Agently.settings),
@@ -97,11 +126,7 @@ async def test_locally_installed_mainstream_toolchain_executes_workspace_bundle(
         {
             "kind": "code_execution",
             "provider_id": "trusted_local",
-            "required_capabilities": {
-                "language": language,
-                "toolchains": toolchains,
-                "workspace_access_mode": "snapshot",
-            },
+            "required_capabilities": required_capabilities,
             "config": {"allow_unsafe_local": True},
             "policy": {"max_output_bytes": 10_000},
             "task_workspace_access_grant": grant,
@@ -129,7 +154,10 @@ async def test_action_runtime_runs_workspace_bound_provider_chain_with_explicit_
     tmp_path: Path,
 ) -> None:
     provider = TrustedLocalExecutionResourceProvider()
-    probe = await provider.async_probe(requirement={"kind": "code_execution"}, policy={})
+    probe = cast(
+        _ObservedProbe,
+        await provider.async_probe(requirement={"kind": "code_execution"}, policy={}),
+    )
     if "python" not in probe["capabilities"]["languages"]:
         pytest.skip("Python toolchain is unavailable")
     workspace = TaskWorkspace(tmp_path / "action-workspace", execution_id="actual-action")

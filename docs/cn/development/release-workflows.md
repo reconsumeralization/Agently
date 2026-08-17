@@ -266,6 +266,11 @@ Desktop installers 不属于当前主仓库 release 流程。
 Agently-Stage），先运行 typing 与测试；随后 publish job 检测 Agently package version
 是否变化，并只在 version 变化时使用 Poetry 发布。
 
+如果该版本变更 push 之后 validation 失败，应通过新 PR 修复，再手动运行同一 workflow
+并设置 `force_publish=true`。手动触发默认不发布，只用于完整 validation matrix
+通过后恢复“版本号未再变化但制品从未成功上传”的版本。不要为了恢复失败 run 而再次
+提升 package version，也不要改为本地手工上传。
+
 PyPI 项目列表页展示的是包元数据 `Summary`，来源于 `pyproject.toml` 的 `[project].description`。项目内页展示完整 README，来源于 `[project].readme`。
 
 准备 release 时：

@@ -12,6 +12,7 @@ import pytest
 from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider import (
     LandlockCodeExecutionResource,
     LandlockExecutionResourceProvider,
+    _canonical_landlock_path,
 )
 from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionHelper import (
     LANDLOCK_ACCESS_FS_MAKE_DIR,
@@ -33,6 +34,10 @@ from agently.types.data import (
 landlock_module = importlib.import_module(
     "agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourceProvider"
 )
+
+
+def test_landlock_preserves_proc_self_exe_virtual_path() -> None:
+    assert _canonical_landlock_path("/proc/self/exe") == "/proc/self/exe"
 
 
 def _grant(tmp_path: Path) -> TaskWorkspaceAccessGrant:

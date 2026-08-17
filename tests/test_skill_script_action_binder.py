@@ -173,9 +173,13 @@ async def test_agent_exposes_explicit_script_binding_after_exact_skill_binding(
 async def test_bound_skill_script_executes_through_workspace_and_docker(
     tmp_path: Path,
 ) -> None:
-    availability = DockerExecutionResource().inspect_availability()
+    docker_resource = DockerExecutionResource()
+    availability = docker_resource.inspect_availability()
     if not availability["available"]:
         pytest.skip(f"Docker is unavailable: {availability}")
+    image = DockerExecutionResource._default_image("python")
+    if not docker_resource.inspect_image(image).get("exists"):
+        pytest.skip(f"required local Docker image is unavailable: {image}")
 
     skill_root = _write_skill(tmp_path / "skill", trust_marker="actual-docker")
     (skill_root / "scripts" / "check.py").write_text(

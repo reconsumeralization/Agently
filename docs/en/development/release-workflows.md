@@ -317,6 +317,12 @@ dependencies, including Agently-Stage from PyPI, and runs typing and tests
 before the publish job. The publish job then detects whether the Agently package
 version changed and publishes with Poetry only when it changed.
 
+If validation fails after that version-changing push, fix the failure through a
+new PR and rerun the same workflow manually with `force_publish=true`. Manual
+dispatch defaults to no publish and exists only to recover an unchanged,
+previously unuploaded version after the complete validation matrix passes. Do
+not bump the package version or upload locally merely to recover a failed run.
+
 The PyPI project list page shows the package metadata `Summary`, which comes from `[project].description` in `pyproject.toml`. The full project page renders the README from `[project].readme`.
 
 When preparing a release:

@@ -142,7 +142,7 @@ def _load_manifest(path: Path) -> list[tuple[str, str]]:
         access = item.get("access")
         if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
             raise ValueError(f"rules[{index}].path must be absolute")
-        resolved = str(Path(raw_path).resolve())
+        resolved = raw_path if raw_path.startswith("/proc/") else str(Path(raw_path).resolve())
         if resolved != raw_path or not Path(resolved).exists():
             raise ValueError(f"rules[{index}].path must be canonical and existing")
         if access not in {"read", "write"}:
