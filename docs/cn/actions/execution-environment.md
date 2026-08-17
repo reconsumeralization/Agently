@@ -76,7 +76,7 @@ Browser、SQLite action 可以声明自己的 requirement，Action dispatcher �
 | `mcp` | `agent.use_mcp(...)` / MCP actions | MCP transport resource |
 | `bash` | `sandbox="trusted_local"` shell actions | 配置后的本地命令 runner |
 | `docker` | 隔离 shell actions、direct Docker Actions，以及一个 `code_execution` provider 候选 | Docker CLI runner 与镜像 provisioning |
-| `code_execution` | `agent.enable_python(...)`、`agent.enable_nodejs(...)`、`agent.enable_code_runtime(...)` 与已授权 Skill script Actions | provider-neutral、Workspace-bound 执行；内置包括 Docker 与显式无防护 `trusted_local` fallback |
+| `code_execution` | `agent.enable_python(...)`、`agent.enable_nodejs(...)`、`agent.enable_code_runtime(...)` 与已授权 Skill script Actions | provider-neutral、Workspace-bound 执行；内置包括 Docker、可选的 gVisor/runsc 与显式无防护 `trusted_local` fallback |
 | `browser` | 选择托管 browser resource 的 Browse actions | 托管 browser/page/session wrapper |
 | `sqlite` | `agent.enable_sqlite(...)` / SQLite executor actions | SQLite connection |
 
@@ -128,6 +128,22 @@ provider 必须报告具体布尔隔离轴：进程 containment、宿主文件�
 syscall 限制。required isolation 必须满足全部请求轴；preferred isolation 会先在有序
 候选集中寻找完整匹配，找不到时才使用其他合格 fallback，并在 handle metadata 中记录
 该 fallback。provider 名称或 `"required"` 之类字符串都不是安全证据。
+
+### gVisor Docker runtime
+
+当宿主 Docker daemon 已配置 `runsc` runtime 时，可显式选择 `gvisor`：
+
+```python
+agent.enable_python(sandbox="gvisor")
+```
+
+该选择只使用可选的 `gvisor` provider。handle 就绪前，Agently 会验证 Docker
+可用性、确认 daemon 已注册 `runsc`、按既有镜像策略准备镜像，并通过有界的
+`runsc` 容器 probe 验证实际可执行。runtime 缺失、注册表格式错误、未注册或实际
+无法执行时都会 fail closed；显式选择不会回退到 Docker/runc、`auto` 或
+`trusted_local`。经验证的 active runtime 会保留在 handle 与 code-execution
+result metadata 中。gVisor 不会增加默认 import 依赖，也不会把不安全 Docker
+参数解释为更强的安全证据。
 
 代码请求最多声明 128 个 expected outputs；每条路径都有长度边界、必须规范化并位于
 `output/` 下，缺少任一声明制品都会使 Action 失败。stdout/stderr 有界保留，取消会终止
