@@ -67,17 +67,26 @@ TriggerFlow's process-local execution stream transport. EventCenter keeps its
 native background-task mechanism because the Stage-backed candidate had a
 measurable hot-path cost. EventCenter, RuntimeEvent, SignalNet,
 TriggerFlowExecution, and AgentExecution remain the semantic owners.
-Applications and plugins should not select a "Stage runtime" or place Stage
-objects in execution state. Stage EventEmitter does not replace
-EventCenter/SignalNet. Agently's internal sync/async call adaptation uses
+An application or plugin may use Agently-Stage's public `with Stage()`,
+`Stage.as_sync()` / `Stage.as_async()`, `Tunnel`, or `EventEmitter` capabilities
+independently for its own process-local lifetime, call bridge, replay channel,
+or listener boundary. That does not make Stage the Agently workflow owner:
+integrations must not place Stage objects in execution state or use Stage
+EventEmitter to replace EventCenter/SignalNet. Agently's internal sync/async call adaptation uses
 `StageCallBridge`; `FunctionShifter` remains only as a deprecated public
-compatibility facade that delegates to the same bridge.
-Call-shape conversion is light by default. Only a scheduling owner such as
+compatibility facade. Its scalar `syncify()` / `asyncify()` methods delegate to
+the scoped `Stage.as_sync()` / `Stage.as_async()` deep interface, while its
+future and stream compatibility methods retain the advanced bridge.
+`StageCallBridge` call-shape conversion is light by default. Only a scheduling owner such as
 TriggerFlow or EventCenter requests `managed=True`; this prevents compatibility
 helpers from changing error or cancellation semantics merely because they adapt
 sync and async call shapes.
 
-Agently depends on Agently-Stage 0.3.5 or newer in the 0.3 compatibility line.
+Agently 4.1.4.7 depends on Agently-Stage 0.3.8 or newer in the 0.3 compatibility line.
+Stage owns automatic physical carrier selection across mixed sync/async
+boundaries; TriggerFlow still owns workflow lifecycle and public state. Reusing
+one safe carrier does not merge separate Stage scope inventories or expose
+carrier concepts through Agently's public lifecycle.
 `LocalTaskScope` is not an Agently integration surface; it is a deprecated
 Agently-Stage compatibility shim scheduled for removal in Agently-Stage 0.4.
 
