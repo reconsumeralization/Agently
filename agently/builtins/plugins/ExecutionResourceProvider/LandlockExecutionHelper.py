@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+_O_PATH = getattr(os, "O_PATH", 0)
+
 LANDLOCK_ACCESS_FS_EXECUTE = 1 << 0
 LANDLOCK_ACCESS_FS_WRITE_FILE = 1 << 1
 LANDLOCK_ACCESS_FS_READ_FILE = 1 << 2
@@ -175,7 +177,7 @@ def apply_manifest(path: Path) -> int:
 
     try:
         for rule_path, mode in _load_manifest(path):
-            path_fd = os.open(rule_path, os.O_PATH | os.O_CLOEXEC)
+            path_fd = os.open(rule_path, _O_PATH | os.O_CLOEXEC)
             try:
                 rule_attr = _PathBeneathAttr(
                     allowed_access=access_for_path(

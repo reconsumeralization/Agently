@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from typing import Any
+from typing import Any, TypedDict, cast
 
 import pytest
 
@@ -15,13 +15,19 @@ from agently.builtins.plugins.ExecutionResourceProvider.GVisorDockerExecutionRes
 )
 from agently.core import ExecutionResourceError
 from agently.core.operation.Action.ActionResourceRegistrar import ActionResourceRegistrar
+from agently.types.data import ExecutionResourceRequirement
 
 
 def _ready_docker() -> dict[str, Any]:
     return {"available": True, "reason": "ready", "docker_binary": "docker", "server_version": "29.0.0"}
 
 
-def _gvisor_requirement() -> dict[str, Any]:
+class _ReadyHandle(TypedDict):
+    provider_id: str
+    meta: dict[str, Any]
+
+
+def _gvisor_requirement() -> ExecutionResourceRequirement:
     return {"kind": "docker", "config": {"runtime_profile": {"image": "python:3.12-slim"}}}
 
 
@@ -119,7 +125,13 @@ async def test_gvisor_ensure_records_active_runtime_only_after_execution_probe(m
         return {"verified": True, "result": {"ok": True}}
 
     monkeypatch.setattr(GVisorDockerExecutionResource, "async_verify_runtime", verify)
-    handle = await GVisorDockerExecutionResourceProvider().async_ensure(requirement=_gvisor_requirement(), policy={})
+    handle = cast(
+        _ReadyHandle,
+        await GVisorDockerExecutionResourceProvider().async_ensure(
+            requirement=_gvisor_requirement(),
+            policy={},
+        ),
+    )
 
     assert handle["provider_id"] == "gvisor"
     assert handle["meta"]["active_runtime"] == "runsc"
@@ -198,7 +210,7 @@ async def test_gvisor_ensure_closes_unowned_resource_when_runtime_verification_i
 
 def test_generic_selection_uses_only_the_gvisor_provider() -> None:
     action = _Action()
-    ActionResourceRegistrar(action).register_code_runtime_action(
+    ActionResourceRegistrar(cast(Any, action)).register_code_runtime_action(
         language="python",
         providers=["gvisor"],
         isolation="required",

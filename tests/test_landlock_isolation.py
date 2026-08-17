@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypedDict, cast
 
 import pytest
 
@@ -23,7 +23,11 @@ from agently.builtins.plugins.ExecutionResourceProvider._bounded_process import 
 )
 from agently.core import ExecutionResourceError
 from agently.core.operation.Action.ActionResourceRegistrar import ActionResourceRegistrar
-from agently.types.data import TaskWorkspaceAccessGrant, TaskWorkspaceAccessRoot
+from agently.types.data import (
+    TaskWorkspaceAccessGrant,
+    TaskWorkspaceAccessRoot,
+    TaskWorkspaceAccessRootRole,
+)
 
 
 landlock_module = importlib.import_module(
@@ -34,12 +38,16 @@ landlock_module = importlib.import_module(
 def _grant(tmp_path: Path) -> TaskWorkspaceAccessGrant:
     area = tmp_path / "execution"
     roots = []
-    for role, mode in (
+    root_specs: tuple[
+        tuple[TaskWorkspaceAccessRootRole, Literal["read_only", "read_write"]],
+        ...,
+    ] = (
         ("source", "read_only"),
         ("build", "read_write"),
         ("output", "read_write"),
         ("logs", "read_write"),
-    ):
+    )
+    for role, mode in root_specs:
         path = area / role
         path.mkdir(parents=True, exist_ok=True)
         roots.append(TaskWorkspaceAccessRoot(role=role, host_path=str(path), access_mode=mode))
@@ -73,6 +81,10 @@ class _Action:
 
     def register_action(self, **kwargs: Any) -> None:
         self.registered = kwargs
+
+
+class _CapabilityProbe(TypedDict):
+    capabilities: dict[str, Any]
 
 
 def test_landlock_resource_accepts_no_arbitrary_path_or_abi_configuration(tmp_path: Path) -> None:
@@ -140,9 +152,12 @@ async def test_landlock_probe_reports_filesystem_only_capabilities(
         lambda _self: {"python": {"tool": "python", "available": True, "binary": "/usr/bin/python3", "version": "3.10", "raw_version": "Python 3.10"}},
     )
 
-    probe = await LandlockExecutionResourceProvider().async_probe(
-        requirement={"kind": "code_execution"},
-        policy={},
+    probe = cast(
+        _CapabilityProbe,
+        await LandlockExecutionResourceProvider().async_probe(
+            requirement={"kind": "code_execution"},
+            policy={},
+        ),
     )
 
     isolation = probe["capabilities"]["isolation"]
@@ -198,7 +213,7 @@ async def test_landlock_health_rechecks_real_mechanism(
 
 def test_generic_selection_uses_only_the_landlock_provider() -> None:
     action = _Action()
-    ActionResourceRegistrar(action).register_code_runtime_action(
+    ActionResourceRegistrar(cast(Any, action)).register_code_runtime_action(
         language="python",
         providers=["landlock"],
         isolation="preferred",

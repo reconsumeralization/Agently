@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import platform
 from pathlib import Path
+from typing import Any, TypedDict, cast
 
 import pytest
 
@@ -14,6 +15,11 @@ from agently.builtins.plugins.ExecutionResourceProvider.SeatbeltExecutionResourc
 )
 from agently.core.TaskWorkspace import TaskWorkspace
 from agently.types.data import CodeExecutionRequest, TaskWorkspaceAccessRequirement
+
+
+class _ObservedHandle(TypedDict):
+    resource: Any
+    meta: dict[str, Any]
 
 
 @pytest.mark.asyncio
@@ -50,14 +56,17 @@ async def test_seatbelt_enforces_granted_write_and_denies_ungranted_write(
     )
     manifest = await workspace.materialize_execution_bundle(grant, bundle)
     provider = SeatbeltExecutionResourceProvider()
-    handle = await provider.async_ensure(
-        requirement={
-            "kind": "code_execution",
-            "required_capabilities": {"language": "python"},
-            "task_workspace_access_grant": grant,
-            "config": {"network": False},
-        },
-        policy={"timeout_seconds": 20, "max_output_bytes": 10000},
+    handle = cast(
+        _ObservedHandle,
+        await provider.async_ensure(
+            requirement={
+                "kind": "code_execution",
+                "required_capabilities": {"language": "python"},
+                "task_workspace_access_grant": grant,
+                "config": {"network": False},
+            },
+            policy={"timeout_seconds": 20, "max_output_bytes": 10000},
+        ),
     )
     resource = handle["resource"]
 

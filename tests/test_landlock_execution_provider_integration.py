@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import platform
 from pathlib import Path
+from typing import Any, TypedDict, cast
 
 import pytest
 
@@ -14,6 +15,11 @@ from agently.builtins.plugins.ExecutionResourceProvider.LandlockExecutionResourc
 )
 from agently.core.TaskWorkspace import TaskWorkspace
 from agently.types.data import CodeExecutionRequest, TaskWorkspaceAccessRequirement
+
+
+class _ObservedHandle(TypedDict):
+    resource: Any
+    meta: dict[str, Any]
 
 
 @pytest.mark.asyncio
@@ -46,14 +52,17 @@ async def test_landlock_allows_granted_output_and_denies_ungranted_read(tmp_path
     )
     manifest = await workspace.materialize_execution_bundle(grant, bundle)
     provider = LandlockExecutionResourceProvider()
-    handle = await provider.async_ensure(
-        requirement={
-            "kind": "code_execution",
-            "required_capabilities": {"language": "python"},
-            "task_workspace_access_grant": grant,
-            "config": {},
-        },
-        policy={"timeout_seconds": 20, "max_output_bytes": 10000},
+    handle = cast(
+        _ObservedHandle,
+        await provider.async_ensure(
+            requirement={
+                "kind": "code_execution",
+                "required_capabilities": {"language": "python"},
+                "task_workspace_access_grant": grant,
+                "config": {},
+            },
+            policy={"timeout_seconds": 20, "max_output_bytes": 10000},
+        ),
     )
     result = await handle["resource"].async_execute_code(
         bundle=bundle,

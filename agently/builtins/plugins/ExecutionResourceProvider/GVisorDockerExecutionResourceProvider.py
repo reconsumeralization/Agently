@@ -139,8 +139,9 @@ class GVisorDockerExecutionResource(DockerExecutionResource):
     async def async_execute_code(self, **kwargs: Any) -> dict[str, Any]:
         result = await super().async_execute_code(**kwargs)
         if self._runtime_verified:
+            existing_meta = result.get("meta")
             result["meta"] = {
-                **(result.get("meta") if isinstance(result.get("meta"), dict) else {}),
+                **(existing_meta if isinstance(existing_meta, dict) else {}),
                 "active_runtime": self.runtime_name,
             }
         return result

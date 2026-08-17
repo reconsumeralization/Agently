@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from typing import Any, TypedDict, cast
 
 import pytest
 
 from agently.builtins.plugins.ExecutionResourceProvider.GVisorDockerExecutionResourceProvider import (
     GVisorDockerExecutionResourceProvider,
 )
+from agently.types.data import ExecutionResourceRequirement
+
+
+class _ObservedProbe(TypedDict):
+    available: bool
+    reason: str
+
+
+class _ObservedHandle(TypedDict):
+    provider_id: str
+    meta: dict[str, Any]
 
 
 @pytest.mark.asyncio
@@ -29,18 +41,24 @@ async def test_gvisor_provider_executes_with_registered_runsc() -> None:
         pytest.skip(f"required local gVisor probe image is unavailable: {image}")
 
     provider = GVisorDockerExecutionResourceProvider()
-    requirement = {
+    requirement: ExecutionResourceRequirement = {
         "kind": "docker",
         "config": {
             "docker_binary": docker,
             "runtime_profile": {"image": image, "image_pull_policy": "never"},
         },
     }
-    probe = await provider.async_probe(requirement=requirement, policy={})
+    probe = cast(
+        _ObservedProbe,
+        await provider.async_probe(requirement=requirement, policy={}),
+    )
     if not probe["available"]:
         pytest.skip(f"gVisor provider prerequisites unavailable: {probe['reason']}")
 
-    handle = await provider.async_ensure(requirement=requirement, policy={})
+    handle = cast(
+        _ObservedHandle,
+        await provider.async_ensure(requirement=requirement, policy={}),
+    )
 
     assert handle["provider_id"] == "gvisor"
     assert handle["meta"]["active_runtime"] == "runsc"
