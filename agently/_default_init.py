@@ -40,6 +40,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
         BrowserExecutionResourceProvider,
         DockerExecutionResourceProvider,
         GVisorDockerExecutionResourceProvider,
+        SeatbeltExecutionResourceProvider,
         MCPExecutionResourceProvider,
         SQLiteExecutionResourceProvider,
         TrustedLocalExecutionResourceProvider,
@@ -61,6 +62,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     plugin_manager.register("ExecutionResourceProvider", BashExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", DockerExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", GVisorDockerExecutionResourceProvider, activate=False)
+    plugin_manager.register("ExecutionResourceProvider", SeatbeltExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", BrowserExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", SQLiteExecutionResourceProvider, activate=False)
     plugin_manager.register("ExecutionResourceProvider", TrustedLocalExecutionResourceProvider, activate=False)

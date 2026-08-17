@@ -38,15 +38,15 @@ class ActionResourceRegistrar:
         self._action = action
 
     @staticmethod
-    def _normalize_code_sandbox(value: Literal["auto", "docker", "gvisor", "trusted_local"] | str) -> Literal["auto", "docker", "gvisor", "trusted_local"]:
+    def _normalize_code_sandbox(value: Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"] | str) -> Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"]:
         normalized = str(value or "trusted_local").strip().lower().replace("-", "_")
         if normalized in {"local", "python", "node", "bash"}:
             normalized = "trusted_local"
         if normalized in {"gvisor", "runsc", "gvisor/runsc"}:
             normalized = "gvisor"
-        if normalized not in {"auto", "docker", "gvisor", "trusted_local"}:
-            raise ValueError("sandbox must be one of: 'auto', 'docker', 'gvisor', 'trusted_local'.")
-        return cast(Literal["auto", "docker", "gvisor", "trusted_local"], normalized)
+        if normalized not in {"auto", "docker", "gvisor", "seatbelt", "trusted_local"}:
+            raise ValueError("sandbox must be one of: 'auto', 'docker', 'gvisor', 'seatbelt', 'trusted_local'.")
+        return cast(Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"], normalized)
 
     @staticmethod
     def _normalize_dependency_policy(value: Literal["deny", "request", "install"] | dict[str, Any] | str) -> dict[str, Any]:
@@ -322,7 +322,7 @@ class ActionResourceRegistrar:
         preset_objects: dict[str, object] | None = None,
         base_vars: dict[str, Any] | None = None,
         allowed_return_types: list[type] | None = None,
-        sandbox: Literal["auto", "docker", "gvisor", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"] = "trusted_local",
         docker_image: str = "python:3.12-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -348,6 +348,9 @@ class ActionResourceRegistrar:
             providers = ["docker"]
         elif sandbox_mode == "gvisor":
             providers = ["gvisor"]
+        elif sandbox_mode == "seatbelt":
+            providers = ["seatbelt"]
+            isolation = "preferred"
         return self.register_code_runtime_action(
             language="python",
             action_id=action_id,
@@ -392,6 +395,10 @@ class ActionResourceRegistrar:
     ):
         action = self._action
         sandbox_mode = self._normalize_code_sandbox(sandbox)
+        if sandbox_mode == "seatbelt":
+            raise ValueError(
+                "Seatbelt supports Workspace-bound code_execution helpers, not the broad Bash sandbox action."
+            )
         model_desc = self._format_bash_sandbox_desc(
             desc,
             allowed_cmd_prefixes=allowed_cmd_prefixes,
@@ -484,7 +491,7 @@ class ActionResourceRegistrar:
         cwd: str | None = None,
         timeout: int = 20,
         env: dict[str, str] | None = None,
-        sandbox: Literal["auto", "docker", "gvisor", "trusted_local"] = "trusted_local",
+        sandbox: Literal["auto", "docker", "gvisor", "seatbelt", "trusted_local"] = "trusted_local",
         docker_image: str = "node:22-slim",
         docker_binary: str = "docker",
         docker_default_args: list[str] | None = None,
@@ -509,6 +516,9 @@ class ActionResourceRegistrar:
             providers = ["docker"]
         elif sandbox_mode == "gvisor":
             providers = ["gvisor"]
+        elif sandbox_mode == "seatbelt":
+            providers = ["seatbelt"]
+            isolation = "preferred"
         return self.register_code_runtime_action(
             language="nodejs",
             action_id=action_id,
