@@ -80,6 +80,12 @@ Candidate configuration is merged only for the candidate being probed or
 ensured. This lets two candidates use different mechanisms without leaking
 provider-specific settings into the core Action contract.
 
+Provider PRs must not add their `provider_id`, aliases, capability assumptions,
+or configuration branches to core Action helpers. In particular, do not extend
+the compatibility `sandbox=` enum for a plugin. Applications select optional
+providers through `enable_code_runtime(..., providers=[...], isolation=...)`;
+the generic candidate descriptor is passed to the selected provider unchanged.
+
 Container-runtime variants can subclass `DockerExecutionResourceProvider` and
 override only `create_resource(...)` to construct their own
 `DockerExecutionResource` subclass. `ExecutionResourceManager` still owns

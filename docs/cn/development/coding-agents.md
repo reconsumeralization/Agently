@@ -145,6 +145,13 @@ ACP 只是选项之一，不是必选项，也不需要把三个选项全部执�
 当你审计或编写面向 Agently `4.1+` 的指导时，coding agent 应默认偏向这些用法：
 
 - API 形态：遵守奥卡姆剃刀原则。如无必要，勿增实体、方法、facade 或兼容补丁；已有表面能清晰承载语义时优先复用。若只是命名表意不清，优先建议窄别名或文档澄清，而不是再加一个容易重叠的方法。
+- 请求本地 prompt 上下文：只保留解释已提供输入、提供权威事实/契约/证据、改变模型
+  决策、定义输出/消费者/tool/能力边界，或提供有明确用户或 UI 消费者的有用过程上下文
+  的内容。保留会改变决策或允许 verdict 的有效上游调用方保证，必要时改写为行为约束；
+  不要保留未解释的架构名称或泛化项目叙述。发送前，`execution.get_prompt_text()` 只
+  审计已渲染的 execution draft。若 runtime extension 还会注入内容，应在有界测试中
+  检查注入后的最终 ModelRequest `prompt_text`；启动后的 execution snapshot 不是充分
+  证据，保留证据前必须脱敏。
 - 结构化输出：固定必填叶子直接写在 `.output(...)` 的 `(TypeExpr, "description", True)` 里。只有空值必须触发重试时才用 `(TypeExpr, "description", "not_null")`。手动 `ensure_keys=` 只留给条件路径或运行时决定的路径。
 - 规则先行校验：如果模型需要满足业务 validator，所有非敏感、且模型能够遵守的规则都要
   在首次请求的 `input` / `info` / `instruct` / `output` 契约中说明。确定性校验仍是

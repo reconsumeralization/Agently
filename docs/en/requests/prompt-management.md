@@ -48,6 +48,53 @@ independently owned/versioned or product-edited, or genuinely generated or
 conditional. Do not move a one-use schema or prompt step elsewhere merely to
 make the Agently request chain look shorter.
 
+## Request-local context
+
+Every model-visible prompt item must serve at least one current-request role:
+
+1. interpret a supplied input;
+2. provide an authoritative fact, policy, schema, or evidence item;
+3. change the model-owned decision or transformation;
+4. define an output, consumer, tool, or capability boundary;
+5. provide useful user-visible process context, state, or explanation with a
+   declared user or UI consumer.
+
+Use the prompt slots deliberately: `agent` supplies stable role and
+capabilities; `input` supplies current facts; `info` supplies authoritative
+contract and evidence; `instruct` supplies task rules; and `output` supplies
+the required result shape. Together, they must give the model a self-contained
+account of the current request rather than assuming unexplained project
+context.
+
+Apply the removal counterfactual to every candidate item: if removing it would
+not change the current request's effective task, contract, evidence, decision,
+allowed verdict, or declared user/UI projection, remove or rewrite it.
+Project-level origin is not a removal test: retain a shared policy or fact when
+it changes this request. Retain or behaviorally rewrite an effective upstream
+caller guarantee when it changes the model-owned decision or the allowed
+verdict set. A proper name may remain only when it identifies a real domain
+contract, allowlist, evidence item, input fact, or capability boundary that
+changes the current request. Otherwise, rewrite an unexplained implementation
+name as its request-relevant role, or remove it. The fifth role does not permit
+generic project narration: declare which user or UI consumer uses the process
+context, state, or explanation.
+
+| | `info` |
+|---|---|
+| Bad | “Follow the project’s worker-manager convention.” |
+| Good | “Allowed actions: approve or reject. Evidence: the attached request and its policy record.” |
+
+Audit at two levels: first review each slot against its role and the removal
+counterfactual; then inspect the rendered request, including mappings and
+references. Before dispatch, `execution.get_prompt_text()` audits the rendered
+execution draft, not the final ModelRequest prompt. When TaskContext, Session,
+Skills, retrieval, Actions, or other runtime extensions can inject later, use a
+bounded test to inspect the final ModelRequest `prompt_text` emitted or built
+after injection, for example the `prompt.built` event's
+`payload.prompt_text`. Do not treat the post-start execution snapshot as
+sufficient evidence for late injections. Redact secrets before retaining
+prompt evidence.
+
 ## Strict external interface contracts
 
 When model output will be passed directly to a documented API request, module
@@ -206,10 +253,11 @@ execution = agent.role("You are an Agently agent.", always=True).input("Say hell
 })
 print(execution.get_yaml_prompt())
 print(execution.get_json_prompt())
-print(execution.get_prompt_text())  # the rendered text the model will see
+print(execution.get_prompt_text())  # rendered execution draft for pre-dispatch audit
 ```
 
-This round-trip is the canonical way to compare "what I think I'm sending" against "what the framework actually sends".
+This round-trip reviews the authored execution draft and its mappings. It is
+not final-prompt evidence when runtime extensions can inject later.
 
 ## Placeholders
 
@@ -232,16 +280,19 @@ agent.load_yaml_prompt(yaml_text, mappings={"product_name": "Agently"})
 
 ## Where each layer's prompt comes from
 
-When a request runs, Agently composes the final prompt by stacking:
+When a request runs, Agently composes the model prompt from:
 
 1. Agent-level slots (set with `always=True` or `set_agent_prompt`)
 2. Request-level slots (set without `always=True`)
 3. Slots populated by framework extensions or application code (Session injects chat history; retrieval code usually puts snippets into per-request `info(...)`)
 
 Use `execution.get_prompt_text()` after one-run chaining, for example
-`execution = agent.input(...).output(...)`, to see the merged result before
-sending. `agent.get_prompt_text()` only inspects prompt data kept on the Agent
-itself, such as slots set with `always=True`.
+`execution = agent.input(...).output(...)`, to inspect the rendered execution
+draft before dispatch. It does not prove what late runtime injections add.
+When the third layer can change the prompt, inspect the observed final
+ModelRequest `prompt_text` after injection in a bounded test and redact secrets
+before retaining it. `agent.get_prompt_text()` only inspects prompt data kept
+on the Agent itself, such as slots set with `always=True`.
 
 ## See also
 
