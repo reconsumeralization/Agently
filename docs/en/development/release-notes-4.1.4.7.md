@@ -1,14 +1,14 @@
 ---
-title: Agently 4.1.4.7 Development Notes
+title: Agently 4.1.4.7 Release Notes
 description: Automatic mixed sync/async Stage routing for TriggerFlow integrations.
 keywords: Agently, 4.1.4.7, Agently-Stage, TriggerFlow, sync, async, carrier
 ---
 
-# Agently 4.1.4.7 Development Notes
+# Agently 4.1.4.7 Release Notes
 
-The Agently 4.1.4.7 development line updates the minimum Stage dependency to
-`agently-stage >=0.3.7,<0.4.0`. It is preparing the Agently integration for the
-runtime bug exposed by [Agently #347](https://github.com/AgentEra/Agently/issues/347),
+Agently 4.1.4.7 raises the minimum Stage dependency to
+`agently-stage >=0.3.7,<0.4.0` and resolves the mixed sync/async runtime bug
+exposed by [Agently #347](https://github.com/AgentEra/Agently/issues/347),
 [Agently-Stage #24](https://github.com/AgentEra/Agently-Stage/issues/24), and
 [Agently-Stage #25](https://github.com/AgentEra/Agently-Stage/issues/25).
 
@@ -17,19 +17,21 @@ now distinguish inherited logical execution lineage from the physical thread
 and event loop that a call can safely block. Stage 0.3.7 also propagates every
 upstream carrier in a transitive synchronous wait chain, preventing a nested
 scope from selecting a loop that is indirectly waiting for it. This supersedes
-the incomplete 0.3.6 routing fix. The 4.1.4.7 development line adds end-to-end
-TriggerFlow regression contracts and will ensure later Agently installations
-receive the complete correction after the integration release.
+the incomplete 0.3.6 routing fix. Agently adds end-to-end TriggerFlow
+regression contracts and pins later installations to the complete correction.
+
+The public PyPI baseline is 4.1.4.6. This release is a focused runtime
+integration patch over that published version.
 
 ## Developer-visible changes
 
-| Area | Behavior in 4.1.4.7 | Compatibility |
+| Area | What changed | Recommended usage | Compatibility / risk | Evidence |
 |---|---|---|
-| Sync TriggerFlow chunks | A provider-owned sync wrapper may use `with Stage()` for an async SDK and then call `data.set_state(...)`, `append_state(...)`, or `del_state(...)` | No provider API rewrite and no knowledge of TriggerFlow's private Stage use is required |
-| Stage dependency | Minimum version is `0.3.7` in the existing `<0.4.0` compatibility line | Updating Stage alone fixes the existing script family; updating Agently fixes dependency resolution for later installs |
-| `FunctionShifter.syncify/asyncify` | Deprecated names and warnings remain; scalar calls delegate to `Stage.as_sync/as_async` | Existing imports and call forms remain valid |
-| Internal bridges | `default_stage_call_bridge` remains the owner where Agently requires lightweight bridging, injected lifecycle, streams, or explicit `managed=True` settlement | No blanket bridge replacement or semantic change |
-| Workflow ownership | TriggerFlow still owns workflow state, lifecycle, persistence, concurrency, and errors | Stage carrier details remain private and are not serialized |
+| Sync TriggerFlow chunks | A provider-owned sync wrapper may use `with Stage()` for an async SDK and then call `data.set_state(...)`, `append_state(...)`, or `del_state(...)`. | Keep the provider's synchronous interface; use native async chunks only when the work must remain on the caller-owned loop. | No provider API rewrite or awareness of TriggerFlow's private Stage use is required. | `tests/test_cores/test_trigger_flow_execution_state.py`; `examples/trigger_flow/automatic_stage_sync_provider.py` |
+| Stage dependency | The minimum compatible Stage is `0.3.7` within the existing `<0.4.0` line. | Install `agently==4.1.4.7` (or a later compatible release). | Resolves dependency selection for future installs; direct Stage users should not downgrade below 0.3.7. | `pyproject.toml`; `poetry.lock`; `tests/test_stage_support_contract.py` |
+| `FunctionShifter.syncify/asyncify` | Deprecated names and warnings remain; scalar calls delegate to `Stage.as_sync/as_async`. | Keep existing imports and call forms, or migrate to `Stage.as_sync/as_async`. | Additive runtime correction; the deprecated façade remains supported. | `tests/test_utils/test_function_shifter.py` |
+| Internal bridges | `default_stage_call_bridge` remains the owner where Agently requires lightweight bridging, injected lifecycle, streams, or explicit `managed=True` settlement. | Do not replace every bridge call with a scoped adapter. | No semantic change to these existing boundaries. | `agently/utils/FunctionShifter.py`; Stage support contracts |
+| Workflow ownership | TriggerFlow still owns workflow state, lifecycle, persistence, concurrency, and errors. | Continue using TriggerFlow's public execution APIs. | Stage carrier details remain private and are not serialized. | `compatibility/releases/4.1.4.7.json` |
 
 ## Provider-owned synchronous interface
 
@@ -79,7 +81,12 @@ lightweight adaptation.
 ## Upgrade
 
 No application source migration is required for the reported call chain.
-While Agently 4.1.4.7 remains under development, an existing Agently
-installation that permits the Stage 0.3 compatibility line can upgrade only
-Stage to 0.3.7. Install Agently 4.1.4.7 normally after that integration version
-is released.
+Install the release normally:
+
+```bash
+pip install -U "agently==4.1.4.7"
+```
+
+An existing Agently installation that already permits the Stage 0.3
+compatibility line may independently upgrade Stage to 0.3.7, but installing
+Agently 4.1.4.7 is the supported way to carry the minimum dependency forward.
