@@ -106,7 +106,7 @@ class ActionResourceRegistrar:
         provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
         image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
         runtime_profile: dict[str, Any] | None = None,
-        runtime: str = "runc",
+        provider_id: str = "docker",
     ) -> "ExecutionResourceRequirement":
         normalized_provisioning_profile = self._normalize_provisioning_profile(provisioning_profile)
         normalized_dependency_policy = (
@@ -147,8 +147,8 @@ class ActionResourceRegistrar:
                 "timeout": timeout,
                 "default_args": docker_default_args or [],
                 "runtime_profile": profile,
-                "runtime": runtime,
             },
+            "provider_id": provider_id,
             "policy": self._docker_policy(default_policy, timeout=timeout),
         })
         if normalized_dependency_policy.get("mode") == "request" or normalized_image_pull_policy == "request":
@@ -340,7 +340,6 @@ class ActionResourceRegistrar:
         providers: list[str] | None = None
         unsafe_fallback = False
         isolation: Literal["required", "preferred", "none"] = "required"
-        docker_runtime: str = "runc"
         if sandbox_mode == "trusted_local":
             providers = ["trusted_local"]
             unsafe_fallback = True
@@ -348,8 +347,7 @@ class ActionResourceRegistrar:
         elif sandbox_mode == "docker":
             providers = ["docker"]
         elif sandbox_mode == "gvisor":
-            providers = ["docker"]
-            docker_runtime = "runsc"
+            providers = ["gvisor"]
         return self.register_code_runtime_action(
             language="python",
             action_id=action_id,
@@ -367,7 +365,6 @@ class ActionResourceRegistrar:
             provisioning_profile=provisioning_profile,
             image_pull_policy=image_pull_policy,
             timeout=timeout,
-            docker_runtime=docker_runtime,
         )
 
     def register_bash_sandbox_action(
@@ -423,7 +420,6 @@ class ActionResourceRegistrar:
             ])
         else:
             roots = [str(Path(root).expanduser().resolve()) for root in (allowed_workdir_roots or [])]
-            docker_runtime = "runsc" if sandbox_mode == "gvisor" else "runc"
             execution_resources = [
                 self._docker_runtime_requirement(
                     action_id=action_id,
@@ -444,7 +440,7 @@ class ActionResourceRegistrar:
                         "output_artifact_dir": str(output_artifact_dir) if output_artifact_dir is not None else None,
                         "task_workspace_mounts": [dict(item) for item in (task_workspace_mounts or [])],
                     },
-                    runtime=docker_runtime,
+                    provider_id="gvisor" if sandbox_mode == "gvisor" else "docker",
                 )
             ]
         action.register_action(
@@ -505,7 +501,6 @@ class ActionResourceRegistrar:
         providers: list[str] | None = None
         unsafe_fallback = False
         isolation: Literal["required", "preferred", "none"] = "required"
-        docker_runtime: str = "runc"
         if sandbox_mode == "trusted_local":
             providers = ["trusted_local"]
             unsafe_fallback = True
@@ -513,8 +508,7 @@ class ActionResourceRegistrar:
         elif sandbox_mode == "docker":
             providers = ["docker"]
         elif sandbox_mode == "gvisor":
-            providers = ["docker"]
-            docker_runtime = "runsc"
+            providers = ["gvisor"]
         return self.register_code_runtime_action(
             language="nodejs",
             action_id=action_id,
@@ -532,7 +526,6 @@ class ActionResourceRegistrar:
             provisioning_profile=provisioning_profile,
             image_pull_policy=image_pull_policy,
             timeout=timeout,
-            docker_runtime=docker_runtime,
         )
 
     def register_code_runtime_action(
@@ -554,7 +547,6 @@ class ActionResourceRegistrar:
         provisioning_profile: Literal["strict", "developer", "ci"] | str = "strict",
         image_pull_policy: Literal["never", "request", "if_missing", "always"] | str | None = None,
         timeout: int = 60,
-        docker_runtime: str = "runc",
     ):
         from agently.builtins.plugins.CodeRuntimeAdapter import get_code_runtime_adapter
 
@@ -603,7 +595,7 @@ class ActionResourceRegistrar:
         has_unsafe_candidate = False
         for candidate in provider_candidates:
             candidate_config = dict(candidate.get("config", {}))
-            if candidate["provider_id"] == "docker":
+            if candidate["provider_id"] in {"docker", "gvisor"}:
                 candidate_runtime_profile = candidate_config.get("runtime_profile", {})
                 if not isinstance(candidate_runtime_profile, dict):
                     raise TypeError("Docker candidate runtime_profile must be a mapping.")
@@ -611,7 +603,6 @@ class ActionResourceRegistrar:
                     "docker_binary": docker_binary,
                     "timeout": timeout,
                     "default_args": list(docker_default_args or []),
-                    "runtime": docker_runtime,
                     **candidate_config,
                     "runtime_profile": {
                         **runtime_profile,
