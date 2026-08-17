@@ -95,6 +95,32 @@ class MockStatusObservationRequester(MockObservationRequester):
         yield "status", {"status": "completed"}
 
 
+class MockReasoningObservationRequester(MockObservationRequester):
+    name = "MockReasoningObservationRequester"
+
+    async def broadcast_response(
+        self,
+        response_generator: AsyncGenerator[tuple[str, Any], None],
+    ):
+        async for _event, _data in response_generator:
+            pass
+        yield "reasoning_delta", "Inspect "
+        yield "reasoning_delta", "constraints."
+        yield "reasoning_done", "Inspect constraints."
+        yield "delta", "Final answer."
+        yield "done", "Final answer."
+        yield "meta", {
+            "provider": "mock-reasoning",
+            "model": "mock-reasoning-1",
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 11,
+                "total_tokens": 31,
+                "output_tokens_details": {"reasoning_tokens": 7},
+            },
+        }
+
+
 class MockThinkStructuredRequester:
     name = "MockThinkStructuredRequester"
     DEFAULT_SETTINGS: dict[str, Any] = {}
@@ -374,6 +400,22 @@ def _create_status_request():
         plugin_manager,
         agent_name="observation-agent",
         agent_id="agent-observation",
+        parent_settings=settings,
+    )
+
+
+def _create_reasoning_request():
+    settings = Settings(name="ReasoningObservationTestSettings", parent=Agently.settings)
+    plugin_manager = PluginManager(
+        settings,
+        parent=Agently.plugin_manager,
+        name="ReasoningObservationTestPluginManager",
+    )
+    plugin_manager.register("ModelRequester", MockReasoningObservationRequester, activate=True)
+    return ModelRequest(
+        plugin_manager,
+        agent_name="reasoning-observation-agent",
+        agent_id="agent-reasoning-observation",
         parent_settings=settings,
     )
 
@@ -844,6 +886,56 @@ async def test_model_request_retry_creates_multiple_attempt_runs():
 
 
 @pytest.mark.asyncio
+async def test_reasoning_content_and_usage_flow_through_model_request_observation():
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    hook_name = "test_model_request_observation.reasoning_capture"
+    Agently.event_center.register_hook(capture, hook_name=hook_name)
+    try:
+        request = _create_reasoning_request()
+        request.input("Answer after inspecting the constraints.")
+        response = request.get_response()
+        all_data = await response.async_get_data(type="all")
+
+        assert all_data["reasoning_delta"] == ["Inspect ", "constraints."]
+        assert all_data["reasoning"] == "Inspect constraints."
+        assert all_data["text_result"] == "Final answer."
+
+        assert response.model_run_context is not None
+        model_events = [
+            event
+            for event in captured
+            if event.run is not None and event.run.run_id == response.model_run_context.run_id
+        ]
+        assert [event.event_type for event in model_events if event.event_type.startswith("model.reasoning")] == [
+            "model.reasoning.delta",
+            "model.reasoning.delta",
+            "model.reasoning.completed",
+        ]
+        assert [event.payload["delta"] for event in model_events if event.event_type == "model.reasoning.delta"] == [
+            "Inspect ",
+            "constraints.",
+        ]
+        assert all(
+            event.meta.get("high_frequency") is True
+            for event in model_events
+            if event.event_type == "model.reasoning.delta"
+        )
+        reasoning_completed = next(event for event in model_events if event.event_type == "model.reasoning.completed")
+        assert reasoning_completed.payload["reasoning"] == "Inspect constraints."
+        meta_event = next(event for event in model_events if event.event_type == "model.meta")
+        usage_summary = meta_event.payload["model_request_telemetry"]["usage_summary"]
+        assert usage_summary["provider"]["reasoning_tokens"] == 7
+        assert usage_summary["provider"]["output_tokens"] == 11
+        assert usage_summary["provider"]["total_tokens"] == 31
+    finally:
+        Agently.event_center.unregister_hook(hook_name)
+
+
+@pytest.mark.asyncio
 async def test_model_request_telemetry_dedupes_same_kind_for_same_attempt():
     captured = []
 
@@ -927,6 +1019,7 @@ def test_model_request_telemetry_summarizes_usage_and_estimated_lengths():
     assert provider_summary["provider"]["completion_tokens"] == 7
     assert provider_summary["provider"]["input_tokens"] == 12
     assert provider_summary["provider"]["output_tokens"] == 7
+    assert provider_summary["provider"]["reasoning_tokens"] is None
     assert provider_summary["provider"]["total_tokens"] == 19
     assert provider_summary["estimated_lengths"]["output_chars"] == len("provider text")
 
@@ -954,6 +1047,7 @@ def test_model_request_telemetry_summarizes_usage_and_estimated_lengths():
     assert estimated_summary["source"] == "estimated_lengths"
     assert estimated_summary["provider"]["prompt_tokens"] is None
     assert estimated_summary["provider"]["completion_tokens"] is None
+    assert estimated_summary["provider"]["reasoning_tokens"] is None
     assert estimated_summary["provider"]["total_tokens"] is None
     assert estimated_summary["estimated_lengths"] == {
         "input_chars": len("summarize this"),
@@ -991,6 +1085,61 @@ def test_model_request_telemetry_summarizes_usage_and_estimated_lengths():
         "output_chars": 987,
         "output_source": "text_result",
     }
+
+    reasoning_run = RunContext.create(
+        run_kind="model_request",
+        agent_name="usage-agent",
+        response_id="response-reasoning-usage",
+        meta={"attempt_index": 1},
+    )
+    reasoning_payload: dict[str, Any] = {
+        "response_id": "response-reasoning-usage",
+        "meta": {
+            "provider": "openai-compatible",
+            "model": "reasoning-model",
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 11,
+                "total_tokens": 31,
+                "output_tokens_details": {"reasoning_tokens": 7},
+            },
+        },
+    }
+
+    attach_model_request_telemetry(
+        reasoning_payload,
+        event_kind="model.completed",
+        run=reasoning_run,
+        source="TestParser",
+    )
+
+    reasoning_summary = reasoning_payload["model_request_telemetry"]["usage_summary"]
+    assert reasoning_summary["provider"]["reasoning_tokens"] == 7
+    assert reasoning_summary["provider"]["output_tokens"] == 11
+    assert reasoning_summary["provider"]["total_tokens"] == 31
+
+    thinking_payload: dict[str, Any] = {
+        "response_id": "response-thinking-usage",
+        "usage": {
+            "input_token_count": 8,
+            "output_token_count": 5,
+            "thinking_tokens": 3,
+        },
+    }
+    attach_model_request_telemetry(
+        thinking_payload,
+        event_kind="model.completed",
+        run=RunContext.create(
+            run_kind="model_request",
+            agent_name="usage-agent",
+            response_id="response-thinking-usage",
+            meta={"attempt_index": 1},
+        ),
+        source="TestParser",
+    )
+    thinking_summary = thinking_payload["model_request_telemetry"]["usage_summary"]
+    assert thinking_summary["provider"]["reasoning_tokens"] == 3
+    assert thinking_summary["provider"]["output_tokens"] == 5
 
 
 @pytest.mark.asyncio

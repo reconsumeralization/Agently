@@ -73,6 +73,11 @@ agent.enable_code_runtime(language="python")
 候选配置只在该候选被 probe 或 ensure 时合并，因此不同机制的 provider 配置不会
 泄漏到核心 Action 契约。
 
+provider PR 不得把自己的 `provider_id`、别名、能力假设或配置分支加入 core Action
+helper，尤其不得为插件扩展兼容 `sandbox=` 枚举。应用应通过
+`enable_code_runtime(..., providers=[...], isolation=...)` 选择可选 provider；通用候选
+描述符必须原样传给被选中的 provider。
+
 容器运行时变体可以继承 `DockerExecutionResourceProvider`，只覆写
 `create_resource(...)` 来构造自己的 `DockerExecutionResource` 子类。继承的 provider
 复用 Workspace grant 绑定、镜像准备、健康检查与清理；有序选择与 ensure 前强制重新

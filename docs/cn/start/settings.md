@@ -141,7 +141,7 @@ Agently.set_settings("debug", True)
 ```
 
 打印精简的模型请求与结果日志。AgentTask 运行时，`"simple"` 还会打印 phase、
-progress、snapshot 等过程事件摘要，但不打印 token 级 delta。需要完整 observation
+progress、snapshot 等过程事件摘要，但不打印 token 级 delta。需要详细 observation
 诊断流和模型 delta 输出时，使用 `debug="detail"`。debug 不会自动替代面向用户的过程
 与最终答案输出；还需要同时消费公开 delta：
 
@@ -152,7 +152,7 @@ await task.async_streaming_print()
 result = await task.async_get_full_data()
 ```
 
-这个组合会同时显示完整诊断、可读任务阶段和终态结果，但不会把原始事件 JSON 混入
+这个组合会同时显示详细诊断、可读任务阶段和终态结果，但不会把原始事件 JSON 混入
 公开文本 delta。
 
 运行时日志也可以按 family 单独打开：
@@ -164,7 +164,12 @@ Agently.set_settings("runtime.show_trigger_flow_logs", True)
 Agently.set_settings("runtime.show_runtime_logs", "detail")
 ```
 
-这些开关都接受 `False` / `"off"`、`True` / `"simple"`、`"detail"`。`"simple"` 打印请求/结果摘要、AgentTask 过程摘要和 warning/error/critical 事件；`"detail"` 打印该 family 的完整 observation 事件，包括模型 delta 输出。Action loop 事件显示为 `ActionLoop`；具体 `action.*` 事件会显示 action 名称和 `action_type`。`runtime.show_tool_logs` 仍兼容旧代码；当没有显式设置 `runtime.show_action_logs` 时，它会启用同一组 Action Runtime 日志。开始事件显示 `Started`，正常结束显示 `Completed`，只有失败事件或显式失败 payload 才显示 `Failed`。
+这些开关都接受 `False` / `"off"`、`True` / `"simple"`、`"detail"`。`"simple"` 打印请求/结果摘要、AgentTask 过程摘要和 warning/error/critical 事件；`"detail"` 打印该 family 的详细 observation 事件，包括模型 delta 输出。Action loop 事件显示为 `ActionLoop`；具体 `action.*` 事件会显示 action 名称和 `action_type`。`runtime.show_tool_logs` 仍兼容旧代码；当没有显式设置 `runtime.show_action_logs` 时，它会启用同一组 Action Runtime 日志。开始事件显示 `Started`，正常结束显示 `Completed`，只有失败事件或显式失败 payload 才显示 `Failed`。
+
+对于 ModelRequest 输出校验，`"simple"` 会显示 validator、失败原因、尝试次数摘要和
+重试迁移；`"detail"` 可额外显示有限长度的校验上下文或 validator traceback，但不会在
+相邻的 retry 条目中重复模型响应或校验原因。完整的结构化事实仍保留在对应的
+RuntimeEvent 和 DevTools observation 中。
 
 如果生产环境明确保留了一些 legacy compatibility 调用，可以全局关闭 deprecation warning：
 

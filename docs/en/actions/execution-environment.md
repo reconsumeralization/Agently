@@ -81,7 +81,7 @@ The built-in providers are:
 | `mcp` | `agent.use_mcp(...)` / MCP actions | MCP transport resource |
 | `bash` | `sandbox="trusted_local"` shell actions | configured local command runner |
 | `docker` | isolated shell actions, direct Docker Actions, and one `code_execution` provider candidate | Docker CLI runner and image provisioning |
-| `code_execution` | `agent.enable_python(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and authorized Skill script Actions | provider-neutral Workspace-bound execution; built-ins include Docker and the explicit unsafe `trusted_local` fallback |
+| `code_execution` | `agent.enable_python(...)`, `agent.enable_nodejs(...)`, `agent.enable_code_runtime(...)`, and authorized Skill script Actions | provider-neutral Workspace-bound execution; built-ins include Docker, optional gVisor/runsc, optional macOS Seatbelt, optional Linux Landlock, and the explicit unsafe `trusted_local` fallback |
 | `browser` | Browse actions that opt into managed browser resources | managed browser/page/session wrapper |
 | `sqlite` | `agent.enable_sqlite(...)` / SQLite executor actions | SQLite connection |
 
@@ -134,6 +134,13 @@ agent.settings.set(
 agent.enable_code_runtime(language="go")
 ```
 
+`sandbox=` on `enable_python(...)` and `enable_nodejs(...)` is a compatibility
+shortcut limited to `"auto"`, `"docker"`, and `"trusted_local"`. Optional
+isolation mechanisms are plugins: select them through the provider-neutral
+`providers=` and `isolation=` options shown below. A provider-specific
+configuration belongs in that provider's candidate descriptor, not in the core
+Action API.
+
 `trusted_local` executes host toolchains without isolation and accepts only a
 snapshot grant. It requires explicit host authorization and cannot satisfy
 `isolation="required"`. `unsafe_fallback=True` must therefore be paired with an
@@ -147,6 +154,70 @@ axes. Preferred isolation first searches the ordered candidate set for a full
 match and only then uses an eligible fallback, recording that fallback in the
 handle metadata. A provider name or a string such as `"required"` is not safety
 evidence.
+
+### gVisor Docker runtime
+
+When the host Docker daemon is configured with the `runsc` runtime, select the
+optional `gvisor` provider through the generic code-runtime API:
+
+```python
+agent.enable_code_runtime(
+    language="python",
+    providers=["gvisor"],
+    isolation="required",
+)
+```
+
+This chooses only the optional `gvisor` provider. Before a handle is ready,
+Agently verifies Docker availability, requires a registered `runsc` runtime,
+prepares the selected image under the configured image policy, and starts a
+bounded `runsc` container probe. A missing, malformed, unregistered, or
+non-executable runtime fails closed; this explicit choice never falls back to
+Docker/runc, `auto`, or `trusted_local`. The verified active runtime is retained
+in handle and code-execution result metadata. gVisor adds no default import
+dependency and does not make unsafe Docker arguments stronger safety evidence.
+
+### macOS Seatbelt
+
+On macOS, explicitly select the optional Seatbelt provider with:
+
+```python
+agent.enable_code_runtime(
+    language="python",
+    providers=["seatbelt"],
+    isolation="preferred",
+)
+```
+
+Seatbelt uses the system `sandbox-exec` mechanism, denies network access by
+default, and derives every writable filesystem rule from the TaskWorkspace
+grant. It never accepts raw SBPL rules or additional host write paths and never
+falls back to Docker or `trusted_local`. To keep host toolchains and dynamic
+libraries usable, this initial profile permits broad host reads; it therefore
+reports `host_filesystem_restricted=false` and the helper records preferred,
+not required, isolation. Use Docker/gVisor when host-read isolation is required.
+
+### Linux Landlock
+
+On a Linux kernel with Landlock support, explicitly select the filesystem-only
+provider with:
+
+```python
+agent.enable_code_runtime(
+    language="python",
+    providers=["landlock"],
+    isolation="preferred",
+)
+```
+
+Landlock runs a provider-owned helper process, applies `PR_SET_NO_NEW_PRIVS`
+and ABI-aware rules derived only from provider system/toolchain roots and the
+TaskWorkspace grant, then executes the adapter argv. Output, timeout,
+cancellation, and cleanup remain bounded by the normal process carrier. It
+accepts no raw rule manifests, ABI overrides, or additional host paths and
+never falls back to Docker or `trusted_local`. Landlock does not isolate
+processes, networks, or general syscalls, so it uses preferred isolation and
+reports those limitations explicitly.
 
 Code requests declare at most 128 expected outputs. Each path is bounded,
 normalized, and must be under `output/`; missing declared outputs make the

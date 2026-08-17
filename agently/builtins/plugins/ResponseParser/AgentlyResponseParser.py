@@ -195,6 +195,8 @@ class AgentlyResponseParser(ResponseParser):
             "meta": {},
             "original_delta": [],
             "original_done": {},
+            "reasoning_delta": [],
+            "reasoning": None,
             "text_result": "",
             "cleaned_result": "",
             "parsed_result": None,
@@ -373,6 +375,8 @@ class AgentlyResponseParser(ResponseParser):
         self.full_result_data["meta"].clear()
         self.full_result_data["original_delta"].clear()
         self.full_result_data["original_done"] = {}
+        self.full_result_data["reasoning_delta"].clear()
+        self.full_result_data["reasoning"] = None
         self.full_result_data["text_result"] = ""
         self.full_result_data["cleaned_result"] = ""
         self.full_result_data["parsed_result"] = None
@@ -382,6 +386,34 @@ class AgentlyResponseParser(ResponseParser):
         self._final_json_parse_result = None
         self._output_validation_feedback = []
         self._streaming_canceled = False
+
+    def _handle_reasoning_delta_event(self, data: Any) -> None:
+        delta = str(data)
+        self.full_result_data["reasoning_delta"].append(delta)
+        if self.settings.get("$log.cancel_logs") is not True:
+            self._record_runtime_observation(
+                "reasoning_delta",
+                level="DEBUG",
+                message=delta,
+                payload={
+                    "delta": delta,
+                    "chunk_index": len(self.full_result_data["reasoning_delta"]),
+                },
+            )
+
+    def _handle_reasoning_done_event(self, data: Any) -> None:
+        emitted_reasoning = str(data) if data is not None else ""
+        buffered_reasoning = "".join(self.full_result_data["reasoning_delta"])
+        reasoning = emitted_reasoning if len(emitted_reasoning) >= len(buffered_reasoning) else buffered_reasoning
+        self.full_result_data["reasoning"] = reasoning or None
+        self._record_runtime_observation(
+            "reasoning_completed",
+            message="Model reasoning stream completed.",
+            payload={
+                "reasoning": reasoning or None,
+                "chunk_count": len(self.full_result_data["reasoning_delta"]),
+            },
+        )
 
     async def _handle_done_event(self, data: Any, buffer: str) -> None:
         self.full_result_data["text_result"] = str(data)
@@ -749,6 +781,10 @@ class AgentlyResponseParser(ResponseParser):
                     continue
                 if event == "delta":
                     for normalized_event, normalized_data in think_normalizer.feed_delta(str(data)):
+                        if normalized_event == "reasoning_delta":
+                            self._handle_reasoning_delta_event(normalized_data)
+                        elif normalized_event == "reasoning_done":
+                            self._handle_reasoning_done_event(normalized_data)
                         yield normalized_event, normalized_data
                         if normalized_event == "delta":
                             buffer += str(normalized_data)
@@ -777,9 +813,21 @@ class AgentlyResponseParser(ResponseParser):
                     else:
                         normalized_done_events = [("done", data)]
                     for normalized_event, normalized_data in normalized_done_events:
-                        if normalized_event == "done":
+                        if normalized_event == "reasoning_delta":
+                            self._handle_reasoning_delta_event(normalized_data)
+                        elif normalized_event == "reasoning_done":
+                            self._handle_reasoning_done_event(normalized_data)
+                        elif normalized_event == "done":
                             await self._handle_done_event(normalized_data, buffer)
                         yield normalized_event, normalized_data
+                    continue
+                if event == "reasoning_delta":
+                    self._handle_reasoning_delta_event(data)
+                    yield event, data
+                    continue
+                if event == "reasoning_done":
+                    self._handle_reasoning_done_event(data)
+                    yield event, data
                     continue
                 yield event, data
                 match event:

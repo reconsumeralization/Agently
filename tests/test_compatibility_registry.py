@@ -28,18 +28,18 @@ def test_current_release_manifest_matches_registry_release_file() -> None:
     current_manifest = get_current_release_manifest()
 
     assert index["latest_release"] == CURRENT_FRAMEWORK_VERSION
-    assert current_manifest["framework"] == release_manifest["framework"]
-    assert current_manifest["framework_version"] == release_manifest["framework_version"]
-    assert current_manifest["release_train"] == release_manifest["release_train"]
+    assert current_manifest == release_manifest
 
 
-def test_4_1_4_6_release_manifest_pins_stage_native_runtime_contract() -> None:
+def test_4_1_4_7_release_manifest_pins_stage_native_runtime_contract() -> None:
     manifest = get_current_release_manifest()
 
-    assert CURRENT_FRAMEWORK_VERSION == "4.1.4.6"
-    assert CURRENT_RELEASE_TRAIN == "2026-07-4.1.4.6"
+    assert CURRENT_FRAMEWORK_VERSION == "4.1.4.7"
+    assert CURRENT_RELEASE_TRAIN == "2026-08-4.1.4.7"
     stage_support = manifest["runtime_support"]["agently_stage"]
-    assert stage_support["version_specifier"] == ">=0.3.5,<0.4.0"
+    assert stage_support["version_specifier"] == ">=0.3.8,<0.4.0"
+    assert stage_support["role"] == "required_runtime_dependency"
+    assert stage_support["release_order"] == "publish_and_verify_stage_before_raising_agently_minimum"
     assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
     assert stage_support["public_runtime_surface"] is False
     assert "EventCenter background task settlement" in stage_support[
@@ -59,21 +59,29 @@ def test_companion_views_still_derive_from_released_manifest() -> None:
     assert skills["authoring_protocol"] == current["companions"]["skills"]["authoring_protocol"]
 
 
-def test_in_development_manifest_declares_4_1_4_6_owner_boundaries() -> None:
+def test_in_development_manifest_declares_4_1_4_7_owner_boundaries() -> None:
     manifest = _development_manifest()
 
-    assert manifest["target_version"] == "4.1.4.6"
-    assert manifest["release_train"] == "2026-07-4.1.4.6-dev"
-    assert "agently.__version__" in manifest["notes"]
-    assert "agently.version" in manifest["notes"]
-    assert "removed rather than retained as compatibility aliases" in manifest["notes"]
-    assert "ensure_long_output()" in manifest["notes"]
-    assert "TriggerFlow-visible continuation" in manifest["notes"]
-    assert "TaskWorkspace owns staged file truth" in manifest["notes"]
-    assert "Agently-Stage >=0.3.5,<0.4.0" in manifest["notes"]
+    assert manifest["target_version"] == "4.1.4.7"
+    assert manifest["release_train"] == "2026-08-4.1.4.7-dev"
+    assert "Agently-Stage >=0.3.8,<0.4.0" in manifest["notes"]
+    assert "Python 3.14 task-factory keyword arguments" in manifest["notes"]
+    assert "physically safe carrier" in manifest["notes"]
+    assert "provider-owned sync wrapper" in manifest["notes"]
+    assert "deprecated syncify/asyncify adapters" in manifest["notes"]
+    assert "Stage.as_sync/as_async" in manifest["notes"]
+    assert "default_stage_call_bridge usage remains unchanged" in manifest["notes"]
+    assert "TriggerFlowExecution remains the semantic lifecycle owner" in manifest["notes"]
 
     stage_support = manifest["runtime_support"]["agently_stage"]
-    assert stage_support["version_specifier"] == ">=0.3.5,<0.4.0"
+    assert stage_support["repository"] == "Agently-Stage"
+    assert stage_support["package"] == "agently-stage"
+    assert stage_support["role"] == "required_runtime_dependency"
+    assert stage_support["version_specifier"] == ">=0.3.8,<0.4.0"
+    assert stage_support["release_order"] == (
+        "publish_and_verify_stage_before_raising_agently_minimum"
+    )
+    assert stage_support["skills_guidance_required"] is True
     assert stage_support["public_runtime_surface"] is False
     assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
     assert "EventCenter background task settlement" in stage_support[
@@ -112,6 +120,7 @@ def test_in_development_manifest_declares_4_1_4_6_owner_boundaries() -> None:
 
 def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
     manifest = _development_manifest()
+    stage_support = manifest["runtime_support"]["agently_stage"]
     skills = manifest["companions"]["skills"]
     contract = skills["runtime_contract"]
 
@@ -128,6 +137,10 @@ def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
     assert "Agent.run_skills_task" in request_contract["surface"]
     assert "result-shaped adapter" in request_contract["contract"]
 
+    stage_guidance = skills["runtime_dependency_guidance"]["agently_stage"]
+    assert stage_guidance["skill"] == "agently-stage"
+    assert stage_guidance["version_specifier"] == stage_support["version_specifier"]
+
 
 def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:
     manifest = _development_manifest()
@@ -137,9 +150,16 @@ def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:
     assert blocks["removed_block_kinds"] == ["skill_activation", "workspace_operation"]
     assert "caller-bound ContextReader" in blocks["context_read_contract"]
     assert devtools["runtime_protocol"] == "agently-devtools.observation-runtime.v1"
+    assert devtools["recommended_version_specifier"] == ">=0.1.11,<0.2.0"
     assert "TaskWorkspace is never an event store" in (
         devtools["runtime_control"]["record_store_contract"]
     )
+    assert "model.reasoning.delta" in devtools["runtime_control"][
+        "model_reasoning_observation_contract"
+    ]
+    assert "model.validation_failed" in devtools["runtime_control"][
+        "model_validation_diagnostics_contract"
+    ]
 
 
 def test_in_development_triggerflow_snapshot_projection_contract() -> None:
@@ -166,6 +186,19 @@ def test_in_development_code_execution_and_evidence_replan_contracts() -> None:
     ]
     assert "toolchain-version" in action_runtime["provider_selection_contract"]
     assert "Action result metadata" in action_runtime["provider_selection_contract"]
+    provider_candidates = action_runtime["builtin_provider_candidates"]
+    assert {candidate["provider_id"] for candidate in provider_candidates} == {
+        "gvisor",
+        "seatbelt",
+        "landlock",
+    }
+    assert {candidate["provider_id"]: candidate["isolation_policy"] for candidate in provider_candidates} == {
+        "gvisor": "required",
+        "seatbelt": "preferred",
+        "landlock": "preferred",
+    }
+    assert all(candidate["fallback"] == "fail_closed" for candidate in provider_candidates)
+    assert "contributor-owned" not in action_runtime["builtin_provider_contract"]
     assert "evidence-reacquisition card" in task_loop["evidence_replan_contract"]
     assert "final-artifact self-readback" in task_loop["evidence_replan_contract"]
 

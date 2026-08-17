@@ -62,6 +62,21 @@ The older `bridge = ObservationBridge(...); bridge.register(Agently)` form remai
 
 `ObservationBridge` uploads from a background queue and coalesces high-frequency observation events such as `model.streaming` before sending them to the listener. This keeps passive observation off the request/output path. For short scripts that exit immediately after a run, call `await bridge.flush()` before process exit if you need all buffered events uploaded.
 
+The DevTools listener has a separate bounded receiver pipeline. It partitions
+events by run so concurrent ingest requests cannot reorder one run merely
+because another event is awaiting an async sink. Agently-Stage privately owns
+the dispatcher and worker task lifetime; DevTools still owns queue pressure,
+ordering, acknowledgement, errors, storage, and subscriptions. HTTP ingest
+success remains a processed acknowledgement rather than an enqueue-only
+acknowledgement.
+
+Receiver settings are
+`observation.ingest.worker_count` (default `4`),
+`observation.ingest.queue_limit` (default `64` per intake/partition queue), and
+`observation.ingest.shutdown_timeout_seconds` (default `5.0`). Normal shutdown
+drains admitted batches. A timeout warns and cancels cooperative workers;
+external blocking sinks still need their own timeout/cancellation contract.
+
 ## EvaluationBridge
 
 [`03_scenario_evaluations.py`](../../../examples/devtools/03_scenario_evaluations.py) builds a small TriggerFlow, binds it with `EvaluationBinding`, and runs `EvaluationRunner` across multiple `EvaluationCase` inputs. Use this path for repeatable scenario checks, not for request-time validation inside application code.
@@ -87,6 +102,13 @@ These records are for display, logging, and post-run analysis only. Do not use t
 ## Model request usage
 
 DevTools should consume model request usage from `payload.model_request_telemetry.usage_summary` when present, with compatible fallbacks to provider `usage` metadata on model meta or terminal events. Display usage at two scopes: the individual model request and the selected run branch with descendant model requests aggregated upward.
+
+When present, `model.reasoning.delta` is reconstructed progressively and
+`model.reasoning.completed` supplies the final provider reasoning text. Model
+request cards expose it in a separate Reasoning tab. The tab remains available
+when reasoning is absent and states that the output did not include provider
+reasoning. Nullable `reasoning_tokens` is displayed and aggregated independently;
+it is not added again to provider output/completion/total values.
 
 When provider token counts are unavailable, show token fields as unknown, for example `NaN`, and show estimated input/output character lengths as diagnostics only. Usage telemetry is observation-only; it must not become a framework budget cap, retry rule, route decision, quality score, verifier result, or task-completion acceptance.
 
