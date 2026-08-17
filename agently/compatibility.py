@@ -5,8 +5,8 @@ from typing import Any
 
 
 CURRENT_COMPATIBILITY_SCHEMA_VERSION = 1
-CURRENT_FRAMEWORK_VERSION = "4.1.4.6"
-CURRENT_RELEASE_TRAIN = "2026-07-4.1.4.6"
+CURRENT_FRAMEWORK_VERSION = "4.1.4.7"
+CURRENT_RELEASE_TRAIN = "2026-08-4.1.4.7"
 
 DEVTOOLS_RUNTIME_PROTOCOL = "agently-devtools.observation-runtime.v1"
 SKILLS_AUTHORING_PROTOCOL = "agently-skills.authoring.v2"
@@ -15,15 +15,36 @@ DOCS_PUBLIC_SURFACE_PROTOCOL = "agently-docs.public-surface.v1"
 
 _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
  'framework': 'agently',
- 'framework_version': '4.1.4.6',
- 'release_train': '2026-07-4.1.4.6',
- 'released_at': '2026-07-31',
- 'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.6. This patch exposes the standard '
-          'agently.__version__ and Agently.__version__ surfaces, normalizes reasoning lifecycle events across '
-          'OpenAI-compatible Chat Completions, Anthropic-compatible Messages, and Responses adapters, makes the public '
-          'request retry lifecycle the sole owner of physical SSE connections across all three compatible adapters, '
-          'and preserves live runtime-resource identity across TriggerFlow sub-flow boundaries.',
- 'runtime_support': {'agently_stage': {'version_specifier': '>=0.3.5,<0.4.0',
+ 'framework_version': '4.1.4.7',
+ 'release_train': '2026-08-4.1.4.7',
+ 'released_at': '2026-08-18',
+ 'notes': 'Version-scoped companion compatibility manifest for Agently 4.1.4.7: requires Agently-Stage >=0.3.8,<0.4.0. '
+          'Stage 0.3.7 supplies physically safe carrier routing across mixed sync/async boundaries and excludes every '
+          'upstream carrier in a transitive synchronous wait chain; 0.3.8 preserves that contract while forwarding '
+          'Python 3.14 task-factory keyword arguments. A synchronous TriggerFlow chunk may call a provider-owned sync '
+          "wrapper that uses with Stage() for an async tool and may then re-enter TriggerFlow's synchronous state "
+          'facade without knowing that the framework already uses Stage. FunctionShifter.syncify/asyncify retain their '
+          'compatibility names and deprecation warnings but now delegate to Stage.as_sync/as_async; internal '
+          'lightweight default_stage_call_bridge usage remains unchanged. Stage is the required-runtime companion and '
+          'remains a private Agently mechanism dependency: TriggerFlowExecution remains the semantic lifecycle owner, '
+          'and Stage types or carrier state do not enter public execution state. Built-in inactive gvisor, seatbelt, '
+          'and landlock candidates use the existing provider-neutral code_execution contract and probe external '
+          'mechanisms only when explicitly selected; they add no third-party Python dependency and fail closed without '
+          'implicit fallback. Provider reasoning and explicit reasoning-token usage remain observation-only facts, and '
+          'validation console output exposes bounded failure/retry diagnostics without changing validation authority. '
+          'The 4.1.4.6 contracts remain intact: agently.__version__ and Agently.__version__ are the standard package '
+          'version surfaces, provider reasoning and compatible SSE retry boundaries remain normalized, and live '
+          'TriggerFlow sub-flow resources preserve identity. The 4.1.4.5 runtime line also remains intact: '
+          'AgentExecution ensure_long_output() uses TriggerFlow-visible continuation and TaskWorkspace owns staged '
+          'file truth. The 4.1.4.2 owner split remains intact: TaskContext owns bounded disclosure, TaskWorkspace owns '
+          'files and artifacts, RecordStore owns durable runtime state including opt-in record_store_recovery, and '
+          'SkillLibrary owns immutable Skill revisions.',
+ 'runtime_support': {'agently_stage': {'repository': 'Agently-Stage',
+                                       'package': 'agently-stage',
+                                       'role': 'required_runtime_dependency',
+                                       'version_specifier': '>=0.3.8,<0.4.0',
+                                       'release_order': 'publish_and_verify_stage_before_raising_agently_minimum',
+                                       'skills_guidance_required': True,
                                        'public_runtime_surface': False,
                                        'task_mechanism_owners': ['TriggerFlowExecution'],
                                        'stream_mechanism_owner': 'TriggerFlow execution stream',
@@ -55,11 +76,33 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                           'projections are bounded observation facts '
                                                                           'only and never drive route selection, '
                                                                           'verification, or task acceptance.',
-                                                 'model_request_telemetry_contract': 'Existing model RuntimeEvents may '
-                                                                                     'carry '
-                                                                                     'payload.model_request_telemetry '
-                                                                                     'observation facts; telemetry '
-                                                                                     'remains observation-only.',
+                                                 'model_request_telemetry_contract': (
+                                                     'Existing model RuntimeEvents may carry '
+                                                     'payload.model_request_telemetry observation facts. '
+                                                     'usage_summary.provider may add nullable reasoning_tokens only '
+                                                     'when provider usage explicitly reports reasoning/thinking token '
+                                                     'detail; completion/output/total values retain provider semantics '
+                                                     'and reasoning_tokens is not added again. Telemetry remains '
+                                                     'observation-only.'
+                                                 ),
+                                                 'model_reasoning_observation_contract': (
+                                                     'Provider-supplied reasoning is preserved in ModelRequestResult '
+                                                     'type=all as reasoning_delta plus nullable reasoning, and '
+                                                     'projected through high-frequency model.reasoning.delta plus '
+                                                     'terminal model.reasoning.completed RuntimeEvents. Missing content '
+                                                     'and usage remain unknown/null; the framework does not infer '
+                                                     'hidden chain-of-thought or estimate reasoning tokens from text.'
+                                                 ),
+                                                 'model_validation_diagnostics_contract': (
+                                                     'model.validation_failed and model.validation_error retain '
+                                                     'validator, reason, attempt, bounded validation context, and '
+                                                     'structured error facts; model.retrying records the retry '
+                                                     'transition. Simple console projection shows the concise failure '
+                                                     'and transition, detail may add bounded context and traceback '
+                                                     'tails, and adjacent events do not repeat the model response or '
+                                                     'validation reason. These facts remain observation-only and do '
+                                                     'not change deterministic validation or retry authority.'
+                                                 ),
                                                  'model_request_result_stream_status_contract': 'ModelRequestResult '
                                                                                                 'reserves $status for '
                                                                                                 'completed, failed, '
@@ -100,7 +143,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                                                                   'background_reclaim': 'idle_flush_and_explicit_flush',
                                                                                   'default_delivery': 'raw',
                                                                                   'summary_marker': 'meta.coalesced'}},
-                             'recommended_version_specifier': '>=0.1.10,<0.2.0'},
+                             'recommended_version_specifier': '>=0.1.11,<0.2.0'},
                 'skills': {'repository': 'Agently-Skills',
                            'authoring_protocol': 'agently-skills.authoring.v2',
                            'authoring_format': 'standard SKILL.md only',
@@ -138,6 +181,12 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                            'catalog_generation': 'v2',
                            'recommended_bundle': 'app',
                            'recommended_ref': 'main',
+                           'runtime_dependency_guidance': {
+                               'agently_stage': {
+                                   'skill': 'agently-stage',
+                                   'version_specifier': '>=0.3.8,<0.4.0',
+                               }
+                           },
                            'archived_catalog_generations': [{'generation': 'v1',
                                                              'branch': 'update/archive-legacy-v1-catalog',
                                                              'last_supported_framework_version': '4.1.1',
@@ -192,11 +241,34 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                    'unsafe_fallback_contract': 'trusted_local is explicit unsafe host execution, '
                                                                'requires allow_unsafe_local authorization and snapshot '
                                                                'access, and cannot satisfy isolation=required',
-                                   'community_provider_contract': 'PR #325 and #327 retain contributor ownership of '
-                                                                  'concrete gVisor and Seatbelt implementations; the '
-                                                                  'base branch provides only provider-neutral '
-                                                                  'contracts, synthetic conformance fixtures, and '
-                                                                  'migration guidance'},
+                                   'builtin_provider_contract': (
+                                       'Built-in gVisor, macOS Seatbelt, and Linux Landlock candidates use the '
+                                       'existing provider-neutral code_execution selection contract, declare '
+                                       'concrete isolation-axis capabilities, consume only host-authorized '
+                                       'TaskWorkspace grants and provider-owned configuration, expose observed '
+                                       'selection facts in handle/result metadata, and fail closed without implicit '
+                                       'fallback to Docker or trusted_local.'
+                                   ),
+                                   'builtin_provider_candidates': [
+                                       {
+                                           'provider_id': 'gvisor',
+                                           'platform': 'linux_docker_runsc',
+                                           'isolation_policy': 'required',
+                                           'fallback': 'fail_closed',
+                                       },
+                                       {
+                                           'provider_id': 'seatbelt',
+                                           'platform': 'macos',
+                                           'isolation_policy': 'preferred',
+                                           'fallback': 'fail_closed',
+                                       },
+                                       {
+                                           'provider_id': 'landlock',
+                                           'platform': 'linux',
+                                           'isolation_policy': 'preferred',
+                                           'fallback': 'fail_closed',
+                                       },
+                                   ]},
                 'triggerflow': {'record_store_resource': 'flow.create_execution(record_store=...); record_store=False '
                                                          'opts out',
                                 'task_workspace_contract': 'TriggerFlow does not create or infer a TaskWorkspace.',
@@ -417,6 +489,7 @@ _CURRENT_RELEASE_MANIFEST: dict[str, Any] = {'schema_version': 1,
                                'explicit allowlist reasons.',
                    'compatibility_policy': 'The allowlist records deliberate Any boundaries; it is not a public-method '
                                            'allowlist.'}}
+
 
 def get_current_release_manifest() -> dict[str, Any]:
     return deepcopy(_CURRENT_RELEASE_MANIFEST)
