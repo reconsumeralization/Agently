@@ -168,9 +168,16 @@ ACP 只是选项之一，不是必选项，也不需要把三个选项全部执�
   string，并在查找前拒绝未知 key 和业务上不允许的重复 key。
   候选集合成员资格不等于新鲜性：只有选择结果可能跨越 cache、queue、retry、
   persistence 或 replay 边界时，才将其绑定到宿主拥有的 request/execution revision
-  或本次请求专用的 opaque key，并在 canonical lookup 前校验宿主关联。优先使用
-  宿主绑定的 lineage，而不是让模型抄写 request id。严格内联、已等待且不可能跨越
-  请求边界的 response，不需要额外的模型返回关联字段。
+  或本次请求专用的 opaque key，并在 canonical lookup 前校验宿主关联。关联必须绑定
+  语义输入、证据或请求 revision，而不只是候选/目录状态；调用方提供的逻辑 id 只有在
+  宿主存储能保证它与该语义 revision 唯一关联时才足够。应优先使用不可覆盖的宿主
+  lineage 或 canonical input/evidence revision，且绝不能让模型抄写关联 id。严格内联、
+  已等待且不可能跨越请求边界的 response，不需要额外的模型返回关联字段。
+- 严格 hot-only Agent 请求：复用已配置的 Agent 时，应使用
+  `agent.create_temp_request()`，或在 `create_request(...)` 中同时关闭
+  `inherit_agent_prompt` 与 `inherit_extension_handlers`。如果确实要继承，应声明获准
+  继承的槽位/handler，并审计最终 post-prefix prompt；只记录调用的 fake 测试不能证明
+  隔离。
 - Actions：新代码从 `@agent.action_func` 和 `agent.use_actions(...)` 起步。`tool_func`、`use_tool`、`use_tools` 是兼容别名，不是首选推荐。
 - TriggerFlow lifecycle：把 `close()` / `async_close()` 和 close snapshot 视为规范收尾路径。不要把 `.end()`、`set_result()`、`get_result()`、`wait_for_result=` 当正常起点。
 - TriggerFlow state：单次 execution 的数据用 `get_state(...)` / `set_state(...)`。`flow_data` 是有意共享时才使用的风险作用域，不是普通状态存储。
