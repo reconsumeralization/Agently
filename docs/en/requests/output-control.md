@@ -79,6 +79,12 @@ host validates that correlation before canonical lookup, then reconstructs the
 canonical record from host state. Prefer host-bound lineage over asking the
 model to copy another request id.
 
+That binding must cover the semantic input/evidence/request revision, not only
+candidate or catalog state. A caller-supplied logical id is insufficient unless
+host storage guarantees that unique association; prefer non-overridable lineage
+or a host-owned canonical input/evidence revision, and never ask the model to
+copy correlation ids.
+
 A strictly inline awaited response that cannot cross a request boundary needs
 no extra model-returned correlation field.
 

@@ -95,6 +95,33 @@ after injection, for example the `prompt.built` event's
 sufficient evidence for late injections. Redact secrets before retaining
 prompt evidence.
 
+## Isolate a hot-only request from a reusable Agent
+
+If a reusable configured Agent must create a strict hot-only request, use a
+native isolated request boundary:
+
+```python
+request = agent.create_temp_request()
+
+# Equivalent when other create_request(...) options are needed:
+request = agent.create_request(
+    inherit_agent_prompt=False,
+    inherit_extension_handlers=False,
+)
+```
+
+These calls disable inheritance of the Agent prompt and Agent extension
+handlers; they still use the Agent's request infrastructure and settings. If
+inheritance is intentional, declare the approved inherited slots and handlers,
+then test that explicit contract instead of claiming the request is hot-only.
+
+Use the installed runtime to audit the final post-prefix ModelRequest prompt
+after inheritance and extension injection have had their opportunity to run.
+Cover every mechanism allowed by the request contract and redact retained
+evidence. A fake fluent-call test that only records `.input(...)`,
+`.instruct(...)`, or `.output(...)` calls cannot prove isolation when it does
+not implement real Agent inheritance, extension handling, or prompt prefixes.
+
 ## Strict external interface contracts
 
 When model output will be passed directly to a documented API request, module

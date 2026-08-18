@@ -65,6 +65,10 @@ Coding Agent 必须在实现前停止并说明：
 canonical lookup 之前校验这种关联，再从宿主状态重建 canonical record。应优先采用
 宿主绑定的 lineage，而不是要求模型抄写另一个 request id。
 
+该关联必须绑定语义输入/证据/请求 revision，而不只是候选或目录状态。调用方提供的逻辑
+id 只有在宿主存储能保证它与该语义 revision 唯一关联时才足够；应优先使用不可覆盖的
+lineage 或宿主拥有的 canonical input/evidence revision，且绝不能让模型抄写关联 id。
+
 严格内联、已等待且不可能跨越请求边界的 response，不需要额外的模型返回关联字段。
 
 ## 选择输出格式

@@ -193,9 +193,18 @@ When you audit or author guidance for Agently `4.1+`, these are the defaults cod
   Offered-set membership is not freshness: only if a selection can cross a
   cache, queue, retry, persistence, or replay boundary, bind it to a
   host-owned request/execution revision or per-request opaque key and validate
-  host correlation before canonical lookup. Prefer host-bound lineage over a
-  model-copied request id. A strictly inline awaited response that cannot cross
-  a request boundary needs no extra model-returned correlation field.
+  host correlation before canonical lookup. Bind the semantic input, evidence,
+  or request revision, not only candidate/catalog state; a caller-supplied
+  logical id is insufficient unless host storage guarantees that unique
+  association. Prefer non-overridable host lineage or a canonical input/evidence
+  revision, and never ask the model to copy correlation ids. A strictly inline
+  awaited response that cannot cross a request boundary needs no extra
+  model-returned correlation field.
+- Strict hot-only Agent requests: when reusing a configured Agent, use
+  `agent.create_temp_request()` or disable both `inherit_agent_prompt` and
+  `inherit_extension_handlers` on `create_request(...)`. If inheritance is
+  intentional, declare the approved inherited slots/handlers and audit the
+  final post-prefix prompt; a fake call-only test does not prove isolation.
 - Actions: new code should start from `@agent.action_func` and `agent.use_actions(...)`. `tool_func`, `use_tool`, and `use_tools` are compatibility aliases, not the primary recommendation.
 - TriggerFlow lifecycle: treat `close()` / `async_close()` and the close snapshot as the canonical completion path. Do not recommend `.end()`, `set_result()`, `get_result()`, or `wait_for_result=` as the normal starting point.
 - TriggerFlow state: use `get_state(...)` / `set_state(...)` for per-execution data. Treat `flow_data` as an intentionally risky shared scope, not a normal state store.

@@ -83,6 +83,29 @@ ModelRequest `prompt_text`，例如 `prompt.built` 事件的 `payload.prompt_tex
 启动后的 execution snapshot 当成 late injection 的充分证据。保留 prompt 证据前必须
 脱敏秘密信息。
 
+## 将 hot-only 请求与可复用 Agent 隔离
+
+当可复用且已配置的 Agent 必须创建严格 hot-only 请求时，应使用原生隔离请求边界：
+
+```python
+request = agent.create_temp_request()
+
+# 需要其他 create_request(...) 选项时，以下写法等价：
+request = agent.create_request(
+    inherit_agent_prompt=False,
+    inherit_extension_handlers=False,
+)
+```
+
+这两种写法会关闭 Agent prompt 与 Agent extension handler 的继承；请求仍会使用该
+Agent 的请求基础设施和 settings。如果确实要继承，应声明获准继承的槽位与 handler，
+并测试这份显式契约，而不是声称请求是 hot-only。
+
+应通过已安装的 runtime，在继承与 extension 注入都有机会运行后，审计最终 post-prefix
+ModelRequest prompt。测试必须覆盖请求契约允许的每一种机制，保留证据前还要脱敏。
+如果 fake fluent-call 测试只记录 `.input(...)`、`.instruct(...)` 或 `.output(...)`
+调用，却没有实现真实 Agent 继承、extension handler 或 prompt prefix，它不能证明隔离。
+
 ## 严格的外部接口契约
 
 当模型输出会直接作为已定义 API 请求、模块接口或函数调用的参数时，模型必须
