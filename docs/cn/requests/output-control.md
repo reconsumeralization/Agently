@@ -56,6 +56,17 @@ Coding Agent 必须在实现前停止并说明：
 只有开发者在新的回复中明确确认这个具名卡控及其风险后，才可以继续实现。之前的
 笼统“继续执行”不构成这次二次确认。
 
+## 由宿主解析的选择输出
+
+当模型选择宿主记录时，应返回本次提供的 selection key，而不是抄写 canonical id
+或另一个 request id。候选集合成员资格只能证明成员资格，不能证明新鲜性。只有该决定
+可能跨越 cache、queue、retry、persistence 或 replay 边界时，宿主才必须将它绑定到
+宿主拥有的 request/execution revision，或签发本次请求专用的 opaque key。宿主应在
+canonical lookup 之前校验这种关联，再从宿主状态重建 canonical record。应优先采用
+宿主绑定的 lineage，而不是要求模型抄写另一个 request id。
+
+严格内联、已等待且不可能跨越请求边界的 response，不需要额外的模型返回关联字段。
+
 ## 选择输出格式
 
 `.output(...)` 省略 `format` 时读取 `prompt.default_output_format`，全局默认值是

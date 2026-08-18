@@ -68,6 +68,20 @@ Implementation may continue only after a new developer response explicitly
 confirms that named gate and its risks. A previous general instruction to
 proceed is not that second confirmation.
 
+## Host-resolved selection outputs
+
+When a model selects a host record, return the offered selection key rather
+than copied canonical ids or another request id. Offered-set membership proves
+membership, not freshness. Only when that decision can cross a cache, queue,
+retry, persistence, or replay boundary must the host bind it to a
+host-owned request/execution revision or issue per-request opaque keys. The
+host validates that correlation before canonical lookup, then reconstructs the
+canonical record from host state. Prefer host-bound lineage over asking the
+model to copy another request id.
+
+A strictly inline awaited response that cannot cross a request boundary needs
+no extra model-returned correlation field.
+
 ## Choosing An Output Format
 
 `.output(...)` reads its omitted format default from

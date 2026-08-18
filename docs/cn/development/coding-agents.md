@@ -166,6 +166,11 @@ ACP 只是选项之一，不是必选项，也不需要把三个选项全部执�
   不是有价值的推理或输出控制。`selection_key` 只是 application-local projection，
   不是第二套 canonical identity；应把它声明为受本次候选 key 集合约束的 required
   string，并在查找前拒绝未知 key 和业务上不允许的重复 key。
+  候选集合成员资格不等于新鲜性：只有选择结果可能跨越 cache、queue、retry、
+  persistence 或 replay 边界时，才将其绑定到宿主拥有的 request/execution revision
+  或本次请求专用的 opaque key，并在 canonical lookup 前校验宿主关联。优先使用
+  宿主绑定的 lineage，而不是让模型抄写 request id。严格内联、已等待且不可能跨越
+  请求边界的 response，不需要额外的模型返回关联字段。
 - Actions：新代码从 `@agent.action_func` 和 `agent.use_actions(...)` 起步。`tool_func`、`use_tool`、`use_tools` 是兼容别名，不是首选推荐。
 - TriggerFlow lifecycle：把 `close()` / `async_close()` 和 close snapshot 视为规范收尾路径。不要把 `.end()`、`set_result()`、`get_result()`、`wait_for_result=` 当正常起点。
 - TriggerFlow state：单次 execution 的数据用 `get_state(...)` / `set_state(...)`。`flow_data` 是有意共享时才使用的风险作用域，不是普通状态存储。
