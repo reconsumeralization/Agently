@@ -508,6 +508,37 @@ statistical transformations, ask the model for an executable calculation plan or
 code, run it with tools, and pass the original question, code, and observed
 result into the next model step. Do not make text generation be the calculator.
 
+## Hard Gates And Soft Quality Targets
+
+Classify acceptance criteria on two separate axes:
+
+| Axis | Choices | Meaning |
+|---|---|---|
+| acceptance criticality | hard gate / soft target | whether failure must block the result or may remain as a scored imperfection |
+| evaluation method | deterministic check / semantic review | whether code can decide the criterion exactly or meaning must be judged by a model, coding agent, or human |
+
+Use deterministic hard gates for schema, types, required fields, enum values,
+offered ids, authorization, exact calculations, safety invariants, and observed
+side effects. Use semantic review for intent alignment, faithful use of supplied
+facts, usefulness, clarity, tone, visual quality, and other open-ended content.
+A mandatory semantic requirement can still be a hard gate; evaluate it with an
+explicit structured rubric and escalate uncertain or high-risk cases instead
+of replacing it with keyword or regex checks.
+
+Soft targets should produce a level, evidence, and improvement advice. Ordinary
+imperfections do not fail acceptance. If falling below a particular level must
+block release, declare that lower bound as a hard gate before testing.
+
+Structured output controls shape and bounded values, but open-ended text is not
+expected to be byte-identical on every run. Evaluate representative cases over
+repeated real runs for the selected model/configuration, record per-run results
+and variation, and calibrate model or coding-agent reviewers against a small
+human-reviewed sample. The developer-approved minimum business standard may be
+refined through discussion, but must not be silently lowered to make a weak
+model pass. If accurate, sufficient input and a clear request repeatedly fail
+that minimum, report a model-capability or model-fit gap and discuss another
+model, request design, fallback, or human review.
+
 You can also pass handlers per-call:
 
 ```python
