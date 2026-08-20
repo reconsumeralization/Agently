@@ -40,6 +40,20 @@ Runtime graphs, events, traces, and artifacts validate the planned topology;
 they do not replace planning. A graph can show activation without proving that
 the right field reached its consumer.
 
+For a key handoff with an independent consumer, parallel-development benefit,
+or local-validation value, consider providing small replaceable reference data
+before the real producer is complete. This lets downstream work develop against
+the information it actually consumes and gives the producer a concrete target.
+The form is project-defined: it may be a DTO, structured example, JSON fixture,
+event payload, file artifact, or a domain case plus topology data.
+
+A model may simulate an expert to draft such material, but the draft remains
+simulated until confirmed by a developer, domain fact, interface contract, or
+observed run. The completed producer must prove that its real output can replace
+the reference data, and the consumer must not overfit one sample's wording or
+incidental values. Do not add a fixed packet schema or an extra handoff when no
+independent development, replay, validation, or fault-localization value exists.
+
 ## Start with the minimum honest layout
 
 ### One request family
