@@ -19,10 +19,15 @@ from agently_stage import default_stage_call_bridge
 import asyncio
 import json
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, cast
 
 from agently.core.application.AgentExecution import RuntimeStageStallError
-from agently.core.runtime.RuntimeContext import get_current_agent_execution_context, get_current_tool_phase_run_context
+from agently.core.runtime.RuntimeContext import (
+    bind_runtime_context,
+    get_current_agent_execution_context,
+    get_current_tool_phase_run_context,
+)
 from agently.utils import SettingsNamespace
 
 if TYPE_CHECKING:
@@ -57,6 +62,7 @@ class AgentlyActionRuntime:
         self.tool_settings = SettingsNamespace(self.settings, "tool")
         self._planning_handler = self._default_planning_handler
         self._execution_handler = self._default_action_execution_handler
+        self._programmatic_catalogs: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _on_register():
@@ -125,7 +131,11 @@ class AgentlyActionRuntime:
         if not isinstance(candidate, str) or candidate.strip() == "":
             candidate = "structured_plan"
         candidate = candidate.strip().lower()
-        if candidate not in {"structured_plan", "native_tool_calls"}:
+        if candidate not in {
+            "structured_plan",
+            "native_tool_calls",
+            "programmatic",
+        }:
             return "structured_plan"
         return candidate
 
@@ -314,7 +324,9 @@ class AgentlyActionRuntime:
                 "max_rounds": max_rounds,
                 "round_dispatch_policy": round_dispatch_policy,
             }
-        ).instruct(planning_instructions).output(
+        ).instruct(
+            planning_instructions
+        ).output(
             {
                 "next_action": ("'execute' | 'response'", "This round action decision."),
                 "execution_commands": [
@@ -402,22 +414,25 @@ class AgentlyActionRuntime:
                 break
         action_calls = self.action._normalize_native_action_calls(tool_call_chunks)
         if len(action_calls) == 0:
-            diagnostic = cast("ActionDiagnostic", {
-                "source": "ActionRuntime",
-                "severity": "warning",
-                "code": "action_runtime.native_tool_calls.empty",
-                "message": (
-                    "Native tool-call planning returned no executable tool calls. "
-                    "The host should treat this as a planning diagnostic rather than executed action evidence."
-                ),
-                "meta": {
-                    "planning_protocol": "native_tool_calls",
-                    "textual_tool_markup_detected": any(
-                        marker in "".join(text_fragments).lower()
-                        for marker in ("<bash", "<tool", "<command", "```bash")
+            diagnostic = cast(
+                "ActionDiagnostic",
+                {
+                    "source": "ActionRuntime",
+                    "severity": "warning",
+                    "code": "action_runtime.native_tool_calls.empty",
+                    "message": (
+                        "Native tool-call planning returned no executable tool calls. "
+                        "The host should treat this as a planning diagnostic rather than executed action evidence."
                     ),
+                    "meta": {
+                        "planning_protocol": "native_tool_calls",
+                        "textual_tool_markup_detected": any(
+                            marker in "".join(text_fragments).lower()
+                            for marker in ("<bash", "<tool", "<command", "```bash")
+                        ),
+                    },
                 },
-            })
+            )
             return {
                 "next_action": "response",
                 "use_action": False,
@@ -433,6 +448,323 @@ class AgentlyActionRuntime:
             "execution_commands": action_calls,
         }
 
+    def _retain_programmatic_catalog(
+        self,
+        catalog: dict[str, Any],
+        *,
+        max_active_catalogs: int = 64,
+    ) -> None:
+        revision = str(catalog.get("catalog_revision", "")).strip()
+        if not revision:
+            raise ValueError("Programmatic Action catalog revision is required.")
+        existing = self._programmatic_catalogs.get(revision)
+        if isinstance(existing, dict):
+            existing["leases"] = int(existing.get("leases", 0)) + 1
+            return
+        if len(self._programmatic_catalogs) >= max_active_catalogs:
+            raise RuntimeError(
+                "Programmatic Action catalog capacity is exhausted by active or "
+                "generated-but-unsettled program decisions."
+            )
+        catalog_snapshot = dict(catalog)
+        entries = catalog_snapshot.get("entries", [])
+        catalog_snapshot["_registration_versions"] = {
+            str(entry.get("action_id", "")): self.action.action_registry._registration_version(
+                str(entry.get("action_id", ""))
+            )
+            for entry in entries
+            if isinstance(entry, dict) and str(entry.get("action_id", ""))
+        }
+        self._programmatic_catalogs[revision] = {
+            "catalog": catalog_snapshot,
+            "leases": 1,
+        }
+
+    def resolve_programmatic_catalog(self, revision: str) -> dict[str, Any] | None:
+        retained = self._programmatic_catalogs.get(str(revision))
+        catalog = retained.get("catalog") if isinstance(retained, dict) else None
+        return dict(catalog) if isinstance(catalog, dict) else None
+
+    def release_programmatic_catalog(self, revision: str) -> None:
+        retained = self._programmatic_catalogs.get(str(revision))
+        if not isinstance(retained, dict):
+            return
+        leases = int(retained.get("leases", 0)) - 1
+        if leases <= 0:
+            self._programmatic_catalogs.pop(str(revision), None)
+        else:
+            retained["leases"] = leases
+
+    async def _default_programmatic_planning_handler(
+        self,
+        context: "ActionRunContext",
+        request: "ActionPlanningRequest",
+    ) -> "ActionDecision":
+        from agently.core import ModelRequest
+        from agently.core.operation.Action.ActionProgram import (
+            build_programmatic_action_catalog,
+            build_programmatic_python_source,
+            normalize_programmatic_action_decision,
+        )
+        from agently.types.data import PROGRAMMATIC_ACTION_TRANSPORT_ID
+
+        prompt = context["prompt"]
+        settings = context["settings"]
+        agent_name = str(context.get("agent_name", "Manual"))
+        action_list = request.get("action_list", [])
+        done_plans = context.get("done_plans", [])
+        last_round_records = context.get("last_round_records", [])
+        round_index = context.get("round_index", 0)
+        max_rounds = context.get("max_rounds", None)
+        max_program_bytes_raw = settings.get(
+            "action.programmatic.max_program_bytes",
+            20000,
+        )
+        max_program_bytes = (
+            int(max_program_bytes_raw)
+            if isinstance(max_program_bytes_raw, int)
+            and not isinstance(max_program_bytes_raw, bool)
+            and max_program_bytes_raw > 0
+            else 20000
+        )
+        max_description_bytes_raw = settings.get(
+            "action.programmatic.max_description_bytes",
+            1024,
+        )
+        max_description_bytes = (
+            int(max_description_bytes_raw)
+            if isinstance(max_description_bytes_raw, int)
+            and not isinstance(max_description_bytes_raw, bool)
+            and max_description_bytes_raw > 0
+            else 1024
+        )
+        parent_run_context = get_current_tool_phase_run_context()
+        parent_run_id = str(getattr(parent_run_context, "run_id", "") or "")
+        revision_seed = f"{parent_run_id}:{uuid.uuid4().hex}"
+        ensure_transport = getattr(self.action, "_ensure_programmatic_action_transport", None)
+        if not callable(ensure_transport):
+            raise RuntimeError("Programmatic Action transport is not available.")
+        ensure_transport(settings=settings)
+        transport_spec = self.action.action_registry.get_spec(PROGRAMMATIC_ACTION_TRANSPORT_ID)
+        if transport_spec is None:
+            raise RuntimeError("Programmatic Action transport registration failed.")
+        transport_policy = self.action.action_dispatcher._merge_policy(
+            settings,
+            transport_spec,
+            {},
+        )
+        if transport_spec.get("approval_required") is True or transport_policy.get("approval_mode") == "always":
+            return cast(
+                "ActionDecision",
+                {
+                    "next_action": "response",
+                    "use_action": False,
+                    "action_calls": [],
+                    "execution_commands": [],
+                    "diagnostics": [
+                        {
+                            "source": "ActionRuntime",
+                            "severity": "warning",
+                            "code": "action.programmatic.transport_approval_required",
+                            "message": (
+                                "Programmatic Action V1 cannot start when the "
+                                "reserved code transport requires approval. Use "
+                                "an outer graph-visible approved stage instead."
+                            ),
+                            "meta": {"planning_protocol": "programmatic"},
+                        }
+                    ],
+                },
+            )
+        catalog = build_programmatic_action_catalog(
+            action_list,
+            revision_seed=revision_seed,
+        )
+        catalog_payload = cast(dict[str, Any], catalog)
+        catalog_payload["_revision_seed"] = revision_seed
+        catalog_entries = catalog.get("entries", [])
+        diagnostics = list(catalog.get("diagnostics", []))
+        if not isinstance(catalog_entries, list) or not catalog_entries:
+            diagnostics.append(
+                {
+                    "source": "ActionRuntime",
+                    "severity": "warning",
+                    "code": "action.programmatic.no_eligible_actions",
+                    "message": (
+                        "Programmatic Action planning has no eligible read-only, "
+                        "replay-safe Action with an explicit returns contract."
+                    ),
+                    "meta": {"planning_protocol": "programmatic"},
+                }
+            )
+            return cast(
+                "ActionDecision",
+                {
+                    "next_action": "response",
+                    "use_action": False,
+                    "action_calls": [],
+                    "execution_commands": [],
+                    "diagnostics": diagnostics,
+                },
+            )
+
+        def validate_program_decision(value: dict[str, Any], _validation_context: Any):
+            try:
+                normalized = normalize_programmatic_action_decision(
+                    value,
+                    max_program_bytes=max_program_bytes,
+                    max_description_bytes=max_description_bytes,
+                )
+                if normalized["next_action"] == "execute":
+                    build_programmatic_python_source(str(normalized["program"]))
+            except (TypeError, ValueError) as error:
+                return cast(
+                    Any,
+                    {
+                        "ok": False,
+                        "reason": str(error),
+                        "payload": {"planning_protocol": "programmatic"},
+                    },
+                )
+            return True
+
+        action_plan_request = ModelRequest(
+            self.plugin_manager,
+            parent_settings=settings,
+            agent_name=agent_name,
+            model_key=self._resolve_planning_model_key(settings),
+        )
+        action_plan_request._set_output_observation_policy(sensitive_paths=["program"])
+        action_plan_request.input(
+            {
+                "user_input": prompt.get("input"),
+                "user_extra_requirement": prompt.get("instruct"),
+            }
+        ).info(
+            {
+                "action_sdk": catalog.get("sdk", ""),
+                "done_plans": done_plans,
+                "last_round_result": last_round_records,
+                "round_index": round_index,
+                "max_rounds": max_rounds,
+                "program_contract": {
+                    "language": "python",
+                    "python_version": ">=3.10",
+                    "source_shape": (
+                        "statements inside an existing async function body; " "no def, async def, decorator, or wrapper"
+                    ),
+                    "completion": "an explicit return directly owned by the generated body",
+                    "max_program_bytes": max_program_bytes,
+                    "max_description_bytes": max_description_bytes,
+                    "dispatch": "serial",
+                    "return": "lossless JSON",
+                    "model_hot_result": "bounded print output and return value only",
+                },
+            }
+        ).instruct(
+            [
+                "Decide whether another Action round is required to answer {input.user_input}.",
+                "Use next_action='response' with program=null when no Action work remains.",
+                "When Action work remains, write only the statements that belong inside the already-existing async function body, using the authoritative SDK in {info.action_sdk}.",
+                "Never emit def, async def, a decorator, or an outer/nested wrapper function or class in program.",
+                "The generated body must contain at least one explicit return directly owned by that body, not only a return nested under another function or class.",
+                "Call only offered bindings as await actions.name({...}) or await actions['exotic-name']({...}).",
+                "Treat every SDK input and return schema as authoritative and exhaustive. Never invent unlisted fields, wildcard ids, magic values, or implicit bulk operations.",
+                "When a later Action requires an id or field produced by an earlier Action, read that exact field from the earlier result and pass it explicitly.",
+                "Use loops, branches, and local JSON data transformations only when they help the current task.",
+                "Nested Actions execute serially in V1. Do not assume asyncio.gather makes them concurrent.",
+                "Return one bounded lossless-JSON value containing only what the next response round needs.",
+                "Only print(...) output and the return value become the outer Action result; intermediate Action values stay program-local.",
+                "Do not import network, filesystem, subprocess, package-manager, credential, or host-control capabilities.",
+                "Do not request writes, execution, approvals, or irreversible side effects in programmatic V1.",
+                "Handle the declared bounded Action errors honestly. Do not invent missing results.",
+            ]
+        ).output(
+            {
+                "next_action": (
+                    "'execute' | 'response'",
+                    "Whether to run one program or return to response generation.",
+                    True,
+                ),
+                "description": (
+                    str,
+                    "Short observer-facing label for this program decision.",
+                    True,
+                ),
+                "program": (
+                    "str | None",
+                    (
+                        "Statements for the inside of an existing async function when "
+                        "next_action=execute; never include def/async def/decorators/wrappers, "
+                        "and include a direct body-level return. Otherwise null."
+                    ),
+                    True,
+                ),
+            },
+            format="json",
+        ).validate(
+            validate_program_decision
+        )
+        action_plan_result = _get_model_request_result(
+            action_plan_request,
+            parent_run_context=parent_run_context,
+        )
+        result_reader = getattr(action_plan_result, "result", action_plan_result)
+        raw_decision = await result_reader.async_get_data()
+        decision = normalize_programmatic_action_decision(
+            raw_decision,
+            max_program_bytes=max_program_bytes,
+            max_description_bytes=max_description_bytes,
+        )
+        if decision["next_action"] == "response":
+            return cast(
+                "ActionDecision",
+                {
+                    "next_action": "response",
+                    "use_action": False,
+                    "action_calls": [],
+                    "execution_commands": [],
+                    "diagnostics": diagnostics,
+                },
+            )
+
+        max_active_catalogs_raw = settings.get(
+            "action.programmatic.max_active_catalogs",
+            64,
+        )
+        max_active_catalogs = (
+            int(max_active_catalogs_raw)
+            if isinstance(max_active_catalogs_raw, int)
+            and not isinstance(max_active_catalogs_raw, bool)
+            and max_active_catalogs_raw > 0
+            else 64
+        )
+        self._retain_programmatic_catalog(
+            catalog_payload,
+            max_active_catalogs=max_active_catalogs,
+        )
+        action_call = {
+            "purpose": decision["description"],
+            "action_id": PROGRAMMATIC_ACTION_TRANSPORT_ID,
+            "action_input": {
+                "program": decision["program"],
+                "description": decision["description"],
+                "catalog_revision": catalog["catalog_revision"],
+            },
+            "source_protocol": "programmatic",
+            "todo_suggestion": "Use the bounded program result to decide whether to respond or run another Action round.",
+        }
+        return cast(
+            "ActionDecision",
+            {
+                "next_action": "execute",
+                "use_action": True,
+                "action_calls": [action_call],
+                "execution_commands": [action_call],
+                "diagnostics": diagnostics,
+            },
+        )
+
     async def _default_planning_handler(
         self,
         context: "ActionRunContext",
@@ -442,6 +774,8 @@ class AgentlyActionRuntime:
         planning_protocol = self.resolve_planning_protocol(settings, request.get("planning_protocol"))
         if planning_protocol == "native_tool_calls":
             return await self._default_native_tool_call_planning_handler(context, request)
+        if planning_protocol == "programmatic":
+            return await self._default_programmatic_planning_handler(context, request)
         return await self._default_structured_planning_handler(context, request)
 
     async def _default_action_execution_handler(
@@ -458,6 +792,9 @@ class AgentlyActionRuntime:
         trusted_policy_overrides = request.get("trusted_policy_overrides", {})
         if not isinstance(trusted_policy_overrides, dict):
             trusted_policy_overrides = {}
+        action_run_contexts = request.get("action_run_contexts", [])
+        if not isinstance(action_run_contexts, list):
+            action_run_contexts = []
         artifact_scope = context.get("artifact_scope")
         if not isinstance(artifact_scope, dict):
             artifact_scope = None
@@ -492,6 +829,11 @@ class AgentlyActionRuntime:
                 trusted_policy_override = trusted_policy_overrides.get(str(command_key))
             if not isinstance(trusted_policy_override, dict):
                 trusted_policy_override = None
+            selected_run_context = (
+                action_run_contexts[command_key]
+                if isinstance(command_key, int) and 0 <= command_key < len(action_run_contexts)
+                else None
+            )
 
             async def execute_once():
                 command_index = getattr(data, "index", None)
@@ -516,7 +858,15 @@ class AgentlyActionRuntime:
                 )
 
             try:
-                result = await execute_once()
+                if selected_run_context is not None:
+                    with bind_runtime_context(
+                        parent_run_context=selected_run_context,
+                        tool_phase_run_context=selected_run_context,
+                        settings=settings,
+                    ):
+                        result = await execute_once()
+                else:
+                    result = await execute_once()
             except BaseException:
                 self._record_agent_execution_progress(
                     stage=f"actions.{action_id}" if action_id else "actions.unknown",

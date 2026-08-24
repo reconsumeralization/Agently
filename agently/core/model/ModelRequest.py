@@ -316,10 +316,31 @@ class ModelRequest:
         self.extension_handlers.append("validate_handlers", handler)
         return self
 
+    def _set_output_observation_policy(
+        self,
+        *,
+        sensitive_paths: list[str] | tuple[str, ...],
+    ) -> Self:
+        """Protect declared output fields at RuntimeEvent observation boundaries.
+
+        The parsed business result remains unchanged for the request consumer.
+        Model streaming, raw response text, validation/retry text, and matching
+        structured fields are projected to digest/size facts before publication.
+        """
+
+        from .OutputObservationPolicy import normalize_sensitive_output_paths
+
+        self.settings.set(
+            "model_request.output_observation.sensitive_paths",
+            normalize_sensitive_output_paths(sensitive_paths),
+        )
+        return self
+
     # Result
     def _create_model_result(self, *, parent_run_context: "RunContext | None" = None) -> ModelRequestResult:
         if self._model_key:
             from agently.utils.ModelPool import resolve_model_pool_settings
+
             resolve_model_pool_settings(self._model_key, self.settings)
         parent_run_context = resolve_parent_run_context(parent_run_context)
         agent_execution_run_context = (

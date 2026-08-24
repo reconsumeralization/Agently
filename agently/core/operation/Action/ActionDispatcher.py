@@ -54,29 +54,31 @@ class ActionDispatcher:
     # async_execute_action(policy_override=...) call. A model-planned action
     # command must never carry these: setting them would let model output grant
     # its own approval or widen sandbox/network/path limits.
-    HOST_ONLY_POLICY_KEYS = frozenset({
-        "auto_allow",
-        "policy_approval_granted",
-        "policy_approval_decision",
-        "policy_approval_handler",
-        "approval_mode",
-        "task_workspace_roots",
-        "path_allowlist",
-        "path_denylist",
-        "allowed_cmd_prefixes",
-        "network_mode",
-        "read_only",
-        "allow_create",
-        "allow_update",
-        "allow_delete",
-        "timeout_seconds",
-        "max_output_bytes",
-        "sandbox_required",
-    })
+    HOST_ONLY_POLICY_KEYS = frozenset(
+        {
+            "auto_allow",
+            "policy_approval_granted",
+            "policy_approval_decision",
+            "policy_approval_handler",
+            "approval_mode",
+            "task_workspace_roots",
+            "path_allowlist",
+            "path_denylist",
+            "allowed_cmd_prefixes",
+            "network_mode",
+            "read_only",
+            "allow_create",
+            "allow_update",
+            "allow_delete",
+            "timeout_seconds",
+            "max_output_bytes",
+            "sandbox_required",
+        }
+    )
 
     # Source protocols whose action commands originate from model output and are
     # therefore untrusted for host-only policy keys.
-    MODEL_PLANNING_PROTOCOLS = frozenset({"structured_plan", "native_tool_calls"})
+    MODEL_PLANNING_PROTOCOLS = frozenset({"structured_plan", "native_tool_calls", "programmatic"})
 
     def __init__(self, registry: ActionRegistry, settings: Settings):
         self.registry = registry
@@ -126,6 +128,8 @@ class ActionDispatcher:
     def _declared_action_input_keys(cls, spec: ActionSpec) -> set[str] | None:
         kwargs = spec.get("kwargs", {})
         if not isinstance(kwargs, dict):
+            return None
+        if "<*>" in kwargs:
             return None
         return {str(key) for key in kwargs.keys()}
 
@@ -183,21 +187,24 @@ class ActionDispatcher:
         original_input: dict[str, Any],
         sanitized_input: dict[str, Any],
     ) -> ActionDiagnostic:
-        return cast(ActionDiagnostic, {
-            "source": "ActionDispatcher",
-            "severity": "warning",
-            "code": "action.input.unexpected_keys_stripped",
-            "message": (
-                "Ignored undeclared or host-only action input keys from a model-planned action command: "
-                f"{ ', '.join(stripped_keys) }."
-            ),
-            "meta": {
-                "source_protocol": source_protocol,
-                "stripped_keys": stripped_keys,
-                "original_kwargs_preview": cls._compact_diagnostic_value(original_input),
-                "executed_kwargs_preview": cls._compact_diagnostic_value(sanitized_input),
+        return cast(
+            ActionDiagnostic,
+            {
+                "source": "ActionDispatcher",
+                "severity": "warning",
+                "code": "action.input.unexpected_keys_stripped",
+                "message": (
+                    "Ignored undeclared or host-only action input keys from a model-planned action command: "
+                    f"{ ', '.join(stripped_keys) }."
+                ),
+                "meta": {
+                    "source_protocol": source_protocol,
+                    "stripped_keys": stripped_keys,
+                    "original_kwargs_preview": cls._compact_diagnostic_value(original_input),
+                    "executed_kwargs_preview": cls._compact_diagnostic_value(sanitized_input),
+                },
             },
-        })
+        )
 
     @classmethod
     def _exception_diagnostic(
@@ -212,13 +219,16 @@ class ActionDispatcher:
         if error is not None:
             diagnostic_meta.setdefault("exception_type", type(error).__name__)
             diagnostic_meta.setdefault("exception_message", cls._compact_diagnostic_value(str(error)))
-        return cast(ActionDiagnostic, {
-            "source": "ActionDispatcher",
-            "severity": "error",
-            "code": code,
-            "message": message,
-            "meta": diagnostic_meta,
-        })
+        return cast(
+            ActionDiagnostic,
+            {
+                "source": "ActionDispatcher",
+                "severity": "error",
+                "code": code,
+                "message": message,
+                "meta": diagnostic_meta,
+            },
+        )
 
     @classmethod
     def _call_diagnostics(
@@ -306,11 +316,7 @@ class ActionDispatcher:
         host_approval_context = cast(dict[str, Any], action_call).get("_host_approval_context", {})
         if not isinstance(host_approval_context, dict):
             host_approval_context = {}
-        public_action_call = {
-            key: value
-            for key, value in dict(action_call).items()
-            if not str(key).startswith("_")
-        }
+        public_action_call = {key: value for key, value in dict(action_call).items() if not str(key).startswith("_")}
         approval_payload: dict[str, Any] = {
             "action_call": public_action_call,
             "action_spec": {
@@ -498,8 +504,18 @@ class ActionDispatcher:
         policy: ActionPolicy,
     ):
         requirements = spec.get("execution_resources", [])
+        spec_meta = spec.get("meta", {})
+        requirements_factory = (
+            spec_meta.get("_execution_resource_requirements_factory") if isinstance(spec_meta, dict) else None
+        )
+        if callable(requirements_factory):
+            requirements = requirements_factory(
+                spec=spec,
+                settings=settings,
+                policy=policy,
+            )
         if not isinstance(requirements, list):
-            return []
+            raise TypeError("Action execution resource requirements factory must return a list.")
         prepared: list[ExecutionResourceRequirement] = []
         action_policy = self._to_execution_resource_policy(policy)
         for requirement in requirements:
@@ -510,8 +526,12 @@ class ActionDispatcher:
             requirement_policy.update(action_policy)
             prepared_requirement["policy"] = cast(ExecutionResourcePolicy, requirement_policy)
             prepared_requirement.setdefault("scope", "action_call")
-            prepared_requirement.setdefault("owner_id", self._resolve_execution_resource_owner_id(settings, prepared_requirement))
-            prepared_requirement.setdefault("resource_key", str(spec.get("action_id", prepared_requirement.get("kind", ""))))
+            prepared_requirement.setdefault(
+                "owner_id", self._resolve_execution_resource_owner_id(settings, prepared_requirement)
+            )
+            prepared_requirement.setdefault(
+                "resource_key", str(spec.get("action_id", prepared_requirement.get("kind", "")))
+            )
             prepared.append(prepared_requirement)
         return prepared
 
@@ -536,11 +556,7 @@ class ActionDispatcher:
             )
         execution_id = f"action_{uuid.uuid4().hex}"
         return TaskWorkspace(
-            default_task_workspace_root()
-            / ".agently"
-            / "task_workspaces"
-            / "direct"
-            / execution_id,
+            default_task_workspace_root() / ".agently" / "task_workspaces" / "direct" / execution_id,
             mode="read_only",
             create=True,
             execution_id=execution_id,
@@ -595,10 +611,7 @@ class ActionDispatcher:
             try:
                 await execution_resource.async_release(handle)
             except Exception as error:
-                code = str(
-                    getattr(error, "code", "")
-                    or "execution_resource.release_failed"
-                )
+                code = str(getattr(error, "code", "") or "execution_resource.release_failed")
                 diagnostics.append(
                     self._exception_diagnostic(
                         code=code,
@@ -723,16 +736,19 @@ class ActionDispatcher:
         call_diagnostics: list[ActionDiagnostic] = []
         if stripped_policy_keys:
             call_diagnostics.append(
-                cast(ActionDiagnostic, {
-                    "source": "ActionDispatcher",
-                    "severity": "warning",
-                    "code": "action.policy_override.host_only_keys_stripped",
-                    "message": (
-                        "Ignored host-only policy override keys from a model-planned action command: "
-                        f"{ ', '.join(sorted(stripped_policy_keys)) }."
-                    ),
-                    "meta": {"source_protocol": source_protocol, "stripped_keys": sorted(stripped_policy_keys)},
-                })
+                cast(
+                    ActionDiagnostic,
+                    {
+                        "source": "ActionDispatcher",
+                        "severity": "warning",
+                        "code": "action.policy_override.host_only_keys_stripped",
+                        "message": (
+                            "Ignored host-only policy override keys from a model-planned action command: "
+                            f"{ ', '.join(sorted(stripped_policy_keys)) }."
+                        ),
+                        "meta": {"source_protocol": source_protocol, "stripped_keys": sorted(stripped_policy_keys)},
+                    },
+                )
             )
         if stripped_input_keys:
             call_diagnostics.append(
@@ -762,11 +778,7 @@ class ActionDispatcher:
             else []
         )
         if missing_input_keys:
-            message = (
-                f"Action '{action_id}' is missing required input keys: "
-                + ", ".join(missing_input_keys)
-                + "."
-            )
+            message = f"Action '{action_id}' is missing required input keys: " + ", ".join(missing_input_keys) + "."
             call_diagnostics.append(
                 self._exception_diagnostic(
                     code="action.input.required_keys_missing",
@@ -796,11 +808,7 @@ class ActionDispatcher:
 
         dynamic_approval_required = False
         spec_meta = spec.get("meta")
-        approval_predicate = (
-            spec_meta.get("_host_approval_required_when")
-            if isinstance(spec_meta, dict)
-            else None
-        )
+        approval_predicate = spec_meta.get("_host_approval_required_when") if isinstance(spec_meta, dict) else None
         if callable(approval_predicate):
             predicate_result = approval_predicate(action_call)
             if inspect.isawaitable(predicate_result):
@@ -830,9 +838,7 @@ class ActionDispatcher:
         resource_managed_isolation = any(
             isinstance(requirement, dict)
             and isinstance(
-                dict(requirement.get("required_capabilities", {})).get(
-                    "isolation"
-                ),
+                dict(requirement.get("required_capabilities", {})).get("isolation"),
                 dict,
             )
             for requirement in spec.get("execution_resources", [])
@@ -841,10 +847,7 @@ class ActionDispatcher:
         if (
             spec.get("sandbox_required") is True
             and not getattr(executor, "sandboxed", False)
-            and not (
-                getattr(executor, "resource_isolation_managed", False)
-                and resource_managed_isolation
-            )
+            and not (getattr(executor, "resource_isolation_managed", False) and resource_managed_isolation)
         ):
             return {
                 "action_call_id": action_call_id,
@@ -890,9 +893,7 @@ class ActionDispatcher:
                 if isinstance(raw_workspace_access, dict):
                     if task_workspace is None:
                         task_workspace = self._resolve_task_workspace(execution_settings)
-                    resource_key = str(
-                        requirement.get("resource_key", action_id)
-                    )
+                    resource_key = str(requirement.get("resource_key", action_id))
                     grant = task_workspace.issue_execution_access(
                         action_call_id=action_call_id,
                         requirement=self._workspace_access_requirement(raw_workspace_access),
@@ -1022,57 +1023,65 @@ class ActionDispatcher:
                 message=f"Action '{ action_id }' timed out after { timeout_seconds } seconds.",
                 meta={"timeout_seconds": timeout_seconds, "source_protocol": source_protocol},
             )
-            execution_error_result = cast(ActionResult, {
-                "action_call_id": action_call_id,
-                "ok": False,
-                "status": "error",
-                "purpose": str(action_call.get("purpose", f"Use { action_id }")),
-                "action_id": action_id,
-                "tool_name": str(spec.get("name", action_id)),
-                "kwargs": dict(action_input),
-                "todo_suggestion": todo_suggestion,
-                "next": next_value or todo_suggestion,
-                "success": False,
-                "result": None,
-                "data": None,
-                "error": f"Action '{ action_id }' timed out after { timeout_seconds } seconds.",
-                "diagnostics": self._call_diagnostics(action_call, timeout_diagnostic),
-                "meta": {"timeout_seconds": timeout_seconds},
-                "expose_to_model": bool(spec.get("expose_to_model", True)),
-                "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
-                "executor_type": str(spec.get("executor_type", "")),
-            })
+            execution_error_result = cast(
+                ActionResult,
+                {
+                    "action_call_id": action_call_id,
+                    "ok": False,
+                    "status": "error",
+                    "purpose": str(action_call.get("purpose", f"Use { action_id }")),
+                    "action_id": action_id,
+                    "tool_name": str(spec.get("name", action_id)),
+                    "kwargs": dict(action_input),
+                    "todo_suggestion": todo_suggestion,
+                    "next": next_value or todo_suggestion,
+                    "success": False,
+                    "result": None,
+                    "data": None,
+                    "error": f"Action '{ action_id }' timed out after { timeout_seconds } seconds.",
+                    "diagnostics": self._call_diagnostics(action_call, timeout_diagnostic),
+                    "meta": {"timeout_seconds": timeout_seconds},
+                    "expose_to_model": bool(spec.get("expose_to_model", True)),
+                    "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
+                    "executor_type": str(spec.get("executor_type", "")),
+                },
+            )
         except Exception as error:
-            diagnostic_code = "action.input.type_error" if isinstance(error, TypeError) else "action.execution.exception"
+            diagnostic_code = (
+                "action.input.type_error" if isinstance(error, TypeError) else "action.execution.exception"
+            )
             exception_diagnostic = self._exception_diagnostic(
                 code=diagnostic_code,
                 message=str(error) or f"Action '{ action_id }' raised { type(error).__name__ }.",
                 error=error,
                 meta={"source_protocol": source_protocol},
             )
-            execution_error_result = cast(ActionResult, {
-                "action_call_id": action_call_id,
-                "ok": False,
-                "status": "error",
-                "purpose": str(action_call.get("purpose", f"Use { action_id }")),
-                "action_id": action_id,
-                "tool_name": str(spec.get("name", action_id)),
-                "kwargs": dict(action_input),
-                "todo_suggestion": todo_suggestion,
-                "next": next_value or todo_suggestion,
-                "success": False,
-                "result": None,
-                "data": None,
-                "error": str(error),
-                "diagnostics": self._call_diagnostics(action_call, exception_diagnostic),
-                "meta": {
-                    "exception_type": type(error).__name__,
-                    "exception_message": self._compact_diagnostic_value(str(error)),
+            execution_error_result = cast(
+                ActionResult,
+                {
+                    "action_call_id": action_call_id,
+                    "ok": False,
+                    "status": "error",
+                    "purpose": str(action_call.get("purpose", f"Use { action_id }")),
+                    "action_id": action_id,
+                    "tool_name": str(spec.get("name", action_id)),
+                    "kwargs": dict(action_input),
+                    "todo_suggestion": todo_suggestion,
+                    "next": next_value or todo_suggestion,
+                    "success": False,
+                    "result": None,
+                    "data": None,
+                    "error": str(error),
+                    "diagnostics": self._call_diagnostics(action_call, exception_diagnostic),
+                    "meta": {
+                        "exception_type": type(error).__name__,
+                        "exception_message": self._compact_diagnostic_value(str(error)),
+                    },
+                    "expose_to_model": bool(spec.get("expose_to_model", True)),
+                    "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
+                    "executor_type": str(spec.get("executor_type", "")),
                 },
-                "expose_to_model": bool(spec.get("expose_to_model", True)),
-                "side_effect_level": cast(Any, spec.get("side_effect_level", "read")),
-                "executor_type": str(spec.get("executor_type", "")),
-            })
+            )
         finally:
             cleanup_diagnostics = await self._release_execution_resources(
                 execution_resource,
@@ -1085,11 +1094,7 @@ class ActionDispatcher:
         if execution_error_result is not None:
             if cleanup_diagnostics:
                 raw_diagnostics = execution_error_result.get("diagnostics")
-                result_diagnostics = (
-                    list(raw_diagnostics)
-                    if isinstance(raw_diagnostics, list)
-                    else []
-                )
+                result_diagnostics = list(raw_diagnostics) if isinstance(raw_diagnostics, list) else []
                 result_diagnostics.extend(cleanup_diagnostics)
                 execution_error_result["diagnostics"] = result_diagnostics
             return execution_error_result
@@ -1099,10 +1104,7 @@ class ActionDispatcher:
                 spec=spec,
                 action_call=action_call,
                 status="error",
-                error=(
-                    "Action execution completed, but its execution resource "
-                    "could not be released safely."
-                ),
+                error=("Action execution completed, but its execution resource " "could not be released safely."),
             )
 
         result = self._normalize_executor_output(

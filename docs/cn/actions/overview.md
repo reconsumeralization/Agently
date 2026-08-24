@@ -40,6 +40,7 @@ Action 是 Agently 的请求期能力层：模型在回答一次请求时，可�
 |---|---|
 | 写新的函数 action | [Action Runtime](action-runtime.md) |
 | 给业务 agent 开放 Python、shell 或 workspace 能力 | [Action Runtime](action-runtime.md) |
+| 让一轮 Action 对相互依赖的只读调用做分支、循环或聚合 | [程序化 Action 调用](programmatic-action-calling.md) |
 | 开发需要托管资源的后端 | [ExecutionResource](execution-environment.md) |
 | 旧代码还在用 `tool_func` | [工具兼容](tools.md) |
 | 使用本地或 HTTP MCP server | [MCP](mcp.md) |

@@ -18,6 +18,7 @@ from .ActionExecutor import (
     CodeExecutionActionExecutor,
     LocalFunctionActionExecutor,
     MCPActionExecutor,
+    ProgrammaticActionExecutor,
 )
 from .ActionRuntime import AgentlyActionRuntime
 from .ExecutionResourceProvider import (

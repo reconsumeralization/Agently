@@ -104,6 +104,27 @@ ActionCall
 `action_call["execution_resource_handles"]` 传入，live resource 会通过
 `action_call["execution_resource_resources"]` 传入。
 
+### 程序化 Action bindings
+
+`programmatic` Action planning 协议是现有 `code_execution` kind 的一个更严格
+consumer。生成的 Python 程序要求 provider 同时满足 `isolation="required"` 并报告
+host-binding capability。binding bridge 只传递 JSON call；credentials、live Action
+object、callback 和 policy authority 都不会进入程序进程。
+
+每个 binding request 都会重新构造，并通过普通 ActionRuntime/ActionDispatcher
+路径派发。provider 名称、支持 Python 或支持隔离，都不能单独证明它支持 binding。
+没有 provider 同时满足所有 capability 时会 fail closed，且绝不会回退到
+`trusted_local`。
+
+在 POSIX host 上，内置 Docker provider 及其 gVisor variant 实现 binding bridge，
+同时保持 container network disabled。是否合格仍由观测到的
+`host_async_bindings` 与所有请求的 hard-isolation axes 决定，而不是 provider id。
+
+provider、bridge 和 interpreter 都是 live resources。TriggerFlow snapshot 不能
+序列化运行中的程序，也不能在一个 awaited binding 处恢复。请在 settled boundary
+保存，并在恢复后重新生成程序。详见
+[程序化 Action 调用](programmatic-action-calling.md)。
+
 ### 有序 code-execution providers
 
 provider 优先级可用字符串或候选描述符配置。描述符 config 只对该候选合并：

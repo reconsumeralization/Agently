@@ -31,6 +31,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
         DockerActionExecutor,
         LocalFunctionActionExecutor,
         MCPActionExecutor,
+        ProgrammaticActionExecutor,
         SQLiteActionExecutor,
         SearchActionExecutor,
     )
@@ -56,6 +57,7 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
     plugin_manager.register("ActionExecutor", SearchActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", BrowseActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", CodeExecutionActionExecutor, activate=False)
+    plugin_manager.register("ActionExecutor", ProgrammaticActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", DockerActionExecutor, activate=False)
     plugin_manager.register("ActionExecutor", SQLiteActionExecutor, activate=False)
     plugin_manager.register("ExecutionResourceProvider", ACPExecutionResourceProvider, activate=False)

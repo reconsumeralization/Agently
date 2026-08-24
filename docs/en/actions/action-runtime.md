@@ -289,10 +289,33 @@ constraints. Use `desc_mode="override"` when you intentionally want to replace
 the default description, or `desc_mode="default"` to ignore the supplied
 description and keep only the built-in one.
 
+## Planning protocols
+
+Choose how ActionRuntime plans one Action round with `set_action_loop(...)`:
+
+```python
+agent.set_action_loop(planning_protocol="programmatic")
+```
+
+| Value | Use it for |
+|---|---|
+| `structured_plan` | Default provider-neutral structured Action calls |
+| `native_tool_calls` | Provider-native Action/tool calling |
+| `programmatic` | One bounded Python program that branches, loops, or aggregates over eligible read-only Actions |
+
+An explicit `planning_protocol=...` passed to `get_action_result(...)` or
+`async_get_action_result(...)` overrides the Agent setting for that call.
+Programmatic V1 requires read-only, replay-safe Actions with explicit return
+contracts, serializes nested dispatch, and uses a binding-capable isolated code
+ExecutionResource. It does not replace durable TriggerFlow or TaskDAG
+orchestration. See [Programmatic Action Calling](programmatic-action-calling.md)
+for the eligibility, safety, context, and recovery boundaries.
+
 ## Model-sourced input safety
 
 Action commands produced by model planning are treated as untrusted input at the
-Action boundary. For `structured_plan` and `native_tool_calls` commands,
+Action boundary. For `structured_plan`, `native_tool_calls`, and nested
+`programmatic` commands,
 `ActionDispatcher` filters `action_input` to the keys declared in the registered
 `ActionSpec.kwargs` before the executor is called. Direct host calls keep their
 existing behavior and are not filtered this way.
@@ -503,7 +526,7 @@ agent.set_settings("model_profiles", {
 agent.set_settings("action.planning_model_key", "task-main")
 ```
 
-This applies to the default structured-plan and native tool-call planning
+This applies to structured-plan, native tool-call, and programmatic planning
 paths. It is especially important when a higher-level runtime such as
 AgentExecution Skill binding or AgentTask delegates a bounded action round to
 ActionRuntime.
@@ -515,7 +538,8 @@ parsed structured response so normal request/model completion, metadata, and
 usage can settle before the bounded Action step closes.
 
 `agent.get_action_result(..., timeout=N)` bounds the full action loop,
-including structured planning and native tool-call selection. If the loop
+including structured planning, native tool-call selection, and programmatic
+execution. If the loop
 cannot finish before the deadline, Agently raises `RuntimeStageStallError` with
 `stage="action_loop_close"`.
 

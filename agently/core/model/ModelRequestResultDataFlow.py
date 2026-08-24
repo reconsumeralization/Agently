@@ -27,6 +27,8 @@ from agently.core.application.AgentExecution import RuntimeStageStallError
 from agently.core.runtime import bind_runtime_context, get_current_agent_execution_context
 from agently.utils import DataFormatter, DataLocator, DataPathBuilder
 
+from .OutputObservationPolicy import OutputObservationPolicy
+
 if TYPE_CHECKING:
     from agently.types.data import OutputValidateHandler, OutputValidateResult
     from .ModelRequestResult import ModelRequestResult
@@ -332,7 +334,9 @@ class ModelRequestResultDataFlow:
             return {
                 "ok": ok,
                 "kind": "passed" if ok else "failed",
-                "reason": reason if reason is not None else (None if ok else f"Validation failed in { validator_name }."),
+                "reason": (
+                    reason if reason is not None else (None if ok else f"Validation failed in { validator_name }.")
+                ),
                 "payload": validation_payload,
                 "validator_name": str(validator_name_value) if validator_name_value is not None else validator_name,
                 "retryable": False if ok else not (no_retry or stop or explicit_raise is not None),
@@ -389,27 +393,35 @@ class ModelRequestResultDataFlow:
 
         result = self._result
         error = outcome.get("error")
+        output_observation_policy = OutputObservationPolicy.from_settings(result.settings)
+        payload = output_observation_policy.project_event_payload(
+            {
+                "agent_name": result.agent_name,
+                "response_id": result._response_id,
+                "attempt_index": result.attempt_index,
+                "retry_count": retry_count,
+                "max_retries": max_retries,
+                "validator_name": outcome.get("validator_name"),
+                "reason": outcome.get("reason"),
+                "stop": outcome.get("stop", False),
+                "no_retry": outcome.get("no_retry", False),
+                "error_kind": type(error).__name__ if isinstance(error, BaseException) else None,
+                "validation_payload": DataFormatter.sanitize(outcome.get("payload")),
+                "response_text": response_text,
+            },
+            raw_text_fields=("response_text", "reason"),
+            opaque_fields=("validation_payload",),
+        )
         await async_emit_runtime(
             {
                 "event_type": event_type,
                 "source": "ModelRequestResult",
                 "level": level,
                 "message": message,
-                "payload": {
-                    "agent_name": result.agent_name,
-                    "response_id": result._response_id,
-                    "attempt_index": result.attempt_index,
-                    "retry_count": retry_count,
-                    "max_retries": max_retries,
-                    "validator_name": outcome.get("validator_name"),
-                    "reason": outcome.get("reason"),
-                    "stop": outcome.get("stop", False),
-                    "no_retry": outcome.get("no_retry", False),
-                    "error_kind": type(error).__name__ if isinstance(error, BaseException) else None,
-                    "validation_payload": DataFormatter.sanitize(outcome.get("payload")),
-                    "response_text": response_text,
-                },
-                "error": error if isinstance(error, BaseException) else None,
+                "payload": payload,
+                "error": (
+                    None if output_observation_policy.active else error if isinstance(error, BaseException) else None
+                ),
                 "run": result.request_run_context,
             }
         )
@@ -424,7 +436,11 @@ class ModelRequestResultDataFlow:
         result = self._result
         if result._validate_outcome is not None:
             signature = tuple(id(handler) for handler in handlers)
-            if len(handlers) > 0 and result._validate_handler_signature is not None and signature != result._validate_handler_signature:
+            if (
+                len(handlers) > 0
+                and result._validate_handler_signature is not None
+                and signature != result._validate_handler_signature
+            ):
                 warnings.warn(
                     "Validation already finalized for this response result. New validate handlers are ignored.",
                     stacklevel=2,
@@ -537,6 +553,11 @@ class ModelRequestResultDataFlow:
             )
         if extra_payload:
             payload.update(DataFormatter.sanitize(extra_payload))
+        payload = OutputObservationPolicy.from_settings(result.settings).project_event_payload(
+            payload,
+            raw_text_fields=("response_text", "validation_reason"),
+            opaque_fields=("validation_payload",),
+        )
         with bind_runtime_context(
             parent_run_context=result.request_run_context,
             request_run_context=result.request_run_context,
@@ -600,10 +621,7 @@ class ModelRequestResultDataFlow:
                 strict_output=False,
                 key_style=key_style,
                 retry_reason="format_degradation",
-                message=(
-                    f"Auto-format '{original_format}' parse failed. "
-                    f"Degrading to json."
-                ),
+                message=(f"Auto-format '{original_format}' parse failed. " f"Degrading to json."),
                 extra_payload={
                     "auto_degradation_reason": "auto_resolved_format_parse_failed",
                     "from_output_format": original_format,
@@ -840,10 +858,9 @@ class ModelRequestResultDataFlow:
                         )
                         if located_value is empty:
                             raise ValueError(f"Missing ensure key: { ensure_key }")
-                        if (
-                            active_ensure_policies.get(ensure_key, "presence") == "not_null"
-                            and not self.ensure_value_is_present(located_value)
-                        ):
+                        if active_ensure_policies.get(
+                            ensure_key, "presence"
+                        ) == "not_null" and not self.ensure_value_is_present(located_value):
                             raise ValueError(f"Missing ensure key: { ensure_key }")
             except Exception as constraint_error:
                 output_validation_feedback = self.get_output_validation_feedback()

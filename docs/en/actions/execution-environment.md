@@ -118,6 +118,30 @@ Custom `ActionExecutor.execute(...)` signatures do not change. Managed handles
 are passed through `action_call["execution_resource_handles"]` and live
 resources through `action_call["execution_resource_resources"]`.
 
+### Programmatic Action bindings
+
+The `programmatic` Action planning protocol adds a stricter consumer of the
+existing `code_execution` kind. Its generated Python program needs a provider
+that both satisfies `isolation="required"` and reports host-binding capability.
+The binding bridge carries JSON calls only; it does not move credentials, live
+Action objects, callbacks, or policy authority into the program process.
+
+Each binding request is reconstructed and dispatched through the ordinary
+ActionRuntime/ActionDispatcher path. A provider name, Python support, or
+isolation support alone does not imply binding support. Selection fails closed
+when no provider satisfies all requested capabilities and never falls back to
+`trusted_local`.
+
+On POSIX hosts, the built-in Docker provider and its gVisor variant implement
+the binding bridge while keeping container networking disabled. Eligibility
+still depends on observed `host_async_bindings` and all requested hard-isolation
+axes, not on the provider id.
+
+The provider, bridge, and interpreter are live resources. TriggerFlow snapshots
+cannot serialize a running program or resume it at an awaited binding. Save at
+a settled boundary and start a new program decision after recovery. See
+[Programmatic Action Calling](programmatic-action-calling.md).
+
 ### Ordered code-execution providers
 
 Configure provider priority with strings or candidate descriptors. Descriptor

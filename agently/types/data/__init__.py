@@ -173,6 +173,9 @@ from .task_board import (
 )
 
 from .action import (
+    PROGRAMMATIC_ACTION_ARTIFACT_READ_ID,
+    PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION,
+    PROGRAMMATIC_ACTION_TRANSPORT_ID,
     ActionApproval,
     ActionArtifact,
     ActionCall,
@@ -183,9 +186,13 @@ from .action import (
     ActionExecutionRequest,
     ActionResult,
     ActionRunContext,
+    ActionPlanningProtocol,
     ActionSideEffectLevel,
     ActionSpec,
     ActionStatus,
+    ProgrammaticActionCatalog,
+    ProgrammaticActionCatalogEntry,
+    ProgrammaticActionDecision,
 )
 
 from .capability import (
@@ -207,6 +214,13 @@ from .execution_resource import (
 )
 
 from .code_execution import (
+    CodeExecutionBinding,
+    CodeExecutionBindingCallRecord,
+    CodeExecutionBindingError,
+    CodeExecutionBindingLimits,
+    CodeExecutionBindingStatus,
+    CodeExecutionBindingSummary,
+    CodeExecutionSchemaValidationError,
     CodeExecutionBundle,
     CodeExecutionFile,
     CodeExecutionFileRole,
@@ -217,8 +231,12 @@ from .code_execution import (
     CodeExecutionStep,
     CodeExecutionStepRole,
     CodeExecutionToolchainRequirement,
+    code_execution_json_bytes,
+    normalize_code_execution_json_value,
     required_code_execution_isolation,
     resolve_code_execution_workspace_uri,
+    validate_code_execution_json_schema_definition,
+    validate_code_execution_json_schema,
 )
 
 from .execution_plan import (

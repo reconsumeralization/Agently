@@ -258,10 +258,32 @@ skipped diagnostics，不会导入 ACP 依赖，也不会伪造可用 agent。
 如果你确实要替换默认描述，使用 `desc_mode="override"`；如果要忽略传入描述、只保留内置描述，使用
 `desc_mode="default"`。
 
+## 规划协议
+
+通过 `set_action_loop(...)` 选择 ActionRuntime 如何规划一轮 Action：
+
+```python
+agent.set_action_loop(planning_protocol="programmatic")
+```
+
+| 值 | 适用场景 |
+|---|---|
+| `structured_plan` | 默认、provider-neutral 的结构化 Action call |
+| `native_tool_calls` | provider-native Action/tool calling |
+| `programmatic` | 用一段有边界 Python 程序对合格只读 Actions 做分支、循环或聚合 |
+
+在 `get_action_result(...)` 或 `async_get_action_result(...)` 上显式传入的
+`planning_protocol=...` 会覆盖本次调用的 Agent 设置。程序化 V1 只纳入有明确
+返回 contract、只读且 replay-safe 的 Actions；嵌套派发采用串行，并依赖支持
+host binding 的隔离 code ExecutionResource。它不会替代可持久化的 TriggerFlow
+或 TaskDAG 编排。完整的合格条件、安全、上下文与恢复边界见
+[程序化 Action 调用](programmatic-action-calling.md)。
+
 ## 模型来源输入安全
 
 模型规划产生的 Action command 在 Action 边界被视为不可信输入。对于
-`structured_plan` 和 `native_tool_calls` command，`ActionDispatcher` 会在调用
+`structured_plan`、`native_tool_calls` 和嵌套 `programmatic` command，
+`ActionDispatcher` 会在调用
 executor 之前，把 `action_input` 过滤到注册时 `ActionSpec.kwargs` 声明过的 key。
 host 的 `direct` / `dry_run` 调用保持既有行为，不做这类过滤。
 
@@ -436,7 +458,7 @@ agent.set_settings("model_profiles", {
 agent.set_settings("action.planning_model_key", "task-main")
 ```
 
-这个配置同时作用于默认 structured-plan 和 native tool-call planning
+这个配置同时作用于 structured-plan、native tool-call 和 programmatic planning
 路径。当 AgentExecution Skill binding 或 AgentTask 把一个 bounded action round
 委托给 ActionRuntime 时尤其重要，否则 action planning 可能没有显式使用
 预期的 `model_pool` 业务 key。
@@ -447,7 +469,8 @@ signal。ActionRuntime 会等待最终结构化解析结果，让正常的 reque
 metadata 与 usage 完成收尾，再关闭当前 bounded Action step。
 
 `agent.get_action_result(..., timeout=N)` 会约束完整 action loop，包括
-structured planning 和 native tool-call selection。如果 loop 不能在 deadline
+structured planning、native tool-call selection 和 programmatic execution。
+如果 loop 不能在 deadline
 前结束，Agently 会抛出 `RuntimeStageStallError`，其中
 `stage="action_loop_close"`。
 

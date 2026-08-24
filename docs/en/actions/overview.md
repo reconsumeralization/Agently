@@ -40,6 +40,7 @@ The public facade is [`agently/core/operation/Action/`](../../../agently/core/op
 |---|---|
 | New function actions | [Action Runtime](action-runtime.md) |
 | Give an app agent Python, shell, or workspace access | [Action Runtime](action-runtime.md) |
+| Let one Action round branch, loop, or aggregate over dependent read calls | [Programmatic Action Calling](programmatic-action-calling.md) |
 | Build a backend that needs managed resources | [ExecutionResource](execution-environment.md) |
 | Existing code still uses `tool_func` | [Tools Compatibility](tools.md) |
 | Use a local or HTTP MCP server | [MCP](mcp.md) |

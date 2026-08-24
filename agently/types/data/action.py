@@ -23,6 +23,11 @@ from .execution_resource import ExecutionResourceRequirement
 
 ActionStatus = Literal["success", "partial_success", "error", "approval_required", "blocked", "skipped"]
 ActionSideEffectLevel = Literal["read", "write", "exec"]
+ActionPlanningProtocol = Literal["structured_plan", "native_tool_calls", "programmatic"]
+
+PROGRAMMATIC_ACTION_TRANSPORT_ID = "run_action_program"
+PROGRAMMATIC_ACTION_ARTIFACT_READ_ID = "read_action_artifact"
+PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION = "agently.programmatic_action.python.v1"
 
 
 class ActionPolicy(TypedDict, total=False):
@@ -143,6 +148,37 @@ class ActionDecision(TypedDict, total=False):
     diagnostics: list[ActionDiagnostic]
 
 
+class ProgrammaticActionDecision(TypedDict):
+    """Final model-owned decision before host catalog identity is attached."""
+
+    next_action: Literal["execute", "response"]
+    description: str
+    program: str | None
+
+
+class ProgrammaticActionCatalogEntry(TypedDict):
+    """One host-owned Action projection used by the programmatic SDK."""
+
+    action_id: str
+    binding_key: str
+    access_expression: str
+    description: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    required_input_keys: list[str]
+    artifact_read_exception: bool
+
+
+class ProgrammaticActionCatalog(TypedDict):
+    """Deterministic host catalog; ``catalog_revision`` is never model-authored."""
+
+    renderer_version: str
+    catalog_revision: str
+    sdk: str
+    entries: list[ProgrammaticActionCatalogEntry]
+    diagnostics: list[ActionDiagnostic]
+
+
 class ActionResult(TypedDict, total=False):
     action_call_id: str
     ok: bool
@@ -190,7 +226,7 @@ class ActionRunContext(_ActionRunContextRequired, total=False):
 
 class ActionPlanningRequest(TypedDict, total=False):
     action_list: list[dict[str, Any]]
-    planning_protocol: str | None
+    planning_protocol: ActionPlanningProtocol | None
 
 
 class ActionExecutionRequest(TypedDict, total=False):
@@ -198,3 +234,4 @@ class ActionExecutionRequest(TypedDict, total=False):
     async_call_action: Callable[[str, dict[str, Any]], Awaitable[Any]]
     concurrency: int | None
     timeout: float | None
+    action_run_contexts: list[Any]

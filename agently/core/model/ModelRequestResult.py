@@ -130,12 +130,16 @@ class ModelRequestResult:
             return
 
         from agently.core.runtime.RuntimeEvents import async_emit_response_parser_observation
+        from agently.core.model.OutputObservationPolicy import (
+            OutputObservationPolicy,
+        )
 
         run = self.model_run_context or self.request_run_context
+        output_observation_policy = OutputObservationPolicy.from_settings(self.settings)
         for observation in observations:
             if isinstance(observation, Mapping):
                 await async_emit_response_parser_observation(
-                    dict(observation),
+                    output_observation_policy.project_parser_observation(observation),
                     agent_name=self.agent_name,
                     response_id=self._response_id,
                     run=run,

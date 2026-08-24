@@ -206,7 +206,9 @@ class ActionExtension(BaseAgent):
                 action_name = getattr(action_item, "__name__", "")
                 if not action_name:
                     raise TypeError("use_actions() expects action names, callables, or built-in action packages.")
-                if action_name not in self.action.tool_funcs and (local_registry is None or not local_registry.has(action_name)):
+                if action_name not in self.action.tool_funcs and (
+                    local_registry is None or not local_registry.has(action_name)
+                ):
                     self.action_func(action_item)
                 names.append(action_name)
         if names:
@@ -289,11 +291,7 @@ class ActionExtension(BaseAgent):
         if not allowed_ids:
             scoped_list = action_list
         else:
-            scoped_list = [
-            item
-            for item in action_list
-            if self._action_item_id(item) in allowed_ids
-            ]
+            scoped_list = [item for item in action_list if self._action_item_id(item) in allowed_ids]
         recall_records = getattr(execution_context, "scoped_action_artifact_recall_records", None)
         if callable(recall_records):
             scoped_list = self.action._with_action_artifact_recall_action(
@@ -709,8 +707,7 @@ class ActionExtension(BaseAgent):
             root = getattr(task_workspace, "root")
         elif root is _TASK_WORKSPACE_ROOT_UNSET:
             raise RuntimeError(
-                "TaskWorkspace file actions require an explicit root or an Agent "
-                "TaskWorkspace binding."
+                "TaskWorkspace file actions require an explicit root or an Agent " "TaskWorkspace binding."
             )
         root_path = Path(str(root)).expanduser().resolve()
         agent_tag = f"agent-{ self.name }"
@@ -779,8 +776,7 @@ class ActionExtension(BaseAgent):
             if operation == "apply_patch":
                 paths = patch_paths(str(action_input.get("patch") or ""))
                 external_required = any(
-                    active_task_workspace._resolve_external_file_path(item).exists()
-                    for item in paths
+                    active_task_workspace._resolve_external_file_path(item).exists() for item in paths
                 )
             else:
                 target = active_task_workspace._resolve_external_file_path(path)
@@ -1259,7 +1255,10 @@ class ActionExtension(BaseAgent):
                 ),
                 kwargs={
                     "patch": (str, "Unified diff patch to apply."),
-                    "expected_files": ([str], "Optional exact list of TaskWorkspace-relative files expected in the patch."),
+                    "expected_files": (
+                        [str],
+                        "Optional exact list of TaskWorkspace-relative files expected in the patch.",
+                    ),
                 },
                 func=apply_patch,
                 tags=[agent_tag],
@@ -1364,6 +1363,14 @@ class ActionExtension(BaseAgent):
         max_rounds: int | None = None,
         concurrency: int | None = None,
         timeout: float | None = None,
+        planning_protocol: (
+            Literal[
+                "structured_plan",
+                "native_tool_calls",
+                "programmatic",
+            ]
+            | None
+        ) = None,
     ) -> Self:
         if enabled is not None:
             self.settings.set("action.loop.enabled", bool(enabled))
@@ -1383,6 +1390,17 @@ class ActionExtension(BaseAgent):
                 raise ValueError("timeout must be a number > 0.")
             self.settings.set("action.loop.timeout", float(timeout))
             self.settings.set("tool.loop.timeout", float(timeout))
+        if planning_protocol is not None:
+            if planning_protocol not in {
+                "structured_plan",
+                "native_tool_calls",
+                "programmatic",
+            }:
+                raise ValueError(
+                    "planning_protocol must be one of: 'structured_plan', " "'native_tool_calls', 'programmatic'."
+                )
+            self.settings.set("action.protocol", planning_protocol)
+            self.settings.set("tool.protocol", planning_protocol)
         return self
 
     def set_tool_loop(
@@ -1392,12 +1410,21 @@ class ActionExtension(BaseAgent):
         max_rounds: int | None = None,
         concurrency: int | None = None,
         timeout: float | None = None,
+        planning_protocol: (
+            Literal[
+                "structured_plan",
+                "native_tool_calls",
+                "programmatic",
+            ]
+            | None
+        ) = None,
     ) -> Self:
         return self.set_action_loop(
             enabled=enabled,
             max_rounds=max_rounds,
             concurrency=concurrency,
             timeout=timeout,
+            planning_protocol=planning_protocol,
         )
 
     def register_action_planning_handler(self, handler: Any) -> Self:
@@ -1457,6 +1484,14 @@ class ActionExtension(BaseAgent):
             max_rounds=max_rounds,
             planning_protocol=planning_protocol,
         )
+
+    def release_programmatic_action_calls(
+        self,
+        action_calls: list["ActionCall"] | list[dict[str, Any]],
+    ) -> int:
+        """Release generated program calls when the caller elects not to run them."""
+
+        return self.action.release_programmatic_action_calls(action_calls)
 
     async def async_get_action_result(
         self,

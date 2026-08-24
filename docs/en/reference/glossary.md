@@ -98,6 +98,16 @@ Flow-scoped shared data. Calling `get_flow_data(...)` / `set_flow_data(...)` and
 
 The three protocol-level model request plugins: `OpenAICompatible`, `OpenAIResponsesCompatible`, and `AnthropicCompatible`. Most Chat Completions compatible providers configure `OpenAICompatible`; Responses API-shaped endpoints use `OpenAIResponsesCompatible`; Claude configures `AnthropicCompatible`. See [Models Overview](../models/overview.md).
 
+## Programmatic Action Calling (PTC)
+
+An ActionRuntime planning protocol in which one bounded model-generated Python
+program calls eligible read-only, replay-safe Actions and returns a compact
+projection. `PTC` is documentation shorthand; the public API value is
+`planning_protocol="programmatic"`. It owns ephemeral micro-orchestration inside
+one Action round, not TaskDAG/TriggerFlow lifecycle, approval, persistence, or
+live-interpreter recovery. See
+[Programmatic Action Calling](../actions/programmatic-action-calling.md).
+
 ## Runtime resources
 
 Execution-local storage for live objects — database clients, callbacks, sockets, function pointers, cache handles. Runtime resources are **not** serializable and **do not** enter close snapshots or save/load execution snapshots; only their `resource_keys` are recorded. On resume after `load()`, the caller must re-inject them.

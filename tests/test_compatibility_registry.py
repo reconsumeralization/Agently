@@ -42,9 +42,7 @@ def test_4_1_4_7_release_manifest_pins_stage_native_runtime_contract() -> None:
     assert stage_support["release_order"] == "publish_and_verify_stage_before_raising_agently_minimum"
     assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
     assert stage_support["public_runtime_surface"] is False
-    assert "EventCenter background task settlement" in stage_support[
-        "rejected_mechanism_replacements"
-    ]
+    assert "EventCenter background task settlement" in stage_support["rejected_mechanism_replacements"]
     assert stage_support["semantic_owners_unchanged"] is True
 
 
@@ -79,44 +77,28 @@ def test_in_development_manifest_declares_4_1_4_8_owner_boundaries() -> None:
     assert stage_support["package"] == "agently-stage"
     assert stage_support["role"] == "required_runtime_dependency"
     assert stage_support["version_specifier"] == ">=0.3.8,<0.4.0"
-    assert stage_support["release_order"] == (
-        "publish_and_verify_stage_before_raising_agently_minimum"
-    )
+    assert stage_support["release_order"] == ("publish_and_verify_stage_before_raising_agently_minimum")
     assert stage_support["skills_guidance_required"] is True
     assert stage_support["public_runtime_surface"] is False
     assert stage_support["task_mechanism_owners"] == ["TriggerFlowExecution"]
-    assert "EventCenter background task settlement" in stage_support[
-        "rejected_mechanism_replacements"
-    ]
+    assert "EventCenter background task settlement" in stage_support["rejected_mechanism_replacements"]
     assert stage_support["semantic_owners_unchanged"] is True
 
     companions = manifest["companions"]
     assert companions["task_context"]["reader"] == "ContextReader"
-    assert companions["task_context"]["derived_index_owner"] == (
-        "TaskContext internal ContextIndex"
-    )
-    assert "async_enumerate_descriptors" in companions["task_context"][
-        "source_protocol"
-    ]
+    assert companions["task_context"]["derived_index_owner"] == ("TaskContext internal ContextIndex")
+    assert "async_enumerate_descriptors" in companions["task_context"]["source_protocol"]
     assert "async_read_exact" in companions["task_context"]["source_protocol"]
     assert companions["task_context"]["source_kinds"] == "open adapter vocabulary"
-    assert companions["task_workspace"]["default_root"].endswith(
-        ".agently/task_workspaces/<agent-id>"
-    )
-    assert "verifier acceptance" in companions["task_workspace"][
-        "terminal_artifact_contract"
-    ]
-    assert companions["record_store"]["local_state"].endswith(
-        ".agently/records/records.db"
-    )
+    assert companions["task_workspace"]["default_root"].endswith(".agently/task_workspaces/<agent-id>")
+    assert "verifier acceptance" in companions["task_workspace"]["terminal_artifact_contract"]
+    assert companions["record_store"]["local_state"].endswith(".agently/records/records.db")
     assert companions["session_memory"]["storage_owner"] == "RecordStore"
 
     execution_contract = manifest["request_input"]["agent_execution_request_scope"]
     assert "AgentExecution.ensure_long_output" in execution_contract["surface"]
     assert "first request keeps its original contract" in execution_contract["contract"]
-    assert "cannot be combined with an explicit AgentTask strategy" in execution_contract[
-        "contract"
-    ]
+    assert "cannot be combined with an explicit AgentTask strategy" in execution_contract["contract"]
 
 
 def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
@@ -152,15 +134,9 @@ def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:
     assert "caller-bound ContextReader" in blocks["context_read_contract"]
     assert devtools["runtime_protocol"] == "agently-devtools.observation-runtime.v1"
     assert devtools["recommended_version_specifier"] == ">=0.1.11,<0.2.0"
-    assert "TaskWorkspace is never an event store" in (
-        devtools["runtime_control"]["record_store_contract"]
-    )
-    assert "model.reasoning.delta" in devtools["runtime_control"][
-        "model_reasoning_observation_contract"
-    ]
-    assert "model.validation_failed" in devtools["runtime_control"][
-        "model_validation_diagnostics_contract"
-    ]
+    assert "TaskWorkspace is never an event store" in (devtools["runtime_control"]["record_store_contract"])
+    assert "model.reasoning.delta" in devtools["runtime_control"]["model_reasoning_observation_contract"]
+    assert "model.validation_failed" in devtools["runtime_control"]["model_validation_diagnostics_contract"]
 
 
 def test_in_development_triggerflow_snapshot_projection_contract() -> None:
@@ -202,6 +178,20 @@ def test_in_development_code_execution_and_evidence_replan_contracts() -> None:
     assert "contributor-owned" not in action_runtime["builtin_provider_contract"]
     assert "evidence-reacquisition card" in task_loop["evidence_replan_contract"]
     assert "final-artifact self-readback" in task_loop["evidence_replan_contract"]
+
+
+def test_in_development_programmatic_action_calling_contract() -> None:
+    contract = _development_manifest()["companions"]["action_runtime"]["programmatic_action_calling"]
+
+    assert "Agent.set_action_loop(planning_protocol=programmatic)" in contract["surface"]
+    assert contract["default_protocol"].startswith("structured_plan")
+    assert "ephemeral read-only Action micro-DAG" in contract["scope_contract"]
+    assert "lossless-JSON returns contract" in contract["eligibility_contract"]
+    assert "host_async_bindings" in contract["execution_contract"]
+    assert "re-enters ActionDispatcher" in contract["execution_contract"]
+    assert "Agent.release_programmatic_action_calls" in contract["catalog_lifecycle_contract"]
+    assert "redaction digest/byte facts" in contract["observation_contract"]
+    assert "fail-open for DevTools" in contract["observation_contract"]
 
 
 def test_public_typing_contract_remains_explicit() -> None:

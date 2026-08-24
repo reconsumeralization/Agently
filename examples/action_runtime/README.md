@@ -44,6 +44,8 @@ Example groups:
   - `3_3_third_party_sandlock_action_deepseek.py`
   - `3_4_third_party_docker_sandbox_action_deepseek.py`
   - `3_5_action_execution_recall_local.py`
+  - `3_6_action_input_safety_local.py`
+  - `3_7_action_evidence_refs_local.py`
 - Plugin customization examples
   - `4_1_custom_action_executor_plugin_local.py`
   - `4_2_custom_action_runtime_plugin_local.py`

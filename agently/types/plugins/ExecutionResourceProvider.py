@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from agently.types.data import (
+        CodeExecutionBinding,
+        CodeExecutionBindingLimits,
         CodeExecutionBundle,
         CodeExecutionResult,
         ExecutionResourceHandle,
@@ -37,6 +40,8 @@ class CodeExecutionResource(Protocol):
         manifest: "TaskWorkspaceExecutionManifest",
         grant: "TaskWorkspaceAccessGrant",
         timeout: int,
+        bindings: "Sequence[CodeExecutionBinding]" = (),
+        binding_limits: "CodeExecutionBindingLimits | None" = None,
     ) -> "CodeExecutionResult": ...
 
 

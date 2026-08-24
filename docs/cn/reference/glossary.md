@@ -90,6 +90,14 @@ Flow scope 的共享数据。调用 `get_flow_data(...)` / `set_flow_data(...)` 
 
 三个协议层 Model Request 插件：`OpenAICompatible`、`OpenAIResponsesCompatible`、`AnthropicCompatible`。多数 Chat Completions 兼容 provider 配置 `OpenAICompatible`；Responses API 形态用 `OpenAIResponsesCompatible`；Claude 配置 `AnthropicCompatible`。详见 [模型概览](../models/overview.md)。
 
+## Programmatic Action Calling（PTC，程序化 Action 调用）
+
+一种 ActionRuntime 规划协议：由模型生成一段有边界 Python 程序，调用合格的只读、
+replay-safe Actions，并返回紧凑结果投影。`PTC` 是文档简称；公开 API 值是
+`planning_protocol="programmatic"`。它负责一轮 Action 内短时的微观编排，不负责
+TaskDAG/TriggerFlow lifecycle、审批、持久化或 live interpreter 恢复。详见
+[程序化 Action 调用](../actions/programmatic-action-calling.md)。
+
 ## Runtime resources
 
 Execution-local 的活对象存储——数据库 client、回调、socket、函数指针、cache 句柄。Runtime resources **不**可序列化、**不**进 close snapshot，也**不**进 save/load execution snapshot；只记录 `resource_keys`。`load()` 后调用方必须重新注入。
