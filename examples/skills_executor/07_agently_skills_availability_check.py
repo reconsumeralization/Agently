@@ -36,23 +36,25 @@ from agently import Agently
 #
 # Expected key output from one local run:
 # pack_status=success
-# installed_count=6
+# installed_count=7
 #
-# Installed Agently-Skills (6):
+# Installed Agently-Skills (7):
 #   agently:
-#   agently-dynamic-task:
+#   agently-design:
 #   agently-migration:
 #   agently-request:
 #   agently-runtime:
+#   agently-stage:
 #   agently-triggerflow:
 #
 # Availability check (deterministic planner, no model call):
-#   agently              → resolved
-#   agently-dynamic-task → resolved
-#   agently-migration    → resolved
-#   agently-request      → resolved
-#   agently-runtime      → resolved
-#   agently-triggerflow  → resolved
+#   agently             → resolved
+#   agently-design      → resolved
+#   agently-migration   → resolved
+#   agently-request     → resolved
+#   agently-runtime     → resolved
+#   agently-stage       → resolved
+#   agently-triggerflow → resolved
 #
 # all_available=True
 #

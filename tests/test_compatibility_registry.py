@@ -128,6 +128,8 @@ def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
     assert contract["selection_and_binding_owner"].startswith("AgentExecution")
     assert "TaskContext" in contract["disclosure_owner"]
     assert "Agently.skills_executor" in contract["compatibility_facade"]
+    assert "not executor-ready" in contract["compatibility_facade"]
+    assert "TaskDAGContext" in contract["compatibility_facade"]
     assert "No Skills route" in contract["execution_policy"]
     assert "SkillSourceProvider" in contract["remote_source_policy"]
     assert "immutable local snapshots" in contract["remote_source_policy"]
@@ -140,6 +142,24 @@ def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
     stage_guidance = skills["runtime_dependency_guidance"]["agently_stage"]
     assert stage_guidance["skill"] == "agently-stage"
     assert stage_guidance["version_specifier"] == stage_support["version_specifier"]
+
+    assert skills["catalog_generation"] == "v3"
+    archived_catalogs = {
+        entry["generation"]: entry
+        for entry in skills["archived_catalog_generations"]
+    }
+    assert archived_catalogs["v2"] == {
+        "generation": "v2",
+        "branch": "update/archive-v2-catalog",
+        "last_supported_framework_version": "4.1.4.7",
+        "status": "frozen",
+    }
+    assert archived_catalogs["v1"] == {
+        "generation": "v1",
+        "branch": "update/archive-legacy-v1-catalog",
+        "last_supported_framework_version": "4.1.1",
+        "status": "frozen",
+    }
 
 
 def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:

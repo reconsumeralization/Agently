@@ -41,11 +41,13 @@ skill **不是**纯文档。它为 coding agent 结构化：每个 skill 告诉 
 | `agently-design` | 设计或审计跨 ModelRequest、证据、生命周期、并发或可观测性的非简单系统拓扑 |
 | `agently-request` | 模型接入、Prompt 管理、结构化输出、响应复用、session memory、embedding、检索 |
 | `agently-runtime` | Action Runtime、内置 actions、MCP、ExecutionResource、FastAPI 暴露、DevTools 接入 |
-| `agently-dynamic-task` | 模型生成或应用提交的 DAG 规划、校验和执行 |
+| `agently-stage` | Agently-Stage 进程内任务生命周期、sync/async 桥接、settlement、replay channel 和本地 listener |
 | `agently-triggerflow` | 需要分支、并发、pause/resume、save/load |
 | `agently-migration` | 从 LangChain、LangGraph、LlamaIndex、CrewAI 或类似系统迁移 |
 
-当前公开 catalog generation 是 `v2`。实际默认 skill 列表见 `Agently-Skills/skills/`，应只包含这 7 个 skills。
+当前公开 catalog generation 是 `v3`。实际公开 skill 列表见 `Agently-Skills/skills/`，应只包含这 7 个 skills。
+
+TaskDAG 和 `DynamicTask` 便利 facade 仍是受支持的框架 API。由于模型生成或应用提交 DAG 属于低频应用路径，它不再占用一个独立 coding-agent skill。从 `agently` 开始，只在实际需要该能力时按需读取其 TaskDAG / Dynamic Task reference。
 
 ## 安装
 
@@ -69,7 +71,7 @@ for skill in \
   agently-design \
   agently-request \
   agently-runtime \
-  agently-dynamic-task \
+  agently-stage \
   agently-triggerflow
 do
   npx skills add AgentEra/Agently-Skills --agent "$AGENT" --skill "$skill" -y
@@ -77,7 +79,8 @@ done
 ```
 
 只有迁移项目才额外安装 `agently-migration`。历史 catalog 通过冻结归档分支保留，
-而不是放在默认分支文件树里；V1 12-skill catalog 归档在
+而不是放在默认分支文件树里：V2 归档在 `update/archive-v2-catalog`，
+最后支持 Agently `4.1.4.7`；V1 12-skill catalog 归档在
 `update/archive-legacy-v1-catalog`，最后支持 Agently `4.1.1`。新项目不要把归档
 catalog 加入 coding agent 的常规搜索路径。
 

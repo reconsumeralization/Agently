@@ -79,6 +79,13 @@ Skills:
 - build a compatibility context-pack projection;
 - expose the TaskDAG `skill` resolver helper.
 
+That TaskDAG helper is a legacy compatibility seam, not a complete
+`TaskDAGExecutor` integration in 4.1.4.7. The real executor passes
+`TaskDAGContext` while the helper consumes a
+mapping-shaped projection. Host code would have to adapt that boundary. Do not
+present direct registration as proven until the framework owns the adapter and
+an end-to-end executor test; reverify this limitation for later release lines.
+
 It does not own route selection, effort strategies, stages, React loops,
 runtime chains, Blocks lowering, script execution, capability inference,
 automatic Action mounting, or approvals. A registered `SkillSourceProvider`

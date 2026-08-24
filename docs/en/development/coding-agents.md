@@ -41,11 +41,13 @@ The companion repo does not become a runtime dependency of your Agently app. It 
 | `agently-design` | designing or auditing a non-trivial cross-layer ModelRequest, evidence, lifecycle, concurrency, or observability topology |
 | `agently-request` | model setup, prompt management, structured output, response reuse, session memory, embeddings, retrieval |
 | `agently-runtime` | Action Runtime, built-in actions, MCP, ExecutionResource, FastAPI exposure, DevTools wiring |
-| `agently-dynamic-task` | model-generated or app-submitted DAG planning, validation, and execution |
+| `agently-stage` | Agently-Stage process-local lifetime, sync/async bridging, settlement, replay channels, and local listeners |
 | `agently-triggerflow` | needing branching, concurrency, pause/resume, save/load |
 | `agently-migration` | migrating from LangChain, LangGraph, LlamaIndex, CrewAI, or similar systems |
 
-The current public catalog generation is `v2`. The actual default skill list lives in `Agently-Skills/skills/` and should contain only these 7 skills.
+The current public catalog generation is `v3`. The actual public skill list lives in `Agently-Skills/skills/` and should contain only these 7 skills.
+
+TaskDAG and the `DynamicTask` convenience facade remain supported framework APIs. Because model-generated or app-submitted DAG work is a less common application path, it no longer has a standalone coding-agent skill. Start with `agently` and load its TaskDAG / Dynamic Task reference only when that capability is actually needed.
 
 ## Installing the skills
 
@@ -69,14 +71,14 @@ for skill in \
   agently-design \
   agently-request \
   agently-runtime \
-  agently-dynamic-task \
+  agently-stage \
   agently-triggerflow
 do
   npx skills add AgentEra/Agently-Skills --agent "$AGENT" --skill "$skill" -y
 done
 ```
 
-Add `agently-migration` only for migration projects. Historical catalogs are kept on frozen archive branches instead of the default branch; the V1 12-skill catalog is archived on `update/archive-legacy-v1-catalog` and last supports Agently `4.1.1`. Do not add archived catalogs to a coding agent's normal search path for new projects.
+Add `agently-migration` only for migration projects. Historical catalogs are kept on frozen archive branches instead of the default branch: V2 is archived on `update/archive-v2-catalog` and last supports Agently `4.1.4.7`; V1 is archived on `update/archive-legacy-v1-catalog` and last supports Agently `4.1.1`. Do not add archived catalogs to a coding agent's normal search path for new projects.
 
 ## Why skills, not just docs
 

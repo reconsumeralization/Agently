@@ -72,6 +72,12 @@ facade 只保留已经发布的 Skill 管理和投影调用：
 - 构造兼容 context-pack projection；
 - 提供 TaskDAG `skill` resolver helper。
 
+该 TaskDAG helper 是历史兼容 seam，在 4.1.4.7 中不是已经完整接通的
+`TaskDAGExecutor` integration。真实 executor 传入 `TaskDAGContext`，而 helper
+消费 mapping-shaped projection，因此宿主仍需
+适配这个边界。在框架拥有 adapter 和端到端 executor test 之前，不应把直接注册
+描述为已验证路径；后续 release line 需要重新核验该限制。
+
 它不负责 route selection、effort strategy、stage、React loop、runtime chain、
 Blocks lowering、script execution、capability inference、自动 Action mounting 或审批。
 已注册的 `SkillSourceProvider` 可以把已授权远程 source 落成不可变本地 snapshot；
