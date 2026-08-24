@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -219,6 +220,179 @@ def test_programmatic_transport_carrier_never_retains_raw_program_source() -> No
 
     assert marker not in str(carrier)
     assert carrier.get("kwargs") is None
+    digest = carrier.get("result")
+    assert isinstance(digest, dict)
+    assert digest.get("result_preview") == {
+        "value": {"ok": True},
+        "logs": [],
+    }
+
+    normalized_again = agent.action._normalize_execution_records(
+        [carrier],
+        [
+            {
+                "action_id": PROGRAMMATIC_ACTION_TRANSPORT_ID,
+                "action_input": {
+                    "program": f"return {marker!r}",
+                    "description": "carrier test",
+                    "catalog_revision": "sha256:test",
+                },
+            }
+        ],
+        artifact_scope=scope,
+    )[0]
+    carrier_again = agent.action._to_action_flow_return_records([normalized_again])[0]
+    assert marker not in str(carrier_again)
+    repeated_digest = carrier_again.get("result")
+    assert isinstance(repeated_digest, dict)
+    assert repeated_digest.get("result_preview") == {
+        "value": {"ok": True},
+        "logs": [],
+    }
+
+
+def test_programmatic_carrier_preserves_small_nested_value_with_large_cold_artifact() -> None:
+    agent = Agently.create_agent()
+    program_marker = "PROGRAM_SOURCE_MUST_STAY_COLD_WITH_NESTED_VALUE"
+    sdk_marker = "SDK_SOURCE_MUST_STAY_COLD_WITH_NESTED_VALUE"
+    scope = {"kind": "action_run", "id": "nested-carrier-test"}
+    outer_value = [
+        {"user_id": "u1", "spent": 600.0, "limit": 500.0},
+        {"user_id": "u2", "spent": 1200.0, "limit": 1000.0},
+    ]
+    with agent.action._artifact_manager.bind_artifact_scope(scope):
+        finalized = agent.action._finalize_action_result(
+            {
+                "action_call_id": "outer-nested",
+                "ok": True,
+                "status": "success",
+                "success": True,
+                "action_id": PROGRAMMATIC_ACTION_TRANSPORT_ID,
+                "kwargs": {
+                    "program": f"return {program_marker!r}",
+                    "description": "nested carrier test",
+                    "catalog_revision": "sha256:nested",
+                },
+                "data": {
+                    "value": outer_value,
+                    "logs": [],
+                    "logs_truncated": False,
+                    "subcall_evidence": [
+                        {
+                            "action_call_id": f"nested-{index}",
+                            "action_id": "lookup",
+                            "status": "success",
+                            "success": True,
+                        }
+                        for index in range(6)
+                    ],
+                },
+                "result": {"value": outer_value, "logs": []},
+                "executor_type": "programmatic_action",
+                "artifacts": [
+                    {
+                        "artifact_type": "programmatic_action_sdk",
+                        "label": "cold SDK",
+                        "media_type": "text/x-python",
+                        "value": sdk_marker + ("x" * 8_000),
+                    }
+                ],
+            },
+            artifact_scope=scope,
+        )
+    carrier = agent.action._to_action_flow_return_records([finalized])[0]
+
+    serialized = json.dumps(carrier, ensure_ascii=False)
+    assert program_marker not in serialized
+    assert sdk_marker not in serialized
+    digest = carrier.get("result")
+    assert isinstance(digest, dict)
+    preview = digest.get("result_preview")
+    assert isinstance(preview, dict)
+    assert preview.get("value") == outer_value
+
+
+def test_programmatic_carrier_redacts_sensitive_outer_value_fields() -> None:
+    agent = Agently.create_agent()
+    scope = {"kind": "action_run", "id": "sensitive-carrier-test"}
+    with agent.action._artifact_manager.bind_artifact_scope(scope):
+        finalized = agent.action._finalize_action_result(
+            {
+                "action_call_id": "outer-sensitive",
+                "ok": True,
+                "status": "success",
+                "success": True,
+                "action_id": PROGRAMMATIC_ACTION_TRANSPORT_ID,
+                "kwargs": {
+                    "program": "return {'token': 'secret'}",
+                    "description": "sensitive carrier test",
+                    "catalog_revision": "sha256:sensitive",
+                },
+                "data": {
+                    "value": {
+                        "user_id": "u1",
+                        "access_token": "MUST_NOT_ENTER_MODEL_HOT_RESULT",
+                    },
+                    "logs": [],
+                },
+                "result": {},
+                "executor_type": "programmatic_action",
+            },
+            artifact_scope=scope,
+        )
+    carrier = agent.action._to_action_flow_return_records([finalized])[0]
+
+    serialized = json.dumps(carrier, ensure_ascii=False)
+    assert "MUST_NOT_ENTER_MODEL_HOT_RESULT" not in serialized
+    digest = carrier.get("result")
+    assert isinstance(digest, dict)
+    preview = digest.get("result_preview")
+    assert isinstance(preview, dict)
+    assert preview.get("value") == {
+        "user_id": "u1",
+        "access_token": "[REDACTED]",
+    }
+
+
+def test_programmatic_carrier_oversized_outer_value_uses_digest_fact() -> None:
+    agent = Agently.create_agent()
+    marker = "OVERSIZED_PROGRAM_VALUE_MUST_STAY_COLD"
+    scope = {"kind": "action_run", "id": "oversized-carrier-test"}
+    with agent.action._artifact_manager.bind_artifact_scope(scope):
+        finalized = agent.action._finalize_action_result(
+            {
+                "action_call_id": "outer-oversized",
+                "ok": True,
+                "status": "success",
+                "success": True,
+                "action_id": PROGRAMMATIC_ACTION_TRANSPORT_ID,
+                "kwargs": {
+                    "program": "return {'body': 'large'}",
+                    "description": "oversized carrier test",
+                    "catalog_revision": "sha256:oversized",
+                },
+                "data": {
+                    "value": {"body": marker + ("x" * 8_000)},
+                    "logs": [],
+                },
+                "result": {},
+                "executor_type": "programmatic_action",
+            },
+            artifact_scope=scope,
+        )
+    carrier = agent.action._to_action_flow_return_records([finalized])[0]
+
+    serialized = json.dumps(carrier, ensure_ascii=False)
+    assert marker not in serialized
+    digest = carrier.get("result")
+    assert isinstance(digest, dict)
+    preview = digest.get("result_preview")
+    assert isinstance(preview, dict)
+    value_fact = preview.get("value")
+    assert isinstance(value_fact, dict)
+    assert value_fact.get("omitted") is True
+    assert value_fact.get("reason") == ("programmatic_outer_value_exceeds_hot_limit")
+    assert str(value_fact.get("sha256", "")).startswith("sha256:")
 
 
 @pytest.mark.asyncio

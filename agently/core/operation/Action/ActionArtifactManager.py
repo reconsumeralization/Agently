@@ -686,6 +686,102 @@ class ActionArtifactManager:
                 }
         return self._compact_value(kwargs, limit=4000)
 
+    @classmethod
+    def _programmatic_result_preview(
+        cls,
+        value: Any,
+        *,
+        max_bytes: int,
+    ) -> Any:
+        """Preserve one deliberate outer JSON projection before evidence detail.
+
+        Generic Action compaction limits recursive mapping depth because most
+        instruction-heavy results are diagnostic carriers. A programmatic
+        result is different: ``data.value`` is the model-authored projection
+        intended for the next request. Preserve the complete redacted JSON
+        shape when it fits, then prioritize that value over logs and subcall
+        evidence under real byte pressure.
+        """
+
+        safe_value = cls._redact_value(value)
+        if cls._safe_json_size(safe_value) <= max_bytes:
+            return deepcopy(safe_value)
+
+        if not isinstance(safe_value, Mapping):
+            raw = cls._json_bytes(safe_value)
+            return {
+                "omitted": True,
+                "reason": "programmatic_outer_value_exceeds_hot_limit",
+                "original_size": len(raw),
+                "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            }
+
+        projected: dict[str, Any] = {}
+        outer_value = safe_value.get("value")
+        outer_raw = cls._json_bytes(outer_value)
+        outer_budget = max(400, max_bytes - 800)
+        projected["value"] = (
+            deepcopy(outer_value)
+            if len(outer_raw) <= outer_budget
+            else {
+                "omitted": True,
+                "reason": "programmatic_outer_value_exceeds_hot_limit",
+                "original_size": len(outer_raw),
+                "sha256": "sha256:" + hashlib.sha256(outer_raw).hexdigest(),
+            }
+        )
+
+        logs = safe_value.get("logs", [])
+        if isinstance(logs, list):
+            projected["logs"] = [cls._bounded_runtime_text(item, max_bytes=400) for item in logs[:20]]
+            if len(logs) > 20:
+                projected["logs_omitted_count"] = len(logs) - 20
+        projected["logs_truncated"] = bool(safe_value.get("logs_truncated", False))
+
+        evidence = safe_value.get("subcall_evidence", [])
+        if isinstance(evidence, list):
+            compact_evidence: list[dict[str, Any]] = []
+            for item in evidence[:20]:
+                if not isinstance(item, Mapping):
+                    continue
+                compact_evidence.append(
+                    {
+                        key: deepcopy(item.get(key))
+                        for key in (
+                            "action_call_id",
+                            "action_id",
+                            "status",
+                            "success",
+                        )
+                        if item.get(key) is not None
+                    }
+                )
+            projected["subcall_evidence"] = compact_evidence
+            if len(evidence) > len(compact_evidence):
+                projected["subcall_evidence_omitted_count"] = len(evidence) - len(compact_evidence)
+
+        if cls._safe_json_size(projected) > max_bytes:
+            projected["subcall_evidence"] = {
+                "omitted": True,
+                "count": len(evidence) if isinstance(evidence, list) else 0,
+            }
+            projected.pop("subcall_evidence_omitted_count", None)
+        if cls._safe_json_size(projected) > max_bytes:
+            log_count = len(logs) if isinstance(logs, list) else 0
+            projected["logs"] = {
+                "omitted": True,
+                "count": log_count,
+            }
+            projected.pop("logs_omitted_count", None)
+        if cls._safe_json_size(projected) > max_bytes:
+            projected["value"] = {
+                "omitted": True,
+                "reason": "programmatic_outer_value_exceeds_hot_limit",
+                "original_size": len(outer_raw),
+                "sha256": "sha256:" + hashlib.sha256(outer_raw).hexdigest(),
+            }
+        return projected
+
     def _build_execution_digest(
         self,
         record: ActionResult,
@@ -694,7 +790,11 @@ class ActionArtifactManager:
         redaction_report: list[str],
     ) -> dict[str, Any]:
         data = record.get("data", record.get("result"))
-        result_preview = self._compact_value(data, limit=8000)
+        result_preview = (
+            self._programmatic_result_preview(data, max_bytes=8000)
+            if str(record.get("action_id") or "") == self._PROGRAMMATIC_TRANSPORT_ID
+            else self._compact_value(data, limit=8000)
+        )
         result_size = self._safe_json_size(data)
         result_preview_size = self._safe_json_size(result_preview)
         digest: dict[str, Any] = {
@@ -801,6 +901,24 @@ class ActionArtifactManager:
 
     # ── result finalization ────────────────────────────────────────────────
 
+    @classmethod
+    def _is_finalized_action_carrier(cls, record: Any) -> bool:
+        if not isinstance(record, Mapping):
+            return False
+        data = record.get("data")
+        model_digest = record.get("model_digest")
+        result = record.get("result")
+        if not (isinstance(data, Mapping) and isinstance(model_digest, Mapping) and isinstance(result, Mapping)):
+            return False
+        if data.get("same_as") != "result" or model_digest.get("same_as") != "result":
+            return False
+        marker_keys = (
+            "carrier_compacted",
+            "hot_path_compacted",
+            "explicit_recall_transfer",
+        )
+        return any(data.get(key) is True and model_digest.get(key) is True for key in marker_keys)
+
     def finalize_action_result(
         self,
         result: Any,
@@ -810,6 +928,8 @@ class ActionArtifactManager:
         record = (
             normalize_execution_record(result, None, 0) if not isinstance(result, dict) else cast(ActionResult, result)
         )
+        if self._is_finalized_action_carrier(record):
+            return cast(ActionResult, deepcopy(record))
         meta = record.get("meta", {})
         if not isinstance(meta, dict):
             meta = {}
@@ -932,8 +1052,13 @@ class ActionArtifactManager:
         seen_call_ids: set[str] = set()
         for index, record in enumerate(records):
             command = commands[index] if index < len(commands) else None
+            candidate = (
+                record
+                if self._is_finalized_action_carrier(record)
+                else normalize_execution_record(record, command, index)
+            )
             finalized = self.finalize_action_result(
-                normalize_execution_record(record, command, index),
+                candidate,
                 artifact_scope=artifact_scope,
             )
             action_call_id = str(finalized.get("action_call_id", ""))
@@ -1456,11 +1581,16 @@ class ActionArtifactManager:
                 str(visible.get("action_id") or "") == cls._RECALL_ACTION_ID
                 and compact_digest.get("transfer_kind") == "explicit_action_artifact_readback"
             )
-            if not explicit_recall_transfer:
+            programmatic_outer_transfer = str(visible.get("action_id") or "") == cls._PROGRAMMATIC_TRANSPORT_ID
+            if not explicit_recall_transfer and not programmatic_outer_transfer:
                 if "instruction" in compact_digest:
                     compact_digest["instruction"] = {"omitted": True}
                 if "result_preview" in compact_digest:
                     compact_digest["result_preview"] = {"omitted": True}
+            elif programmatic_outer_transfer:
+                preview_meta = dict(compact_digest.get("result_preview_meta") or {})
+                preview_meta["programmatic_outer_transfer"] = True
+                compact_digest["result_preview_meta"] = preview_meta
             visible["result"] = compact_digest
             visible["data"] = {
                 "same_as": "result",
@@ -1504,9 +1634,16 @@ class ActionArtifactManager:
             digest.get("instruction"),
             max_bytes=cls._MODEL_VISIBLE_INSTRUCTION_MAX_BYTES,
         )
-        compact["result_preview"] = cls._compact_hot_path_field(
-            digest.get("result_preview"),
-            max_bytes=cls._MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES,
+        compact["result_preview"] = (
+            cls._programmatic_result_preview(
+                digest.get("result_preview"),
+                max_bytes=cls._MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES,
+            )
+            if str(digest.get("action_id") or "") == cls._PROGRAMMATIC_TRANSPORT_ID
+            else cls._compact_hot_path_field(
+                digest.get("result_preview"),
+                max_bytes=cls._MODEL_VISIBLE_RESULT_PREVIEW_MAX_BYTES,
+            )
         )
         preview_meta = dict(digest.get("result_preview_meta") or {})
         preview_meta["hot_path_compacted"] = True

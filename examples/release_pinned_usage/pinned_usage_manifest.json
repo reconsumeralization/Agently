@@ -66,6 +66,11 @@
       "path": "examples/skills_executor/08_architecture_diagram_skill.py",
       "reason": "Real-model Skills task compatibility facade and artifact-producing skill usage.",
       "provider": "Explicitly configured online model"
+    },
+    {
+      "path": "examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py",
+      "reason": "Real DeepSeek comparison of structured_plan and programmatic ActionLoop behavior, bounded result handoff, and Action evidence; Docker is required for programmatic execution.",
+      "provider": "Explicitly configured online model"
     }
   ]
 }

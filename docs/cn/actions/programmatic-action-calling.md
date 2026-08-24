@@ -68,6 +68,27 @@ finally:
 只有一两个小型直接调用时，优先使用 `structured_plan` 或
 `native_tool_calls`。此时启动代码运行环境和生成程序通常不会带来收益。
 
+### 实测 ActionLoop 对比
+
+可运行样例
+[`4_4_programmatic_vs_structured_deepseek.py`](../../../examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py)
+固定使用同一模型、prompt、output schema、源数据和三组只读 Action。2026-08-24
+记录的 DeepSeek 运行结果是：
+
+| 观测事实 | `structured_plan` | `programmatic` |
+|---|---:|---:|
+| 模型请求数 | 4 | 3 |
+| 业务 Action 调用数 | 6 | 7 |
+| input tokens | 6,509 | 9,714 |
+| output tokens | 563 | 319 |
+| 耗时（秒） | 6.34 | 9.30 |
+| 最终结果 | 准确 | 准确 |
+
+PTC 少了一轮模型请求，但在这个小场景中，确定性 SDK 与 program contract 增加的
+输入超过了节省量，而且生成程序重复读取了一次同级预算。因此“轮次更少”、
+“token 更少”和“延迟更低”应分别测量。PTC 更适合需要运行时控制或压缩大体积
+中间值的工作负载，不应被视为所有多调用任务的自动优化。
+
 ## V1 合格边界
 
 V1 生成一段 Python 3.10+ async function body；它的 return value 必须符合

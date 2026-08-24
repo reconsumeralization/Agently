@@ -50,6 +50,11 @@ Example groups:
   - `4_1_custom_action_executor_plugin_local.py`
   - `4_2_custom_action_runtime_plugin_local.py`
   - `4_3_custom_action_flow_plugin_local.py`
+- Programmatic Action comparison
+  - `4_4_programmatic_vs_structured_deepseek.py` compares the ordinary
+    `structured_plan` Action loop with `programmatic` PTC on the same real
+    DeepSeek task and local read-only business Actions. It also requires a
+    running Docker daemon and the local `python:3.12-slim` image.
 - Cookbook patterns
   - See `examples/cookbook/` for model-backed Action loop, router, concurrent todo, reflection, and safe shell policy patterns adapted from practical app-development training material.
 
@@ -81,5 +86,8 @@ Notes:
 - `3_3_third_party_sandlock_action_deepseek.py` demonstrates a Linux SandLock third-party sandbox executor registered through the new `ActionExecutor` plugin type.
 - `3_4_third_party_docker_sandbox_action_deepseek.py` demonstrates a local Docker third-party sandbox executor registered through the new `ActionExecutor` plugin type.
 - `4_1` to `4_3` focus on extension points for `ActionExecutor`, `ActionRuntime`, and `ActionFlow`, and also run through an agent with DeepSeek for the final reply.
+- `4_4` is the real-model PTC effect example. It prints both structured final
+  results plus observed model-request, business-Action-call, and elapsed counts;
+  fewer model rounds do not imply lower total tokens or latency.
 - The SandLock example requires Linux 6.7+ and `pip install sandlock`.
 - The Docker sandbox example requires a local Docker daemon that is running and not paused. It auto-pulls `alpine:3.20` when the image is not available locally.

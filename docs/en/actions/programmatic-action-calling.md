@@ -72,6 +72,29 @@ Prefer `structured_plan` or `native_tool_calls` for one or two small direct
 calls. The code-runtime startup and program-generation work usually adds no
 value in that case.
 
+### Observed ActionLoop comparison
+
+The runnable
+[`4_4_programmatic_vs_structured_deepseek.py`](../../../examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py)
+example holds the model, prompt, output schema, source data, and three read
+Action families constant. In the recorded 2026-08-24 DeepSeek run:
+
+| Observed fact | `structured_plan` | `programmatic` |
+|---|---:|---:|
+| Model requests | 4 | 3 |
+| Business Action calls | 6 | 7 |
+| Input tokens | 6,509 | 9,714 |
+| Output tokens | 563 | 319 |
+| Elapsed seconds | 6.34 | 9.30 |
+| Final result | exact | exact |
+
+PTC removed one model round, but the deterministic SDK/program contract added
+more input than it saved in this small case, and the generated program repeated
+one level-budget read. Treat fewer rounds, lower tokens, and lower latency as
+separate measurements. PTC is most compelling when runtime control or reducing
+large intermediate values matters—not as an automatic optimization for every
+multi-call task.
+
 ## V1 eligibility boundary
 
 V1 generates the body of one Python 3.10+ async function. Its return value must

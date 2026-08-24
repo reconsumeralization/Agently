@@ -192,6 +192,8 @@ def test_in_development_programmatic_action_calling_contract() -> None:
     assert "Agent.release_programmatic_action_calls" in contract["catalog_lifecycle_contract"]
     assert "redaction digest/byte facts" in contract["observation_contract"]
     assert "fail-open for DevTools" in contract["observation_contract"]
+    assert "independent observed effects" in contract["performance_contract"]
+    assert "does not promise universal cost or latency" in contract["performance_contract"]
 
 
 def test_public_typing_contract_remains_explicit() -> None:
