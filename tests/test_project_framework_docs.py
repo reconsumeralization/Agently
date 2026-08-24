@@ -27,7 +27,7 @@ def test_project_framework_docs_publish_topology_first_template_contract(path: s
         "FastAPI",
         "FastMCP",
         "Dynamic Task",
-        "skills/agently/assets/project-template",
+        "skills/agently/assets/full-stack-reference",
     ):
         assert required in document
 
@@ -46,4 +46,9 @@ def test_coding_agent_docs_publish_seven_skill_catalog(path: str) -> None:
     document = _read(path)
 
     assert "`agently-design`" in document
+    assert "`agently-stage`" in document
+    assert "`agently-dynamic-task`" not in document
+    assert "`v3`" in document
+    assert "update/archive-v2-catalog" in document
+    assert "TaskDAG" in document and "DynamicTask" in document
     assert "7 skills" in document or "7 个 skills" in document

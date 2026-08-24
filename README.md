@@ -359,7 +359,10 @@ immutable installed revisions, AgentExecution owns selection and exact-revision
 binding, and TaskContext owns progressive disclosure. `agent.use_skills(...)`
 is the normal candidate-binding surface; `agent.require_skills(...)` binds a
 known exact revision. `Agently.skills_executor` remains a thin compatibility
-facade for installation, inspection, context projection, and TaskDAG helpers.
+facade for installation, inspection, and context projection. In the 4.1.4.7
+release, its legacy TaskDAG `skill` resolver helper is not an executor-ready
+integration: it still needs a host adapter from the real `TaskDAGContext` before
+node selectors reach the compatibility projection.
 
 ```python
 result = (
@@ -698,7 +701,7 @@ Archived examples live under `examples/archived/` and are compatibility referenc
 Agently-Skills gives coding agents current Agently implementation guidance.
 
 - Repository: https://github.com/AgentEra/Agently-Skills
-- Current catalog generation: `v2`
+- Current catalog generation: `v3`
 - Recommended bundle: `app`
 - Agently 4.1.4.7 compatibility: Skills authoring protocol `agently-skills.authoring.v2`
 

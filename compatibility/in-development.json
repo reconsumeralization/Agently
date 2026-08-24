@@ -97,14 +97,14 @@
         "installed_truth_owner": "SkillLibrary immutable content-addressed revisions",
         "selection_and_binding_owner": "AgentExecution structured semantic selection with host-issued keys and fail-closed validation",
         "disclosure_owner": "TaskContext plus SkillContextSource plus consumer-bound ContextReader",
-        "compatibility_facade": "Agently.skills_executor supports local configure/install/list/inspect/read/context-pack/TaskDAG helpers only",
+        "compatibility_facade": "Agently.skills_executor supports local configure/install/list/inspect/read/context-pack projection. Its legacy TaskDAG skill resolver helper is not executor-ready until host code adapts the real TaskDAGContext into the helper's mapping input.",
         "execution_policy": "No Skills route, Skill-local strategy, stage engine, implicit script actionization, capability inference, or capability mounting; trusted exact-revision scripts require explicit host authorization and bind as ordinary Workspace-backed code_execution Actions",
         "revision_binding_event": "skills.revisions.bound records exact revision availability without claiming activation",
         "context_consumption_event": "skills.context.bound records concrete ModelRequest response-bound context consumption; availability alone is not consumption or Action evidence",
         "remote_source_policy": "Registered SkillSourceProvider plugins materialize authorized local or Git sources to immutable local snapshots; SkillLibrary installs exact snapshots and records redacted provenance; remote compatibility installs default to untrusted and selected subpaths reject symlink escape"
       },
       "devtools_guidance_protocol": "agently-skills.devtools-guidance.v1",
-      "catalog_generation": "v2",
+      "catalog_generation": "v3",
       "recommended_bundle": "app",
       "recommended_ref": "main",
       "runtime_dependency_guidance": {
@@ -114,6 +114,12 @@
         }
       },
       "archived_catalog_generations": [
+        {
+          "generation": "v2",
+          "branch": "update/archive-v2-catalog",
+          "last_supported_framework_version": "4.1.4.7",
+          "status": "frozen"
+        },
         {
           "generation": "v1",
           "branch": "update/archive-legacy-v1-catalog",

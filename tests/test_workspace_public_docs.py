@@ -120,6 +120,8 @@ def test_skills_docs_define_direct_reconnection_and_thin_facade() -> None:
         assert "AgentExecution" in document
         assert "TaskContext" in document
         assert "Agently.skills_executor" in document
+        assert "TaskDAGContext" in document
+        assert "executor" in document
         assert "run_skills_task" in document
         assert "result-shaped adapter" in document
         assert "skill_activation" not in document
