@@ -315,6 +315,17 @@ notebook。
 结束后接受一个替换 attempt。retry event 与重复 delta 必须收敛到同一个宿主 key，
 不能重复检索。不可逆副作用与最终业务决策仍要等待最终接受对象。
 
+最终 getter 完成校验后，在同一个 `ModelRequestResult` 上重新打开
+`get_async_generator()` 或 `get_generator()`，会重放最终接受的 attempt。如果校验已替换
+原 attempt，新 stream 会提供替换 attempt 的 `instant`、`delta`、`specific`、
+`original` 或 `all` 事件，而不会再次重放被拒绝的 attempt。应用这次 accepted replay
+前，应先清空或替换 provisional UI state。
+
+`AgentExecution` 的 structured direct-model stream 会为调用方完成这次投影：它先发送
+原 provisional attempt，完成最终校验，然后在关闭 execution stream 前追加最终接受的
+替换 attempt。调用方可以使用每个 item 的 `meta.response_id` 和
+`meta.attempt_index` 区分替换结果与被拒绝的 provisional state。
+
 ### Specific 例子（事件）
 
 ```python

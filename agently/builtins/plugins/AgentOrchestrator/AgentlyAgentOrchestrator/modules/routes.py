@@ -25,6 +25,33 @@ if TYPE_CHECKING:
     from agently.types.data import OutputValidateHandler
 
 
+def _model_result_stream_meta(result: Any) -> dict[str, Any]:
+    return {
+        "response_id": result.response_id,
+        "request_run_id": result.request_run_context.run_id if result.request_run_context is not None else None,
+        "model_run_id": result.model_run_context.run_id if result.model_run_context is not None else None,
+        "attempt_index": result.attempt_index,
+    }
+
+
+async def _bridge_structured_model_result_stream(
+    execution: "AgentExecution",
+    result: Any,
+    *,
+    collected_events: list[Any] | None = None,
+) -> None:
+    execution.record_model_response_id(result.id)
+    stream_meta = _model_result_stream_meta(result)
+    async for item in result.get_async_generator(type="instant"):
+        if collected_events is not None:
+            collected_events.append(item)
+        await execution.bridge_model_stream_item(
+            item,
+            route="model_request",
+            meta=stream_meta,
+        )
+
+
 async def run_model_request_route(
     execution: "AgentExecution",
     *,
@@ -91,25 +118,17 @@ async def run_model_request_route(
         long_output_delivery.preflight()
     result = execution.request.get_result(parent_run_context=agent_execution_run_context)
     execution._model_request_result = result
-    execution.record_model_response_id(result.id)
-    stream_meta = {
-        "response_id": result.response_id,
-        "request_run_id": result.request_run_context.run_id if result.request_run_context is not None else None,
-        "model_run_id": result.model_run_context.run_id if result.model_run_context is not None else None,
-        "attempt_index": result.attempt_index,
-    }
     has_structured_stream = bool(execution.prompt_snapshot.get("output"))
     structured_stream_events: list[Any] = []
     if has_structured_stream:
-        async for item in result.get_async_generator(type="instant"):
-            if long_output_delivery is not None:
-                structured_stream_events.append(item)
-            await execution.bridge_model_stream_item(
-                item,
-                route="model_request",
-                meta=stream_meta,
-            )
+        await _bridge_structured_model_result_stream(
+            execution,
+            result,
+            collected_events=structured_stream_events if long_output_delivery is not None else None,
+        )
     else:
+        execution.record_model_response_id(result.id)
+        stream_meta = _model_result_stream_meta(result)
         async for event, data in result.get_async_generator(type="all"):
             if event in {"action", "tool"}:
                 await execution.record_action_log(
@@ -221,6 +240,13 @@ async def run_model_request_route(
             key_style=key_style,
             max_retries=max_retries,
             raise_ensure_failure=raise_ensure_failure,
+        )
+    # Final validation may replace the provisional attempt after its parser
+    # stream ended. Project that accepted attempt before closing the execution.
+    if has_structured_stream and result._accepted_retry_result is not None:
+        await _bridge_structured_model_result_stream(
+            execution,
+            result._accepted_retry_result,
         )
     execution.record_context_consumption(
         context_package,

@@ -466,6 +466,12 @@ class ModelRequestResult:
                 type = content
             else:
                 type = "delta"
+        if self._accepted_retry_result is not None:
+            yield from self._accepted_retry_result.get_generator(
+                type=type,
+                specific=specific,
+            )
+            return
         parsed_generator = self._response_parser.get_generator(type=type, specific=specific)
         completed = False
         try:
@@ -551,6 +557,13 @@ class ModelRequestResult:
                 type = content
             else:
                 type = "delta"
+        if self._accepted_retry_result is not None:
+            async for data in self._accepted_retry_result.get_async_generator(
+                type=type,
+                specific=specific,
+            ):
+                yield data
+            return
         parsed_generator = self._response_parser.get_async_generator(type=type, specific=specific)
         completed = False
         try:

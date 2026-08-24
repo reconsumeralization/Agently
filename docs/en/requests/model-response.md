@@ -337,6 +337,19 @@ events and repeated deltas must converge on the same host key rather than repeat
 retrievals. Irreversible effects and final decisions still wait for the final
 accepted object.
 
+After a final getter completes validation, reopening `get_async_generator()` or
+`get_generator()` on the same `ModelRequestResult` replays the accepted attempt.
+If validation replaced the original attempt, the reopened stream therefore
+contains the replacement attempt's `instant`, `delta`, `specific`, `original`,
+or `all` events instead of replaying the rejected attempt. Clear or replace
+provisional UI state before applying that accepted replay.
+
+An `AgentExecution` structured direct-model stream performs this projection for
+its caller: it emits the original provisional attempt, completes final
+validation, then appends the accepted replacement attempt before closing the
+execution stream. Use each item's `meta.response_id` and `meta.attempt_index` to
+distinguish the replacement from the rejected provisional state.
+
 ### Specific example (events)
 
 ```python
