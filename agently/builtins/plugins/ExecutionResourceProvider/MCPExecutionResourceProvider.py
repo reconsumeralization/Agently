@@ -13,7 +13,10 @@
 # limitations under the License.
 
 import uuid
-from typing import TYPE_CHECKING
+from contextlib import suppress
+from typing import TYPE_CHECKING, Any
+
+from agently.utils import LazyImport
 
 from ._base import BuiltinExecutionResourceProvider
 
@@ -48,16 +51,31 @@ class MCPExecutionResourceProvider(BuiltinExecutionResourceProvider):
     ) -> "ExecutionResourceHandle":
         _ = (policy, existing_handle)
         config = requirement.get("config", {})
+        transport = config.get("transport")
+        LazyImport.import_package("fastmcp", version_constraint=">=3", auto_install=False)
+        from fastmcp import Client
+
+        client = Client(transport)
+        try:
+            await client.__aenter__()
+        except BaseException:
+            with suppress(Exception):
+                await client.close()
+            raise
         return {
             "handle_id": f"mcp:{ uuid.uuid4().hex }",
-            "resource": config.get("transport"),
+            "resource": client,
             "status": "ready",
-            "meta": {"provider": self.name},
+            "meta": {"provider": self.name, "managed_session": True},
         }
 
     async def async_health_check(self, handle: "ExecutionResourceHandle") -> "ExecutionResourceStatus":
-        return "ready" if handle.get("resource") is not None else "unhealthy"
+        client = handle.get("resource")
+        is_connected = getattr(client, "is_connected", None)
+        return "ready" if callable(is_connected) and is_connected() else "unhealthy"
 
     async def async_release(self, handle: "ExecutionResourceHandle") -> None:
-        _ = handle
-        return None
+        client: Any = handle.get("resource")
+        close = getattr(client, "close", None)
+        if callable(close):
+            await close()

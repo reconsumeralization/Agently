@@ -49,6 +49,12 @@ asyncio.run(main())
 
 `use_mcp(url)` registers all tools the MCP server exposes. The agent then plans tool calls against the union of {`@agent.action_func`, `use_tool`, `use_mcp` tools} as if they were one set.
 
+All tools from one MCP registration share one agent-scoped managed MCP client
+session. Stateful servers such as Playwright can therefore navigate through one
+Action and inspect or operate the same browser page through later Actions. A
+long-lived host should release that agent's ExecutionResource scope when it
+retires the agent; the Playwright example below does so explicitly.
+
 ## API
 
 | Method | Behavior |
@@ -117,6 +123,42 @@ When an MCP tool returns resource/content blocks or structured
 the Action record so hosts can inspect `record["artifact_refs"]` instead of
 polling output directories. The MCP server must declare the artifact metadata;
 Agently does not scan the filesystem to infer undeclared writes.
+
+## Playwright browser E2E
+
+[`examples/action_runtime/2_3_mcp_playwright_e2e_local.py`](../../../examples/action_runtime/2_3_mcp_playwright_e2e_local.py)
+runs a complete local Todo E2E. Agently registers Microsoft's Playwright MCP
+browser operations as Actions; the host dispatches navigation, typing, clicks,
+and snapshots through Action Runtime. It then checks real Action records and
+canonical server-side Todo state, without relying on model prose.
+
+The example does not call a model. It requires Node.js 20+, npm, and Google
+Chrome. Its tested default MCP package is `@playwright/mcp@0.0.78`; set
+`PLAYWRIGHT_MCP_PACKAGE` to test another immutable version deliberately. It
+launches a headless, isolated browser and permits browser requests
+only to the ephemeral local test origin. If the default `npx` belongs to an older
+Node.js installation, point `PLAYWRIGHT_NPX_BIN` at an `npx` installation backed
+by Node.js 20+.
+
+The model-autonomous version is
+[`examples/action_runtime/2_4_mcp_playwright_agent_qwen.py`](../../../examples/action_runtime/2_4_mcp_playwright_agent_qwen.py).
+It lets `qwen3-32b` inspect each accessibility snapshot and independently choose
+navigate, type, click, and snapshot Actions. The host supplies no selector or
+element answer. It only validates one model-selected `[ref=eN]` marker and
+projects it to Playwright's canonical `target="eN"`; the live Playwright backend
+still decides whether that ref belongs to the current page.
+
+The autonomous example uses `structured_plan`, a request allowlist of four
+Actions, concurrency one, at most eight planning rounds, and no business retry.
+It records model requests, Action input projections, elapsed time, canonical
+server state, and resource release. In the observed 2026-08-25 `qwen3-32b` run,
+the loop settled in round eight and all seven browser Actions succeeded. This
+is model-specific evidence, not an automatic claim for other models or
+configurations. Set `QWEN_API_KEY`; `QWEN_BASE_URL` and `QWEN_MODEL` are optional.
+
+Playwright Test is usually simpler for a fully fixed CI regression suite. The
+`2_3` example verifies Agently's stateful MCP and Action evidence boundaries;
+`2_4` verifies autonomous exploration with a host-owned identity projection.
 
 ## Common pitfalls
 

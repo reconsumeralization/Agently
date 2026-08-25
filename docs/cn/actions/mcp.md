@@ -48,6 +48,10 @@ asyncio.run(main())
 
 `use_mcp(url)` 注册 MCP 服务暴露的所有工具。agent 接着把它们作为 {`@agent.action_func`、`use_tool`、`use_mcp` 工具} 的并集来规划，对模型像同一组。
 
+同一次 MCP 注册得到的所有工具共享一个 agent-scope 托管 MCP client 会话。因此像 Playwright
+这类有状态服务可以先通过一个 Action 导航，再由另一个 Action 读取或操作同一浏览器页面。长驻
+host 在淘汰 agent 时应释放对应的 agent ExecutionResource scope；下方 Playwright 案例包含显式释放。
+
 ## API
 
 | 方法 | 行为 |
@@ -113,6 +117,32 @@ action 记录也写到 `extra.action_logs`（兼容入口下是 `extra.tool_logs
 `artifact_refs` / `artifacts` / `file_refs` 时，Agently 会把这些声明保留在
 Action record 上，host 可以读取 `record["artifact_refs"]`，不需要轮询输出目录。
 MCP server 必须显式声明 artifact metadata；Agently 不通过扫描文件系统推断未声明写入。
+
+## Playwright 浏览器 E2E
+
+[`examples/action_runtime/2_3_mcp_playwright_e2e_local.py`](../../../examples/action_runtime/2_3_mcp_playwright_e2e_local.py)
+展示了一个完整的本地 Todo E2E：Agently 把 Microsoft Playwright MCP 的浏览器操作注册为
+Action，host 通过 Action Runtime 依次执行导航、填写、点击和快照，最后检查真实 Action 记录和
+服务端 Todo 状态。测试结论不依赖模型自述。
+
+该案例不调用模型，需要 Node.js 20+、npm 和 Google Chrome。已验证的默认 MCP 包版本是
+`@playwright/mcp@0.0.78`，可通过 `PLAYWRIGHT_MCP_PACKAGE` 显式测试其他不可变版本。浏览器以 headless、isolated
+模式启动，并且只允许访问本次测试启动的临时本地 origin。如果默认 `npx` 属于较旧的 Node.js，
+可把 `PLAYWRIGHT_NPX_BIN` 指向 Node.js 20+ 配套的 `npx`。
+
+模型自主探索版本见
+[`examples/action_runtime/2_4_mcp_playwright_agent_qwen.py`](../../../examples/action_runtime/2_4_mcp_playwright_agent_qwen.py)。
+它让 `qwen3-32b` 根据每轮 accessibility snapshot 自主选择 navigate、type、click 和 snapshot
+Action；host 不提供 selector 或元素答案，只把模型选中的唯一 `[ref=eN]` 行校验并投影为
+Playwright 的 canonical `target="eN"`。Playwright 活浏览器仍负责判断 ref 是否属于当前页面。
+
+该自主案例使用 `structured_plan`、四个 Action 的 request allowlist、并发 1、最多 8 轮，无业务
+重试，并记录模型请求数、Action 输入投影、耗时、最终服务端状态和资源释放。2026-08-25 的真实
+`qwen3-32b` 运行在第 8 轮结束，7 个浏览器 Action 全部成功；这是一条模型特定证据，不自动代表
+其他模型或配置。运行前设置 `QWEN_API_KEY`，可选设置 `QWEN_BASE_URL` 和 `QWEN_MODEL`。
+
+对于完全固定的 CI 回归，直接使用 Playwright Test 通常更简单；`2_3` 的重点是 Agently MCP
+状态会话与 Action 证据，`2_4` 的重点是经过 host 身份边界校验的模型自主探索。
 
 ## 常见错误
 

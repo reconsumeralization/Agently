@@ -1,16 +1,18 @@
 # Action Runtime Examples
 
-These examples are written for the Action-based runtime. Every numbered example
-creates a request-scoped `turn`, passes `turn.prompt` into
-`agent.get_action_result(...)` to inspect intermediate `ActionResult` records
-first, then uses `turn.get_result()` to produce the final DeepSeek reply
-through `OpenAICompatible`.
+These examples are written for the Action-based runtime. Model-backed examples
+create a request-scoped `turn`, inspect intermediate `ActionResult` records, and
+then produce a final reply. Local examples exercise the same Action dispatch,
+evidence, and ExecutionResource boundaries without requiring a model.
 
-Before running them, set:
+Before running the DeepSeek-backed examples, set:
 
 - `DEEPSEEK_API_KEY`
 - `DEEPSEEK_BASE_URL` (optional, defaults to `https://api.deepseek.com/v1`)
 - `DEEPSEEK_DEFAULT_MODEL` (optional, defaults to `deepseek-v4-flash`)
+
+The autonomous Playwright example instead uses `QWEN_API_KEY`, with optional
+`QWEN_BASE_URL` and `QWEN_MODEL` overrides.
 
 Example groups:
 
@@ -20,6 +22,18 @@ Example groups:
 - MCP actions
   - `2_1_mcp_stdio_action_deepseek.py`
   - `2_2_mcp_http_action_deepseek.py`
+  - `2_3_mcp_playwright_e2e_local.py` runs a real local-browser Todo E2E
+    through Microsoft's Playwright MCP server, then verifies canonical server
+    state independently of model prose. It requires Node.js 20+, npm, and
+    Google Chrome; set `PLAYWRIGHT_NPX_BIN` if the default `npx` belongs to an
+    older Node.js installation. The tested MCP package defaults to
+    `@playwright/mcp@0.0.78`; set `PLAYWRIGHT_MCP_PACKAGE` to test another
+    immutable version deliberately.
+  - `2_4_mcp_playwright_agent_qwen.py` lets `qwen3-32b` autonomously inspect
+    Playwright snapshots and choose navigate/type/click/snapshot Actions. The
+    host supplies no selectors; it only validates and projects the model's
+    unique `[ref=eN]` selection to Playwright's canonical `target="eN"` value.
+    Set `QWEN_API_KEY`; `QWEN_BASE_URL` and `QWEN_MODEL` are optional.
   - `_calculator_mcp_server.py` is the shared local MCP server
 - Built-in action packages
   - See `examples/builtin_actions/` for Search/Browse package mounting and local browse examples.
@@ -42,7 +56,18 @@ Shared helper:
 
 Notes:
 
-- Every numbered example registers or imports actions, mounts them on an agent, runs a real prompt, prints intermediate action records, and then prints the final reply plus `extra.action_logs`.
+- Model-backed numbered examples run a real prompt, print intermediate Action
+  records, and then print the final reply plus `extra.action_logs`. Local
+  examples print their Action evidence and deterministic host assertions.
+- When validating unreleased source from a checkout, install it in editable
+  mode or run with `PYTHONPATH=.` so nested example scripts do not import an
+  older site-packages build.
+- The Playwright E2E example launches an isolated, headless browser and limits
+  browser requests to its ephemeral local test origin. Its deterministic host
+  assertion checks both Action evidence and canonical server state.
+- The autonomous Playwright example uses a four-Action request allowlist,
+  `structured_plan`, eight planning rounds at most, concurrency one, no business
+  retry loop, model/action accounting, and explicit agent-scope resource release.
 - Future action examples must be runnable in their declared environment and must include an `Expected key output` comment in the file. For model-backed examples, the comment should describe the stable action/result shape rather than an exact model sentence.
 - Cookbook examples must call DeepSeek or local Ollama for planner/classifier/evaluator/reviser steps. Local functions are acceptable only as the business capability being called by an Action or workflow step, not as a model-decision substitute.
 - By default, `agent.get_action_result(prompt=turn.prompt)` stores
