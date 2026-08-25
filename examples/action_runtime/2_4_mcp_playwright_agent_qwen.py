@@ -83,7 +83,12 @@ def create_validating_execution_handler(action_trace: list[dict[str, Any]]):
             model_input = dict(call.get("action_input") or {})
             executed_input = dict(model_input)
             try:
-                if action_id in {"browser_type", "browser_click"}:
+                if action_id == "browser_snapshot":
+                    # This exploration profile always requests the complete current
+                    # page. A model-authored target can hide the controls needed for
+                    # the next decision or introduce an unobserved selector.
+                    executed_input.pop("target", None)
+                elif action_id in {"browser_type", "browser_click"}:
                     executed_input["target"] = canonicalize_playwright_target(
                         model_input.get("target")
                     )
@@ -133,7 +138,10 @@ async def main() -> None:
         "You are an autonomous browser E2E operator. Use only mounted Playwright "
         "Actions. Select elements from the latest observed accessibility snapshot, "
         "adapt after every Action result, and do not claim success until a final "
-        "observed snapshot satisfies the task.",
+        "observed snapshot satisfies the task. Call browser_snapshot without a "
+        "target to inspect the complete current page. Never invent CSS selectors; "
+        "browser_type and browser_click targets must come from observed [ref=eN] "
+        "markers.",
     )
     agent.set_action_loop(
         max_rounds=8,
@@ -250,7 +258,7 @@ if __name__ == "__main__":
 # - [RUN_FACTS] reports resources_after_release=0.
 # - [HOST_ASSERTION] autonomous E2E passed
 #
-# The host does not provide selectors or choose elements. It only projects a
-# model-selected snapshot line containing one [ref=eN] marker to the canonical
-# target="eN" protocol value. Playwright's live browser backend remains the
-# authoritative owner that accepts or rejects the current ref.
+# The host does not provide selectors or choose elements. It enforces full-page
+# exploratory snapshots and projects a model-selected line containing one
+# [ref=eN] marker to canonical target="eN". Playwright's live browser backend
+# remains the authoritative owner that accepts or rejects the current ref.

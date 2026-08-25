@@ -144,9 +144,11 @@ The model-autonomous version is
 [`examples/action_runtime/2_4_mcp_playwright_agent_qwen.py`](../../../examples/action_runtime/2_4_mcp_playwright_agent_qwen.py).
 It lets `qwen3-32b` inspect each accessibility snapshot and independently choose
 navigate, type, click, and snapshot Actions. The host supplies no selector or
-element answer. It only validates one model-selected `[ref=eN]` marker and
-projects it to Playwright's canonical `target="eN"`; the live Playwright backend
-still decides whether that ref belongs to the current page.
+element answer. Exploratory snapshots are projected to the complete current
+page with no target. Type/click calls must contain one model-selected
+`[ref=eN]` marker, which the host projects to Playwright's canonical
+`target="eN"`; the live Playwright backend still decides whether that ref
+belongs to the current page.
 
 The autonomous example uses `structured_plan`, a request allowlist of four
 Actions, concurrency one, at most eight planning rounds, and no business retry.
