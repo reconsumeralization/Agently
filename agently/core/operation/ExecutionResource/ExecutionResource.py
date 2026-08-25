@@ -869,7 +869,7 @@ class ExecutionResourceManager:
             if handle.get("scope") == scope and handle.get("owner_id") == owner_id
         ]
         for handle_id in targets:
-            await self.async_release(handle_id)
+            await self._async_release_handle(handle_id, force=True)
 
     def inspect(self, handle_or_requirement_id: str):
         if handle_or_requirement_id in self._handles:

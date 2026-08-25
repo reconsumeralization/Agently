@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -241,6 +242,7 @@ class ActionResourceRegistrar:
 
         transport = normalize_mcp_transport(transport, headers=headers)
         normalized_tags = action._normalize_tags(tags)
+        mcp_resource_key = f"mcp_server:{ uuid.uuid4().hex }"
 
         action_ids: list[str] = []
         registration_snapshot: dict[str, dict[str, Any] | None] = {}
@@ -268,6 +270,7 @@ class ActionResourceRegistrar:
                             "MCPActionExecutor",
                             action_id=tool.name,
                             transport=transport,
+                            resource_key=mcp_resource_key,
                         ),
                         tags=tool_tags,
                         default_policy=default_policy,
@@ -283,7 +286,7 @@ class ActionResourceRegistrar:
                                     "requirement_id": f"mcp:{ tool.name }",
                                     "kind": "mcp",
                                     "scope": "agent",
-                                    "resource_key": tool.name,
+                                    "resource_key": mcp_resource_key,
                                     "config": {"transport": transport},
                                     "policy": cast(ExecutionResourcePolicy, default_policy or {}),
                                     "approval_required": approval_required,

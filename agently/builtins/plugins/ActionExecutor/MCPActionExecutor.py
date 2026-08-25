@@ -25,9 +25,10 @@ class MCPActionExecutor:
     kind = "mcp"
     sandboxed = False
 
-    def __init__(self, action_id: str, transport: Any):
+    def __init__(self, action_id: str, transport: Any, resource_key: str | None = None):
         self.action_id = action_id
         self.transport = transport
+        self.resource_key = resource_key or action_id
 
     @staticmethod
     def _on_register():
@@ -122,41 +123,52 @@ class MCPActionExecutor:
         if not isinstance(action_input, dict):
             action_input = {}
         environment_resources = action_call.get("execution_resource_resources", {})
-        transport = self.transport
-        if isinstance(environment_resources, dict) and self.action_id in environment_resources:
-            transport = environment_resources[self.action_id]
+        managed_client = (
+            environment_resources.get(self.resource_key)
+            if isinstance(environment_resources, dict)
+            else None
+        )
 
-        async with Client(transport) as client:  # type: ignore[arg-type]
-            mcp_result = await client.call_tool(
+        if managed_client is not None and callable(getattr(managed_client, "call_tool", None)):
+            mcp_result = await managed_client.call_tool(
                 name=self.action_id,
                 arguments=action_input,
                 raise_on_error=False,
             )
-            if mcp_result.is_error:
-                return {"error": mcp_result.content[0].text}  # type: ignore[index]
-            artifacts = [
-                artifact
-                for artifact in (
-                    self._artifact_from_content_block(block)
-                    for block in list(mcp_result.content or [])
+        else:
+            transport = managed_client if managed_client is not None else self.transport
+            async with Client(transport) as client:  # type: ignore[arg-type]
+                mcp_result = await client.call_tool(
+                    name=self.action_id,
+                    arguments=action_input,
+                    raise_on_error=False,
                 )
-                if artifact is not None
-            ]
-            if mcp_result.structured_content:
-                return self._result_with_artifacts(mcp_result.structured_content, artifacts)
-            try:
-                content = list(mcp_result.content or [])
-                if not content:
-                    return self._result_with_artifacts(None, artifacts)
-                result = content[0]
-                if isinstance(result, TextContent):
-                    try:
-                        parsed = json.loads(result.text)
-                        return self._result_with_artifacts(parsed, artifacts)
-                    except json.JSONDecodeError:
-                        return self._result_with_artifacts(result.text, artifacts)
-                if isinstance(result, (ImageContent, AudioContent, ResourceLink, EmbeddedResource)):
-                    data = result.model_dump()
-                    return self._result_with_artifacts(data, artifacts)
-            except Exception:
-                return None
+
+        if mcp_result.is_error:
+            return {"error": mcp_result.content[0].text}  # type: ignore[index]
+        artifacts = [
+            artifact
+            for artifact in (
+                self._artifact_from_content_block(block)
+                for block in list(mcp_result.content or [])
+            )
+            if artifact is not None
+        ]
+        if mcp_result.structured_content:
+            return self._result_with_artifacts(mcp_result.structured_content, artifacts)
+        try:
+            content = list(mcp_result.content or [])
+            if not content:
+                return self._result_with_artifacts(None, artifacts)
+            result = content[0]
+            if isinstance(result, TextContent):
+                try:
+                    parsed = json.loads(result.text)
+                    return self._result_with_artifacts(parsed, artifacts)
+                except json.JSONDecodeError:
+                    return self._result_with_artifacts(result.text, artifacts)
+            if isinstance(result, (ImageContent, AudioContent, ResourceLink, EmbeddedResource)):
+                data = result.model_dump()
+                return self._result_with_artifacts(data, artifacts)
+        except Exception:
+            return None

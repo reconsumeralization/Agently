@@ -13,7 +13,6 @@ from agently.builtins.plugins.ExecutionResourceProvider._bounded_process import 
 )
 from agently.core import (
     ExecutionResourceApprovalDenied,
-    ExecutionResourceApprovalRequired,
     ExecutionResourceError,
     ExecutionResourceManager,
 )
@@ -572,9 +571,14 @@ async def test_execution_resource_release_scope_cleans_handles():
     manager = _create_manager()
     owner = "scope-test-owner"
 
-    await manager.async_ensure(
-        {"kind": "bash", "scope": "agent", "owner_id": owner, "resource_key": "bash1"},
-    )
+    agent_requirement = {
+        "kind": "bash",
+        "scope": "agent",
+        "owner_id": owner,
+        "resource_key": "bash1",
+    }
+    await manager.async_ensure(agent_requirement)
+    reused_agent_handle = await manager.async_ensure(agent_requirement)
     await manager.async_ensure(
         {"kind": "bash", "scope": "session", "owner_id": owner, "resource_key": "bash2"},
     )
@@ -583,6 +587,7 @@ async def test_execution_resource_release_scope_cleans_handles():
     )
 
     assert len(manager.list(scope="agent", owner_id=owner)) == 1
+    assert reused_agent_handle["ref_count"] == 2
     assert len(manager.list(scope="session", owner_id=owner)) == 1
 
     await manager.async_release_scope("agent", owner)
@@ -707,8 +712,11 @@ async def test_mcp_executor_transport_routing():
     from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
 
     direct_transport = object()
-    managed_transport = object()
-    executor = MCPActionExecutor(action_id="my_tool", transport=direct_transport)
+    executor = MCPActionExecutor(
+        action_id="my_tool",
+        transport=direct_transport,
+        resource_key="shared_mcp_server",
+    )
 
     captured: list[Any] = []
 
@@ -751,16 +759,31 @@ async def test_mcp_executor_transport_routing():
 
         captured.clear()
 
+        managed_client = mock.MagicMock()
+        managed_client.call_tool = mock.AsyncMock(
+            return_value=types.SimpleNamespace(
+                is_error=False,
+                structured_content={"session": "shared"},
+                content=[],
+            )
+        )
         action_call_with_env: dict[str, Any] = {
             "action_input": {},
-            "execution_resource_resources": {"my_tool": managed_transport},
+            "execution_resource_resources": {"shared_mcp_server": managed_client},
         }
-        try:
-            await executor.execute(spec=spec, action_call=action_call_with_env, policy=policy, settings=settings)
-        except Exception:
-            pass
-        assert captured and captured[-1] is managed_transport, \
-            "With managed resource injected, executor must prefer managed transport"
+        result = await executor.execute(
+            spec=spec,
+            action_call=action_call_with_env,
+            policy=policy,
+            settings=settings,
+        )
+        assert captured == [], "A managed MCP client must be reused without opening another session"
+        managed_client.call_tool.assert_awaited_once_with(
+            name="my_tool",
+            arguments={},
+            raise_on_error=False,
+        )
+        assert result == {"session": "shared"}
         assert lazy_import.call_args_list == [
             mock.call("fastmcp", version_constraint=">=3", auto_install=False),
             mock.call("mcp", auto_install=False),
@@ -768,6 +791,97 @@ async def test_mcp_executor_transport_routing():
             mock.call("mcp", auto_install=False),
         ]
 
+
+@pytest.mark.asyncio
+async def test_mcp_execution_resource_provider_owns_client_lifecycle():
+    import unittest.mock as mock
+    from agently.builtins.plugins.ExecutionResourceProvider.MCPExecutionResourceProvider import (
+        MCPExecutionResourceProvider,
+    )
+
+    class FakeClient:
+        def __init__(self, transport):
+            self.transport = transport
+            self.connected = False
+            self.closed = False
+
+        async def __aenter__(self):
+            self.connected = True
+            return self
+
+        def is_connected(self):
+            return self.connected and not self.closed
+
+        async def close(self):
+            self.closed = True
+
+    fake_fastmcp = types.ModuleType("fastmcp")
+    fake_fastmcp.Client = FakeClient  # type: ignore[attr-defined]
+    provider_module = importlib.import_module(
+        "agently.builtins.plugins.ExecutionResourceProvider.MCPExecutionResourceProvider"
+    )
+    provider = MCPExecutionResourceProvider()
+    transport = object()
+
+    with (
+        mock.patch.dict(sys.modules, {"fastmcp": fake_fastmcp}),
+        mock.patch.object(provider_module.LazyImport, "import_package") as lazy_import,
+    ):
+        handle = await provider.async_ensure(
+            requirement={"kind": "mcp", "config": {"transport": transport}},
+            policy={},
+        )
+        client = handle["resource"]
+        assert client.transport is transport
+        assert await provider.async_health_check(handle) == "ready"
+        await provider.async_release(handle)
+        assert client.closed is True
+        assert await provider.async_health_check(handle) == "unhealthy"
+
+    lazy_import.assert_called_once_with("fastmcp", version_constraint=">=3", auto_install=False)
+
+
+@pytest.mark.asyncio
+async def test_action_use_mcp_shares_one_managed_session_across_registered_tools():
+    import unittest.mock as mock
+
+    tools = [
+        types.SimpleNamespace(
+            name=name,
+            description=f"{name} description",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {}},
+            _meta={},
+        )
+        for name in ("stateful_navigate", "stateful_snapshot")
+    ]
+
+    class FakeClient:
+        def __init__(self, _transport):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def list_tools(self):
+            return tools
+
+    agent = Agently.create_agent()
+    registrar_module = importlib.import_module("agently.core.operation.Action.ActionResourceRegistrar")
+    with (
+        mock.patch.object(registrar_module.LazyImport, "import_package"),
+        mock.patch("fastmcp.Client", FakeClient),
+    ):
+        await agent.action.async_use_action_mcp("https://example.com/mcp")
+
+    specs = [agent.action.action_registry.get_spec(tool.name) for tool in tools]
+    requirements = [spec["execution_resources"][0] for spec in specs if spec is not None]
+    assert len(requirements) == 2
+    assert len({item["resource_key"] for item in requirements}) == 1
+    assert requirements[0]["resource_key"].startswith("mcp_server:")
 
 def test_mcp_executor_resource_blocks_use_action_artifact_contract():
     from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
