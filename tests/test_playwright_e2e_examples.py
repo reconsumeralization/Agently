@@ -79,6 +79,38 @@ async def test_playwright_execution_handler_preserves_model_choice_and_projects_
 
 
 @pytest.mark.asyncio
+async def test_playwright_execution_handler_projects_snapshot_to_full_page():
+    module = load_agent_example()
+    calls: list[dict[str, Any]] = []
+
+    class FakeAction:
+        async def async_execute_action(self, action_id, action_input, **kwargs):
+            calls.append({"action_id": action_id, "action_input": action_input})
+            return {"action_id": action_id, "status": "success", "data": {}}
+
+    handler = module.create_validating_execution_handler([])
+    records = await handler(
+        {"action": FakeAction(), "settings": object()},
+        {
+            "action_calls": [
+                {
+                    "action_id": "browser_snapshot",
+                    "action_input": {"target": "document.body", "boxes": True},
+                }
+            ]
+        },
+    )
+
+    assert records[0]["status"] == "success"
+    assert calls == [
+        {
+            "action_id": "browser_snapshot",
+            "action_input": {"boxes": True},
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_playwright_execution_handler_rejects_ambiguous_ref_without_dispatch():
     module = load_agent_example()
     dispatch_count = 0

@@ -133,8 +133,9 @@ Action，host 通过 Action Runtime 依次执行导航、填写、点击和快�
 模型自主探索版本见
 [`examples/action_runtime/2_4_mcp_playwright_agent_qwen.py`](../../../examples/action_runtime/2_4_mcp_playwright_agent_qwen.py)。
 它让 `qwen3-32b` 根据每轮 accessibility snapshot 自主选择 navigate、type、click 和 snapshot
-Action；host 不提供 selector 或元素答案，只把模型选中的唯一 `[ref=eN]` 行校验并投影为
-Playwright 的 canonical `target="eN"`。Playwright 活浏览器仍负责判断 ref 是否属于当前页面。
+Action；host 不提供 selector 或元素答案。探索 snapshot 统一投影为无 target 的完整当前页面，
+type/click 则只把模型选中的唯一 `[ref=eN]` 行校验并投影为 Playwright 的 canonical
+`target="eN"`。Playwright 活浏览器仍负责判断 ref 是否属于当前页面。
 
 该自主案例使用 `structured_plan`、四个 Action 的 request allowlist、并发 1、最多 8 轮，无业务
 重试，并记录模型请求数、Action 输入投影、耗时、最终服务端状态和资源释放。2026-08-25 的真实

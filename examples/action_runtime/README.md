@@ -31,8 +31,9 @@ Example groups:
     immutable version deliberately.
   - `2_4_mcp_playwright_agent_qwen.py` lets `qwen3-32b` autonomously inspect
     Playwright snapshots and choose navigate/type/click/snapshot Actions. The
-    host supplies no selectors; it only validates and projects the model's
-    unique `[ref=eN]` selection to Playwright's canonical `target="eN"` value.
+    host supplies no selectors; it enforces full-page exploratory snapshots and
+    validates/projects the model's unique `[ref=eN]` selection to Playwright's
+    canonical `target="eN"` value.
     Set `QWEN_API_KEY`; `QWEN_BASE_URL` and `QWEN_MODEL` are optional.
   - `_calculator_mcp_server.py` is the shared local MCP server
 - Built-in action packages
