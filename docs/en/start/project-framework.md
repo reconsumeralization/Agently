@@ -54,6 +54,27 @@ the reference data, and the consumer must not overfit one sample's wording or
 incidental values. Do not add a fixed packet schema or an extra handoff when no
 independent development, replay, validation, or fault-localization value exists.
 
+## Keep Intermediate Output Locally Correct And Progressive
+
+A non-terminal model output or assistant turn does not need to complete the
+whole task. Define its current stage, subject, next consumer, and local
+acceptance boundary. Within that scope it must satisfy its schema and hard
+invariants, stay grounded in supplied facts, and avoid known material logical or
+domain errors.
+
+The output should create observable progress: advance one state, narrow an
+uncertainty, select one actionable next step, or produce information consumed
+by a later stage. Label assumptions, provisional conclusions, unknowns, and
+deferred work instead of presenting them as finished facts. Do not add
+speculative answers for unrelated future stages merely to look complete.
+
+Progress does not excuse a broken local contract or unsafe action. Conversely,
+do not reject a sound bounded contribution only because later work remains.
+Terminal results, whole-task completion claims, and irreversible effects still
+require the full terminal acceptance contract. For example, a schematic tutor
+may recommend and locally validate one minimal circuit action without finishing
+the complete schematic in that turn.
+
 ## Start with the minimum honest layout
 
 ### One request family
