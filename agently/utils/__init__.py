@@ -44,6 +44,7 @@ from .LanguagePolicy import (
     normalize_language,
     resolve_language_policy,
 )
+from .ModelPool import resolve_model_profile
 from .DeprecationWarnings import (
     DeprecationWarnings,
     warn_deprecated_once,

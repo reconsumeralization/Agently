@@ -32,9 +32,16 @@ import re
 import threading
 from dataclasses import dataclass
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from agently.types.data import APIKeyFailoverContext, APIKeySelectionContext
+from agently.types.data import (
+    APIKeyFailoverContext,
+    APIKeySelectionContext,
+    ModelProfileResolution,
+)
+
+if TYPE_CHECKING:
+    from agently.utils.Settings import Settings
 
 _ENV_PLACEHOLDER = re.compile(r"\$\{\s*(?:ENV\.)?([^}]+?)\s*\}")
 _DEFAULT_FAILOVER_STATUS_CODES = {401, 403, 429}
@@ -58,6 +65,14 @@ class APIKeyFailoverDecision:
     key_id: str | None = None
     api_key: str | None = None
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _ResolvedModelRoute:
+    model_key: str
+    model_name: str | None
+    profile: dict[str, Any]
+    provider: str
 
 
 def _resolve_env(value: str) -> str:
@@ -237,7 +252,9 @@ def _select_key_entry(
         if selected is not None:
             return selected
     key_values = {str(entry["id"]): str(entry["value"]) for entry in key_entries}
-    selected_key_id = _select_key(strategy, [str(entry["id"]) for entry in key_entries], f"api_key_pool:{ pool_id }", key_values)
+    selected_key_id = _select_key(
+        strategy, [str(entry["id"]) for entry in key_entries], f"api_key_pool:{ pool_id }", key_values
+    )
     selected_entry = _coerce_key_entry(selected_key_id, key_entries, default_id=f"{ pool_id }.selected")
     if selected_entry is None:
         raise ValueError(f"API key pool selection returned unknown key id: { selected_key_id }")
@@ -489,7 +506,145 @@ def _profile_from_model_pool(
     return str(model_ref), {}
 
 
-def resolve_model_pool_settings(model_key: str, settings: Any) -> None:
+def _available_model_keys(model_pool: dict[str, Any]) -> str:
+    keys = sorted(str(key) for key in model_pool)
+    if len(keys) > 10:
+        return f"{', '.join(keys[:10])}, ... ({len(keys)} total)"
+    return ", ".join(keys)
+
+
+def _resolve_model_route(model_key: str, settings: "Settings") -> _ResolvedModelRoute:
+    model_pool = _as_dict(settings.get("model_pool", {}) or {})
+    model_profiles = _as_dict(settings.get("model_profiles", {}) or {})
+    if model_pool and model_key not in model_pool:
+        available = _available_model_keys(model_pool)
+        raise ValueError(
+            f"Unknown model_key {model_key!r}; configure it in model_pool or omit model_key "
+            f"to use inherited model settings. Available model keys: {available}."
+        )
+
+    model_name, profile = _profile_from_model_pool(model_key, model_pool, model_profiles)
+    if model_key in model_pool and not model_name:
+        raise ValueError(f"model_pool[{model_key!r}] must resolve to a non-empty model or model profile.")
+
+    active_plugin = str(settings.get("plugins.ModelRequester.activate", "OpenAICompatible"))
+    provider = str(profile.get("provider") or active_plugin)
+    return _ResolvedModelRoute(
+        model_key=model_key,
+        model_name=model_name,
+        profile=profile,
+        provider=provider,
+    )
+
+
+def _auth_value_present(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(_resolve_env(value).strip())
+    if isinstance(value, Mapping):
+        return any(_auth_value_present(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_auth_value_present(item) for item in value)
+    return value is not None and value is not False
+
+
+def _api_key_pool_auth_state(
+    pool_id: str,
+    api_key_pools: dict[str, Any],
+    legacy_key_pool: dict[str, str],
+) -> tuple[bool, bool]:
+    pool_config = _as_dict(api_key_pools.get(pool_id))
+    raw_entries = pool_config.get("keys")
+    if raw_entries is None:
+        raw_entries = pool_config.get("pool", [])
+    if not isinstance(raw_entries, list):
+        return False, False
+    key_entries: list[dict[str, Any]] = []
+    for index, raw_entry in enumerate(raw_entries):
+        key_entry = _build_key_entry(
+            pool_id=pool_id,
+            index=index,
+            raw_entry=raw_entry,
+            legacy_key_pool=legacy_key_pool,
+        )
+        if key_entry is not None:
+            key_entries.append(key_entry)
+    return bool(key_entries), any(_auth_value_present(entry.get("value")) for entry in key_entries)
+
+
+def _legacy_strategy_has_auth(
+    model_name: str | None,
+    key_pool: dict[str, str],
+    key_pool_strategy: dict[str, dict[str, Any]],
+) -> bool:
+    if model_name is None:
+        return False
+    strategy = _as_dict(key_pool_strategy.get(model_name))
+    pool_ids = strategy.get("pool", [])
+    if not isinstance(pool_ids, list):
+        return False
+    return any(_auth_value_present(key_pool.get(str(key_id))) for key_id in pool_ids)
+
+
+def _profile_value(profile: dict[str, Any], key: str, fallback: Any) -> Any:
+    value = profile.get(key)
+    return fallback if value is None else value
+
+
+def _optional_str(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def resolve_model_profile(model_key: str, settings: "Settings") -> ModelProfileResolution:
+    """Return a non-secret model-profile projection without mutating settings.
+
+    When a non-empty ``model_pool`` is configured, *model_key* must be one of
+    its aliases. With no model pool, the inherited single-model settings remain
+    valid for backward compatibility.
+    """
+    if not model_key:
+        raise ValueError("resolve_model_profile(...) requires a non-empty model_key.")
+
+    route = _resolve_model_route(model_key, settings)
+    profile = route.profile
+    ns = f"plugins.ModelRequester.{route.provider}"
+    api_key_pools = _as_dict(settings.get("api_key_pools", {}) or {})
+    key_pool = _as_dict(settings.get("key_pool", {}) or {})
+    key_pool_strategy = _as_dict(settings.get("key_pool_strategy", {}) or {})
+
+    auth_present = False
+    auth_resolved = False
+    api_key_pool = profile.get("api_key_pool")
+    if api_key_pool:
+        auth_resolved, auth_present = _api_key_pool_auth_state(str(api_key_pool), api_key_pools, key_pool)
+    if not auth_resolved:
+        raw_profile_key = profile.get("api_key")
+        if raw_profile_key is None and isinstance(profile.get("auth"), str):
+            raw_profile_key = profile["auth"]
+        if raw_profile_key is not None:
+            auth_present = _auth_value_present(raw_profile_key)
+            auth_resolved = True
+        elif _auth_value_present(profile.get("auth")):
+            auth_present = True
+            auth_resolved = True
+    if not auth_resolved:
+        auth_present = _legacy_strategy_has_auth(route.model_name, key_pool, key_pool_strategy)
+        auth_resolved = auth_present
+    if not auth_resolved:
+        auth_present = _auth_value_present(settings.get(f"{ns}.api_key", None)) or _auth_value_present(
+            settings.get(f"{ns}.auth", None)
+        )
+
+    return {
+        "model_key": route.model_key,
+        "provider": route.provider,
+        "model": _optional_str(route.model_name if route.model_name is not None else settings.get(f"{ns}.model", None)),
+        "base_url": _optional_str(_profile_value(profile, "base_url", settings.get(f"{ns}.base_url", None))),
+        "full_url": _optional_str(_profile_value(profile, "full_url", settings.get(f"{ns}.full_url", None))),
+        "auth_present": auth_present,
+    }
+
+
+def resolve_model_pool_settings(model_key: str, settings: "Settings") -> None:
     """Resolve *model_key* into provider, model, profile fields, and API key.
 
     Reads the current layered ``model_pool``/``model_profiles``/
@@ -497,23 +652,28 @@ def resolve_model_pool_settings(model_key: str, settings: Any) -> None:
     ``key_pool_strategy``. Injected values are written into the ModelRequester
     settings namespace that the selected provider already reads.
 
-    This is a no-op when *model_key* is ``None`` or empty.
+    This is a no-op when *model_key* is ``None``/empty or no model pool is
+    configured. A non-empty pool rejects unknown aliases before any provider
+    request can be constructed.
     """
     if not model_key:
         return
 
-    model_pool: dict[str, Any] = settings.get("model_pool", {}) or {}
-    model_profiles: dict[str, Any] = settings.get("model_profiles", {}) or {}
-    api_key_pools: dict[str, Any] = settings.get("api_key_pools", {}) or {}
-    key_pool: dict[str, str] = settings.get("key_pool", {}) or {}
-    key_pool_strategy: dict[str, dict[str, Any]] = settings.get("key_pool_strategy", {}) or {}
+    api_key_pools = _as_dict(settings.get("api_key_pools", {}) or {})
+    key_pool = cast(dict[str, str], _as_dict(settings.get("key_pool", {}) or {}))
+    key_pool_strategy = cast(
+        dict[str, dict[str, Any]],
+        _as_dict(settings.get("key_pool_strategy", {}) or {}),
+    )
 
-    model_name, profile = _profile_from_model_pool(model_key, model_pool, model_profiles)
-    if not model_name:
+    route = _resolve_model_route(model_key, settings)
+    model_name = route.model_name
+    profile = route.profile
+    if model_name is None:
         return
 
     active_plugin = str(settings.get("plugins.ModelRequester.activate", "OpenAICompatible"))
-    provider = str(profile.get("provider") or active_plugin)
+    provider = route.provider
     if provider != active_plugin:
         settings.set("plugins.ModelRequester.activate", provider)
     ns = f"plugins.ModelRequester.{provider}"

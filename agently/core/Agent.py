@@ -252,6 +252,7 @@ class BaseAgent:
 
         The model key is resolved through the existing model_pool /
         key_pool_strategy / key_pool settings when a request is consumed.
+        A configured non-empty model_pool rejects unknown aliases at that point.
         Passing None clears the active model key.
         """
         if model_key is None:

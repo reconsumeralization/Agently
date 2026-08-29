@@ -27,6 +27,17 @@ class AgentlyRequestDataDict(TypedDict):
     request_url: str
 
 
+class ModelProfileResolution(TypedDict):
+    """Non-secret, read-only projection of one effective model profile."""
+
+    model_key: str
+    provider: str
+    model: str | None
+    base_url: str | None
+    full_url: str | None
+    auth_present: bool
+
+
 class AgentlyRequestData(BaseModel):
     client_options: dict[str, Any]
     headers: dict[str, str]

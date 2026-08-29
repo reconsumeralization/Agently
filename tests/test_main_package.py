@@ -153,6 +153,16 @@ def test_agent_activate_model_sets_default_model_key_for_requests():
         agent.activate_model("")
 
 
+def test_model_request_rejects_unknown_key_before_provider_dispatch():
+    agent = Agently.create_agent("model-key-validation")
+    agent.set_settings("model_pool", {"known-model": "configured-model"})
+
+    request = agent.create_request(model_key="unknown-model").input("must not be dispatched")
+
+    with pytest.raises(ValueError, match="Unknown model_key 'unknown-model'"):
+        request.get_result()
+
+
 def test_action_executor_plugins_registered():
     plugin_list = Agently.plugin_manager.get_plugin_list("ActionExecutor")
     assert "LocalFunctionActionExecutor" in plugin_list

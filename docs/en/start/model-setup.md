@@ -235,6 +235,30 @@ agent = Agently.create_agent()
 agent.activate_model("reasoning")
 ```
 
+Once `model_pool` is non-empty, an explicit `model_key` is an alias contract:
+the key must be present in that pool. An unknown key raises `ValueError` before
+Agently constructs or sends a provider request, so a typo cannot fall through
+to an inherited or plugin-default endpoint. Omitting `model_key` still uses the
+inherited model settings. When no model pool is configured, legacy optional
+stage keys also continue to use the inherited single-model settings.
+
+Use the read-only resolver to validate one configured alias before dispatch:
+
+```python
+from agently.utils import resolve_model_profile
+
+profile = resolve_model_profile("reasoning", agent.settings)
+assert profile["provider"] == "OpenAICompatible"
+assert profile["base_url"] == "https://api.deepseek.com/v1"
+assert profile["model"] == "deepseek-v4-flash"
+assert profile["auth_present"] is True
+```
+
+The returned projection contains no credential value and does not mutate
+settings or advance API-key selection. It reports profile-level configuration;
+the `model.requesting` RuntimeEvent remains the source for the final provider
+request URL and model after the requester has built the wire request.
+
 `selection` controls which key is used for a new independent request. It
 supports `fixed`, `random`, `round_robin`, and `least_used`; the legacy top-level
 `strategy` / `mode` fields remain selection shortcuts.

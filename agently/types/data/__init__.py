@@ -93,6 +93,7 @@ from .request import (
     APIKeySelectionContext,
     AgentlyRequestData,
     AgentlyRequestDataDict,
+    ModelProfileResolution,
 )
 
 from .response import (

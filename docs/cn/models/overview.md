@@ -110,6 +110,10 @@ result = (
 `activate_model(...)` 影响后续 Agent 自己创建和持有的请求，包括链式
 `agent.input(...).start()` 和 `agent.create_execution()`。如果只想覆盖单次调用，
 使用 `agent.create_request(model_key="deepseek-v4")`。
+当 `model_pool` 非空时，显式 model key 必须存在于池中；未知别名会在 provider dispatch
+之前失败。可以使用 `agently.utils` 的
+`resolve_model_profile(model_key, settings)`，在请求前只读检查 provider、model、endpoint
+和 auth 是否存在，且不会暴露 credential。
 
 API key 会在请求时根据 key pool 的 `selection` 策略选择：`fixed`、`random`、
 `round_robin` 或 `least_used`。旧的 `key_pool_strategy` 路径继续兼容。
