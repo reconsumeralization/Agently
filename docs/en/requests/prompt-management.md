@@ -95,6 +95,39 @@ after injection, for example the `prompt.built` event's
 sufficient evidence for late injections. Redact secrets before retaining
 prompt evidence.
 
+## Keep special cases out of normative instructions
+
+Do not encode behavior for one customer, component/model name, page state,
+incident, fixture, or known answer as a normative prompt branch merely because
+that case exposed a failure. First identify the general invariant or missing
+decision boundary, state the smallest general rule, and verify it against the
+original case plus contrasting valid, invalid, and boundary cases. Remove
+incident-specific literals unless the current request supplies them as real
+facts.
+
+This does not remove legitimate business context. A current authoritative
+business policy, domain invariant, authorization rule, interface contract, or
+runtime fact that changes the request still belongs in `info`, `instruct`,
+`input`, or `output` according to its owner.
+
+Examples are non-normative. They may clarify an already stated rule, but cannot
+introduce behavior, priority, an exception, or an expected answer that the
+general contract never states. Mark them clearly, prefer generic or synthetic
+content, and use contrasting examples when one example would imply a false
+default.
+
+As an Agently prompt-review rule, total illustrative-example content in the
+final rendered prompt must remain smaller than the non-example normative prompt
+text. Measure both sides consistently by characters or model tokens. This is an
+authoring guard, not a claim that model attention has a universal 50 percent
+threshold.
+
+If a task appears to need more demonstrations, treat it as an explicit
+few-shot design instead of hiding more special cases in the ordinary prompt.
+Keep selected demonstrations bounded and test example selection and order,
+label/answer balance, zero-shot versus few-shot behavior, and model-specific
+regressions.
+
 ## Isolate a hot-only request from a reusable Agent
 
 If a reusable configured Agent must create a strict hot-only request, use a
