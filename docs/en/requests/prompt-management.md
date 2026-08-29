@@ -97,13 +97,14 @@ prompt evidence.
 
 ## Keep special cases out of normative instructions
 
-Do not encode behavior for one customer, component/model name, page state,
-incident, fixture, or known answer as a normative prompt branch merely because
-that case exposed a failure. First identify the general invariant or missing
-decision boundary, state the smallest general rule, and verify it against the
-original case plus contrasting valid, invalid, and boundary cases. Remove
-incident-specific literals unless the current request supplies them as real
-facts.
+Do not promote literals or behavior from a single observed instance into a
+normative prompt branch merely because that instance exposed a failure. This
+includes entity literals, one-time input or environment state, historical
+incidents, test fixtures, and expected answers. First identify the general
+invariant or missing decision boundary, state the smallest general rule, and
+verify it against the original instance plus contrasting valid, invalid, and
+boundary cases. Remove instance-specific literals unless the current request
+supplies them as real facts.
 
 This does not remove legitimate business context. A current authoritative
 business policy, domain invariant, authorization rule, interface contract, or
