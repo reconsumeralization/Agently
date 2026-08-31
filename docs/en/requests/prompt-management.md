@@ -20,6 +20,28 @@ Agently splits a prompt into named slots. The slots compose, so you can set pers
 | `input` | user message | the actual question or payload |
 | `output` | user message + parser | the schema you want back |
 
+## Collaborative prompt design and review
+
+When collaborating on a complex workflow or one scoped block, first explain
+the overall scenario and ask the user to confirm the logical ModelRequest
+inventory and each request's responsibility. A concise table can show each
+request's role, relevant input, consumer, and dependencies. Reuse the existing
+topology plan; distinguish model work from Host work and repeated request
+families from provider retries.
+
+After the inventory is confirmed, select requests for detailed review based on
+the user's needs or explain why a request is critical, for example an unresolved
+business decision or consequential policy/output boundary. By default, show
+one selected design, then wait for confirmation or revision before moving to
+the next one or treating the design as approved. An explicit user preference
+for batch review or delegated decisions may change that pace.
+
+Inventory approval is not approval of every selected Prompt. Apply revisions
+to the actual chain/config and check affected producer/consumer contracts and
+workflow roles. Reconfirm changed scope or handoffs, not unchanged decisions.
+Keep pending/confirmed/revising state clear in ordinary review notes; no new
+runtime protocol or mandatory approval of every routine request is implied.
+
 ## Show a business prompt for review
 
 When a business user needs to confirm a prompt choice, start with the scenario,
@@ -27,23 +49,34 @@ the problem this request owns, its boundary, and the result's consumer. A small
 Agently slot table can then expose the concrete prompt and field constraints
 without asking the user to inspect scattered code.
 
-For example, a document planner for a meeting-follow-up product plans coverage
-and section order; it does not write the whole document or create real tasks:
+Prefer a table-first layout: request overview, a `Slot | Topic | Actual prompt
+content` main table, a visible examples table when used, and a field/type/
+requiredness/meaning table for output constraints. Include enum, format, range,
+nullability, and downstream checks where applicable. Adapt the layout; show
+proposed wording rather than placeholders such as “put the business rules here.”
 
-| Surface | Illustrative design |
-|---|---|
-| `input` | The supplied product requirements and unresolved questions. |
-| `info` | Intended readers, agreed scope, and authoritative business facts. |
-| `instruct` | Plan non-overlapping sections covering the requirement; explain each section's purpose and flag missing facts rather than inventing them. |
-| `output` | `parts: list[{title: str, brief: str}]`, with non-empty parts/title/brief, and `open_questions: list[str]`, which may be empty. |
-| Consumer | Writers consume the plan, the user reviews questions, and Host code owns ordering and assembly identity. |
+### Long slots and examples
 
-Adapt the table to the actual decision, including enum, format, range,
-nullability, and downstream validation when relevant. It is a review aid, not a
-fixed template, new runtime schema, or mandatory approval gate for every edit.
-Label representative inputs and redact secrets. Keep this view aligned with
-the actual chain/config and the rendered-prompt audit; do not maintain a second
-prompt source that can drift.
+Divide long slots into meaningful paragraphs, topics, or sections in the
+Prompt source and review view. Use topic-sized rows or expanded sections rather
+than a giant cell. This is not a reason to split files or requests. Review each
+block for relevance, authority, repetition, contradiction, and instance-specific
+rules that were incorrectly generalized.
+
+Show model-visible examples with their content, the existing rule illustrated,
+actual slot/config placement, and synthetic or redacted source status. Mark
+reviewer-only notes or display examples **not sent to the model**; do not inject
+review metadata by default. Examples are a presentation group, not a new Agently
+slot/API. Keep them within the example-volume guard and do not invent examples
+just to fill a section.
+
+Collapsed views may help navigation, but expose full permitted content and
+mark omissions/redactions. The review must stay aligned with the real
+chain/config and rendered-prompt audit, not a separate prompt source.
+
+See the optional [table-first collaboration example](prompt-collaboration.md).
+Its scenario, request list, and fields demonstrate presentation, not a mandatory
+business template. Selected reviews still wait for confirmation as above.
 
 ## Keep one request contract local
 
