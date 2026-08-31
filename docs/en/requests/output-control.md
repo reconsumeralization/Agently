@@ -34,6 +34,36 @@ necessary output control rather than business-logic intrusion. Parsing and
 `ensure` checks do not replace deterministic DTO/Pydantic/SDK validation before
 a real call or side effect.
 
+If measured generation complexity justifies a shallower model-facing contract,
+the Host may explicitly map that intermediate result into the required external
+shape. The external API/DTO contract is unchanged and still validated before
+the call; flattening is not permission to pass an incomplete object downstream.
+
+## When complex structured output becomes unreliable
+
+Do not reject nesting by appearance alone. If representative runs show more
+schema violations, missing keys, ensure failures/retries, or length failures,
+inspect the actual rendered prompt, schema/format support, raw output, provider
+finish reason, and output limits first. Missing context, a parser defect, and
+provider truncation need different fixes.
+
+Consider these options according to the business consumer:
+
+- Flatten redundant hierarchy into a compact model-facing projection. For
+  example, return an offered item key plus its decision instead of copying
+  Host-owned grouping around every item. Keep decision-relevant relationships
+  and facts in the input; Host mappings restore the full result.
+- Split coherent sections or bounded batches when evidence, output size,
+  consumer, or independent validation/repair warrants it. Preserve real
+  dependencies and use bounded concurrency only for independent work.
+- Validate each part and the assembled result against the original required
+  contract. Do not remove ensure, weaken hard rules, or silently make required
+  fields optional to improve a pass rate.
+
+Compare before/after structure and key reliability, ensure failures, retries,
+length failures, request count, latency, observed usage, and semantic coverage. A
+flattening that loses business meaning is not a successful optimization.
+
 ## Rule-first business validation
 
 When the model is expected to satisfy a post-generation business validator,
@@ -428,6 +458,62 @@ async for item in result.get_async_generator(type="instant"):
 final = await result.async_get_data()
 await save_case_update(final)
 ```
+
+## Long prose: plan, write, and assemble
+
+Long prose and large structured data have different generation goals; neither
+is the same problem as recovering a truncated response:
+
+| Concern | Primary approach |
+|---|---|
+| Long prose | Plan useful coverage, develop coherent sections, and manage continuity. |
+| Large structured data | Preserve fields, types, relationships, and collection completeness; use suitable schemas and Host reconstruction. |
+| Truncated delivery | Continue an incomplete result across output windows; native `ensure_long_output()` supports plain text and JSON. |
+
+For long prose, a useful optional pattern is:
+
+```text
+requirements + sources -> section plan
+  -> section writing -> validate/store body -> optional next-use summary
+  -> Host assembly in plan order -> coverage/consistency review
+```
+
+The writer needs the relevant original requirements, current section title and
+scope, the necessary outline/source facts, and compact continuity from earlier
+sections. Keep full accepted bodies in Host storage or artifacts. A summary is
+lossy derived context: it must not override requirements or replace exact source
+evidence. Bound the rolling continuity view instead of accumulating every prior
+body or summary; read exact passages when needed.
+
+- If later sections consume earlier accepted content, sequential
+  `for_each(concurrency=1)` is justified. Otherwise independent sections may
+  use bounded concurrency and Host-ordered collection, without sharing a
+  concurrently mutated summary list.
+- A separate summary request per section is optional, not mandatory. If a later
+  consumer needs it and same-response generation is sufficient, a shallow
+  `body` then `continuity_note` output can share one request. If the note must
+  describe validated, transformed, or read-back text, it needs a later request.
+  Keep body and note from the same accepted result; omit notes with no consumer.
+- Use plain text for a section that is one freeform artifact and structure only
+  the fields with real consumers. Use fresh request drafts and async APIs;
+  `async_get_data()` suffices without a progressive consumer.
+- Host code joins the accepted bodies rather than asking a model to recopy the
+  whole document. Check section coverage/order and semantically review
+  contradictions, duplication, grounding, and usefulness. Repair scoped gaps
+  and expose failed sections instead of padding text or claiming completion.
+
+Diagnose short output before choosing a mechanism: output caps, timeouts,
+schema failures, unclear instructions, and learned brevity differ.
+[LongWriter](https://arxiv.org/abs/2408.07055) found an effect from limited
+long-output SFT samples in its studied models and explored plan/write
+decomposition; that is not proof that pretraining caused a particular provider
+response. `ensure_long_output()` reacts to normalized `length`/`incomplete`,
+not to a normal `stop` with inadequate coverage. It may support a planned
+writer's delivery but cannot replace writing strategy or quality review.
+
+Section count, summary size, concurrency, and repair limits are application
+choices. Account for plan, writer, optional summary/review, and retry calls;
+neither more requests nor more words alone proves a better result.
 
 ## The pipeline
 

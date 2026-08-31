@@ -20,6 +20,31 @@ Agently splits a prompt into named slots. The slots compose, so you can set pers
 | `input` | user message | the actual question or payload |
 | `output` | user message + parser | the schema you want back |
 
+## Show a business prompt for review
+
+When a business user needs to confirm a prompt choice, start with the scenario,
+the problem this request owns, its boundary, and the result's consumer. A small
+Agently slot table can then expose the concrete prompt and field constraints
+without asking the user to inspect scattered code.
+
+For example, a document planner for a meeting-follow-up product plans coverage
+and section order; it does not write the whole document or create real tasks:
+
+| Surface | Illustrative design |
+|---|---|
+| `input` | The supplied product requirements and unresolved questions. |
+| `info` | Intended readers, agreed scope, and authoritative business facts. |
+| `instruct` | Plan non-overlapping sections covering the requirement; explain each section's purpose and flag missing facts rather than inventing them. |
+| `output` | `parts: list[{title: str, brief: str}]`, with non-empty parts/title/brief, and `open_questions: list[str]`, which may be empty. |
+| Consumer | Writers consume the plan, the user reviews questions, and Host code owns ordering and assembly identity. |
+
+Adapt the table to the actual decision, including enum, format, range,
+nullability, and downstream validation when relevant. It is a review aid, not a
+fixed template, new runtime schema, or mandatory approval gate for every edit.
+Label representative inputs and redact secrets. Keep this view aligned with
+the actual chain/config and the rendered-prompt audit; do not maintain a second
+prompt source that can drift.
+
 ## Keep one request contract local
 
 For a one-off Agently fluent request, keep the request expression visible as
