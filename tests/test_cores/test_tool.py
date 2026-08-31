@@ -860,14 +860,21 @@ def test_use_mcp():
 
     server_script = Path(__file__).with_name("cal_mcp_server.py")
     tool.use_mcp(str(server_script))
+    owner_id = tool.action_dispatcher._resolve_execution_resource_owner_id(
+        tool.settings, {"scope": "agent"}
+    )
 
-    result = tool.call_tool("add", kwargs={"first_number": 1, "second_number": 2})
-    assert result["result"] == 3
+    try:
+        result = tool.call_tool("add", kwargs={"first_number": 1, "second_number": 2})
+        assert result["result"] == 3
 
-    result = tool.call_tool("add", kwargs={"a": 1, "b": 2})
-    assert "validation error" in result["error"].lower()
-    assert "first_number" in result["error"]
-    assert "second_number" in result["error"]
+        result = tool.call_tool("add", kwargs={"a": 1, "b": 2})
+        assert "validation error" in result["error"].lower()
+        assert "first_number" in result["error"]
+        assert "second_number" in result["error"]
+    finally:
+        Agently.execution_resource.release_scope("agent", owner_id)
+    assert Agently.execution_resource.list(scope="agent", owner_id=owner_id) == []
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 
 from agently import Agently
 
@@ -36,10 +36,13 @@ async def main() -> None:
         records: list[dict[str, Any]] = []
 
         async def execute(action_id: str, action_input: dict[str, Any]) -> dict[str, Any]:
-            record = await agent.action.async_execute_action(
-                action_id,
-                action_input,
-                settings=agent.settings,
+            record = cast(
+                dict[str, Any],
+                await agent.action.async_execute_action(
+                    action_id,
+                    action_input,
+                    settings=agent.settings,
+                ),
             )
             records.append(record)
             assert record.get("status") in {"success", "partial_success"}, record

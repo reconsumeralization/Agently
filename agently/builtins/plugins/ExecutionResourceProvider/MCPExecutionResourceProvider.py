@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import uuid
+from collections.abc import Awaitable
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agently.utils import LazyImport
 
@@ -51,7 +52,7 @@ class MCPExecutionResourceProvider(BuiltinExecutionResourceProvider):
     ) -> "ExecutionResourceHandle":
         _ = (policy, existing_handle)
         config = requirement.get("config", {})
-        transport = config.get("transport")
+        transport = cast(Any, config.get("transport"))
         LazyImport.import_package("fastmcp", version_constraint=">=3", auto_install=False)
         from fastmcp import Client
 
@@ -78,4 +79,4 @@ class MCPExecutionResourceProvider(BuiltinExecutionResourceProvider):
         client: Any = handle.get("resource")
         close = getattr(client, "close", None)
         if callable(close):
-            await close()
+            await cast(Awaitable[None], close())
