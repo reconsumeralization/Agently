@@ -571,12 +571,15 @@ async def test_execution_resource_release_scope_cleans_handles():
     manager = _create_manager()
     owner = "scope-test-owner"
 
-    agent_requirement = {
-        "kind": "bash",
-        "scope": "agent",
-        "owner_id": owner,
-        "resource_key": "bash1",
-    }
+    agent_requirement = cast(
+        ExecutionResourceRequirement,
+        {
+            "kind": "bash",
+            "scope": "agent",
+            "owner_id": owner,
+            "resource_key": "bash1",
+        },
+    )
     await manager.async_ensure(agent_requirement)
     reused_agent_handle = await manager.async_ensure(agent_requirement)
     await manager.async_ensure(
@@ -587,7 +590,7 @@ async def test_execution_resource_release_scope_cleans_handles():
     )
 
     assert len(manager.list(scope="agent", owner_id=owner)) == 1
-    assert reused_agent_handle["ref_count"] == 2
+    assert reused_agent_handle.get("ref_count") == 2
     assert len(manager.list(scope="session", owner_id=owner)) == 1
 
     await manager.async_release_scope("agent", owner)
@@ -831,7 +834,8 @@ async def test_mcp_execution_resource_provider_owns_client_lifecycle():
             requirement={"kind": "mcp", "config": {"transport": transport}},
             policy={},
         )
-        client = handle["resource"]
+        client = handle.get("resource")
+        assert client is not None
         assert client.transport is transport
         assert await provider.async_health_check(handle) == "ready"
         await provider.async_release(handle)
@@ -878,10 +882,15 @@ async def test_action_use_mcp_shares_one_managed_session_across_registered_tools
         await agent.action.async_use_action_mcp("https://example.com/mcp")
 
     specs = [agent.action.action_registry.get_spec(tool.name) for tool in tools]
-    requirements = [spec["execution_resources"][0] for spec in specs if spec is not None]
+    requirements = [
+        execution_resources[0]
+        for spec in specs
+        if spec is not None
+        and (execution_resources := spec.get("execution_resources"))
+    ]
     assert len(requirements) == 2
-    assert len({item["resource_key"] for item in requirements}) == 1
-    assert requirements[0]["resource_key"].startswith("mcp_server:")
+    assert len({item.get("resource_key") for item in requirements}) == 1
+    assert str(requirements[0].get("resource_key", "")).startswith("mcp_server:")
 
 def test_mcp_executor_resource_blocks_use_action_artifact_contract():
     from agently.builtins.plugins.ActionExecutor.MCPActionExecutor import MCPActionExecutor
