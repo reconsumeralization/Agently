@@ -133,8 +133,25 @@ provider。没有合格 provider 时会 fail closed，绝不会静默回退到
 在 POSIX host 上，内置 Docker provider 及其 gVisor variant 支持 host-binding
 bridge；每次 resource 变为 eligible 之前，provider probe 仍必须验证所需 capability。
 
-V1 串行启动嵌套 Action；即使生成代码尝试并发提交也不会并行执行。
-`read` 和 `replay_safe` 本身不足以证明 Action 可以安全重叠。
+嵌套 Action 默认以 `exclusive` 模式执行。host 只有在确认某个 Action 可以独立、
+安全重叠时，才应在注册时显式开启并行：
+
+```python
+agent.register_action(
+    name="lookup_record",
+    desc="读取一条彼此独立的记录。",
+    kwargs={"record_id": (str, "记录 id")},
+    func=lookup_record,
+    returns={"record_id": (str, "记录 id")},
+    concurrency_mode="parallel",
+)
+```
+
+生成的 SDK 会携带准确的 `concurrency_mode`。程序可以对彼此独立的调用使用
+`asyncio.gather(...)`。host 只并发执行明确声明为 `parallel` 的 Action，并受
+`action.programmatic.max_parallel_subcalls` 限制；`exclusive` Action 会等待此前
+工作完成、独占执行，并阻止后续调用提前启动。仅有 `read` 与 `replay_safe`
+绝不等同于可以安全并发。
 
 只有程序的有界 `print(...)` 输出和 JSON-compatible return value 会组成外层
 Action result。嵌套 Action records 仍是 canonical evidence 与 observation data；

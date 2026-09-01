@@ -188,6 +188,8 @@ def test_in_development_programmatic_action_calling_contract() -> None:
     assert "ephemeral read-only Action micro-DAG" in contract["scope_contract"]
     assert "lossless-JSON returns contract" in contract["eligibility_contract"]
     assert "host_async_bindings" in contract["execution_contract"]
+    assert "concurrency_mode=parallel" in contract["execution_contract"]
+    assert "exclusive Actions form ordering barriers" in contract["execution_contract"]
     assert "re-enters ActionDispatcher" in contract["execution_contract"]
     assert "Agent.release_programmatic_action_calls" in contract["catalog_lifecycle_contract"]
     assert "redaction digest/byte facts" in contract["observation_contract"]

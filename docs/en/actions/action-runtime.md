@@ -305,9 +305,11 @@ agent.set_action_loop(planning_protocol="programmatic")
 
 An explicit `planning_protocol=...` passed to `get_action_result(...)` or
 `async_get_action_result(...)` overrides the Agent setting for that call.
-Programmatic V1 requires read-only, replay-safe Actions with explicit return
-contracts, serializes nested dispatch, and uses a binding-capable isolated code
-ExecutionResource. It does not replace durable TriggerFlow or TaskDAG
+Programmatic mode requires read-only, replay-safe Actions with explicit return
+contracts and uses a binding-capable isolated code ExecutionResource. Nested
+Actions default to exclusive execution; only host-declared
+`concurrency_mode="parallel"` Actions overlap under a bounded scheduler. It does
+not replace durable TriggerFlow or TaskDAG
 orchestration. See [Programmatic Action Calling](programmatic-action-calling.md)
 for the eligibility, safety, context, and recovery boundaries.
 

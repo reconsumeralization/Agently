@@ -273,9 +273,10 @@ agent.set_action_loop(planning_protocol="programmatic")
 | `programmatic` | 用一段有边界 Python 程序对合格只读 Actions 做分支、循环或聚合 |
 
 在 `get_action_result(...)` 或 `async_get_action_result(...)` 上显式传入的
-`planning_protocol=...` 会覆盖本次调用的 Agent 设置。程序化 V1 只纳入有明确
-返回 contract、只读且 replay-safe 的 Actions；嵌套派发采用串行，并依赖支持
-host binding 的隔离 code ExecutionResource。它不会替代可持久化的 TriggerFlow
+`planning_protocol=...` 会覆盖本次调用的 Agent 设置。程序化模式只纳入有明确
+返回 contract、只读且 replay-safe 的 Actions，并依赖支持 host binding 的隔离
+code ExecutionResource。嵌套 Action 默认独占执行；只有 host 明确注册为
+`concurrency_mode="parallel"` 的 Action 才会在有界调度器下并发。它不会替代可持久化的 TriggerFlow
 或 TaskDAG 编排。完整的合格条件、安全、上下文与恢复边界见
 [程序化 Action 调用](programmatic-action-calling.md)。
 

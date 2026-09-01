@@ -145,9 +145,25 @@ On POSIX hosts, the built-in Docker provider and its gVisor variant support the
 host-binding bridge; provider probes still have to verify the required
 capabilities before each resource becomes eligible.
 
-V1 starts nested Actions serially, even if generated code attempts concurrent
-submission. `read` and `replay_safe` do not by themselves prove that an Action
-is safe to overlap.
+Nested Actions are exclusive by default. A host may opt an independently safe
+Action into overlap when registering it:
+
+```python
+agent.register_action(
+    name="lookup_record",
+    desc="Read one independent record.",
+    kwargs={"record_id": (str, "Record id")},
+    func=lookup_record,
+    returns={"record_id": (str, "Record id")},
+    concurrency_mode="parallel",
+)
+```
+
+The generated SDK carries the exact `concurrency_mode`. A program may use
+`asyncio.gather(...)` for independent calls. The host overlaps only Actions
+declared `parallel`, up to `action.programmatic.max_parallel_subcalls`; an
+`exclusive` Action waits for earlier work, runs alone, and blocks later starts
+until it settles. `read` and `replay_safe` alone never imply parallel safety.
 
 Only the program's bounded `print(...)` output and JSON-compatible return value
 form the outer Action result. Nested Action records remain canonical evidence
