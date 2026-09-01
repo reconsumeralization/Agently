@@ -450,6 +450,86 @@ async def test_bridge_cancellation_propagates_and_drains_started_handler(
 
 
 @pytest.mark.asyncio
+async def test_bridge_cancellation_marks_active_parallel_and_queued_exclusive_calls(
+    tmp_path: Path,
+) -> None:
+    parallel_started = asyncio.Event()
+    parallel_cancelled = 0
+    exclusive_started = False
+    active = 0
+
+    async def parallel_handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal active, parallel_cancelled
+        active += 1
+        if active == 2:
+            parallel_started.set()
+        try:
+            await asyncio.Future()
+            raise AssertionError("unreachable")
+        finally:
+            parallel_cancelled += 1
+            active -= 1
+
+    async def exclusive_handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal exclusive_started
+        exclusive_started = True
+        return arguments
+
+    bridge = CodeExecutionBindingBridge(
+        bindings=[
+            _binding(parallel_handler, key="parallel", concurrency_mode="parallel"),
+            _binding(exclusive_handler, key="exclusive", concurrency_mode="exclusive"),
+        ],
+        limits=_limits(call_timeout_seconds=10, max_parallel_calls=2),
+        socket_path=tmp_path / "runtime" / "bridge.sock",
+        container_socket_path="/workspace/build/runtime/bridge.sock",
+    )
+    await bridge.async_start()
+    calls = [
+        asyncio.create_task(
+            _send_frame(
+                bridge,
+                _call_frame(
+                    bridge,
+                    request_id=f"parallel-{value}",
+                    binding_key="parallel",
+                    arguments={"value": value},
+                ),
+            )
+        )
+        for value in (1, 2)
+    ]
+    await asyncio.wait_for(parallel_started.wait(), timeout=1)
+    calls.append(
+        asyncio.create_task(
+            _send_frame(
+                bridge,
+                _call_frame(
+                    bridge,
+                    request_id="exclusive-3",
+                    binding_key="exclusive",
+                    arguments={"value": 3},
+                ),
+            )
+        )
+    )
+    while len(bridge.call_records) < 3:
+        await asyncio.sleep(0)
+
+    await bridge.async_close(cancel_active=True)
+    await asyncio.gather(*calls, return_exceptions=True)
+
+    assert parallel_cancelled == 2
+    assert active == 0
+    assert exclusive_started is False
+    assert [record["status"] for record in bridge.call_records] == [
+        "cancelled",
+        "cancelled",
+        "cancelled",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_injected_python_client_reports_separate_value_and_ordered_logs(
     tmp_path: Path,
 ) -> None:

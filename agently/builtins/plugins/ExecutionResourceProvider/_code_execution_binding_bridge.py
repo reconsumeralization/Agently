@@ -945,13 +945,6 @@ class CodeExecutionBindingBridge:
                     started_at=started_at,
                 )
                 raise
-            except asyncio.CancelledError:
-                await self._record_call_status(
-                    sequence,
-                    status="cancelled",
-                    started_at=started_at,
-                )
-                raise
             except (TypeError, ValueError) as error:
                 await self._record_call_status(
                     sequence,
@@ -986,6 +979,15 @@ class CodeExecutionBindingBridge:
                 "ok": True,
                 "value": value,
             }
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self._record_call_status(
+                    sequence,
+                    status="cancelled",
+                    started_at=started_at,
+                )
+            )
+            raise
         finally:
             if dispatch_acquired:
                 await asyncio.shield(self._release_dispatch(sequence, concurrency_mode))
