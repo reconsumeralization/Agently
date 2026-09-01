@@ -54,6 +54,17 @@ async def _consume_binding_stdout(
     header_bytes = len(magic) + 9
     buffer = bytearray()
     unframed = _BoundedCapture(max_output_bytes, fail_on_overflow=True)
+    response_tasks: set[asyncio.Task[None]] = set()
+    response_write_lock = asyncio.Lock()
+    response_failure: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def settle_response_task(task: asyncio.Task[None]) -> None:
+        response_tasks.discard(task)
+        if task.cancelled() or response_failure.done():
+            return
+        error = task.exception()
+        if error is not None:
+            response_failure.set_exception(error)
 
     async def write_response(payload: bytes) -> None:
         if len(payload) > bridge.limits.max_frame_bytes:
@@ -64,8 +75,23 @@ async def _consume_binding_stdout(
             timeout=bridge.limits.frame_timeout_seconds,
         )
 
+    async def process_protocol_frame(payload: bytes) -> None:
+        response = await bridge.async_process_stdio_frame(payload)
+        async with response_write_lock:
+            await write_response(response)
+
     while True:
-        chunk = await stream.read(65536)
+        read_task = asyncio.create_task(stream.read(65536))
+        done, _pending = await asyncio.wait(
+            {read_task, response_failure},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if response_failure in done:
+            read_task.cancel()
+            await asyncio.gather(read_task, return_exceptions=True)
+            await response_failure
+            raise AssertionError("unreachable")
+        chunk = read_task.result()
         if chunk:
             buffer.extend(chunk)
         while buffer:
@@ -95,14 +121,19 @@ async def _consume_binding_stdout(
                 break
             payload = bytes(buffer[header_bytes:complete_size])
             del buffer[:complete_size]
-            response = await bridge.async_process_stdio_frame(payload)
-            await write_response(response)
+            task = asyncio.create_task(process_protocol_frame(payload))
+            response_tasks.add(task)
+            task.add_done_callback(settle_response_task)
         if not chunk:
             break
     if buffer:
         if buffer.startswith(magic):
             raise BindingStdioProtocolError("binding program protocol frame ended before completion")
         unframed.add(bytes(buffer))
+    if response_tasks:
+        await asyncio.gather(*tuple(response_tasks))
+    if response_failure.done():
+        await response_failure
     return bytes(unframed.value), unframed.truncated
 
 

@@ -283,6 +283,7 @@ class Action:
             approval_required=False,
             sandbox_required=True,
             replay_safe=True,
+            concurrency_mode="exclusive",
             expose_to_model=False,
             executor_type=str(getattr(executor, "kind", "programmatic_action")),
             execution_resources=[requirement],
@@ -510,6 +511,7 @@ class Action:
         approval_required: bool,
         sandbox_required: bool,
         replay_safe: bool,
+        concurrency_mode: Literal["parallel", "exclusive"],
         expose_to_model: bool,
         executor_type: str,
         execution_resources: list[ExecutionResourceRequirement] | None,
@@ -528,6 +530,7 @@ class Action:
                 "approval_required": approval_required,
                 "sandbox_required": sandbox_required,
                 "replay_safe": replay_safe,
+                "concurrency_mode": concurrency_mode,
                 "expose_to_model": expose_to_model,
                 "executor_type": executor_type,
                 "execution_resources": execution_resources if execution_resources is not None else [],
@@ -593,6 +596,7 @@ class Action:
         approval_required: bool = False,
         sandbox_required: bool = False,
         replay_safe: bool = True,
+        concurrency_mode: Literal["parallel", "exclusive"] = "exclusive",
         expose_to_model: bool = True,
         execution_resources: list[ExecutionResourceRequirement] | None = None,
         meta: dict[str, Any] | None = None,
@@ -601,6 +605,8 @@ class Action:
             if func is None:
                 raise ValueError("register_action() requires either func or executor.")
             executor = self._create_executor("LocalFunctionActionExecutor", func=func)
+        if concurrency_mode not in {"parallel", "exclusive"}:
+            raise ValueError("concurrency_mode must be 'parallel' or 'exclusive'.")
         normalized_tags = self._normalize_tags(tags)
         executor_type = str(getattr(executor, "kind", "function"))
         resolved_required_input_keys = self._resolve_required_input_keys(
@@ -620,6 +626,7 @@ class Action:
             approval_required=approval_required,
             sandbox_required=sandbox_required,
             replay_safe=replay_safe,
+            concurrency_mode=concurrency_mode,
             expose_to_model=expose_to_model,
             executor_type=executor_type,
             execution_resources=execution_resources,

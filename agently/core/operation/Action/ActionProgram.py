@@ -211,11 +211,11 @@ def build_programmatic_python_source(program: str) -> str:
     """Wrap one validated async-function body in the provider binding client.
 
     The returned source is the only program entry point needed by a Python
-    binding-capable CodeExecution provider.  Syntax is validated after
-    wrapping because top-level ``await`` and ``return`` are intentionally
-    function-body syntax, not standalone-module syntax. V1 requires an
-    explicit return in that execution scope and rejects nested function/class
-    wrappers; their returns cannot settle the reserved program Action.
+    binding-capable CodeExecution provider. Syntax is validated after wrapping
+    because top-level ``await`` and ``return`` are intentionally function-body
+    syntax, not standalone-module syntax. The outer execution scope requires an
+    explicit return; nested functions/classes are allowed but their returns do
+    not satisfy that completion contract.
     """
 
     if not isinstance(program, str):
@@ -245,21 +245,29 @@ def build_programmatic_python_source(program: str) -> str:
         program_function = next(
             node for node in parsed.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "_agently_program"
         )
-        nested_declaration = next(
-            (
-                node
-                for node in ast.walk(program_function)
-                if node is not program_function
-                and isinstance(
-                    node,
-                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
-                )
-            ),
-            None,
-        )
-        if nested_declaration is not None:
-            raise ValueError("nested def, async def, class, decorator, or wrapper declarations are not allowed")
-        if not any(isinstance(node, ast.Return) for node in ast.walk(program_function)):
+        class _OuterReturnVisitor(ast.NodeVisitor):
+            found = False
+
+            def visit_Return(self, node: ast.Return) -> None:
+                _ = node
+                self.found = True
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                _ = node
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                _ = node
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                _ = node
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                _ = node
+
+        return_visitor = _OuterReturnVisitor()
+        for statement in program_function.body:
+            return_visitor.visit(statement)
+        if not return_visitor.found:
             raise ValueError("the program execution scope must contain an explicit return statement")
     except (SyntaxError, ValueError, TypeError) as error:
         raise ValueError(f"Programmatic Action program is not a valid async Python body: {error}") from error
@@ -521,6 +529,11 @@ def _project_programmatic_action_spec(
             "output_schema": output_schema,
             "required_input_keys": required_input_keys,
             "artifact_read_exception": artifact_read_exception,
+            "concurrency_mode": (
+                "parallel"
+                if spec.get("concurrency_mode", "exclusive") == "parallel"
+                else "exclusive"
+            ),
         },
         diagnostics,
     )
@@ -956,6 +969,7 @@ def programmatic_action_catalog_revision(
             "input_schema": entry["input_schema"],
             "output_schema": entry["output_schema"],
             "required_input_keys": entry["required_input_keys"],
+            "concurrency_mode": entry["concurrency_mode"],
         }
         for entry in ordered_entries
     ]
@@ -992,6 +1006,7 @@ def render_programmatic_action_sdk(
             "input_schema": entry["input_schema"],
             "required_input_keys": entry["required_input_keys"],
             "returns": entry["output_schema"],
+            "concurrency_mode": entry["concurrency_mode"],
         }
         for entry in ordered_entries
     }

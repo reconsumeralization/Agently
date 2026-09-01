@@ -187,6 +187,7 @@ from .action import (
     ActionResult,
     ActionRunContext,
     ActionPlanningProtocol,
+    ActionConcurrencyMode,
     ActionSideEffectLevel,
     ActionSpec,
     ActionStatus,
@@ -215,6 +216,7 @@ from .execution_resource import (
 
 from .code_execution import (
     CodeExecutionBinding,
+    CodeExecutionBindingConcurrencyMode,
     CodeExecutionBindingCallRecord,
     CodeExecutionBindingError,
     CodeExecutionBindingLimits,

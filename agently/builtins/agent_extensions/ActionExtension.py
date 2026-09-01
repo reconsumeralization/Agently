@@ -124,6 +124,10 @@ class ActionExtension(BaseAgent):
             approval_required=bool(copied_spec.get("approval_required", False)),
             sandbox_required=bool(copied_spec.get("sandbox_required", False)),
             replay_safe=bool(copied_spec.get("replay_safe", True)),
+            concurrency_mode=cast(
+                Literal["parallel", "exclusive"],
+                copied_spec.get("concurrency_mode", "exclusive"),
+            ),
             expose_to_model=bool(copied_spec.get("expose_to_model", True)),
             execution_resources=copied_spec.get("execution_resources", []),
             meta=copied_spec.get("meta", {}),
@@ -137,6 +141,7 @@ class ActionExtension(BaseAgent):
         kwargs: "KwargsType",
         func: Callable,
         returns: "ReturnType | None" = None,
+        concurrency_mode: Literal["parallel", "exclusive"] = "exclusive",
     ) -> Self:
         self.action.register_action(
             action_id=name,
@@ -145,6 +150,7 @@ class ActionExtension(BaseAgent):
             func=func,
             tags=[f"agent-{ self.name }"],
             returns=returns,
+            concurrency_mode=concurrency_mode,
         )
         return self
 

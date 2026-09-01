@@ -23,6 +23,7 @@ from .execution_resource import ExecutionResourceRequirement
 
 ActionStatus = Literal["success", "partial_success", "error", "approval_required", "blocked", "skipped"]
 ActionSideEffectLevel = Literal["read", "write", "exec"]
+ActionConcurrencyMode = Literal["parallel", "exclusive"]
 ActionPlanningProtocol = Literal["structured_plan", "native_tool_calls", "programmatic"]
 
 PROGRAMMATIC_ACTION_TRANSPORT_ID = "run_action_program"
@@ -111,6 +112,7 @@ class ActionSpec(TypedDict, total=False):
     approval_required: bool
     sandbox_required: bool
     replay_safe: bool
+    concurrency_mode: ActionConcurrencyMode
     expose_to_model: bool
     executor_type: str
     execution_resources: list[ExecutionResourceRequirement]
@@ -167,6 +169,7 @@ class ProgrammaticActionCatalogEntry(TypedDict):
     output_schema: dict[str, Any]
     required_input_keys: list[str]
     artifact_read_exception: bool
+    concurrency_mode: ActionConcurrencyMode
 
 
 class ProgrammaticActionCatalog(TypedDict):

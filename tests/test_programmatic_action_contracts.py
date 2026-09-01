@@ -93,6 +93,18 @@ def test_programmatic_catalog_is_lexical_and_byte_deterministic():
     assert len(first["catalog_revision"]) == len("sha256:") + 64
 
 
+def test_programmatic_catalog_binds_explicit_action_concurrency_mode():
+    exclusive = build_programmatic_action_catalog([_read_spec()])
+    parallel = build_programmatic_action_catalog(
+        [_read_spec(concurrency_mode="parallel")]
+    )
+
+    assert exclusive["entries"][0]["concurrency_mode"] == "exclusive"
+    assert parallel["entries"][0]["concurrency_mode"] == "parallel"
+    assert exclusive["catalog_revision"] != parallel["catalog_revision"]
+    assert '\\"concurrency_mode\\":\\"parallel\\"' in parallel["sdk"]
+
+
 def test_catalog_mapping_can_use_schema_like_action_ids_without_becoming_one_spec():
     catalog = build_programmatic_action_catalog(
         {
@@ -489,15 +501,19 @@ def test_programmatic_python_source_rejects_empty_or_invalid_bodies(program):
 
 
 def test_r4_nested_async_wrapper_return_does_not_satisfy_program_return_contract():
-    with pytest.raises(ValueError, match="nested def, async def"):
+    with pytest.raises(ValueError, match="explicit return"):
         build_programmatic_python_source(
             "async def run():\n" "    return await actions.search_docs({'query': 'Agently'})"
         )
 
 
-def test_decorated_wrapper_is_rejected_even_with_a_direct_outer_return():
-    with pytest.raises(ValueError, match="decorator, or wrapper"):
-        build_programmatic_python_source("@trace\n" "async def run():\n" "    return 3\n" "return await run()")
+def test_programmatic_python_source_allows_nested_async_handler_with_outer_return():
+    source = build_programmatic_python_source(
+        "async def run():\n"
+        "    return await actions.search_docs({'query': 'Agently'})\n"
+        "return await run()"
+    )
+    compile(source, "<programmatic-action-handler-test>", "exec")
 
 
 def test_programmatic_python_source_allows_lambda_with_direct_scope_return():

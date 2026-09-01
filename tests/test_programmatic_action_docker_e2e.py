@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -157,4 +158,76 @@ async def test_programmatic_action_direct_generated_call_uses_docker_binding(
 
     assert observed == ["r1"], json.dumps(record, ensure_ascii=False, default=str)
     assert record.get("status") == "success"
+    assert catalog["catalog_revision"] not in agent.action.action_runtime._programmatic_catalogs
+
+
+@pytest.mark.asyncio
+async def test_programmatic_action_docker_overlaps_parallel_safe_actions(
+    tmp_path: Path,
+) -> None:
+    probe = DockerExecutionResource()
+    if not probe.inspect_availability().get("available"):
+        pytest.skip("local Docker daemon is unavailable")
+    image = "python:3.12-slim"
+    if not probe.inspect_image(image).get("exists"):
+        pytest.skip(f"required local Docker image is unavailable: {image}")
+
+    agent = Agently.create_agent()
+    agent.set_settings("code_execution.providers", ["docker"])
+    agent.set_settings("task_workspace.root", str(tmp_path / "workspace"))
+    agent.set_settings("task_workspace.mode", "read_write")
+    agent.set_settings("action.programmatic.max_parallel_subcalls", 3)
+    active = 0
+    peak_active = 0
+
+    async def lookup_record(record_id: str) -> dict[str, Any]:
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        try:
+            await asyncio.sleep(0.08)
+            return {"record_id": record_id}
+        finally:
+            active -= 1
+
+    tag = f"agent-{agent.name}"
+    agent.action.register_action(
+        action_id="lookup_record",
+        desc="Look up one independent record.",
+        kwargs={"record_id": (str, "Record id")},
+        func=lookup_record,
+        returns={"record_id": (str, "Record id")},
+        tags=[tag],
+        side_effect_level="read",
+        replay_safe=True,
+        concurrency_mode="parallel",
+        expose_to_model=True,
+    )
+    action_list = agent.action.get_action_list(tags=[tag])
+    catalog = build_programmatic_action_catalog(action_list)
+    assert catalog["entries"][0]["concurrency_mode"] == "parallel"
+    agent.action.action_runtime._retain_programmatic_catalog(dict(catalog))
+    agent.action._ensure_programmatic_action_transport(settings=agent.settings)
+
+    record = await agent.action.async_execute_action(
+        PROGRAMMATIC_ACTION_TRANSPORT_ID,
+        {
+            "program": (
+                "records = await asyncio.gather(*[\n"
+                "    actions.lookup_record({'record_id': record_id})\n"
+                "    for record_id in ['r1', 'r2', 'r3']\n"
+                "])\n"
+                "return {'record_ids': [record['record_id'] for record in records]}"
+            ),
+            "description": "lookup records concurrently",
+            "catalog_revision": catalog["catalog_revision"],
+        },
+        settings=agent.settings,
+        purpose="lookup independent records concurrently",
+        source_protocol="programmatic",
+    )
+
+    assert record.get("status") == "success", json.dumps(record, ensure_ascii=False, default=str)
+    assert peak_active == 3
+    assert active == 0
     assert catalog["catalog_revision"] not in agent.action.action_runtime._programmatic_catalogs

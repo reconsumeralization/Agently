@@ -448,8 +448,9 @@ async def test_default_programmatic_planner_builds_one_reserved_action_call(
     assert request.prompt.get("tools") is None
     prompt_text = request.prompt.to_text()
     assert "lookup_record" in prompt_text
-    assert "Never emit def, async def" in prompt_text
-    assert "direct body-level return" in prompt_text
+    assert "local helper definitions are allowed" in prompt_text
+    assert "concurrency_mode='parallel'" in prompt_text
+    assert "direct return" in prompt_text
     assert request.settings.get("model_request.output_observation.sensitive_paths") == ["program"]
     assert agent.action.action_registry._is_reserved(PROGRAMMATIC_ACTION_TRANSPORT_ID)
 

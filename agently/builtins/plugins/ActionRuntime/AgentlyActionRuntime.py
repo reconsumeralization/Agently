@@ -651,12 +651,15 @@ class AgentlyActionRuntime:
                     "language": "python",
                     "python_version": ">=3.10",
                     "source_shape": (
-                        "statements inside an existing async function body; " "no def, async def, decorator, or wrapper"
+                        "statements inside an existing async function body; local helper definitions are allowed"
                     ),
                     "completion": "an explicit return directly owned by the generated body",
                     "max_program_bytes": max_program_bytes,
                     "max_description_bytes": max_description_bytes,
-                    "dispatch": "serial",
+                    "dispatch": (
+                        "explicit concurrency_mode='parallel' Actions may overlap up to the host limit; "
+                        "exclusive Actions form ordering barriers"
+                    ),
                     "return": "lossless JSON",
                     "model_hot_result": "bounded print output and return value only",
                 },
@@ -666,13 +669,13 @@ class AgentlyActionRuntime:
                 "Decide whether another Action round is required to answer {input.user_input}.",
                 "Use next_action='response' with program=null when no Action work remains.",
                 "When Action work remains, write only the statements that belong inside the already-existing async function body, using the authoritative SDK in {info.action_sdk}.",
-                "Never emit def, async def, a decorator, or an outer/nested wrapper function or class in program.",
+                "You may define local helper functions, async handlers, or classes when they make the program clearer; do not wrap or invoke a second top-level program entry point.",
                 "The generated body must contain at least one explicit return directly owned by that body, not only a return nested under another function or class.",
                 "Call only offered bindings as await actions.name({...}) or await actions['exotic-name']({...}).",
                 "Treat every SDK input and return schema as authoritative and exhaustive. Never invent unlisted fields, wildcard ids, magic values, or implicit bulk operations.",
                 "When a later Action requires an id or field produced by an earlier Action, read that exact field from the earlier result and pass it explicitly.",
                 "Use loops, branches, and local JSON data transformations only when they help the current task.",
-                "Nested Actions execute serially in V1. Do not assume asyncio.gather makes them concurrent.",
+                "Use asyncio.gather only for calls that are independent. Actions whose SDK contract declares concurrency_mode='parallel' may overlap; exclusive Actions are serialized as ordering barriers by the host.",
                 "Return one bounded lossless-JSON value containing only what the next response round needs.",
                 "Only print(...) output and the return value become the outer Action result; intermediate Action values stay program-local.",
                 "Do not import network, filesystem, subprocess, package-manager, credential, or host-control capabilities.",
@@ -695,8 +698,8 @@ class AgentlyActionRuntime:
                     "str | None",
                     (
                         "Statements for the inside of an existing async function when "
-                        "next_action=execute; never include def/async def/decorators/wrappers, "
-                        "and include a direct body-level return. Otherwise null."
+                        "next_action=execute; local helper definitions are allowed, and the "
+                        "outer generated body must include a direct return. Otherwise null."
                     ),
                     True,
                 ),

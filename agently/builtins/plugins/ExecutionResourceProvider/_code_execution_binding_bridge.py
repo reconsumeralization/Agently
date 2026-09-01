@@ -75,6 +75,7 @@ import json
 import os
 import secrets
 import sys
+import threading
 from typing import Any
 
 _TRANSPORT = os.environ.get("AGENTLY_CODE_BINDING_TRANSPORT", "unix_socket")
@@ -89,7 +90,11 @@ _RESPONSE_TIMEOUT_SECONDS = float(os.environ["AGENTLY_CODE_BINDING_RESPONSE_TIME
 _STDIO_MAGIC = b"\x1eAGENTLY-CODE-BINDING-1:"
 _PROTOCOL_INPUT = sys.stdin.buffer
 _PROTOCOL_OUTPUT = sys.stdout.buffer
-_STDIO_LOCK: asyncio.Lock | None = None
+_STDIO_LOOP: asyncio.AbstractEventLoop | None = None
+_STDIO_READER_THREAD: threading.Thread | None = None
+_STDIO_WRITE_LOCK = threading.Lock()
+_STDIO_PENDING: dict[str, asyncio.Future[bytes]] = {}
+_STDIO_TERMINAL_REQUEST_ID: str | None = None
 
 
 class BindingCallError(RuntimeError):
@@ -179,9 +184,13 @@ def _read_exact(stream: Any, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def _blocking_stdio_request(raw: bytes) -> bytes:
-    _PROTOCOL_OUTPUT.write(_stdio_frame(raw))
-    _PROTOCOL_OUTPUT.flush()
+def _blocking_stdio_write(raw: bytes) -> None:
+    with _STDIO_WRITE_LOCK:
+        _PROTOCOL_OUTPUT.write(_stdio_frame(raw))
+        _PROTOCOL_OUTPUT.flush()
+
+
+def _blocking_stdio_read() -> bytes:
     header = _read_exact(_PROTOCOL_INPUT, len(_STDIO_MAGIC) + 9)
     if not header.startswith(_STDIO_MAGIC) or header[-1:] != b":":
         raise RuntimeError("binding stdio response header is invalid")
@@ -194,15 +203,73 @@ def _blocking_stdio_request(raw: bytes) -> bytes:
     return _read_exact(_PROTOCOL_INPUT, size)
 
 
-async def _stdio_request(raw: bytes) -> bytes:
-    global _STDIO_LOCK
-    if _STDIO_LOCK is None:
-        _STDIO_LOCK = asyncio.Lock()
-    async with _STDIO_LOCK:
-        return await asyncio.wait_for(
-            asyncio.to_thread(_blocking_stdio_request, raw),
-            timeout=_RESPONSE_TIMEOUT_SECONDS,
+def _resolve_stdio_response(request_id: str, payload: bytes) -> None:
+    future = _STDIO_PENDING.pop(request_id, None)
+    if future is not None and not future.done():
+        future.set_result(payload)
+
+
+def _fail_stdio_responses(error: BaseException) -> None:
+    for request_id, future in list(_STDIO_PENDING.items()):
+        _STDIO_PENDING.pop(request_id, None)
+        if not future.done():
+            future.set_exception(RuntimeError(f"binding stdio response reader failed: {type(error).__name__}"))
+
+
+def _stdio_reader_main() -> None:
+    loop = _STDIO_LOOP
+    if loop is None:
+        return
+    try:
+        while True:
+            payload = _blocking_stdio_read()
+            parsed = json.loads(payload)
+            request_id = parsed.get("request_id") if isinstance(parsed, dict) else None
+            if not isinstance(request_id, str):
+                raise RuntimeError("binding stdio response identity is invalid")
+            loop.call_soon_threadsafe(_resolve_stdio_response, request_id, payload)
+            if request_id == _STDIO_TERMINAL_REQUEST_ID:
+                return
+    except BaseException as error:
+        loop.call_soon_threadsafe(_fail_stdio_responses, error)
+
+
+def _ensure_stdio_reader() -> None:
+    global _STDIO_LOOP, _STDIO_READER_THREAD
+    loop = asyncio.get_running_loop()
+    if _STDIO_LOOP is None:
+        _STDIO_LOOP = loop
+    elif _STDIO_LOOP is not loop:
+        raise RuntimeError("binding stdio client cannot span event loops")
+    if _STDIO_READER_THREAD is None:
+        _STDIO_READER_THREAD = threading.Thread(
+            target=_stdio_reader_main,
+            name="agently-code-binding-reader",
+            daemon=True,
         )
+        _STDIO_READER_THREAD.start()
+
+
+async def _stdio_request(raw: bytes, request_id: str, *, terminal: bool) -> bytes:
+    global _STDIO_TERMINAL_REQUEST_ID
+    _ensure_stdio_reader()
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[bytes] = loop.create_future()
+    if request_id in _STDIO_PENDING:
+        raise RuntimeError("duplicate binding stdio request id")
+    _STDIO_PENDING[request_id] = future
+    if terminal:
+        _STDIO_TERMINAL_REQUEST_ID = request_id
+    try:
+        await asyncio.to_thread(_blocking_stdio_write, raw)
+        payload = await asyncio.wait_for(future, timeout=_RESPONSE_TIMEOUT_SECONDS)
+        if terminal and _STDIO_READER_THREAD is not None:
+            await asyncio.to_thread(_STDIO_READER_THREAD.join, _FRAME_TIMEOUT_SECONDS)
+            if _STDIO_READER_THREAD.is_alive():
+                raise RuntimeError("binding stdio response reader did not settle")
+        return payload + b"\n"
+    finally:
+        _STDIO_PENDING.pop(request_id, None)
 
 
 async def _request(payload: dict[str, Any]) -> dict[str, Any]:
@@ -223,7 +290,11 @@ async def _request(payload: dict[str, Any]) -> dict[str, Any]:
     if _TRANSPORT == "unix_socket":
         response_raw = await _unix_request(raw)
     elif _TRANSPORT == "stdio_framed":
-        response_raw = await _stdio_request(raw)
+        response_raw = await _stdio_request(
+            raw,
+            request_id,
+            terminal=payload.get("type") == "complete",
+        )
     else:
         raise BindingCallError(
             binding_key=str(payload.get("binding_key", "")),
@@ -464,7 +535,10 @@ class CodeExecutionBindingBridge:
         self._server: asyncio.AbstractServer | None = None
         self._started = False
         self._state_lock = asyncio.Lock()
-        self._dispatch_lock = asyncio.Lock()
+        self._schedule_condition = asyncio.Condition()
+        self._pending_dispatches: dict[int, str] = {}
+        self._active_dispatches: set[int] = set()
+        self._exclusive_dispatch_active = False
         self._client_tasks: set[asyncio.Task[Any]] = set()
         self._call_tasks: set[asyncio.Task[Any]] = set()
         self._seen_request_ids: set[str] = set()
@@ -669,6 +743,40 @@ class CodeExecutionBindingBridge:
                 int((time.monotonic() - started_at) * 1000),
             )
 
+    async def _acquire_dispatch(self, sequence: int, mode: str) -> None:
+        """Admit one binding call in submission order under safe/exclusive rules."""
+
+        async with self._schedule_condition:
+            self._pending_dispatches[sequence] = mode
+            self._schedule_condition.notify_all()
+            try:
+                while True:
+                    head = min(self._pending_dispatches, default=None)
+                    if head == sequence and not self._exclusive_dispatch_active:
+                        if mode == "parallel" and len(self._active_dispatches) < self.limits.max_parallel_calls:
+                            self._pending_dispatches.pop(sequence, None)
+                            self._active_dispatches.add(sequence)
+                            self._schedule_condition.notify_all()
+                            return
+                        if mode == "exclusive" and not self._active_dispatches:
+                            self._pending_dispatches.pop(sequence, None)
+                            self._active_dispatches.add(sequence)
+                            self._exclusive_dispatch_active = True
+                            self._schedule_condition.notify_all()
+                            return
+                    await self._schedule_condition.wait()
+            except BaseException:
+                self._pending_dispatches.pop(sequence, None)
+                self._schedule_condition.notify_all()
+                raise
+
+    async def _release_dispatch(self, sequence: int, mode: str) -> None:
+        async with self._schedule_condition:
+            self._active_dispatches.discard(sequence)
+            if mode == "exclusive":
+                self._exclusive_dispatch_active = False
+            self._schedule_condition.notify_all()
+
     async def _handle_call(
         self,
         frame: Mapping[str, Any],
@@ -754,6 +862,8 @@ class CodeExecutionBindingBridge:
                 binding_key=binding_key,
                 request_id=request_id,
             )
+        concurrency_mode = binding.concurrency_mode
+        self._call_records[sequence]["concurrency_mode"] = concurrency_mode
         try:
             validate_code_execution_json_schema(
                 arguments,
@@ -774,94 +884,96 @@ class CodeExecutionBindingBridge:
         current_task = asyncio.current_task()
         if current_task is not None:
             self._call_tasks.add(current_task)
+        dispatch_acquired = False
         try:
-            async with self._dispatch_lock:
-                try:
-                    value = await asyncio.wait_for(
-                        binding.async_handler(arguments),
-                        timeout=self.limits.call_timeout_seconds,
+            await self._acquire_dispatch(sequence, concurrency_mode)
+            dispatch_acquired = True
+            try:
+                value = await asyncio.wait_for(
+                    binding.async_handler(arguments),
+                    timeout=self.limits.call_timeout_seconds,
+                )
+                value = normalize_code_execution_json_value(value)
+                validate_code_execution_json_schema(
+                    value,
+                    binding.output_schema,
+                    field_name="binding result",
+                )
+                value_bytes = len(code_execution_json_bytes(value))
+                if value_bytes > self.limits.max_response_bytes:
+                    raise _ProtocolFailure(
+                        "Binding result exceeds the response limit.",
+                        binding_key=binding_key,
+                        request_id=request_id,
                     )
-                    value = normalize_code_execution_json_value(value)
-                    validate_code_execution_json_schema(
-                        value,
-                        binding.output_schema,
-                        field_name="binding result",
-                    )
-                    value_bytes = len(code_execution_json_bytes(value))
-                    if value_bytes > self.limits.max_response_bytes:
+                async with self._state_lock:
+                    if self._request_bytes + self._response_bytes + value_bytes > self.limits.max_total_bytes:
                         raise _ProtocolFailure(
-                            "Binding result exceeds the response limit.",
+                            "Aggregate binding byte limit exhausted.",
                             binding_key=binding_key,
                             request_id=request_id,
                         )
-                    async with self._state_lock:
-                        if self._request_bytes + self._response_bytes + value_bytes > self.limits.max_total_bytes:
-                            raise _ProtocolFailure(
-                                "Aggregate binding byte limit exhausted.",
-                                binding_key=binding_key,
-                                request_id=request_id,
-                            )
-                        self._response_bytes += value_bytes
-                except asyncio.TimeoutError as error:
-                    await self._record_call_status(
-                        sequence,
-                        status="timed_out",
-                        started_at=started_at,
-                    )
-                    raise _ProtocolFailure(
-                        "Host binding timed out.",
-                        status="timed_out",
-                        binding_key=binding_key,
-                        request_id=request_id,
-                    ) from error
-                except CodeExecutionBindingError as error:
-                    await self._record_call_status(
-                        sequence,
-                        status=error.status,
-                        started_at=started_at,
-                    )
-                    raise _ProtocolFailure(
-                        error.public_message,
-                        status=error.status,
-                        binding_key=binding_key,
-                        request_id=request_id,
-                    ) from error
-                except _ProtocolFailure:
-                    await self._record_call_status(
-                        sequence,
-                        status="error",
-                        started_at=started_at,
-                    )
-                    raise
-                except asyncio.CancelledError:
-                    await self._record_call_status(
-                        sequence,
-                        status="cancelled",
-                        started_at=started_at,
-                    )
-                    raise
-                except (TypeError, ValueError) as error:
-                    await self._record_call_status(
-                        sequence,
-                        status="error",
-                        started_at=started_at,
-                    )
-                    raise _ProtocolFailure(
-                        "Host binding result violates its declared JSON contract.",
-                        binding_key=binding_key,
-                        request_id=request_id,
-                    ) from error
-                except Exception as error:
-                    await self._record_call_status(
-                        sequence,
-                        status="error",
-                        started_at=started_at,
-                    )
-                    raise _ProtocolFailure(
-                        "Host binding failed.",
-                        binding_key=binding_key,
-                        request_id=request_id,
-                    ) from error
+                    self._response_bytes += value_bytes
+            except asyncio.TimeoutError as error:
+                await self._record_call_status(
+                    sequence,
+                    status="timed_out",
+                    started_at=started_at,
+                )
+                raise _ProtocolFailure(
+                    "Host binding timed out.",
+                    status="timed_out",
+                    binding_key=binding_key,
+                    request_id=request_id,
+                ) from error
+            except CodeExecutionBindingError as error:
+                await self._record_call_status(
+                    sequence,
+                    status=error.status,
+                    started_at=started_at,
+                )
+                raise _ProtocolFailure(
+                    error.public_message,
+                    status=error.status,
+                    binding_key=binding_key,
+                    request_id=request_id,
+                ) from error
+            except _ProtocolFailure:
+                await self._record_call_status(
+                    sequence,
+                    status="error",
+                    started_at=started_at,
+                )
+                raise
+            except asyncio.CancelledError:
+                await self._record_call_status(
+                    sequence,
+                    status="cancelled",
+                    started_at=started_at,
+                )
+                raise
+            except (TypeError, ValueError) as error:
+                await self._record_call_status(
+                    sequence,
+                    status="error",
+                    started_at=started_at,
+                )
+                raise _ProtocolFailure(
+                    "Host binding result violates its declared JSON contract.",
+                    binding_key=binding_key,
+                    request_id=request_id,
+                ) from error
+            except Exception as error:
+                await self._record_call_status(
+                    sequence,
+                    status="error",
+                    started_at=started_at,
+                )
+                raise _ProtocolFailure(
+                    "Host binding failed.",
+                    binding_key=binding_key,
+                    request_id=request_id,
+                ) from error
             await self._record_call_status(
                 sequence,
                 status="success",
@@ -875,6 +987,8 @@ class CodeExecutionBindingBridge:
                 "value": value,
             }
         finally:
+            if dispatch_acquired:
+                await asyncio.shield(self._release_dispatch(sequence, concurrency_mode))
             if current_task is not None:
                 self._call_tasks.discard(current_task)
 

@@ -33,6 +33,7 @@ from typing_extensions import TypedDict
 
 CodeExecutionFileRole = Literal["source", "dependency", "input"]
 CodeExecutionStepRole = Literal["build", "run"]
+CodeExecutionBindingConcurrencyMode = Literal["parallel", "exclusive"]
 
 
 class CodeExecutionIsolationCapability(TypedDict, total=False):
@@ -85,6 +86,7 @@ class CodeExecutionBindingCallRecord(TypedDict, total=False):
     request_bytes: int
     response_bytes: int
     elapsed_ms: int
+    concurrency_mode: CodeExecutionBindingConcurrencyMode
 
 
 class CodeExecutionBindingSummary(TypedDict, total=False):
@@ -133,6 +135,7 @@ _MAX_BINDING_FRAME_BYTES = 4 * 1024 * 1024
 _MAX_BINDING_VALUE_BYTES = 4 * 1024 * 1024
 _MAX_BINDING_TOTAL_BYTES = 64 * 1024 * 1024
 _MAX_BINDING_CALLS = 1024
+_MAX_BINDING_PARALLEL_CALLS = 256
 _MAX_BINDING_FRAMES = 2048
 _MAX_BINDING_LOG_LINES = 4096
 _MAX_BINDING_SECONDS = 300.0
@@ -704,6 +707,7 @@ class CodeExecutionBinding:
     )
     input_schema: Mapping[str, Any] = field(default_factory=dict)
     output_schema: Mapping[str, Any] = field(default_factory=dict)
+    concurrency_mode: CodeExecutionBindingConcurrencyMode = "exclusive"
 
     def __post_init__(self) -> None:
         key = unicodedata.normalize("NFC", self.binding_key.strip()) if isinstance(self.binding_key, str) else ""
@@ -715,6 +719,8 @@ class CodeExecutionBinding:
             raise ValueError("binding_key must be a bounded canonical string without control characters")
         if not callable(self.async_handler):
             raise TypeError("async_handler must be callable")
+        if self.concurrency_mode not in {"parallel", "exclusive"}:
+            raise ValueError("concurrency_mode must be 'parallel' or 'exclusive'")
         if not isinstance(self.input_schema, Mapping) or not isinstance(self.output_schema, Mapping):
             raise TypeError("binding input_schema and output_schema must be JSON Schema mappings")
         validate_code_execution_json_schema_definition(
@@ -752,6 +758,7 @@ class CodeExecutionBindingLimits:
     max_response_bytes: int = 1024 * 1024
     max_total_bytes: int = 8 * 1024 * 1024
     max_calls: int = 64
+    max_parallel_calls: int = 10
     max_protocol_frames: int = 96
     max_log_bytes: int = 20_000
     max_log_lines: int = 512
@@ -776,6 +783,10 @@ class CodeExecutionBindingLimits:
             ),
             "max_total_bytes": (self.max_total_bytes, _MAX_BINDING_TOTAL_BYTES),
             "max_calls": (self.max_calls, _MAX_BINDING_CALLS),
+            "max_parallel_calls": (
+                self.max_parallel_calls,
+                _MAX_BINDING_PARALLEL_CALLS,
+            ),
             "max_protocol_frames": (
                 self.max_protocol_frames,
                 _MAX_BINDING_FRAMES,

@@ -102,6 +102,11 @@ class ProgrammaticActionExecutor:
                 32 * 1024 * 1024,
             ),
             max_calls=max_calls,
+            max_parallel_calls=self._positive_int(
+                settings,
+                "action.programmatic.max_parallel_subcalls",
+                10,
+            ),
             max_protocol_frames=max(max_calls + 1, max_calls * 2 + 8),
             max_log_bytes=self._positive_int(
                 settings,
@@ -388,6 +393,7 @@ class ProgrammaticActionExecutor:
                     async_handler=dispatch,
                     input_schema=entry["input_schema"],
                     output_schema=entry["output_schema"],
+                    concurrency_mode=entry.get("concurrency_mode", "exclusive"),
                 )
             )
         return tuple(bindings), subcall_records

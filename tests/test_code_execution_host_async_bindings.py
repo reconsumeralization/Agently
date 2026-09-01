@@ -5,7 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -44,6 +44,7 @@ def _limits(**overrides: Any) -> CodeExecutionBindingLimits:
         "max_total_bytes": 16 * 1024,
         "max_calls": 8,
         "max_protocol_frames": 16,
+        "max_parallel_calls": 3,
         "max_log_bytes": 1024,
         "max_log_lines": 16,
         "call_timeout_seconds": 1,
@@ -58,6 +59,7 @@ def _binding(
     handler: Any,
     *,
     key: str = "echo",
+    concurrency_mode: Literal["parallel", "exclusive"] = "exclusive",
     output_schema: dict[str, Any] | None = None,
 ) -> CodeExecutionBinding:
     return CodeExecutionBinding(
@@ -76,6 +78,7 @@ def _binding(
             "required": ["value"],
             "additionalProperties": False,
         },
+        concurrency_mode=concurrency_mode,
     )
 
 
@@ -169,6 +172,13 @@ def test_binding_contract_rejects_implicit_json_conversion_and_unsupported_schem
             max_protocol_frames=8,
         )
     assert limits.max_calls == 8
+    assert limits.max_parallel_calls == 3
+
+    with pytest.raises(ValueError, match="concurrency_mode"):
+        _binding(handler, concurrency_mode="unsafe")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="max_parallel_calls"):
+        _limits(max_parallel_calls=0)
 
 
 @pytest.mark.asyncio
@@ -231,6 +241,97 @@ async def test_bridge_serializes_concurrent_calls_and_records_only_bounded_facts
             "logs_truncated": False,
         }
         assert bridge.summary["successful_calls"] == 2
+    finally:
+        await bridge.async_close(cancel_active=True)
+
+
+@pytest.mark.asyncio
+async def test_bridge_overlaps_parallel_bindings_and_honors_exclusive_barriers(
+    tmp_path: Path,
+) -> None:
+    active = 0
+    max_active = 0
+    events: list[str] = []
+
+    async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal active, max_active
+        value = arguments["value"]
+        active += 1
+        max_active = max(max_active, active)
+        events.append(f"start:{value}")
+        try:
+            await asyncio.sleep(0.04 if value < 3 else 0.01)
+            return {"value": value + 1}
+        finally:
+            events.append(f"end:{value}")
+            active -= 1
+
+    bridge = CodeExecutionBindingBridge(
+        bindings=[
+            _binding(handler, key="parallel", concurrency_mode="parallel"),
+            _binding(handler, key="exclusive", concurrency_mode="exclusive"),
+        ],
+        limits=_limits(max_parallel_calls=2),
+        socket_path=tmp_path / "runtime" / "bridge.sock",
+        container_socket_path="/workspace/build/runtime/bridge.sock",
+    )
+    await bridge.async_start()
+    try:
+        responses = await asyncio.gather(
+            _send_frame(
+                bridge,
+                _call_frame(
+                    bridge,
+                    request_id="parallel-1",
+                    binding_key="parallel",
+                    arguments={"value": 1},
+                ),
+            ),
+            _send_frame(
+                bridge,
+                _call_frame(
+                    bridge,
+                    request_id="parallel-2",
+                    binding_key="parallel",
+                    arguments={"value": 2},
+                ),
+            ),
+            _send_frame(
+                bridge,
+                _call_frame(
+                    bridge,
+                    request_id="exclusive-3",
+                    binding_key="exclusive",
+                    arguments={"value": 3},
+                ),
+            ),
+            _send_frame(
+                bridge,
+                _call_frame(
+                    bridge,
+                    request_id="parallel-4",
+                    binding_key="parallel",
+                    arguments={"value": 4},
+                ),
+            ),
+        )
+        assert [response["value"] for response in responses] == [
+            {"value": 2},
+            {"value": 3},
+            {"value": 4},
+            {"value": 5},
+        ]
+        assert max_active == 2
+        assert events.index("start:3") > events.index("end:1")
+        assert events.index("start:3") > events.index("end:2")
+        assert events.index("start:4") > events.index("end:3")
+        assert [record["sequence"] for record in bridge.call_records] == [1, 2, 3, 4]
+        assert [record["concurrency_mode"] for record in bridge.call_records] == [
+            "parallel",
+            "parallel",
+            "exclusive",
+            "parallel",
+        ]
     finally:
         await bridge.async_close(cancel_active=True)
 
@@ -503,6 +604,78 @@ asyncio.run(execute_program(program))
     assert bridge.program_completion is not None
     assert bridge.program_completion["value"] == {"value": 32}
     assert bridge.program_completion["logs"] == ["stdio-log"]
+
+
+@pytest.mark.asyncio
+async def test_framed_stdio_client_multiplexes_parallel_binding_responses(
+    tmp_path: Path,
+) -> None:
+    active = 0
+    max_active = 0
+
+    async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.04)
+            return {"value": arguments["value"] + 100}
+        finally:
+            active -= 1
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / CODE_EXECUTION_BINDING_CLIENT_MODULE).write_text(
+        python_binding_client_source(),
+        encoding="utf-8",
+    )
+    script = tmp_path / "stdio-parallel-program.py"
+    script.write_text(
+        """import asyncio
+from agently_code_bindings import call_binding, execute_program
+
+async def program():
+    return await asyncio.gather(*[
+        call_binding("parallel", {"value": value})
+        for value in range(3)
+    ])
+
+asyncio.run(execute_program(program))
+""",
+        encoding="utf-8",
+    )
+    bridge = CodeExecutionBindingBridge(
+        bindings=[_binding(handler, key="parallel", concurrency_mode="parallel")],
+        limits=_limits(max_parallel_calls=3),
+        socket_path=tmp_path / "unused.sock",
+        container_socket_path="/unused.sock",
+        transport="stdio_framed",
+    )
+    await bridge.async_start()
+    try:
+        result, transport_error = await run_bounded_binding_process(
+            [sys.executable, str(script)],
+            bridge=bridge,
+            timeout=5,
+            max_output_bytes=1024,
+            env={
+                **os.environ,
+                **bridge.environment,
+                "PYTHONPATH": str(runtime_dir),
+            },
+        )
+    finally:
+        await bridge.async_close(cancel_active=True)
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert transport_error == ""
+    assert max_active == 3
+    assert bridge.program_completion is not None
+    assert bridge.program_completion["value"] == [
+        {"value": 100},
+        {"value": 101},
+        {"value": 102},
+    ]
 
 
 @pytest.mark.asyncio
