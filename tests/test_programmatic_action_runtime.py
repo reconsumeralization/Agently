@@ -4,7 +4,7 @@ import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -60,7 +60,7 @@ def test_action_registry_reserved_transport_cannot_be_replaced_or_removed() -> N
         registry.register(
             _spec("run_action_program"),
             replacement,
-            reserved=True,
+            reserved=True,  # type: ignore[call-arg]
         )
 
     assert registry.unregister("run_action_program") is False
@@ -104,8 +104,8 @@ def test_programmatic_transport_resolves_current_provider_and_timeout_per_call()
         policy={"network_mode": "disabled"},
     )
 
-    assert requirements[0]["provider_candidates"] == [{"provider_id": "gvisor", "config": {}}]
-    assert requirements[0]["policy"]["timeout_seconds"] == 2
+    assert requirements[0].get("provider_candidates") == [{"provider_id": "gvisor", "config": {}}]
+    assert requirements[0].get("policy", {}).get("timeout_seconds") == 2
 
 
 def test_provider_terminal_status_is_normalized_to_action_status() -> None:
@@ -721,7 +721,7 @@ async def test_programmatic_reserved_action_runs_through_triggerflow_action_flow
 ) -> None:
     provider_id = "ptc_flow_synthetic_provider"
     provider = _FlowBindingProvider(provider_id)
-    Agently.execution_resource.register_provider(provider)
+    Agently.execution_resource.register_provider(cast(Any, provider))
     agent = Agently.create_agent()
     agent.set_settings("code_execution.providers", [provider_id])
     agent.set_action_loop(planning_protocol="programmatic", max_rounds=2)
@@ -787,6 +787,6 @@ async def test_programmatic_reserved_action_runs_through_triggerflow_action_flow
     assert provider.ensure_count == 1
     assert provider.release_count == 1
     assert len(records) == 1
-    assert records[0]["action_id"] == PROGRAMMATIC_ACTION_TRANSPORT_ID
-    assert all(record["action_id"] != "lookup_record" for record in records)
+    assert records[0].get("action_id") == PROGRAMMATIC_ACTION_TRANSPORT_ID
+    assert all(record.get("action_id") != "lookup_record" for record in records)
     assert agent.action.action_runtime.resolve_programmatic_catalog(catalog["catalog_revision"]) is None

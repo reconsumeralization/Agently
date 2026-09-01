@@ -57,7 +57,7 @@ def test_reserved_registry_id_cannot_be_replaced_via_public_register() -> None:
         registry.register(
             _registry_spec("run_action_program", name="replacement"),  # type: ignore[arg-type]
             replacement,
-            reserved=True,
+            reserved=True,  # type: ignore[call-arg]
         )
 
     assert registry.get_executor("run_action_program") is original
@@ -209,7 +209,7 @@ async def test_programmatic_dispatch_preserves_declared_wildcard_kwargs() -> Non
 
     assert received == [{"dynamic_key": "kept"}]
     assert value == {"dynamic_key": "kept"}
-    assert record["status"] == "success"
+    assert record.get("status") == "success"
 
 
 @pytest.mark.asyncio
@@ -708,7 +708,7 @@ async def test_denied_outer_approval_releases_program_catalog_lease() -> None:
     finally:
         Agently.policy_approval.unregister_handler(handler_name)
 
-    assert records[0]["status"] == "blocked"
+    assert records[0].get("status") == "blocked"
     assert runtime.resolve_programmatic_catalog(catalog["catalog_revision"]) is None
 
 
