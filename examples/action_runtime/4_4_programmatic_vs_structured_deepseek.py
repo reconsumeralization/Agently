@@ -64,14 +64,26 @@ def configure_deepseek() -> None:
 async def run_route(protocol: ActionPlanningProtocol) -> dict[str, Any]:
     agent = Agently.create_agent(name=f"action-loop-{protocol}")
     agent.set_settings("code_execution.providers", ["docker"])
+    agent.set_settings("action.programmatic.max_parallel_subcalls", 4)
     agent.set_action_loop(
         planning_protocol=protocol,
         max_rounds=4,
-        concurrency=1,
+        concurrency=4,
         timeout=180,
     )
     model_events: Counter[str] = Counter()
     action_calls: list[dict[str, Any]] = []
+    active_action_calls = 0
+    peak_action_calls = 0
+
+    async def start_observed_call() -> None:
+        nonlocal active_action_calls, peak_action_calls
+        active_action_calls += 1
+        peak_action_calls = max(peak_action_calls, active_action_calls)
+
+    def finish_observed_call() -> None:
+        nonlocal active_action_calls
+        active_action_calls -= 1
 
     async def capture_event(event: Any) -> None:
         event_type = str(getattr(event, "event_type", ""))
@@ -81,11 +93,17 @@ async def run_route(protocol: ActionPlanningProtocol) -> dict[str, Any]:
     hook_name = f"action-loop-example-{protocol}"
     Agently.event_center.register_hook(capture_event, hook_name=hook_name)
 
-    def list_team(department: str) -> list[dict[str, str]]:
+    async def list_team(department: str) -> list[dict[str, str]]:
+        await start_observed_call()
         action_calls.append({"action_id": "list_team", "department": department})
-        return list(TEAM) if department == "engineering" else []
+        try:
+            await asyncio.sleep(0.04)
+            return list(TEAM) if department == "engineering" else []
+        finally:
+            finish_observed_call()
 
-    def get_expenses(user_id: str, quarter: str) -> list[dict[str, float]]:
+    async def get_expenses(user_id: str, quarter: str) -> list[dict[str, float]]:
+        await start_observed_call()
         action_calls.append(
             {
                 "action_id": "get_expenses",
@@ -93,11 +111,20 @@ async def run_route(protocol: ActionPlanningProtocol) -> dict[str, Any]:
                 "quarter": quarter,
             }
         )
-        return [{"amount": amount} for amount in EXPENSES.get(user_id, []) if quarter == "Q3"]
+        try:
+            await asyncio.sleep(0.08)
+            return [{"amount": amount} for amount in EXPENSES.get(user_id, []) if quarter == "Q3"]
+        finally:
+            finish_observed_call()
 
-    def get_budget(level: str) -> dict[str, float]:
+    async def get_budget(level: str) -> dict[str, float]:
+        await start_observed_call()
         action_calls.append({"action_id": "get_budget", "level": level})
-        return {"limit": BUDGETS[level]}
+        try:
+            await asyncio.sleep(0.08)
+            return {"limit": BUDGETS[level]}
+        finally:
+            finish_observed_call()
 
     agent.register_action(
         name="list_team",
@@ -120,6 +147,7 @@ async def run_route(protocol: ActionPlanningProtocol) -> dict[str, Any]:
         },
         func=get_expenses,
         returns=[{"amount": (float, "One expense amount")}],
+        concurrency_mode="parallel",
     )
     agent.register_action(
         name="get_budget",
@@ -127,6 +155,7 @@ async def run_route(protocol: ActionPlanningProtocol) -> dict[str, Any]:
         kwargs={"level": (str, "Employee level returned by list_team")},
         func=get_budget,
         returns={"limit": (float, "Budget limit")},
+        concurrency_mode="parallel",
     )
 
     prompt = (
@@ -151,7 +180,7 @@ async def run_route(protocol: ActionPlanningProtocol) -> dict[str, Any]:
             prompt=turn.request.prompt,
             planning_protocol=protocol,
             max_rounds=4,
-            concurrency=1,
+            concurrency=4,
             timeout=180,
             store_for_reply=True,
         )
@@ -163,6 +192,7 @@ async def run_route(protocol: ActionPlanningProtocol) -> dict[str, Any]:
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "model_requests": model_events["model.request_started"],
         "business_action_calls": len(action_calls),
+        "peak_business_action_concurrency": peak_action_calls,
         "action_statuses": [
             {
                 "action_id": record.get("action_id"),
@@ -184,11 +214,12 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
-# Expected key output from the 2026-08-24 DeepSeek effect gate:
+# Expected key business output from the 2026-08-24 DeepSeek baseline (the
+# concurrent rewrite keeps the same source facts and result contract):
 # - Both routes return u1/spent=600/limit=500 and
 #   u2/spent=1200/limit=1000, with no u3 row.
-# - The observed structured route used 4 model requests and 6 business calls.
-# - The observed programmatic route used 3 model requests and 7 business calls.
-# Model-owned call order/count can vary. In the recorded run PTC saved one model
-# request but used more input tokens and elapsed time, so measure the workload
-# instead of treating PTC as an automatic cost/latency optimization.
+# The baseline request/call/latency numbers are not asserted here because the
+# current example permits bounded parallel Actions and records actual peak
+# concurrency. Model-owned call order/count can vary. Re-run the paired routes
+# and compare business completion, peak concurrency, requests, usage and elapsed
+# time instead of treating PTC as an automatic optimization.
