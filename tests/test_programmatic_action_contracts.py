@@ -52,7 +52,7 @@ def test_action_planning_protocol_and_reserved_constants_are_typed():
     }
     assert PROGRAMMATIC_ACTION_TRANSPORT_ID == "run_action_program"
     assert PROGRAMMATIC_ACTION_ARTIFACT_READ_ID == "read_action_artifact"
-    assert PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION.endswith(".v1")
+    assert PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION.endswith(".v2")
 
 
 def test_action_package_does_not_export_programmatic_mechanism_helpers():
@@ -123,7 +123,7 @@ def test_programmatic_catalog_revision_binds_contract_renderer_and_host_seed():
     )
     changed_renderer = build_programmatic_action_catalog(
         [_read_spec()],
-        renderer_version="agently.programmatic_action.python.v2",
+        renderer_version="agently.programmatic_action.python.v3",
         revision_seed="request:v1",
     )
     changed_seed = build_programmatic_action_catalog([_read_spec()], revision_seed="request:v2")

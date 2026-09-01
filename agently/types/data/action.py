@@ -28,7 +28,7 @@ ActionPlanningProtocol = Literal["structured_plan", "native_tool_calls", "progra
 
 PROGRAMMATIC_ACTION_TRANSPORT_ID = "run_action_program"
 PROGRAMMATIC_ACTION_ARTIFACT_READ_ID = "read_action_artifact"
-PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION = "agently.programmatic_action.python.v1"
+PROGRAMMATIC_ACTION_SDK_RENDERER_VERSION = "agently.programmatic_action.python.v2"
 
 
 class ActionPolicy(TypedDict, total=False):

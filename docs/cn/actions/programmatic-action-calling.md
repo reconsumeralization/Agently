@@ -68,12 +68,12 @@ finally:
 只有一两个小型直接调用时，优先使用 `structured_plan` 或
 `native_tool_calls`。此时启动代码运行环境和生成程序通常不会带来收益。
 
-### 实测 ActionLoop 对比
+### 历史串行 ActionLoop 对比
 
 可运行样例
 [`4_4_programmatic_vs_structured_deepseek.py`](../../../examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py)
-固定使用同一模型、prompt、output schema、源数据和三组只读 Action。2026-08-24
-记录的 DeepSeek 运行结果是：
+最初固定使用同一模型、prompt、output schema、源数据和三组只读 Action。
+2026-08-24 记录的**串行 PTC** DeepSeek 运行结果是：
 
 | 观测事实 | `structured_plan` | `programmatic` |
 |---|---:|---:|
@@ -89,12 +89,15 @@ PTC 少了一轮模型请求，但在这个小场景中，确定性 SDK 与 prog
 “token 更少”和“延迟更低”应分别测量。PTC 更适合需要运行时控制或压缩大体积
 中间值的工作负载，不应被视为所有多调用任务的自动优化。
 
-## V1 合格边界
+当前样例已为独立读取加入显式并发合同，并会记录真实 Action 并发峰值。上表只作为
+重写前的串行基线保留，不能作为当前并发候选的效果证据。
 
-V1 生成一段 Python 3.10+ async function body；它的 return value 必须符合
+## 当前合格边界
+
+当前协议生成一段 Python 3.10+ async function body；它的 return value 必须符合
 lossless JSON data model。
 
-程序化模式不会暴露所有已注册 Actions。V1 只纳入同时满足下列条件的 Action：
+程序化模式不会暴露所有已注册 Actions，只纳入同时满足下列条件的 Action：
 
 - 在当前运行范围内可见，且 `expose_to_model=True`；
 - 声明了 `side_effect_level="read"`；

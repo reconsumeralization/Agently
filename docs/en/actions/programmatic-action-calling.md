@@ -72,12 +72,12 @@ Prefer `structured_plan` or `native_tool_calls` for one or two small direct
 calls. The code-runtime startup and program-generation work usually adds no
 value in that case.
 
-### Observed ActionLoop comparison
+### Historical serial ActionLoop comparison
 
 The runnable
 [`4_4_programmatic_vs_structured_deepseek.py`](../../../examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py)
-example holds the model, prompt, output schema, source data, and three read
-Action families constant. In the recorded 2026-08-24 DeepSeek run:
+example originally held the model, prompt, output schema, source data, and three
+read Action families constant. In the recorded 2026-08-24 **serial PTC** run:
 
 | Observed fact | `structured_plan` | `programmatic` |
 |---|---:|---:|
@@ -95,12 +95,17 @@ separate measurements. PTC is most compelling when runtime control or reducing
 large intermediate values matters—not as an automatic optimization for every
 multi-call task.
 
-## V1 eligibility boundary
+The current example now gives independent reads an explicit parallel contract
+and records real peak Action concurrency. The serial table is retained only as
+the pre-rewrite baseline; do not use it as evidence for the concurrent
+candidate.
 
-V1 generates the body of one Python 3.10+ async function. Its return value must
+## Current eligibility boundary
+
+The current protocol generates the body of one Python 3.10+ async function. Its return value must
 use the lossless JSON data model.
 
-Programmatic mode does not expose every registered Action. V1 includes only an
+Programmatic mode does not expose every registered Action. It includes only an
 Action that is:
 
 - visible in the current Action run scope and `expose_to_model=True`;

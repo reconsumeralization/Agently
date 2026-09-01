@@ -52,7 +52,7 @@ Example groups:
   - `4_3_custom_action_flow_plugin_local.py`
 - Programmatic Action comparison
   - `4_4_programmatic_vs_structured_deepseek.py` compares the ordinary
-    `structured_plan` Action loop with `programmatic` PTC on the same real
+    `structured_plan` Action loop with concurrent `programmatic` PTC on the same real
     DeepSeek task and local read-only business Actions. It also requires a
     running Docker daemon and the local `python:3.12-slim` image.
 - Cookbook patterns
