@@ -22,6 +22,13 @@ Agently splits a prompt into named slots. The slots compose, so you can set pers
 
 ## Collaborative prompt design and review
 
+Apply this method by default when it is known that the user is developing with
+Agently and the current work is solution design, workflow/block optimization,
+or Prompt review. Do not wait for the user to request a table. Ordinary
+implementation, bug fixing, provider setup, or unrelated configuration does not
+trigger this review ceremony merely because the repository uses Agently.
+Follow an explicit request to batch reviews, skip details, or delegate decisions.
+
 When collaborating on a complex workflow or one scoped block, first explain
 the overall scenario and ask the user to confirm the logical ModelRequest
 inventory and each request's responsibility. A concise table can show each
