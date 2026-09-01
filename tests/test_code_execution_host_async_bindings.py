@@ -337,6 +337,93 @@ async def test_bridge_overlaps_parallel_bindings_and_honors_exclusive_barriers(
 
 
 @pytest.mark.asyncio
+async def test_bridge_bounds_parallel_pressure_and_releases_failed_exclusive_barrier(
+    tmp_path: Path,
+) -> None:
+    active = 0
+    peak_active = 0
+    failed_exclusive_finished = asyncio.Event()
+
+    async def parallel_handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        try:
+            await asyncio.sleep(0.015)
+            return {"value": arguments["value"] + 1}
+        finally:
+            active -= 1
+
+    async def exclusive_handler(_arguments: dict[str, Any]) -> dict[str, Any]:
+        assert active == 0
+        try:
+            raise RuntimeError("synthetic exclusive failure")
+        finally:
+            failed_exclusive_finished.set()
+
+    bridge = CodeExecutionBindingBridge(
+        bindings=[
+            _binding(parallel_handler, key="parallel", concurrency_mode="parallel"),
+            _binding(exclusive_handler, key="exclusive", concurrency_mode="exclusive"),
+        ],
+        limits=_limits(max_calls=16, max_protocol_frames=40, max_parallel_calls=3),
+        socket_path=tmp_path / "runtime" / "bridge.sock",
+        container_socket_path="/workspace/build/runtime/bridge.sock",
+    )
+    await bridge.async_start()
+    try:
+        before = [
+            asyncio.create_task(
+                _send_frame(
+                    bridge,
+                    _call_frame(
+                        bridge,
+                        request_id=f"before-{value}",
+                        binding_key="parallel",
+                        arguments={"value": value},
+                    ),
+                )
+            )
+            for value in range(6)
+        ]
+        exclusive = asyncio.create_task(
+            _send_frame(
+                bridge,
+                _call_frame(
+                    bridge,
+                    request_id="exclusive-failure",
+                    binding_key="exclusive",
+                    arguments={"value": 10},
+                ),
+            )
+        )
+        after = asyncio.create_task(
+            _send_frame(
+                bridge,
+                _call_frame(
+                    bridge,
+                    request_id="after-11",
+                    binding_key="parallel",
+                    arguments={"value": 11},
+                ),
+            )
+        )
+        before_responses = await asyncio.gather(*before)
+        exclusive_response = await exclusive
+        after_response = await after
+
+        assert all(response["ok"] is True for response in before_responses)
+        assert exclusive_response["ok"] is False
+        assert exclusive_response["error"]["status"] == "error"
+        assert failed_exclusive_finished.is_set()
+        assert after_response["value"] == {"value": 12}
+        assert peak_active == 3
+        assert active == 0
+    finally:
+        await bridge.async_close(cancel_active=True)
+
+
+@pytest.mark.asyncio
 async def test_bridge_rejects_unknown_invalid_duplicate_and_post_settlement_frames(
     tmp_path: Path,
 ) -> None:
@@ -383,7 +470,7 @@ async def test_bridge_rejects_unknown_invalid_duplicate_and_post_settlement_fram
             _call_frame(bridge, request_id="bad-output-1"),
         )
         assert bad_output["ok"] is False
-        assert bad_output["error"]["status"] == "rejected"
+        assert bad_output["error"]["status"] == "error"
         assert bad_output["error"]["message"] == ("Host binding result violates its declared JSON contract.")
         assert handler_calls == 1
 

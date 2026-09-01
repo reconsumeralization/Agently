@@ -903,6 +903,7 @@ class CodeExecutionBindingBridge:
                 if value_bytes > self.limits.max_response_bytes:
                     raise _ProtocolFailure(
                         "Binding result exceeds the response limit.",
+                        status="error",
                         binding_key=binding_key,
                         request_id=request_id,
                     )
@@ -910,6 +911,7 @@ class CodeExecutionBindingBridge:
                     if self._request_bytes + self._response_bytes + value_bytes > self.limits.max_total_bytes:
                         raise _ProtocolFailure(
                             "Aggregate binding byte limit exhausted.",
+                            status="error",
                             binding_key=binding_key,
                             request_id=request_id,
                         )
@@ -953,6 +955,7 @@ class CodeExecutionBindingBridge:
                 )
                 raise _ProtocolFailure(
                     "Host binding result violates its declared JSON contract.",
+                    status="error",
                     binding_key=binding_key,
                     request_id=request_id,
                 ) from error
@@ -964,6 +967,7 @@ class CodeExecutionBindingBridge:
                 )
                 raise _ProtocolFailure(
                     "Host binding failed.",
+                    status="error",
                     binding_key=binding_key,
                     request_id=request_id,
                 ) from error
