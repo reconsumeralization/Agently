@@ -47,7 +47,7 @@ def configure_deepseek() -> None:
             "base_url": base_url,
             "model": os.environ.get(
                 "DEEPSEEK_DEFAULT_MODEL",
-                "deepseek-chat",
+                "deepseek-v4-flash",
             ),
             "model_type": "chat",
             "auth": api_key,

@@ -7,7 +7,7 @@ Environment:
     DEEPSEEK_API_KEY must be available in the shell or a .env file.
     Optional:
       DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
-      DEEPSEEK_DEFAULT_MODEL=deepseek-chat
+      DEEPSEEK_DEFAULT_MODEL=deepseek-v4-flash
       AGENTLY_SKILLS_REPO=../Agently-Skills
 
 Expected key output from a real DeepSeek run after this diagnostic passes:
@@ -98,10 +98,13 @@ def configure_deepseek():
         "OpenAICompatible",
         {
             "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-            "model": os.getenv("DEEPSEEK_DEFAULT_MODEL", "deepseek-chat"),
+            "model": os.getenv("DEEPSEEK_DEFAULT_MODEL", "deepseek-v4-flash"),
             "model_type": "chat",
             "auth": api_key,
-            "request_options": {"temperature": 0.0},
+            "request_options": {
+                "temperature": 0.0,
+                "thinking": {"type": "disabled"},
+            },
         },
     )
     Agently.set_settings("debug", False)
