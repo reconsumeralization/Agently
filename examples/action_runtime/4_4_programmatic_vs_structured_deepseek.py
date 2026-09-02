@@ -214,12 +214,10 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
-# Expected key business output from the 2026-08-24 DeepSeek baseline (the
-# concurrent rewrite keeps the same source facts and result contract):
-# - Both routes return u1/spent=600/limit=500 and
-#   u2/spent=1200/limit=1000, with no u3 row.
-# The baseline request/call/latency numbers are not asserted here because the
-# current example permits bounded parallel Actions and records actual peak
-# concurrency. Model-owned call order/count can vary. Re-run the paired routes
-# and compare business completion, peak concurrency, requests, usage and elapsed
-# time instead of treating PTC as an automatic optimization.
+# Expected source-grounded business projection:
+# - u1/spent=600/limit=500 and u2/spent=1200/limit=1000, with no u3 row.
+# Model-owned results are observed rather than asserted. In the 2026-09-02
+# DSv4-Flash acceptance sample, programmatic returned the exact projection while
+# structured_plan omitted u1. Re-run both routes and compare business completion,
+# peak concurrency, requests, provider usage and elapsed time; do not treat PTC
+# as an automatic token or latency optimization.

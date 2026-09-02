@@ -68,29 +68,33 @@ finally:
 只有一两个小型直接调用时，优先使用 `structured_plan` 或
 `native_tool_calls`。此时启动代码运行环境和生成程序通常不会带来收益。
 
-### 历史串行 ActionLoop 对比
+### DSv4 Flash 并发抽检结果
 
 可运行样例
 [`4_4_programmatic_vs_structured_deepseek.py`](../../../examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py)
-最初固定使用同一模型、prompt、output schema、源数据和三组只读 Action。
-2026-08-24 记录的**串行 PTC** DeepSeek 运行结果是：
+固定 task、output schema、源数据和只读 Action families，为独立 Action 声明显式
+并发，并记录真实 host Action 并发峰值。默认模型是关闭 thinking 的
+`deepseek-v4-flash`。
+
+2026-09-02 的有界验收抽检分别对 fan-out、大结果归约和局部恢复执行了一组
+structured/PTC 配对：
 
 | 观测事实 | `structured_plan` | `programmatic` |
 |---|---:|---:|
-| 模型请求数 | 4 | 3 |
-| 业务 Action 调用数 | 6 | 7 |
-| input tokens | 6,509 | 9,714 |
-| output tokens | 563 | 319 |
-| 耗时（秒） | 6.34 | 9.30 |
-| 最终结果 | 准确 | 准确 |
+| 精确业务结果 | 1 / 3 | 3 / 3 |
+| fan-out 模型请求数 | 4 | 3 |
+| recovery 模型请求数 | 5 | 3 |
+| fan-out Action 并发峰值 | 4 | 3 |
+| recovery Action 并发峰值 | 3 | 3 |
 
-PTC 少了一轮模型请求，但在这个小场景中，确定性 SDK 与 program contract 增加的
-输入超过了节省量，而且生成程序重复读取了一次同级预算。因此“轮次更少”、
-“token 更少”和“延迟更低”应分别测量。PTC 更适合需要运行时控制或压缩大体积
-中间值的工作负载，不应被视为所有多调用任务的自动优化。
+抽检中的 structured route 在 fan-out 与大结果归约上不准确，PTC 返回了精确结果；
+局部恢复程序只在所有 primary 调用结束后，为失败 id 调用一次 fallback。但三组
+PTC 都使用了更多 prompt/total tokens 和耗时。因此业务完成、模型轮次、token 与
+延迟必须分别测量。
 
-当前样例已为独立读取加入显式并发合同，并会记录真实 Action 并发峰值。上表只作为
-重写前的串行基线保留，不能作为当前并发候选的效果证据。
+每种 workload 只有一组配对，这不是统计显著性结论。只有当有界运行时控制和
+精确本地计算的价值足以覆盖 SDK/Docker 开销时才选 PTC；不要把它当成所有多调用
+任务的自动优化。
 
 ## 当前合格边界
 

@@ -72,33 +72,35 @@ Prefer `structured_plan` or `native_tool_calls` for one or two small direct
 calls. The code-runtime startup and program-generation work usually adds no
 value in that case.
 
-### Historical serial ActionLoop comparison
+### Observed concurrent DSv4 Flash sample
 
 The runnable
 [`4_4_programmatic_vs_structured_deepseek.py`](../../../examples/action_runtime/4_4_programmatic_vs_structured_deepseek.py)
-example originally held the model, prompt, output schema, source data, and three
-read Action families constant. In the recorded 2026-08-24 **serial PTC** run:
+holds the task, output schema, source data, and read Action families constant,
+declares independent Actions as parallel, and records real peak host Action
+concurrency. It defaults to `deepseek-v4-flash` with thinking disabled.
+
+A bounded 2026-09-02 acceptance sample ran one structured/PTC pair for fan-out,
+large reduction, and scoped recovery:
 
 | Observed fact | `structured_plan` | `programmatic` |
 |---|---:|---:|
-| Model requests | 4 | 3 |
-| Business Action calls | 6 | 7 |
-| Input tokens | 6,509 | 9,714 |
-| Output tokens | 563 | 319 |
-| Elapsed seconds | 6.34 | 9.30 |
-| Final result | exact | exact |
+| Exact business results | 1 / 3 | 3 / 3 |
+| Fan-out model requests | 4 | 3 |
+| Recovery model requests | 5 | 3 |
+| Fan-out peak Action concurrency | 4 | 3 |
+| Recovery peak Action concurrency | 3 | 3 |
 
-PTC removed one model round, but the deterministic SDK/program contract added
-more input than it saved in this small case, and the generated program repeated
-one level-budget read. Treat fewer rounds, lower tokens, and lower latency as
-separate measurements. PTC is most compelling when runtime control or reducing
-large intermediate values matters—not as an automatic optimization for every
-multi-call task.
+PTC returned the exact fan-out and large-reduction projections where the
+sampled structured route did not. Its scoped-recovery program called fallback
+only for the failed id after the parallel primary cohort settled. However, PTC
+used more prompt/total tokens and elapsed time in every pair. Treat business
+completion, model rounds, tokens, and latency as separate measurements.
 
-The current example now gives independent reads an explicit parallel contract
-and records real peak Action concurrency. The serial table is retained only as
-the pre-rewrite baseline; do not use it as evidence for the concurrent
-candidate.
+This is one paired observation per workload, not a statistical superiority
+claim. Use PTC for bounded runtime control and exact local computation when
+that value justifies the SDK/Docker overhead; do not treat it as an automatic
+optimization for every multi-call task.
 
 ## Current eligibility boundary
 

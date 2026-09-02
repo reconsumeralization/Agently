@@ -88,6 +88,8 @@ Notes:
 - `4_1` to `4_3` focus on extension points for `ActionExecutor`, `ActionRuntime`, and `ActionFlow`, and also run through an agent with DeepSeek for the final reply.
 - `4_4` is the real-model PTC effect example. It prints both structured final
   results plus observed model-request, business-Action-call, and elapsed counts;
-  fewer model rounds do not imply lower total tokens or latency.
+  compare each result with the source-grounded projection in the file. A
+  sampled structured result may be incomplete even when its Action calls
+  succeed; fewer model rounds do not imply lower total tokens or latency.
 - The SandLock example requires Linux 6.7+ and `pip install sandlock`.
 - The Docker sandbox example requires a local Docker daemon that is running and not paused. It auto-pulls `alpine:3.20` when the image is not available locally.
