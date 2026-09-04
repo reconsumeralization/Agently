@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import json
+from collections import OrderedDict
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 from agently.types.data.event import (
@@ -38,6 +40,10 @@ _VALIDATION_TRACEBACK_MAX_LINES = 8
 _SIMPLE_PROMPT_MAX_CHARS = 2000
 _DETAIL_PROMPT_MAX_CHARS = 16000
 _SIMPLE_ACTION_PREVIEW_MAX_CHARS = 500
+_CONSOLE_STREAM_BUFFER_MAX_CHARS = 65536
+_CONSOLE_DEFERRED_DETAIL_MAX_CHARS = 16000
+_CONSOLE_DEFERRED_TOTAL_MAX_CHARS = 131072
+_CONSOLE_DEFERRED_MAX_ENTRIES = 128
 _CONSOLE_EVENT_FAMILIES = frozenset({"model", "action", "triggerflow", "runtime"})
 _RUNTIME_PRINT_EVENTS = frozenset({"runtime.print"})
 _SIMPLE_AGENT_EXECUTION_STREAM_KINDS = frozenset(
@@ -475,14 +481,19 @@ def _model_reasoning_summary(event: "ObservationEvent") -> str:
     return f"Provider reasoning captured: chunks={chunk_count or 0} chars={chars}."
 
 
-def _model_result_detail(event: "ObservationEvent", *, indent: int | None = None) -> str:
+def _model_result_detail(
+    event: "ObservationEvent",
+    *,
+    indent: int | None = None,
+    full: bool = False,
+) -> str:
     keys = ("result", "raw_text", "cleaned_text") if indent is not None else ("raw_text", "cleaned_text", "result")
     for key in keys:
         value = _payload_value(event, key)
         if value is None:
             continue
         if isinstance(value, str):
-            return value if indent is not None else _compact_single_line(value)
+            return value if full or indent is not None else _compact_single_line(value)
         return _stringify_payload(value, indent=indent)
     return ""
 
@@ -986,6 +997,36 @@ def _render_line(prefix: str, detail: str, *, color: str = "gray"):
     print(f"{title} {body}")
 
 
+@dataclass
+class _BufferedModelStream:
+    header: str
+    detail_color: str
+    chunks: list[str] = field(default_factory=list)
+    buffered_chars: int = 0
+    overflowed_chars: int = 0
+    completed_event: Any = None
+
+    def append(self, value: Any) -> None:
+        text = value if isinstance(value, str) else str(value)
+        remaining = max(0, _CONSOLE_STREAM_BUFFER_MAX_CHARS - self.buffered_chars)
+        if remaining:
+            retained = text[:remaining]
+            self.chunks.append(retained)
+            self.buffered_chars += len(retained)
+        self.overflowed_chars += max(0, len(text) - remaining)
+
+    def retained_text(self) -> str:
+        return "".join(self.chunks)
+
+
+@dataclass
+class _DeferredConsoleEntry:
+    header: str
+    stage: str
+    detail: str
+    detail_color: str = "gray"
+
+
 class RuntimeConsoleSinkHooker(EventHooker):
     name = "RuntimeConsoleSinkHooker"
     event_types = None
@@ -995,29 +1036,187 @@ class RuntimeConsoleSinkHooker(EventHooker):
     }
 
     _streaming_key: tuple[str, ...] | None = None
+    _foreground_model_key: tuple[str, str] | None = None
+    _opened_model_streams: set[tuple[str, str]] = set()
+    _background_model_streams: OrderedDict[tuple[str, str], _BufferedModelStream] = OrderedDict()
+    _final_materialization_model_streams: set[tuple[str, str]] = set()
     _streamed_model_responses: set[tuple[str, str]] = set()
     _expected_streaming_model_responses: set[tuple[str, str]] = set()
     _streamed_agent_execution_paths: set[tuple[str, str, str]] = set()
+    _silent_model_stream_resumes: set[tuple[str, str]] = set()
+    _deferred_console_entries: list[_DeferredConsoleEntry] = []
+    _deferred_console_chars: int = 0
+    _deferred_console_omitted_entries: int = 0
+    _deferred_console_omitted_chars: int = 0
 
     @staticmethod
     def _on_register():
         RuntimeConsoleSinkHooker._streaming_key = None
+        RuntimeConsoleSinkHooker._foreground_model_key = None
+        RuntimeConsoleSinkHooker._opened_model_streams = set()
+        RuntimeConsoleSinkHooker._background_model_streams = OrderedDict()
+        RuntimeConsoleSinkHooker._final_materialization_model_streams = set()
         RuntimeConsoleSinkHooker._streamed_model_responses = set()
         RuntimeConsoleSinkHooker._expected_streaming_model_responses = set()
         RuntimeConsoleSinkHooker._streamed_agent_execution_paths = set()
+        RuntimeConsoleSinkHooker._silent_model_stream_resumes = set()
+        RuntimeConsoleSinkHooker._deferred_console_entries = []
+        RuntimeConsoleSinkHooker._deferred_console_chars = 0
+        RuntimeConsoleSinkHooker._deferred_console_omitted_entries = 0
+        RuntimeConsoleSinkHooker._deferred_console_omitted_chars = 0
 
     @staticmethod
     def _on_unregister():
         RuntimeConsoleSinkHooker._streaming_key = None
+        RuntimeConsoleSinkHooker._foreground_model_key = None
+        RuntimeConsoleSinkHooker._opened_model_streams = set()
+        RuntimeConsoleSinkHooker._background_model_streams = OrderedDict()
+        RuntimeConsoleSinkHooker._final_materialization_model_streams = set()
         RuntimeConsoleSinkHooker._streamed_model_responses = set()
         RuntimeConsoleSinkHooker._expected_streaming_model_responses = set()
         RuntimeConsoleSinkHooker._streamed_agent_execution_paths = set()
+        RuntimeConsoleSinkHooker._silent_model_stream_resumes = set()
+        RuntimeConsoleSinkHooker._deferred_console_entries = []
+        RuntimeConsoleSinkHooker._deferred_console_chars = 0
+        RuntimeConsoleSinkHooker._deferred_console_omitted_entries = 0
+        RuntimeConsoleSinkHooker._deferred_console_omitted_chars = 0
 
     @staticmethod
     def _close_stream_if_needed():
         if RuntimeConsoleSinkHooker._streaming_key is not None:
             print()
             RuntimeConsoleSinkHooker._streaming_key = None
+        if RuntimeConsoleSinkHooker._foreground_model_key is not None:
+            RuntimeConsoleSinkHooker._silent_model_stream_resumes.discard(
+                RuntimeConsoleSinkHooker._foreground_model_key
+            )
+
+    @staticmethod
+    def _has_active_model_streams() -> bool:
+        return (
+            RuntimeConsoleSinkHooker._foreground_model_key is not None
+            or bool(RuntimeConsoleSinkHooker._background_model_streams)
+        )
+
+    @staticmethod
+    def _is_actionable_event(event: "ObservationEvent") -> bool:
+        if event.level in _ALWAYS_VISIBLE_LEVELS:
+            return True
+        event_type = event.event_type.lower()
+        return any(
+            marker in event_type
+            for marker in (
+                "approval_required",
+                ".blocked",
+                ".cancelled",
+                ".canceled",
+                ".failed",
+                ".error",
+                ".unhealthy",
+                "interrupt_raised",
+            )
+        )
+
+    @staticmethod
+    def _is_model_request_execution_diagnostic(event: "ObservationEvent") -> bool:
+        if event.event_type != "agent_execution.stream":
+            return False
+        path = str(_payload_value(event, "path") or "")
+        route = str(_payload_value(event, "route") or "")
+        return route == "model_request" or path in {"route.selected", "context.package"}
+
+    @staticmethod
+    def _defer_console_block(
+        header: str,
+        stage: str,
+        detail: str,
+        *,
+        detail_color: str = "gray",
+    ) -> None:
+        detail_text = detail if isinstance(detail, str) else str(detail)
+        original_chars = len(detail_text)
+        if original_chars > _CONSOLE_DEFERRED_DETAIL_MAX_CHARS:
+            omitted = original_chars - _CONSOLE_DEFERRED_DETAIL_MAX_CHARS
+            detail_text = (
+                detail_text[:_CONSOLE_DEFERRED_DETAIL_MAX_CHARS]
+                + f"\n... [{omitted} diagnostic characters omitted by ConsoleSink]"
+            )
+
+        entry_chars = len(header) + len(stage) + len(detail_text)
+        if (
+            len(RuntimeConsoleSinkHooker._deferred_console_entries) >= _CONSOLE_DEFERRED_MAX_ENTRIES
+            or RuntimeConsoleSinkHooker._deferred_console_chars + entry_chars
+            > _CONSOLE_DEFERRED_TOTAL_MAX_CHARS
+        ):
+            RuntimeConsoleSinkHooker._deferred_console_omitted_entries += 1
+            RuntimeConsoleSinkHooker._deferred_console_omitted_chars += original_chars
+            return
+
+        RuntimeConsoleSinkHooker._deferred_console_entries.append(
+            _DeferredConsoleEntry(
+                header=header,
+                stage=stage,
+                detail=detail_text,
+                detail_color=detail_color,
+            )
+        )
+        RuntimeConsoleSinkHooker._deferred_console_chars += entry_chars
+
+    @staticmethod
+    def _flush_deferred_console_blocks(*, force: bool = False) -> None:
+        if RuntimeConsoleSinkHooker._has_active_model_streams() and not force:
+            return
+        entries = RuntimeConsoleSinkHooker._deferred_console_entries
+        omitted_entries = RuntimeConsoleSinkHooker._deferred_console_omitted_entries
+        omitted_chars = RuntimeConsoleSinkHooker._deferred_console_omitted_chars
+        if not entries and not omitted_entries:
+            return
+
+        RuntimeConsoleSinkHooker._close_stream_if_needed()
+        _render_line(
+            "[Deferred diagnostics]",
+            "Request and process details collected during streaming follow.",
+        )
+        for entry in entries:
+            _render_block(
+                f"{entry.header} [Deferred]",
+                entry.stage,
+                entry.detail,
+                detail_color=entry.detail_color,
+            )
+        if omitted_entries:
+            _render_line(
+                "[Deferred diagnostics]",
+                (
+                    f"{omitted_entries} additional diagnostic event(s) "
+                    f"({omitted_chars} source characters) were omitted by ConsoleSink limits."
+                ),
+            )
+
+        RuntimeConsoleSinkHooker._deferred_console_entries = []
+        RuntimeConsoleSinkHooker._deferred_console_chars = 0
+        RuntimeConsoleSinkHooker._deferred_console_omitted_entries = 0
+        RuntimeConsoleSinkHooker._deferred_console_omitted_chars = 0
+
+    @staticmethod
+    def _present_block(
+        header: str,
+        stage: str,
+        detail: str,
+        *,
+        detail_color: str = "gray",
+        defer: bool = False,
+    ) -> None:
+        if defer:
+            RuntimeConsoleSinkHooker._defer_console_block(
+                header,
+                stage,
+                detail,
+                detail_color=detail_color,
+            )
+            return
+        RuntimeConsoleSinkHooker._close_stream_if_needed()
+        _render_block(header, stage, detail, detail_color=detail_color)
 
     @staticmethod
     def _render_stream_delta(
@@ -1036,7 +1235,127 @@ class RuntimeConsoleSinkHooker(EventHooker):
         RuntimeConsoleSinkHooker._streaming_key = stream_key
 
     @staticmethod
-    def _handle_model_event(event: "ObservationEvent", profile: "RuntimeLogProfile"):
+    def _render_model_stream_delta(
+        *,
+        model_stream_key: tuple[str, str],
+        header: str,
+        delta: Any,
+        detail_color: str,
+    ) -> None:
+        if model_stream_key in RuntimeConsoleSinkHooker._final_materialization_model_streams:
+            return
+        if RuntimeConsoleSinkHooker._foreground_model_key is None:
+            RuntimeConsoleSinkHooker._foreground_model_key = model_stream_key
+
+        if RuntimeConsoleSinkHooker._foreground_model_key != model_stream_key:
+            buffered = RuntimeConsoleSinkHooker._background_model_streams.get(model_stream_key)
+            if buffered is None:
+                buffered = _BufferedModelStream(header=header, detail_color=detail_color)
+                RuntimeConsoleSinkHooker._background_model_streams[model_stream_key] = buffered
+                RuntimeConsoleSinkHooker._close_stream_if_needed()
+                _render_line(
+                    f"{header} [Background]",
+                    "Another model response is running in the background; details will follow after streaming.",
+                )
+                if (
+                    RuntimeConsoleSinkHooker._foreground_model_key
+                    in RuntimeConsoleSinkHooker._opened_model_streams
+                ):
+                    RuntimeConsoleSinkHooker._silent_model_stream_resumes.add(
+                        RuntimeConsoleSinkHooker._foreground_model_key
+                    )
+            buffered.append(delta)
+            return
+
+        stream_key = ("model", *model_stream_key)
+        if model_stream_key not in RuntimeConsoleSinkHooker._opened_model_streams:
+            RuntimeConsoleSinkHooker._render_stream_delta(
+                stream_key=stream_key,
+                header=header,
+                delta=delta,
+                detail_color=detail_color,
+            )
+            RuntimeConsoleSinkHooker._opened_model_streams.add(model_stream_key)
+            return
+        if RuntimeConsoleSinkHooker._streaming_key != stream_key:
+            if model_stream_key in RuntimeConsoleSinkHooker._silent_model_stream_resumes:
+                RuntimeConsoleSinkHooker._silent_model_stream_resumes.discard(model_stream_key)
+                print(
+                    color_text(delta if isinstance(delta, str) else str(delta), color=detail_color),
+                    end="",
+                    flush=True,
+                )
+                RuntimeConsoleSinkHooker._streaming_key = stream_key
+                return
+            RuntimeConsoleSinkHooker._close_stream_if_needed()
+            continuation = color_text(f"{header} [Streaming continues]", color="yellow", bold=True)
+            print(f"{continuation} ", end="", flush=True)
+            RuntimeConsoleSinkHooker._streaming_key = stream_key
+        print(color_text(delta if isinstance(delta, str) else str(delta), color=detail_color), end="", flush=True)
+
+    @staticmethod
+    def _promote_next_model_stream() -> None:
+        while RuntimeConsoleSinkHooker._background_model_streams:
+            model_stream_key, buffered = RuntimeConsoleSinkHooker._background_model_streams.popitem(last=False)
+            if buffered.completed_event is not None:
+                event, profile = buffered.completed_event
+                RuntimeConsoleSinkHooker._render_model_event_now(
+                    event,
+                    profile,
+                    force_completed_result=True,
+                )
+                RuntimeConsoleSinkHooker._streamed_model_responses.discard(model_stream_key)
+                RuntimeConsoleSinkHooker._expected_streaming_model_responses.discard(model_stream_key)
+                RuntimeConsoleSinkHooker._opened_model_streams.discard(model_stream_key)
+                continue
+
+            if buffered.overflowed_chars:
+                RuntimeConsoleSinkHooker._foreground_model_key = model_stream_key
+                RuntimeConsoleSinkHooker._final_materialization_model_streams.add(model_stream_key)
+                RuntimeConsoleSinkHooker._close_stream_if_needed()
+                _render_line(
+                    f"{buffered.header} [Full output pending]",
+                    (
+                        "The live replay buffer filled while this response was in the background; "
+                        "its complete result will be shown when generation finishes."
+                    ),
+                )
+                return
+
+            RuntimeConsoleSinkHooker._foreground_model_key = model_stream_key
+            retained = buffered.retained_text()
+            RuntimeConsoleSinkHooker._render_stream_delta(
+                stream_key=("model", *model_stream_key),
+                header=buffered.header,
+                delta=retained,
+                detail_color=buffered.detail_color,
+            )
+            RuntimeConsoleSinkHooker._opened_model_streams.add(model_stream_key)
+            return
+        RuntimeConsoleSinkHooker._foreground_model_key = None
+
+    @staticmethod
+    def _finish_foreground_model_stream(model_stream_key: tuple[str, str]) -> None:
+        if RuntimeConsoleSinkHooker._foreground_model_key != model_stream_key:
+            return
+        RuntimeConsoleSinkHooker._close_stream_if_needed()
+        RuntimeConsoleSinkHooker._opened_model_streams.discard(model_stream_key)
+        RuntimeConsoleSinkHooker._silent_model_stream_resumes.discard(model_stream_key)
+        RuntimeConsoleSinkHooker._streamed_model_responses.discard(model_stream_key)
+        RuntimeConsoleSinkHooker._expected_streaming_model_responses.discard(model_stream_key)
+        RuntimeConsoleSinkHooker._final_materialization_model_streams.discard(model_stream_key)
+        RuntimeConsoleSinkHooker._foreground_model_key = None
+        RuntimeConsoleSinkHooker._promote_next_model_stream()
+        RuntimeConsoleSinkHooker._flush_deferred_console_blocks()
+
+    @staticmethod
+    def _render_model_event_now(
+        event: "ObservationEvent",
+        profile: "RuntimeLogProfile",
+        *,
+        force_completed_result: bool = False,
+        defer: bool = False,
+    ) -> None:
         agent_name = _resolve_agent_name(event) or event.source
         response_id = _resolve_response_id(event)
         response_label = f"[ModelRequest] [Agent-{ agent_name }]"
@@ -1047,15 +1366,13 @@ class RuntimeConsoleSinkHooker(EventHooker):
         if event.event_type == "model.streaming":
             delta = _payload_value(event, "delta", event.message or "")
             RuntimeConsoleSinkHooker._streamed_model_responses.add(model_stream_key)
-            RuntimeConsoleSinkHooker._render_stream_delta(
-                stream_key=("model", *model_stream_key),
+            RuntimeConsoleSinkHooker._render_model_stream_delta(
+                model_stream_key=model_stream_key,
                 header=response_label,
                 delta=delta,
                 detail_color="green",
             )
             return
-
-        RuntimeConsoleSinkHooker._close_stream_if_needed()
 
         stage_mapping = {
             "model.requesting": "Requesting",
@@ -1081,14 +1398,17 @@ class RuntimeConsoleSinkHooker(EventHooker):
                 if isinstance(request, Mapping) and request.get("stream") is True:
                     RuntimeConsoleSinkHooker._expected_streaming_model_responses.add(model_stream_key)
             elif event.event_type == "model.completed":
-                if (
-                    model_stream_key in RuntimeConsoleSinkHooker._streamed_model_responses
-                    or model_stream_key in RuntimeConsoleSinkHooker._expected_streaming_model_responses
-                ):
+                if force_completed_result:
+                    detail = (
+                        _model_result_detail(event, full=True)
+                        or event.message
+                        or stage_mapping.get(event.event_type, event.event_type)
+                    )
+                elif model_stream_key in RuntimeConsoleSinkHooker._streamed_model_responses:
                     detail = "Model response completed."
                 else:
                     detail = (
-                        _model_result_detail(event)
+                        _model_result_detail(event, full=True)
                         or event.message
                         or stage_mapping.get(event.event_type, event.event_type)
                     )
@@ -1115,12 +1435,96 @@ class RuntimeConsoleSinkHooker(EventHooker):
         if not detail:
             detail = _stringify_payload(event.payload, indent=2)
         detail_color = "red" if event.level in ("WARNING", "ERROR", "CRITICAL") else "gray"
-        _render_block(
-            response_label, stage_mapping.get(event.event_type, event.event_type), detail, detail_color=detail_color
+        RuntimeConsoleSinkHooker._present_block(
+            response_label,
+            stage_mapping.get(event.event_type, event.event_type),
+            detail,
+            detail_color=detail_color,
+            defer=defer,
         )
         if event.event_type == "model.completed":
             RuntimeConsoleSinkHooker._streamed_model_responses.discard(model_stream_key)
             RuntimeConsoleSinkHooker._expected_streaming_model_responses.discard(model_stream_key)
+
+    @staticmethod
+    def _handle_model_event(event: "ObservationEvent", profile: "RuntimeLogProfile") -> None:
+        agent_name = _resolve_agent_name(event) or event.source
+        response_id = _resolve_response_id(event)
+        model_stream_key = (str(agent_name or ""), str(response_id or ""))
+
+        if event.event_type == "model.streaming":
+            RuntimeConsoleSinkHooker._render_model_event_now(event, profile)
+            return
+
+        request = _payload_value(event, "request")
+        expects_stream = (
+            event.event_type == "model.requesting"
+            and isinstance(request, Mapping)
+            and request.get("stream") is True
+        )
+        if expects_stream:
+            RuntimeConsoleSinkHooker._expected_streaming_model_responses.add(model_stream_key)
+
+        background = RuntimeConsoleSinkHooker._background_model_streams.get(model_stream_key)
+        status = str(_payload_value(event, "status") or "").lower()
+        terminal_failure = event.event_type in {
+            "model.failed",
+            "model.request_failed",
+            "model.streaming_canceled",
+        } or (event.event_type == "model.status" and status in {"cancelled", "failed"})
+        if background is not None:
+            if terminal_failure or event.level in {"WARNING", "ERROR", "CRITICAL"}:
+                RuntimeConsoleSinkHooker._render_model_event_now(event, profile)
+                if terminal_failure:
+                    RuntimeConsoleSinkHooker._background_model_streams.pop(model_stream_key, None)
+                    RuntimeConsoleSinkHooker._opened_model_streams.discard(model_stream_key)
+                    RuntimeConsoleSinkHooker._streamed_model_responses.discard(model_stream_key)
+                    RuntimeConsoleSinkHooker._expected_streaming_model_responses.discard(model_stream_key)
+                    RuntimeConsoleSinkHooker._final_materialization_model_streams.discard(model_stream_key)
+                return
+            if event.event_type == "model.completed":
+                background.completed_event = (event, profile)
+            else:
+                RuntimeConsoleSinkHooker._render_model_event_now(event, profile, defer=True)
+            return
+
+        is_foreground = RuntimeConsoleSinkHooker._foreground_model_key == model_stream_key
+        actionable = RuntimeConsoleSinkHooker._is_actionable_event(event) or terminal_failure
+        defer = (
+            not actionable
+            and event.event_type != "model.completed"
+            and (
+                RuntimeConsoleSinkHooker._has_active_model_streams()
+                or (
+                    profile == "detail"
+                    and event.event_type in {"model.request_started", "model.requesting"}
+                    and (event.event_type == "model.request_started" or expects_stream)
+                )
+            )
+        )
+        if (
+            profile == "detail"
+            and event.event_type == "model.requesting"
+            and not expects_stream
+            and not RuntimeConsoleSinkHooker._has_active_model_streams()
+        ):
+            RuntimeConsoleSinkHooker._flush_deferred_console_blocks(force=True)
+        RuntimeConsoleSinkHooker._render_model_event_now(
+            event,
+            profile,
+            force_completed_result=(
+                event.event_type == "model.completed"
+                and model_stream_key in RuntimeConsoleSinkHooker._final_materialization_model_streams
+            ),
+            defer=defer,
+        )
+        if is_foreground and (event.event_type == "model.completed" or terminal_failure):
+            RuntimeConsoleSinkHooker._finish_foreground_model_stream(model_stream_key)
+        elif (
+            (event.event_type == "model.completed" or terminal_failure)
+            and not RuntimeConsoleSinkHooker._has_active_model_streams()
+        ):
+            RuntimeConsoleSinkHooker._flush_deferred_console_blocks()
 
     @staticmethod
     def _handle_agent_execution_event(
@@ -1175,17 +1579,37 @@ class RuntimeConsoleSinkHooker(EventHooker):
                 RuntimeConsoleSinkHooker._streamed_agent_execution_paths.discard(completed_progress_key)
                 return
 
-        RuntimeConsoleSinkHooker._close_stream_if_needed()
         if event.event_type in {"agent_execution.stream", "agent_execution.stream.delta"}:
             detail = _agent_execution_stream_detail(event, profile)
         else:
             detail = (event.message or stage) if profile == "simple" else _event_detail(event, pretty_payload=True)
         detail_color = "red" if stage in ("Failed", "Warning") else "gray"
-        _render_block(prefix, stage, detail, detail_color=detail_color)
+        defer = (
+            not RuntimeConsoleSinkHooker._is_actionable_event(event)
+            and (
+                RuntimeConsoleSinkHooker._has_active_model_streams()
+                or (
+                    profile == "detail"
+                    and RuntimeConsoleSinkHooker._is_model_request_execution_diagnostic(event)
+                )
+            )
+        )
+        RuntimeConsoleSinkHooker._present_block(
+            prefix,
+            stage,
+            detail,
+            detail_color=detail_color,
+            defer=defer,
+        )
+        if (
+            event.event_type
+            in {"agent_execution.completed", "agent_execution.failed", "agent_execution.cancelled"}
+            and not RuntimeConsoleSinkHooker._has_active_model_streams()
+        ):
+            RuntimeConsoleSinkHooker._flush_deferred_console_blocks()
 
     @staticmethod
     def _handle_tool_event(event: "ObservationEvent", profile: "RuntimeLogProfile"):
-        RuntimeConsoleSinkHooker._close_stream_if_needed()
         agent_name = _resolve_agent_name(event)
         tool_name = _resolve_tool_name(event)
         header = "[ToolLoop]" if _is_tool_loop_event(event) else f"[Tool-{ tool_name or 'unknown' }]"
@@ -1197,11 +1621,19 @@ class RuntimeConsoleSinkHooker(EventHooker):
         else:
             detail = _stringify_payload(event.payload, indent=2) or _event_detail(event, pretty_payload=True)
         detail_color = "red" if stage in ("Failed", "Warning") else "gray"
-        _render_block(header, stage, detail, detail_color=detail_color)
+        RuntimeConsoleSinkHooker._present_block(
+            header,
+            stage,
+            detail,
+            detail_color=detail_color,
+            defer=(
+                RuntimeConsoleSinkHooker._has_active_model_streams()
+                and not RuntimeConsoleSinkHooker._is_actionable_event(event)
+            ),
+        )
 
     @staticmethod
     def _handle_action_event(event: "ObservationEvent", profile: "RuntimeLogProfile"):
-        RuntimeConsoleSinkHooker._close_stream_if_needed()
         action_name = _resolve_action_name(event)
         action_type = _resolve_action_type(event)
         agent_name = _resolve_agent_name(event)
@@ -1216,11 +1648,19 @@ class RuntimeConsoleSinkHooker(EventHooker):
         else:
             detail = _stringify_payload(event.payload, indent=2) or _event_detail(event, pretty_payload=True)
         detail_color = "red" if stage in ("Failed", "Warning") else "gray"
-        _render_block(header, stage, detail, detail_color=detail_color)
+        RuntimeConsoleSinkHooker._present_block(
+            header,
+            stage,
+            detail,
+            detail_color=detail_color,
+            defer=(
+                RuntimeConsoleSinkHooker._has_active_model_streams()
+                and not RuntimeConsoleSinkHooker._is_actionable_event(event)
+            ),
+        )
 
     @staticmethod
     def _handle_trigger_flow_event(event: "ObservationEvent", profile: "RuntimeLogProfile"):
-        RuntimeConsoleSinkHooker._close_stream_if_needed()
         execution_id = _resolve_execution_id(event)
         prefix = "[TriggerFlow]"
         if execution_id:
@@ -1229,11 +1669,17 @@ class RuntimeConsoleSinkHooker(EventHooker):
         color = (
             "red" if event.level in ("WARNING", "ERROR", "CRITICAL") else "yellow" if event.level == "DEBUG" else "gray"
         )
+        if (
+            RuntimeConsoleSinkHooker._has_active_model_streams()
+            and not RuntimeConsoleSinkHooker._is_actionable_event(event)
+        ):
+            RuntimeConsoleSinkHooker._defer_console_block(prefix, event.event_type, detail, detail_color=color)
+            return
+        RuntimeConsoleSinkHooker._close_stream_if_needed()
         _render_line(prefix, detail, color=color)
 
     @staticmethod
     def _handle_execution_resource_event(event: "ObservationEvent", profile: "RuntimeLogProfile"):
-        RuntimeConsoleSinkHooker._close_stream_if_needed()
         provider_id = str(_payload_value(event, "provider_id") or "")
         kind = str(_payload_value(event, "kind") or "")
         phase = str(_payload_value(event, "phase") or "")
@@ -1271,7 +1717,11 @@ class RuntimeConsoleSinkHooker(EventHooker):
         if profile == "simple" and phase == "image_pull_progress":
             detail = _docker_pull_progress_detail(event)
             if detail:
-                _render_line(header, detail)
+                if RuntimeConsoleSinkHooker._has_active_model_streams():
+                    RuntimeConsoleSinkHooker._defer_console_block(header, stage, detail)
+                else:
+                    RuntimeConsoleSinkHooker._close_stream_if_needed()
+                    _render_line(header, detail)
             return
 
         readable_detail = _execution_resource_simple_detail(event)
@@ -1283,18 +1733,31 @@ class RuntimeConsoleSinkHooker(EventHooker):
         else:
             detail = readable_detail
         detail_color = "red" if event.level in ("WARNING", "ERROR", "CRITICAL") else "gray"
-        _render_block(header, stage, detail, detail_color=detail_color)
+        RuntimeConsoleSinkHooker._present_block(
+            header,
+            stage,
+            detail,
+            detail_color=detail_color,
+            defer=(
+                RuntimeConsoleSinkHooker._has_active_model_streams()
+                and not RuntimeConsoleSinkHooker._is_actionable_event(event)
+            ),
+        )
 
     @staticmethod
     def _handle_generic_event(event: "ObservationEvent", profile: "RuntimeLogProfile"):
-        RuntimeConsoleSinkHooker._close_stream_if_needed()
         if event.event_type == "prompt.built":
             agent_name = _resolve_agent_name(event) or event.source
             response_id = _resolve_response_id(event)
             header = f"[ModelRequest] [Agent-{agent_name}]"
             if response_id:
                 header = f"{header} - [Response-{response_id}]"
-            _render_block(header, "Prompt", _prompt_detail(event, profile))
+            RuntimeConsoleSinkHooker._present_block(
+                header,
+                "Prompt",
+                _prompt_detail(event, profile),
+                defer=(profile == "detail" or RuntimeConsoleSinkHooker._has_active_model_streams()),
+            )
             return
         detail = _event_detail(event, pretty_payload=True)
         prefix = f"[{ event.source }] [{ event.event_type }]"
@@ -1303,6 +1766,13 @@ class RuntimeConsoleSinkHooker(EventHooker):
             color = "red"
         elif event.level == "INFO":
             color = "green"
+        if (
+            RuntimeConsoleSinkHooker._has_active_model_streams()
+            and not RuntimeConsoleSinkHooker._is_actionable_event(event)
+        ):
+            RuntimeConsoleSinkHooker._defer_console_block(prefix, event.event_type, detail, detail_color=color)
+            return
+        RuntimeConsoleSinkHooker._close_stream_if_needed()
         _render_line(prefix, detail, color=color)
 
     @staticmethod

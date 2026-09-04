@@ -1633,6 +1633,20 @@ and does not replace business output: consume `type="delta"` or call
 `async_streaming_print()` for readable task stages and the final result. Use an
 EventCenter hook or DevTools for complete audit, storage, or replay. Remove debug
 settings from examples and production snippets once the problem is understood.
+Concurrent model responses remain concurrent: ConsoleSink gives the first
+delta-producing response the foreground display, buffers later response display
+in FIFO order, and promotes it after the foreground terminal event. This affects
+presentation only and never blocks or reorders the underlying execution. While
+that foreground stream is active, ordinary Prompt/request/process/success
+diagnostics are bounded and deferred until every FIFO response display finishes;
+the console inserts only a compact background notice. Actionable warnings,
+failures, cancellation, interrupts, and approvals stay immediate, and EventCenter
+and DevTools event timing is unchanged.
+Simple mode preserves one complete projection of each successful model response:
+either its fully rendered live stream or its complete terminal result. If a
+background replay buffer fills, the partial replay is replaced by the complete
+authoritative result at completion rather than being presented as the whole
+response.
 
 ## Submitted DAG Input
 

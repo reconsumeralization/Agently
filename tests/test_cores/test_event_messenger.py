@@ -1088,6 +1088,7 @@ def test_prompt_console_uses_readable_prompt_text_in_simple_and_detail(monkeypat
     )
     RuntimeConsoleSinkHooker._handle_generic_event(event, "simple")  # type: ignore[attr-defined]
     RuntimeConsoleSinkHooker._handle_generic_event(event, "detail")  # type: ignore[attr-defined]
+    RuntimeConsoleSinkHooker._flush_deferred_console_blocks(force=True)  # type: ignore[attr-defined]
 
     rendered = "".join(printed)
     assert rendered.count("Stage: Prompt") == 2
@@ -1606,12 +1607,574 @@ def test_model_console_detail_keeps_stream_open_across_agent_execution_projectio
         ),
         "detail",
     )
+    RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+        RuntimeEvent(
+            event_type="model.completed",
+            source="ModelRequestResult",
+            payload={
+                "agent_name": "debug-agent",
+                "response_id": "resp-1",
+                "result": "AB",
+            },
+        ),
+        "detail",
+    )
 
     rendered = "".join(printed)
     assert rendered.count("Stage: Streaming") == 1
-    assert "Detail:\nAB\n[AgentExecution]" in rendered
+    assert "Detail:\nAB" in rendered
+    assert rendered.index("Stage: Done") < rendered.index("[Deferred diagnostics]")
+    assert rendered.index("[Deferred diagnostics]") < rendered.index("[AgentExecution]")
+    assert "Streaming continues" not in rendered
     assert "agent_execution.stream.delta" not in rendered
     assert "agent_task.phase.planned" in rendered
+
+
+def test_model_console_detail_defers_request_and_process_diagnostics_until_stream_finishes(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="agent_execution.stream",
+                source="BaseAgent",
+                payload={
+                    "execution_id": "exec-focus",
+                    "path": "route.selected",
+                    "source": "agent_execution",
+                    "route": "model_request",
+                    "value": {"sentinel": "PROCESS_SENTINEL"},
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.request_started",
+                source="ModelRequest",
+                message="REQUEST_STARTED_SENTINEL",
+                payload={"agent_name": "focus-agent", "response_id": "resp-focus"},
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_generic_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="prompt.built",
+                source="ModelRequest",
+                payload={
+                    "agent_name": "focus-agent",
+                    "response_id": "resp-focus",
+                    "prompt_text": "PROMPT_SENTINEL",
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.requesting",
+                source="ModelRequest",
+                payload={
+                    "agent_name": "focus-agent",
+                    "response_id": "resp-focus",
+                    "request": {
+                        "model": "REQUEST_SENTINEL",
+                        "stream": True,
+                        "messages": [],
+                    },
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.streaming",
+                source="ModelRequestResult",
+                payload={
+                    "agent_name": "focus-agent",
+                    "response_id": "resp-focus",
+                    "delta": "A1",
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_agent_execution_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="agent_execution.completed",
+                source="BaseAgent",
+                message="EXECUTION_COMPLETED_SENTINEL",
+                payload={"execution_id": "exec-other"},
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.streaming",
+                source="ModelRequestResult",
+                payload={
+                    "agent_name": "focus-agent",
+                    "response_id": "resp-focus",
+                    "delta": "A2",
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.completed",
+                source="ModelRequestResult",
+                payload={
+                    "agent_name": "focus-agent",
+                    "response_id": "resp-focus",
+                    "result": "A-final",
+                },
+            ),
+            "detail",
+        )
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    done_index = rendered.index("Stage: Done")
+    assert "Detail:\nA1A2" in rendered
+    assert "Streaming continues" not in rendered
+    assert rendered.count("[Deferred diagnostics]") == 1
+    for sentinel in (
+        "PROCESS_SENTINEL",
+        "REQUEST_STARTED_SENTINEL",
+        "PROMPT_SENTINEL",
+        "REQUEST_SENTINEL",
+        "EXECUTION_COMPLETED_SENTINEL",
+    ):
+        assert sentinel not in rendered[:done_index]
+        assert sentinel in rendered[done_index:]
+
+
+def test_model_console_deferred_diagnostics_are_bounded(monkeypatch):
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "builtins.print",
+        lambda *args, **kwargs: printed.append(
+            "".join(str(arg) for arg in args) + kwargs.get("end", "\n")
+        ),
+    )
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker._CONSOLE_DEFERRED_MAX_ENTRIES",
+        1,
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        RuntimeConsoleSinkHooker._defer_console_block("[First]", "Process", "kept")  # type: ignore[attr-defined]
+        RuntimeConsoleSinkHooker._defer_console_block("[Second]", "Process", "omitted")  # type: ignore[attr-defined]
+        RuntimeConsoleSinkHooker._flush_deferred_console_blocks(force=True)  # type: ignore[attr-defined]
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert "[First] [Deferred]" in rendered
+    assert "kept" in rendered
+    assert "[Second]" not in rendered
+    assert "1 additional diagnostic event(s)" in rendered
+    assert "were omitted by ConsoleSink limits" in rendered
+
+
+def test_model_console_failure_before_first_delta_releases_deferred_diagnostics(monkeypatch):
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "builtins.print",
+        lambda *args, **kwargs: printed.append(
+            "".join(str(arg) for arg in args) + kwargs.get("end", "\n")
+        ),
+    )
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        RuntimeConsoleSinkHooker._handle_generic_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="prompt.built",
+                source="ModelRequest",
+                payload={
+                    "agent_name": "failed-agent",
+                    "response_id": "resp-failed",
+                    "prompt_text": "FAILED_PROMPT_SENTINEL",
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.requesting",
+                source="ModelRequest",
+                payload={
+                    "agent_name": "failed-agent",
+                    "response_id": "resp-failed",
+                    "request": {"model": "failed-model", "stream": True},
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.request_failed",
+                source="ModelRequest",
+                level="ERROR",
+                message="FAILED_BEFORE_DELTA",
+                payload={"agent_name": "failed-agent", "response_id": "resp-failed"},
+            ),
+            "detail",
+        )
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert rendered.index("FAILED_BEFORE_DELTA") < rendered.index("[Deferred diagnostics]")
+    assert rendered.index("[Deferred diagnostics]") < rendered.index("FAILED_PROMPT_SENTINEL")
+
+
+def test_model_console_concurrent_completed_background_uses_fifo_final_result(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        for response_id, delta in (("resp-a", "A1"), ("resp-b", "B-buffered"), ("resp-a", "A2")):
+            RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                RuntimeEvent(
+                    event_type="model.streaming",
+                    source="AgentlyResponseParser",
+                    payload={
+                        "agent_name": "concurrent-agent",
+                        "response_id": response_id,
+                        "delta": delta,
+                    },
+                ),
+                "detail",
+            )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.completed",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-b",
+                    "result": {"message": "B-final"},
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.completed",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-a",
+                    "result": {"message": "A-final"},
+                },
+            ),
+            "detail",
+        )
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert rendered.count("Stage: Streaming") == 1
+    assert rendered.count("Another model response is running in the background") == 1
+    assert "Streaming continues" not in rendered
+    assert "B-buffered" not in rendered
+    assert rendered.index("A1") < rendered.index("A2") < rendered.index("A-final")
+    assert rendered.index("A-final") < rendered.index("B-final")
+
+
+def test_model_console_concurrent_running_background_loads_buffer_then_streams(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        for response_id, delta in (("resp-a", "A"), ("resp-b", "B1")):
+            RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                RuntimeEvent(
+                    event_type="model.streaming",
+                    source="AgentlyResponseParser",
+                    payload={
+                        "agent_name": "concurrent-agent",
+                        "response_id": response_id,
+                        "delta": delta,
+                    },
+                ),
+                "detail",
+            )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.completed",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-a",
+                    "result": {"message": "A-final"},
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.streaming",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-b",
+                    "delta": "B2",
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.completed",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-b",
+                    "result": {"message": "B-final"},
+                },
+            ),
+            "detail",
+        )
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert rendered.count("Stage: Streaming") == 2
+    assert rendered.count("Another model response is running in the background") == 1
+    assert "Streaming continues" not in rendered
+    assert "Detail:\nB1B2" in rendered
+    assert rendered.index("A-final") < rendered.index("B1") < rendered.index("B2") < rendered.index("B-final")
+
+
+def test_model_console_background_buffer_overflow_uses_complete_terminal_result(monkeypatch):
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "builtins.print",
+        lambda *args, **kwargs: printed.append(
+            "".join(str(arg) for arg in args) + kwargs.get("end", "\n")
+        ),
+    )
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker._CONSOLE_STREAM_BUFFER_MAX_CHARS",
+        3,
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        for response_id, delta in (("resp-a", "A"), ("resp-b", "12345")):
+            RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                RuntimeEvent(
+                    event_type="model.streaming",
+                    source="AgentlyResponseParser",
+                    payload={
+                        "agent_name": "concurrent-agent",
+                        "response_id": response_id,
+                        "delta": delta,
+                    },
+                ),
+                "simple",
+            )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.completed",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-a",
+                    "result": "A-final",
+                },
+            ),
+            "simple",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.streaming",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-b",
+                    "delta": "678",
+                },
+            ),
+            "simple",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.completed",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-b",
+                    "result": "12345678\nFULL-TERMINAL-TAIL",
+                },
+            ),
+            "simple",
+        )
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert "Full output pending" in rendered
+    assert "buffered characters omitted by ConsoleSink" not in rendered
+    assert "12345678\nFULL-TERMINAL-TAIL" in rendered
+    assert rendered.count("FULL-TERMINAL-TAIL") == 1
+
+
+def test_model_console_simple_result_without_rendered_stream_is_not_preview_truncated(monkeypatch):
+    printed: list[str] = []
+    complete_result = "RESULT-HEAD\n" + ("x" * 5000) + "\nRESULT-TAIL"
+    monkeypatch.setattr(
+        "builtins.print",
+        lambda *args, **kwargs: printed.append(
+            "".join(str(arg) for arg in args) + kwargs.get("end", "\n")
+        ),
+    )
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.requesting",
+                source="ModelRequest",
+                payload={
+                    "agent_name": "nonstream-agent",
+                    "response_id": "resp-nonstream",
+                    "request": {"model": "test-model", "stream": True},
+                },
+            ),
+            "simple",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.completed",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "nonstream-agent",
+                    "response_id": "resp-nonstream",
+                    "result": complete_result,
+                },
+            ),
+            "simple",
+        )
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert complete_result in rendered
+    assert "RESULT-TAIL" in rendered
+    assert "..." not in rendered
+
+
+def test_model_console_background_failure_is_immediate_without_releasing_foreground(monkeypatch):
+    printed: list[str] = []
+
+    def capture_print(*args, **kwargs):
+        printed.append("".join(str(arg) for arg in args) + kwargs.get("end", "\n"))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+    monkeypatch.setattr(
+        "agently.builtins.hookers.RuntimeConsoleSinkHooker.color_text",
+        lambda value, **_kwargs: str(value),
+    )
+    RuntimeConsoleSinkHooker._on_register()  # type: ignore[attr-defined]
+    try:
+        for response_id, delta in (("resp-a", "A1"), ("resp-b", "B-buffered")):
+            RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+                RuntimeEvent(
+                    event_type="model.streaming",
+                    source="AgentlyResponseParser",
+                    payload={
+                        "agent_name": "concurrent-agent",
+                        "response_id": response_id,
+                        "delta": delta,
+                    },
+                ),
+                "detail",
+            )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.failed",
+                source="ModelRequest",
+                level="ERROR",
+                message="B failed immediately",
+                payload={"agent_name": "concurrent-agent", "response_id": "resp-b"},
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.streaming",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-a",
+                    "delta": "A2",
+                },
+            ),
+            "detail",
+        )
+        RuntimeConsoleSinkHooker._handle_model_event(  # type: ignore[attr-defined]
+            RuntimeEvent(
+                event_type="model.completed",
+                source="AgentlyResponseParser",
+                payload={
+                    "agent_name": "concurrent-agent",
+                    "response_id": "resp-a",
+                    "result": "A-final",
+                },
+            ),
+            "detail",
+        )
+    finally:
+        RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
+
+    rendered = "".join(printed)
+    assert rendered.count("Stage: Streaming") == 1
+    assert "B-buffered" not in rendered
+    assert rendered.index("A1") < rendered.index("B failed immediately") < rendered.index("A2")
+    assert "Streaming continues" in rendered
+    assert "A-final" in rendered
 
 
 def test_agent_execution_console_simple_streams_task_delta_in_one_block(monkeypatch):
@@ -1885,13 +2448,27 @@ async def test_runtime_console_sink_raw_delivery_preserves_detail_stream(monkeyp
                     },
                 )
             )
+            await ec.async_emit(
+                RuntimeEvent(
+                    event_type="model.completed",
+                    source="ModelRequestResult",
+                    payload={
+                        "agent_name": "debug-agent",
+                        "response_id": "resp-raw",
+                        "result": "AB",
+                    },
+                )
+            )
     finally:
         ec.unregister_hook(hook_name)
         RuntimeConsoleSinkHooker._on_unregister()  # type: ignore[attr-defined]
 
     rendered = "".join(printed)
     assert rendered.count("Stage: Streaming") == 1
-    assert "Detail:\nAB\n[AgentExecution]" in rendered
+    assert "Detail:\nAB" in rendered
+    assert rendered.index("Stage: Done") < rendered.index("[Deferred diagnostics]")
+    assert rendered.index("[Deferred diagnostics]") < rendered.index("[AgentExecution]")
+    assert "Streaming continues" not in rendered
     assert "coalesced runtime events" not in rendered
     assert "runtime.progress.model.delta.progress" not in rendered
     assert "Stage: Process" in rendered

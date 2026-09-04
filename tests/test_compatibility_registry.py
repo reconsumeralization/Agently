@@ -151,6 +151,15 @@ def test_in_development_blocks_and_devtools_keep_owner_boundaries() -> None:
     assert "ExecutionResource environment self-check" in console_contract
     assert "product-language labels" in console_contract
     assert "compact translated lines" in console_contract
+    concurrent_console_contract = devtools["runtime_control"][
+        "local_console_concurrent_stream_display_contract"
+    ]
+    assert "first response that emits a delta" in concurrent_console_contract
+    assert "first-delta FIFO order" in concurrent_console_contract
+    assert "labeled deferred section" in concurrent_console_contract
+    assert "ordinary Prompt, provider request, process" in concurrent_console_contract
+    assert "approval-required facts remain immediately visible" in concurrent_console_contract
+    assert "never blocks, throttles, cancels, retries, serializes" in concurrent_console_contract
     planning_contract = devtools["runtime_control"]["action_planning_projection_contract"]
     assert "execution_resources" in planning_contract
     assert "corrected call" in planning_contract
