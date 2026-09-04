@@ -18,7 +18,7 @@ Agently 三层 Action 栈的中间层：`TriggerFlow`（顶，编排）→ `Acti
 
 ## Agent Pattern
 
-通过 `AgentExecution.pattern(...)` 选择的可复用完整请求行为。它消费现有
+通过 `AgentExecution.pattern(...)` 选择的 beta 可复用完整请求行为。它消费现有
 AgentExecution draft，并返回同一个 execution 的业务结果，不创建第二套 input、result
 或 lifecycle facade。其内部可以使用一次或多次 ModelRequest，也可以为 branching、loop、
 HITL wait/resume 或 recovery 编译 TriggerFlow。因此 Pattern 是 application behavior
@@ -27,6 +27,10 @@ built-in `goal` Pattern，普通请求隐式使用 `request`。随包提供的 `
 计划前完成 readiness/clarification；`long_content` 会规划 sections、携带有界 continuity
 逐段写作，并由 host 按序组装文本。这些实现属于内置 `AgentPattern` plugin category，
 不写入 AgentOrchestrator。
+
+仅注册 Pattern 不会选择它，Pattern 名称也不会覆盖 Agent 方法名。Agently 可以在内部透明
+地用 `goal` Pattern 承载 `.goal(...)`；调用者不需要使用 beta Pattern API，原有目标追寻
+行为仍保持不变。
 
 ## auto_close / auto_close_timeout
 

@@ -16,7 +16,8 @@ The middle layer of Agently's three-layer action stack: `TriggerFlow` (top, orch
 
 ## Agent Pattern
 
-A reusable whole-request behavior selected with `AgentExecution.pattern(...)`.
+A beta reusable whole-request behavior selected with
+`AgentExecution.pattern(...)`.
 It consumes the existing AgentExecution draft and returns the same execution's
 business result; it does not create another input, result, or lifecycle facade.
 Its implementation may use one or many ModelRequests and may compile a
@@ -28,6 +29,11 @@ performs readiness/clarification before returning a plan, while
 `long_content` plans sections, writes them with bounded continuity, and uses
 host-ordered text assembly. These implementations live in the built-in
 `AgentPattern` plugin category rather than AgentOrchestrator.
+
+Registration alone never selects a Pattern, and Pattern names remain isolated
+from Agent method names. Agently may carry `.goal(...)` through the internal
+`goal` Pattern transparently; callers do not need to use the beta Pattern API
+to retain existing goal-pursuit behavior.
 
 ## auto_close / auto_close_timeout
 

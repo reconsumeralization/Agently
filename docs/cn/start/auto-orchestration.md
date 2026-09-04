@@ -136,6 +136,11 @@ run 失败。artifact 物化总是在 review 和 verification 之前完成。
 
 ## 请求 Pattern
 
+> **Beta：**`.pattern(...)`、`AgentPattern` 扩展协议以及内置 `plan` /
+> `long_content` 实现仍可能演进。面向调用者的 beta 路径只有显式调用 `.pattern(...)` 后
+> 才会启用；仅注册 Pattern 不会改变普通 Agent 请求。即使 Pattern plugin 使用了相同名称，
+> 既有 Agent 方法仍然是原方法。
+
 Pattern 是一个可复用的完整请求行为，对调用者保持与普通 Agent 请求相同的形态：消费
 现有 AgentExecution draft，返回业务结果。使用 `.pattern(pattern)` 选择一个：
 
@@ -175,6 +180,10 @@ class AnnotatePattern:
 agent.plugin_manager.register("AgentPattern", AnnotatePattern, activate=False)
 result = agent.input(task).pattern("annotate").start()
 ```
+
+注册本身不会选择 Pattern，即使保留通用 plugin manager 的默认 `activate` 参数也一样。
+Pattern 只能由 `.pattern(...)` 选择；Pattern 名称只存在于 `AgentPattern` plugin namespace，
+不会被复制成 Agent 或 AgentExecution 的属性。
 
 一次只选择一个 Pattern；后续 `.pattern(...)` 会替换之前的选择，不会形成隐式链。Pattern
 特有调优应放进 plugin instance 或 plugin settings，不通过 fluent method 增长 kwargs。
@@ -245,12 +254,15 @@ report = (
 `plugins.AgentPattern.long_content.continuity_chars`。`ensure_long_output()` 仍是单次请求的
 transport truncation policy，不是语义长文拼装 Pattern。
 
-隐式简单行为是 `request`；`.goal(...)` 选择 built-in `goal` Pattern；`.strategy(...)`
-仍是更低层的执行机制 override。Pattern identity 会出现在 execution metadata 中；显式
-选择的 Pattern 还会发出 `pattern.started`、`pattern.completed`、`pattern.failed`，隐式
-model-backed built-in 还会发出有界的 `pattern.stage.started`、
-`pattern.stage.completed` 事实。隐式 `request` 不增加 stream 噪声。Pattern 应在
-`.start()` 前选择；`start(mode=...)` 不是 Pattern API。
+隐式简单行为是 `request`。Agently 可以在内部透明地用 built-in `goal` Pattern 承载
+`.goal(...)`，但 goal 调用者继续使用原有 API 和 AgentTask 行为，不需要配置或理解
+Pattern。`.strategy(...)` 仍是更低层的执行机制 override。
+
+只有显式调用 `.pattern(...)` 的 execution 才在 metadata 中暴露 Pattern identity，并发出
+`pattern.started`、`pattern.completed`、`pattern.failed`；model-backed built-in 还会发出
+有界的 `pattern.stage.started`、`pattern.stage.completed` 事实。普通请求和 `.goal(...)`
+不会增加这套 beta metadata 或 stream surface。Pattern 应在 `.start()` 前选择；
+`start(mode=...)` 不是 Pattern API。无效或未知 Pattern 会明确失败，不会静默退回普通请求。
 
 ### 类型与 IDE 提示
 

@@ -153,6 +153,13 @@ run; artifact materialization completes before review and verification.
 
 ## Request Patterns
 
+> **Beta:** `.pattern(...)`, the `AgentPattern` extension protocol, and the
+> bundled `plan` / `long_content` implementations are still evolving. The beta
+> caller-facing path is isolated behind explicit `.pattern(...)` selection:
+> merely registering a Pattern does not change an ordinary Agent request.
+> Existing Agent methods remain methods even when a Pattern plugin uses the
+> same name.
+
 A Pattern is one reusable whole-request behavior with the same caller-facing
 shape as an ordinary Agent request: it consumes the existing AgentExecution
 draft and returns its business result. Select one with `.pattern(pattern)`:
@@ -196,6 +203,11 @@ class AnnotatePattern:
 agent.plugin_manager.register("AgentPattern", AnnotatePattern, activate=False)
 result = agent.input(task).pattern("annotate").start()
 ```
+
+Registration never selects a Pattern, including when the generic plugin
+manager's `activate` argument is left at its default. Selection belongs only to
+`.pattern(...)`; Pattern names stay in the `AgentPattern` plugin namespace and
+are not copied onto Agent or AgentExecution.
 
 Only one Pattern is selected; a later `.pattern(...)` replaces the earlier
 selection rather than forming an implicit chain. Put Pattern-specific tuning in
@@ -280,14 +292,19 @@ is bounded to 4,000 characters. Configure these under
 remains the separate transport-truncation policy for one request; it is not a
 semantic document-composition Pattern.
 
-The implicit simple behavior is `request`. `.goal(...)` selects the built-in
-`goal` Pattern. `.strategy(...)` remains the lower-level execution mechanism
-override. Pattern identity is exposed in execution metadata. Explicitly
-selected Patterns also emit `pattern.started` / `pattern.completed` /
-`pattern.failed`; model-backed built-ins additionally emit bounded
-`pattern.stage.started` / `pattern.stage.completed` facts. The implicit
-`request` behavior adds no stream noise. Pattern selection belongs before
-`.start()`; `start(mode=...)` is not a Pattern API.
+The implicit simple behavior is `request`. Agently may transparently carry
+`.goal(...)` through the built-in `goal` Pattern, but goal callers continue to
+use the existing API and AgentTask behavior without Pattern setup.
+`.strategy(...)` remains the lower-level execution mechanism override.
+
+For executions explicitly configured with `.pattern(...)`, Pattern identity is
+exposed in execution metadata and the run emits `pattern.started` /
+`pattern.completed` / `pattern.failed`; model-backed built-ins additionally
+emit bounded `pattern.stage.started` / `pattern.stage.completed` facts.
+Ordinary requests and `.goal(...)` do not add this beta metadata or stream
+surface. Pattern selection belongs before `.start()`; `start(mode=...)` is not
+a Pattern API. Invalid or unknown Pattern selections fail explicitly rather
+than silently falling back to an ordinary request.
 
 ### Typing And IDE Completion
 
