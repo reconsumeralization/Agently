@@ -23,7 +23,11 @@ Its implementation may use one or many ModelRequests and may compile a
 TriggerFlow for branching, loops, HITL wait/resume, or recovery. Pattern is
 therefore an application behavior contract, not a synonym for TriggerFlow,
 TaskDAG, strategy, or route. `.goal(...)` selects the built-in `goal` Pattern;
-an ordinary request implicitly uses `request`.
+an ordinary request implicitly uses `request`. The bundled `plan` Pattern
+performs readiness/clarification before returning a plan, while
+`long_content` plans sections, writes them with bounded continuity, and uses
+host-ordered text assembly. These implementations live in the built-in
+`AgentPattern` plugin category rather than AgentOrchestrator.
 
 ## auto_close / auto_close_timeout
 

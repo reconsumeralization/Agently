@@ -212,19 +212,82 @@ not require an additional Agent interaction-handler API.
 When plan -> TaskBoard -> task loop is one request whose terminal result is task
 completion, one Pattern owns that topology and its explicit handoffs. If the
 plan or board is itself an independently consumed deliverable, start separate
-AgentExecutions and pass the result explicitly. The lesson `plan` and
-multi-request `long_form` demos are suitable Pattern topology references, but
-those names are not registered as default built-ins until their quality,
-context growth, HITL, request accounting, and artifact readback have real-model
-evidence. `ensure_long_output()` remains a transport-truncation policy, not the
-long-form composition Pattern.
+AgentExecutions and pass the result explicitly.
+
+Agently distributes two concrete AgentPattern plugins under
+`agently.builtins.plugins.AgentPattern`: `plan` and `long_content`. They use the
+same plugin protocol as application Patterns; AgentOrchestrator only resolves
+and invokes them.
+
+### Built-in `plan`
+
+```python
+plan = agent.input(task).pattern("plan").start()
+```
+
+`plan` first makes a structured readiness decision. If required facts are
+missing, its internal TriggerFlow raises a `clarification` ExecutionExchange,
+waits through the configured connected interaction provider, and analyzes the
+request again after the reply. Once ready, a final ModelRequest returns the
+plan, not the requested end deliverable. A caller-provided `.output(...)`
+therefore describes the plan result:
+
+```python
+plan = (
+    agent
+    .input(task)
+    .output({"steps": [str], "risks": [str]}, format="json")
+    .pattern("plan")
+    .start()
+)
+```
+
+The default limits are three questions per round and three clarification
+rounds. Advanced configuration stays in
+`plugins.AgentPattern.plan.max_questions_per_round` and
+`plugins.AgentPattern.plan.max_clarification_rounds`; `.pattern(...)` itself
+does not grow extra parameters. This first built-in supports connected HITL.
+If interaction routing selects a durable/disconnected wait, it fails closed
+because AgentExecution cannot yet return a resumable Pattern handle. It also
+rejects `.ensure_long_output()` because that policy currently belongs to the
+ordinary direct route rather than the Pattern's terminal plan request.
+
+### Built-in `long_content`
+
+```python
+report = (
+    agent
+    .input(task)
+    .pattern("long_content")
+    .artifact("reports/report.md")
+    .review()
+    .start()
+)
+```
+
+`long_content` uses one structured section-plan request, then writes validated
+sections sequentially with bounded continuity notes. Host code adds headings
+and assembles the accepted bodies in plan order, so no final model pass recopies
+the full document. It returns text only: structured `.output(...)` and
+simultaneous `.ensure_long_output()` are rejected before the first model call.
+Use `.artifact(...)` for file delivery and `.review()` / `.verify()` for a
+terminal semantic judgment.
+
+The default section limit is 12 and the total predecessor-continuity projection
+is bounded to 4,000 characters. Configure these under
+`plugins.AgentPattern.long_content.max_sections` and
+`plugins.AgentPattern.long_content.continuity_chars`. `ensure_long_output()`
+remains the separate transport-truncation policy for one request; it is not a
+semantic document-composition Pattern.
 
 The implicit simple behavior is `request`. `.goal(...)` selects the built-in
 `goal` Pattern. `.strategy(...)` remains the lower-level execution mechanism
 override. Pattern identity is exposed in execution metadata. Explicitly
 selected Patterns also emit `pattern.started` / `pattern.completed` /
-`pattern.failed`; the implicit `request` behavior adds no stream noise. Pattern
-selection belongs before `.start()`; `start(mode=...)` is not a Pattern API.
+`pattern.failed`; model-backed built-ins additionally emit bounded
+`pattern.stage.started` / `pattern.stage.completed` facts. The implicit
+`request` behavior adds no stream noise. Pattern selection belongs before
+`.start()`; `start(mode=...)` is not a Pattern API.
 
 ## Goal Pursuit
 

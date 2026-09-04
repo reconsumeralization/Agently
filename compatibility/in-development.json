@@ -259,9 +259,13 @@
         "AgentExecution.verify",
         "AgentExecution.artifact",
         "AgentExecution.pattern",
-        "AgentPattern"
+        "AgentPattern",
+        "PlanPattern",
+        "LongContentPattern",
+        "Agent.pattern(\"plan\")",
+        "Agent.pattern(\"long_content\")"
       ],
-      "contract": "The additive AgentExecution draft declarations keep one business-result and lifecycle owner. review is one advisory handler or structured ModelRequest judgment; verify uses the same handler boundary as a hard terminal gate without hiding a repair loop. artifact renders the accepted result to text or bytes while TaskWorkspace retains containment, write, physical digest readback, trusted identity, and terminal-retention authority. pattern selects one whole-request behavior that consumes the existing AgentExecution input/output/capability/policy draft and returns its business value; the registered AgentPattern seam receives execution plus one-use run_default, while complex branching, loops, HITL wait/resume, and recovery remain TriggerFlow and ExecutionExchange concerns. Ordinary requests implicitly use request, and Agent.goal explicitly selects the built-in goal Pattern while preserving the existing AgentTask implementation."
+      "contract": "The additive AgentExecution draft declarations keep one business-result and lifecycle owner. review is one advisory handler or structured ModelRequest judgment; verify uses the same handler boundary as a hard terminal gate without hiding a repair loop. artifact renders the accepted result to text or bytes while TaskWorkspace retains containment, write, physical digest readback, trusted identity, and terminal-retention authority. pattern selects one whole-request behavior that consumes the existing AgentExecution input/output/capability/policy draft and returns its business value; the registered AgentPattern seam receives execution plus one-use run_default, while complex branching, loops, HITL wait/resume, and recovery remain TriggerFlow and ExecutionExchange concerns. Ordinary requests implicitly use request, and Agent.goal explicitly selects the built-in goal Pattern while preserving the existing AgentTask implementation. The default plugin registry also distributes plan and long_content through agently.builtins.plugins.AgentPattern: plan performs structured readiness, connected ExecutionExchange clarification, and terminal plan generation while preserving the caller output contract; long_content validates an ordered section plan, writes each section sequentially with bounded continuity, and host-assembles text without a final model recopy. Both bundled multi-request Patterns reject ensure_long_output mixing before model dispatch; long_content also rejects structured output, and disconnected plan clarification fails closed until AgentExecution can return a resumable Pattern handle."
     },
     "structured_output": {
       "surface": [

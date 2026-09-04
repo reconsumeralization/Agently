@@ -111,6 +111,11 @@ def _load_default_plugins(plugin_manager: "PluginManager"):
 
     plugin_manager.register("AgentOrchestrator", AgentlyAgentOrchestrator)
 
+    from agently.builtins.plugins.AgentPattern import LongContentPattern, PlanPattern
+
+    plugin_manager.register("AgentPattern", PlanPattern, activate=False)
+    plugin_manager.register("AgentPattern", LongContentPattern, activate=False)
+
     from agently.builtins.plugins.ModelRequester.OpenAICompatible import (
         OpenAICompatible,
     )

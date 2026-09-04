@@ -48,6 +48,8 @@ keywords: Agently, 能力地图, 学习路径, request, TaskDAG, Dynamic Task, T
 | 需要查看观测事件 | [Event Center](../observability/event-center.md) → [DevTools](../observability/devtools.md) |
 | 不确定该用 ModelRequest、AgentExecution、TaskDAG 还是 TriggerFlow | [执行层选择](execution-layer-selection.md) |
 | 需要一次 Agent turn 在模型响应、Actions 或 Skills 中选路线 | [Agent 自动编排](../start/auto-orchestration.md) |
+| 需要带可选人工澄清的终态计划 | [内置 `plan` Pattern](../start/auto-orchestration.md#内置-plan) |
+| 需要跨多次模型请求组装连贯长文本 | [内置 `long_content` Pattern](../start/auto-orchestration.md#内置-long_content) |
 | 单个业务任务需要计划 → 有边界执行 → 证据 → 验证 → replan | [Agent 自动编排](../start/auto-orchestration.md#agenttask-策略)，从 `agent.create_task(...)` 开始，并按 `AgentExecution` result 消费 |
 | 需要查看 task frame / Skill lowering，或可选的 TaskDAG Blocks carrier | [Blocks 生命周期](blocks-lifecycle.md) |
 | 模型生成或应用提交的 DAG 需要规划、校验、定制并执行 | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |

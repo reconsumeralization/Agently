@@ -186,16 +186,71 @@ TriggerFlow wait/resume，不需要再增加 Agent interaction-handler API。
 
 当 plan -> TaskBoard -> task loop 是一个以任务完成为终态结果的请求时，由一个 Pattern
 拥有这套 topology 和明确 handoff；如果 plan 或 board 本身是独立消费的 deliverable，则
-启动不同 AgentExecution 并显式传递结果。课程里的 `plan` 和多轮请求 `long_form` demo
-适合作为 Pattern topology 参考，但在质量、上下文增长、HITL、请求计数和 artifact 回读
-取得真实模型证据前，这两个名称不会注册为默认 built-in。`ensure_long_output()` 仍是
-transport truncation policy，不是长文拼装 Pattern。
+启动不同 AgentExecution 并显式传递结果。
+
+Agently 在 `agently.builtins.plugins.AgentPattern` 下随包提供两个具体插件：`plan` 和
+`long_content`。它们与应用自定义 Pattern 使用同一套 plugin protocol；AgentOrchestrator
+只负责解析和调用，不拥有其内部拼装逻辑。
+
+### 内置 `plan`
+
+```python
+plan = agent.input(task).pattern("plan").start()
+```
+
+`plan` 先进行结构化 readiness 判断。如果缺少会实质改变计划的信息，内部 TriggerFlow
+会发出 `clarification` ExecutionExchange，通过已配置的 connected interaction provider
+等待回复，然后带着回复再次判断；ready 后由最终 ModelRequest 返回计划，而不是执行目标
+交付物。因此调用者的 `.output(...)` 描述的是计划结果：
+
+```python
+plan = (
+    agent
+    .input(task)
+    .output({"steps": [str], "risks": [str]}, format="json")
+    .pattern("plan")
+    .start()
+)
+```
+
+默认每轮最多三个问题、最多三轮 clarification。高级调优放在
+`plugins.AgentPattern.plan.max_questions_per_round` 与
+`plugins.AgentPattern.plan.max_clarification_rounds`，不向 `.pattern(...)` 增加参数。
+首个内置版本支持 connected HITL；若 routing 选择 durable/disconnected wait，会 fail
+closed，因为 AgentExecution 目前还不能返回可恢复的 Pattern handle。它同样拒绝
+`.ensure_long_output()`，因为该 transport policy 当前属于普通 direct route，而不是
+Pattern 的 terminal plan request。
+
+### 内置 `long_content`
+
+```python
+report = (
+    agent
+    .input(task)
+    .pattern("long_content")
+    .artifact("reports/report.md")
+    .review()
+    .start()
+)
+```
+
+`long_content` 先用一次结构化请求生成 section plan，再携带有界 continuity notes 串行写作
+各个已校验 section。host 按计划顺序添加标题并组装已接受正文，不再用最后一次模型请求
+重抄整篇文档。它只返回文本：结构化 `.output(...)` 以及同时选择
+`.ensure_long_output()` 都会在第一次模型调用前被拒绝。使用 `.artifact(...)` 交付文件，
+使用 `.review()` / `.verify()` 做终态语义判断。
+
+默认 section 上限为 12，前序 continuity 投影的总长度上限为 4,000 字符；高级配置位于
+`plugins.AgentPattern.long_content.max_sections` 与
+`plugins.AgentPattern.long_content.continuity_chars`。`ensure_long_output()` 仍是单次请求的
+transport truncation policy，不是语义长文拼装 Pattern。
 
 隐式简单行为是 `request`；`.goal(...)` 选择 built-in `goal` Pattern；`.strategy(...)`
 仍是更低层的执行机制 override。Pattern identity 会出现在 execution metadata 中；显式
 选择的 Pattern 还会发出 `pattern.started`、`pattern.completed`、`pattern.failed`，隐式
-`request` 不增加 stream 噪声。Pattern 应在 `.start()` 前选择；`start(mode=...)` 不是
-Pattern API。
+model-backed built-in 还会发出有界的 `pattern.stage.started`、
+`pattern.stage.completed` 事实。隐式 `request` 不增加 stream 噪声。Pattern 应在
+`.start()` 前选择；`start(mode=...)` 不是 Pattern API。
 
 ## Goal Pursuit
 

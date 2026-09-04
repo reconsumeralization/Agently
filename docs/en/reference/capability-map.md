@@ -46,6 +46,8 @@ Each layer assumes the previous ones work. Skipping ahead is the most common rea
 | Need to inspect observation events | [Event Center](../observability/event-center.md) → [DevTools](../observability/devtools.md) |
 | Not sure whether to use ModelRequest, AgentExecution, TaskDAG, or TriggerFlow | [Execution Layer Selection](execution-layer-selection.md) |
 | Need one Agent turn to choose between model response, Actions, or Skills | [Agent Auto-Orchestration](../start/auto-orchestration.md) |
+| Need a terminal plan with optional human clarification | [Built-in `plan` Pattern](../start/auto-orchestration.md#built-in-plan) |
+| Need a coherent long text assembled across model requests | [Built-in `long_content` Pattern](../start/auto-orchestration.md#built-in-long_content) |
 | Single business task needs plan → bounded execution → evidence → verification → replan | [Agent Auto-Orchestration](../start/auto-orchestration.md#agenttask-strategy), start with `agent.create_task(...)` and consume it as an `AgentExecution` result |
 | Need to inspect task-frame/Skill lowering, or the optional TaskDAG Blocks carrier | [Blocks Lifecycle](blocks-lifecycle.md) |
 | Model-generated or app-generated DAG that must be planned, validated, customized, and executed | [TaskDAG / Dynamic Task](../dynamic-task/README.md) |

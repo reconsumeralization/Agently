@@ -26,7 +26,8 @@ if TYPE_CHECKING:
     from .execution import AgentExecution
 
 
-_BUILTIN_PATTERNS = frozenset({"request", "goal"})
+_BUILTIN_PATTERNS = frozenset({"request", "goal", "plan", "long_content"})
+_BUNDLED_PLUGIN_MODULE = "agently.builtins.plugins.AgentPattern"
 _PatternSource = Literal["builtin", "plugin", "instance", "handler"]
 _DefaultRouteRunner = Callable[[], Awaitable[tuple[str, Any]]]
 
@@ -219,7 +220,15 @@ def _resolve_pattern(
         runner = getattr(plugin, "run", None)
         if not callable(runner):
             raise TypeError(f"Registered AgentPattern {selection!r} must define callable run(...).")
-        return selection, "plugin", cast(AgentPatternHandler, runner)
+        source: _PatternSource = (
+            "builtin"
+            if selection in _BUILTIN_PATTERNS
+            and str(getattr(plugin_class, "__module__", "")).startswith(
+                _BUNDLED_PLUGIN_MODULE
+            )
+            else "plugin"
+        )
+        return selection, source, cast(AgentPatternHandler, runner)
 
     runner = getattr(selection, "run", None)
     if callable(runner):

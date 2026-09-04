@@ -33,6 +33,7 @@ from .PromptGenerator.AgentlyPromptGenerator import AgentlyPromptGenerator
 from .TaskDAGPlanner import AgentlyTaskDAGPlanner
 from .Blocks import AgentlyBlocks
 from .AgentOrchestrator import AgentlyAgentOrchestrator
+from .AgentPattern import LongContentPattern, PlanPattern
 from .ModelRequester.AnthropicCompatible import AnthropicCompatible
 from .ModelRequester.OpenAICompatible import OpenAICompatible
 from .ModelRequester.OpenAIResponsesCompatible import OpenAIResponsesCompatible

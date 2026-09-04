@@ -23,7 +23,10 @@ AgentExecution draft，并返回同一个 execution 的业务结果，不创建�
 或 lifecycle facade。其内部可以使用一次或多次 ModelRequest，也可以为 branching、loop、
 HITL wait/resume 或 recovery 编译 TriggerFlow。因此 Pattern 是 application behavior
 contract，不是 TriggerFlow、TaskDAG、strategy 或 route 的同义词。`.goal(...)` 选择
-built-in `goal` Pattern，普通请求隐式使用 `request`。
+built-in `goal` Pattern，普通请求隐式使用 `request`。随包提供的 `plan` Pattern 会在返回
+计划前完成 readiness/clarification；`long_content` 会规划 sections、携带有界 continuity
+逐段写作，并由 host 按序组装文本。这些实现属于内置 `AgentPattern` plugin category，
+不写入 AgentOrchestrator。
 
 ## auto_close / auto_close_timeout
 
