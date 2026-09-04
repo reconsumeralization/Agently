@@ -496,6 +496,15 @@ class SkillsExtension(BaseAgent):
             }.values()
             if package.revision_ref not in required_refs
         ]
+        execution.diagnostics["skill_scope"] = {
+            "status": "frozen",
+            "required_revision_refs": [
+                package.revision_ref for package in required_packages
+            ],
+            "model_decision_revision_refs": [
+                package.revision_ref for package in optional_packages
+            ],
+        }
         selected_optional = await self._async_select_optional_packages(
             task=execution.task_target(),
             packages=optional_packages,

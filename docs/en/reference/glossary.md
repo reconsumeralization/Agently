@@ -124,7 +124,11 @@ The owner of installed real-world Skill packages: discovery, validation,
 immutable revisions, trust state, resource graphs, and exact resource reads.
 Skill guidance reaches a task through a `TaskContext` source; authorized Skill
 scripts bind as ordinary Workspace-backed CodeExecution Actions. SkillLibrary
-does not select task routes or execute Skills. See
+does not select task routes or execute Skills. It is not automatically exposed
+as a model-visible candidate set. Skills compose like Actions:
+`agent.use_skills(..., always=True)` supplies Agent defaults and
+`execution.use_skills(...)` supplies one-run additions; AgentExecution freezes
+their exact revisions for that run. See
 [SkillsExecutor Migration](../development/skills-executor.md).
 
 ## seal / sealed

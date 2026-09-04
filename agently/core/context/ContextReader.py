@@ -1176,6 +1176,27 @@ class ContextReader:
             required_divisor = max(1, required_remaining)
             if candidate.required:
                 required_remaining -= 1
+            parent_source_ref = str(
+                candidate.metadata.get("parent_source_ref") or ""
+            ).strip()
+            if (
+                not candidate.required
+                and parent_source_ref
+                and any(
+                    block.source_ref == parent_source_ref
+                    and block.completeness == "complete"
+                    for block in blocks
+                )
+            ):
+                omissions.append(
+                    ContextOmission(
+                        block_key=candidate.block_key,
+                        source_ref=candidate.source_ref,
+                        reason="covered_by_complete_parent",
+                        details={"parent_source_ref": parent_source_ref},
+                    )
+                )
+                continue
             if len(blocks) >= self.budget.max_blocks:
                 omissions.append(
                     ContextOmission(
@@ -1571,6 +1592,29 @@ class ContextReader:
             diagnostics=diagnostics,
             remaining_chars=self.budget.max_chars,
         )
+
+        complete_parent_refs = {
+            block.source_ref
+            for block in blocks
+            if block.completeness == "complete"
+        }
+        selectable_optional: list[_CollectedCandidate] = []
+        for item in optional:
+            parent_source_ref = str(
+                item.offered.metadata.get("parent_source_ref") or ""
+            ).strip()
+            if parent_source_ref and parent_source_ref in complete_parent_refs:
+                omissions.append(
+                    ContextOmission(
+                        block_key=item.offered.block_key,
+                        source_ref=item.offered.source_ref,
+                        reason="covered_by_complete_parent",
+                        details={"parent_source_ref": parent_source_ref},
+                    )
+                )
+                continue
+            selectable_optional.append(item)
+        optional = selectable_optional
 
         optional_keys, selection_diagnostics, selection_failure = await self._select_optional(
             resolved_intent,

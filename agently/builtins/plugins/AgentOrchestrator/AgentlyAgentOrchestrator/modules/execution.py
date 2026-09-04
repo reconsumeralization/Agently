@@ -325,6 +325,7 @@ class AgentExecution:
 
     def _reconfiguration_target(self) -> "AgentExecution":
         if not self._started:
+            self._task_context_prepared = False
             return self
         raise RuntimeError(
             "AgentExecution represents one independent run and has already started. "
@@ -1129,6 +1130,9 @@ class AgentExecution:
     async def async_prepare_task_context(self) -> TaskContext:
         """Synchronize prompt facts and exact required Skill bindings before routing."""
 
+        if self._task_context_prepared:
+            return self.task_context
+
         for entry_id in tuple(self._task_context_prompt_entry_ids):
             self.task_context.remove(entry_id)
         self._task_context_prompt_entry_ids.clear()
@@ -1171,7 +1175,11 @@ class AgentExecution:
 
         bind_skills = getattr(self.agent, "async_bind_skills_for_execution", None)
         if callable(bind_skills):
-            resolved_bindings = await cast(Any, bind_skills)(self)
+            with bind_runtime_context(
+                agent_execution_context=self.execution_context,
+                settings=self.request.settings,
+            ):
+                resolved_bindings = await cast(Any, bind_skills)(self)
             self.skill_bindings = list(resolved_bindings or [])
         if self.skill_bindings:
             library = self.skill_library
@@ -1289,7 +1297,11 @@ class AgentExecution:
                 query=resolved_intent,
                 metadata=policy_metadata,
             )
-        package = await reader.async_read(resolved_intent)
+        with bind_runtime_context(
+            agent_execution_context=self.execution_context,
+            settings=self.request.settings,
+        ):
+            package = await reader.async_read(resolved_intent)
         reader.ensure_required_delivery(package)
         self.context_packages.append(package)
         self.logs.setdefault("context_packages", []).append(package.to_dict())

@@ -1092,8 +1092,10 @@ snapshot = await task.async_run(graph_input={"ticket": "TICKET-OK"})
 ## Skills 语义
 
 `agent.use_skills(...)` 和 `agent.use_skills_packs(...)` 在 AgentExecution 上登记
-binding intent。`mode="model_decision"` 用结构化语义 selector 从已安装 revision
-中选择；`mode="required"` 以 fail-closed 方式绑定 SKILL.md guidance。普通
+binding intent，并与 `use_actions(...)` 使用同一种组合表达；没有另一套公开的
+Skill 集合 API。每个 execution 只把这些声明解析成自己的精确 revision 范围，不扫描
+全局 SkillLibrary。`mode="model_decision"` 用结构化语义 selector 从本次 execution
+范围中选择；`mode="required"` 以 fail-closed 方式绑定 SKILL.md guidance。普通
 `model_request` 或显式 AgentTask strategy 再通过 TaskContext 消费这些 guidance。
 
 `run_skills_task(...)` 只是同一 AgentExecution path 的已发布 result-shaped

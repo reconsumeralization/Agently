@@ -59,6 +59,15 @@ result = await execution.async_get_data()
 select from host-issued keys, validates the result, and binds the chosen
 revisions. Unknown or duplicate keys fail closed.
 
+Skills use the same composition grammar as Actions; there is no separate public
+collection API. `agent.use_skills(..., always=True)` configures the Agent defaults,
+while `execution.use_skills(...)` adds declarations for one execution. Before
+selection, AgentExecution resolves those declarations into an execution-scoped,
+revision-pinned snapshot and offers only its bounded metadata cards to the
+model. An execution with no Skill declarations does not scan the global
+SkillLibrary. Installing or changing another Skill after preparation does not
+silently widen the running execution.
+
 `agent.require_skills(...)` is the explicit required-mode convenience method.
 `agent.use_skills_packs(...)` expands an installed immutable pack to its pinned
 revision refs.
@@ -98,9 +107,10 @@ pack = await Agently.skills_executor.async_build_context_pack(
 ```
 
 This method creates a temporary TaskContext and uses the same ContextReader
-contracts as ordinary execution. `actionize_scripts=True` is ignored with a
-diagnostic; it cannot grant execution implicitly. Host code may explicitly bind
-a trusted exact-revision script as an ordinary Workspace-backed
+contracts as ordinary execution. `actionize_scripts=True` returns inert
+`binding_required` Action candidates and a diagnostic; it does not mount or
+authorize them. Host code may explicitly bind a trusted exact-revision script
+as an ordinary Workspace-backed
 `code_execution` Action, with ActionRuntime and ExecutionResource retaining
 execution ownership.
 
@@ -167,8 +177,9 @@ TaskContext diagnostics, retries, or lifecycle control.
 Installing a Skill does not copy all of its resources into every prompt.
 `SkillContextSource` contributes revision-pinned resource descriptors and exact
 reads to the TaskContext-owned internal ContextIndex. Required `SKILL.md`
-guidance is delivered first; resource indexes and explicit references allow
-later bounded reads. Structural, lexical, or optional hybrid indexing may
+guidance is delivered once; its child section descriptors are not offered or
+delivered again when the complete root is already present. Resource indexes and
+explicit references allow later bounded reads. Structural, lexical, or optional hybrid indexing may
 narrow reusable candidates, but TaskContext remains the aggregate and
 SkillLibrary remains source truth. When available context is too large, the
 reader returns omissions and diagnostics plus refs for later reads. It never

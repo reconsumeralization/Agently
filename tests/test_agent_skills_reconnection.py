@@ -50,6 +50,22 @@ class _SelectionRequest:
         return {"selected_keys": self.selected_keys}
 
 
+class _ExecutionAwareSelectionRequest(_SelectionRequest):
+    def __init__(self, selected_keys: list[str]) -> None:
+        super().__init__(selected_keys)
+        self.call_count = 0
+        self.observed_execution_context: Any = None
+
+    async def async_get_data(self) -> dict[str, Any]:
+        from agently.core.runtime.RuntimeContext import (
+            get_current_agent_execution_context,
+        )
+
+        self.call_count += 1
+        self.observed_execution_context = get_current_agent_execution_context()
+        return await super().async_get_data()
+
+
 @pytest.mark.asyncio
 async def test_model_decision_skill_selection_uses_host_keys_and_exact_revision(
     tmp_path: Path,
@@ -85,6 +101,108 @@ async def test_model_decision_skill_selection_uses_host_keys_and_exact_revision(
         second.revision_ref
     ]
     assert execution.skill_bindings[0].mode == "model_decision"
+
+
+@pytest.mark.asyncio
+async def test_skill_selection_uses_execution_scope_and_unchanged_preparation_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    library = SkillLibrary(tmp_path / "library")
+    first = library.install(
+        _write_skill(tmp_path / "first", name="First Scope", description="First procedure."),
+        trust="trusted",
+    )
+    second = library.install(
+        _write_skill(tmp_path / "second", name="Second Scope", description="Second procedure."),
+        trust="trusted",
+    )
+    agent = Agently.create_agent("skill-execution-scope-test").use_task_workspace(
+        tmp_path / "work"
+    )
+    agent.skill_library = library
+    agent.use_skills(first.skill_id, always=True)
+    request = _ExecutionAwareSelectionRequest(["skill-option:1"])
+    cast(Any, agent).create_temp_request = lambda: request
+    execution = agent.create_execution().input("Apply the first procedure")
+
+    first_context = await execution.async_prepare_task_context()
+    agent.use_skills(second.skill_id, always=True)
+    second_context = await execution.async_prepare_task_context()
+
+    assert first_context is second_context
+    assert request.call_count == 1
+    assert request.observed_execution_context is execution.execution_context
+    assert execution.diagnostics["skill_scope"] == {
+        "status": "frozen",
+        "required_revision_refs": [],
+        "model_decision_revision_refs": [first.revision_ref],
+    }
+    assert [binding.revision_ref for binding in execution.skill_bindings] == [
+        first.revision_ref
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execution_without_skill_declarations_does_not_read_global_library(
+    tmp_path: Path,
+) -> None:
+    library = SkillLibrary(tmp_path / "library")
+    library.install(
+        _write_skill(tmp_path / "installed", name="Global Only", description="Not declared."),
+        trust="trusted",
+    )
+    agent = Agently.create_agent("skill-no-global-scope-test").use_task_workspace(
+        tmp_path / "work"
+    )
+    agent.skill_library = library
+    execution = agent.create_execution().input("Answer without declared Skills")
+
+    await execution.async_prepare_task_context()
+
+    assert execution.skill_bindings == []
+    assert execution.diagnostics["skill_scope"] == {
+        "status": "frozen",
+        "required_revision_refs": [],
+        "model_decision_revision_refs": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_execution_local_skill_reconfiguration_refreshes_scope_before_start(
+    tmp_path: Path,
+) -> None:
+    library = SkillLibrary(tmp_path / "library")
+    first = library.install(
+        _write_skill(tmp_path / "first", name="First Required", description="First."),
+        trust="trusted",
+    )
+    second = library.install(
+        _write_skill(tmp_path / "second", name="Second Required", description="Second."),
+        trust="trusted",
+    )
+    agent = Agently.create_agent("skill-local-refresh-test").use_task_workspace(
+        tmp_path / "work"
+    )
+    agent.skill_library = library
+    execution = (
+        agent.create_execution()
+        .input("Apply both procedures")
+        .require_skills(first.skill_id)
+    )
+
+    await execution.async_prepare_task_context()
+    execution.require_skills(second.skill_id)
+    await execution.async_prepare_task_context()
+
+    assert execution.diagnostics["skill_scope"] == {
+        "status": "frozen",
+        "required_revision_refs": [first.revision_ref, second.revision_ref],
+        "model_decision_revision_refs": [],
+    }
+    assert [binding.revision_ref for binding in execution.skill_bindings] == [
+        first.revision_ref,
+        second.revision_ref,
+    ]
 
 
 @pytest.mark.asyncio

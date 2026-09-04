@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -20,6 +21,43 @@ def _write_skill(root: Path, *, name: str = "Execution Skill") -> Path:
         encoding="utf-8",
     )
     return root
+
+
+class _SelectEveryOptionalContextBlock:
+    def __init__(self) -> None:
+        self.slots: dict[str, Any] = {}
+        self.observed_execution_context: Any = None
+
+    def input(self, value: Any) -> "_SelectEveryOptionalContextBlock":
+        self.slots["input"] = value
+        return self
+
+    def info(self, value: Any) -> "_SelectEveryOptionalContextBlock":
+        self.slots["info"] = value
+        return self
+
+    def instruct(self, value: Any) -> "_SelectEveryOptionalContextBlock":
+        self.slots["instruct"] = value
+        return self
+
+    def output(
+        self,
+        value: Any,
+        *,
+        format: str | None = None,
+    ) -> "_SelectEveryOptionalContextBlock":
+        self.slots["output"] = value
+        self.slots["format"] = format
+        return self
+
+    async def async_get_data(self) -> dict[str, Any]:
+        from agently.core.runtime.RuntimeContext import (
+            get_current_agent_execution_context,
+        )
+
+        self.observed_execution_context = get_current_agent_execution_context()
+        cards = self.slots["info"]["offered_context_blocks"]
+        return {"selected_keys": [card["block_key"] for card in cards]}
 
 
 def test_agent_exposes_task_workspace_without_reusing_task_workspace_owner(tmp_path: Path) -> None:
@@ -168,6 +206,54 @@ async def test_direct_consumer_reads_skill_instruction_from_same_task_context(
 
 
 @pytest.mark.asyncio
+async def test_complete_skill_root_and_child_sections_are_not_delivered_together(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "skill-with-sections"
+    skill_root.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_text(
+        "---\n"
+        "name: Sectioned Skill\n"
+        "description: Exercise root and section disclosure.\n"
+        "---\n\n"
+        "# First\n\nApply the first rule.\n\n"
+        "## Second\n\nApply the second rule.\n",
+        encoding="utf-8",
+    )
+    library = SkillLibrary(tmp_path / "library")
+    package = library.install(skill_root, trust="trusted")
+    agent = Agently.create_agent("skill-root-section-dedup-test").use_task_workspace(
+        tmp_path / "work"
+    )
+    agent.skill_library = library
+    selector = _SelectEveryOptionalContextBlock()
+    cast(Any, agent).create_temp_request = lambda: selector
+    execution = (
+        agent.create_execution()
+        .input("Apply all of the Skill instructions")
+        .require_skills(package.skill_id)
+    )
+
+    context_package = await execution.async_read_task_context(
+        consumer_id=f"model_request:{execution.id}",
+        phase="direct",
+    )
+
+    instruction_blocks = [
+        block for block in context_package.blocks if block.role == "instruction"
+    ]
+    assert len(instruction_blocks) == 1
+    assert instruction_blocks[0].source_ref.endswith("/SKILL.md")
+    assert "Apply the first rule." in instruction_blocks[0].content
+    assert "Apply the second rule." in instruction_blocks[0].content
+    assert selector.slots == {}
+    assert any(
+        omission.reason == "covered_by_complete_parent"
+        for omission in context_package.omissions
+    )
+
+
+@pytest.mark.asyncio
 async def test_execution_context_read_accepts_consumer_specific_input_intent(
     tmp_path: Path,
 ) -> None:
@@ -197,6 +283,35 @@ async def test_execution_context_read_accepts_consumer_specific_input_intent(
     )
     assert selected.content == (
         "The security section must disclose the unresolved audit gap."
+    )
+
+
+@pytest.mark.asyncio
+async def test_semantic_context_selection_runs_in_current_execution_scope(
+    tmp_path: Path,
+) -> None:
+    agent = Agently.create_agent("context-selection-lineage-test").use_task_workspace(
+        tmp_path
+    )
+    selector = _SelectEveryOptionalContextBlock()
+    cast(Any, agent).create_temp_request = lambda: selector
+    execution = agent.create_execution().input("Use the optional release evidence")
+    execution.task_context.put(
+        role="information",
+        content="The release evidence is ready.",
+        entry_id="optional-release-evidence",
+        source_ref="caller://release/evidence",
+    )
+
+    context_package = await execution.async_read_task_context(
+        consumer_id=f"model_request:{execution.id}",
+        phase="direct",
+    )
+
+    assert selector.observed_execution_context is execution.execution_context
+    assert any(
+        block.source_ref == "caller://release/evidence"
+        for block in context_package.blocks
     )
 
 

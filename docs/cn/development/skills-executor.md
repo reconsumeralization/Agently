@@ -55,6 +55,13 @@ result = await execution.async_get_data()
 `mode="model_decision"` 下，AgentExecution 用结构化 `ModelRequest` 从宿主发放
 的 key 中选择，校验后绑定 revision；未知或重复 key 会 fail closed。
 
+Skills 与 Actions 使用同一种组合表达，不新增另一套公开集合 API。
+`agent.use_skills(..., always=True)` 配置 Agent 默认可用集合，
+`execution.use_skills(...)` 增加本次 execution 的声明。选择前，AgentExecution
+把这些声明解析成 execution-scoped、revision-pinned 的快照，只向模型投影其中有界的
+meta cards。没有 Skill 声明的 execution 不会扫描全局 SkillLibrary；准备完成后再安装
+或修改其他 Skill，也不会静默扩大正在运行的 execution。
+
 `agent.require_skills(...)` 是 required mode 的便捷方法。
 `agent.use_skills_packs(...)` 把已安装的不可变 pack 展开为固定 revision refs。
 
@@ -89,8 +96,9 @@ pack = await Agently.skills_executor.async_build_context_pack(
 ```
 
 该方法创建临时 TaskContext，并使用与普通 execution 相同的 ContextReader
-contract。`actionize_scripts=True` 会被忽略并产生 diagnostic，不能隐式授予执行权。
-宿主代码可以把可信精确 revision 中的 script 显式绑定成普通 Workspace-backed
+contract。`actionize_scripts=True` 会返回 inert、状态为 `binding_required` 的
+Action candidates 和 diagnostic，但不会挂载或授权它们。宿主代码可以把可信精确
+revision 中的 script 显式绑定成普通 Workspace-backed
 `code_execution` Action，执行所有权仍属于 ActionRuntime 与 ExecutionResource。
 
 ```python
@@ -153,7 +161,8 @@ AgentExecution API。
 ## 上下文限制与渐进式披露
 
 安装 Skill 不会把全部资源复制进每次 prompt。required `SKILL.md` guidance
-优先交付。`SkillContextSource` 向 TaskContext 拥有的内部 ContextIndex 提供固定
+只交付一次；完整 root 已存在时，它的 child section descriptors 不会再次提供给
+selector 或重复进入 package。`SkillContextSource` 向 TaskContext 拥有的内部 ContextIndex 提供固定
 revision 的 resource descriptor 与 exact read；resource index 与显式 refs 支持
 后续 bounded read。structural、lexical 或可选 hybrid index 可以缩小可复用
 candidate，但 TaskContext 仍是 aggregate，SkillLibrary 仍是 source truth。上下文

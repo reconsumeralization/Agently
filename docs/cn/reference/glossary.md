@@ -113,7 +113,10 @@ Execution-local 的活对象存储——数据库 client、回调、socket、函
 真实世界 Skill package 的安装事实 owner，负责 discovery、validation、不可变 revision、
 trust state、resource graph 与精确 resource read。Skill guidance 通过 `TaskContext` source
 进入任务；获授权的 Skill script 绑定为普通 Workspace-backed CodeExecution Action。
-SkillLibrary 不选择任务 route，也不“执行 Skill”。详见
+SkillLibrary 不选择任务 route、不“执行 Skill”，也不会自动成为模型可见候选集。
+Skills 与 Actions 使用相同组合语法：`agent.use_skills(..., always=True)` 提供 Agent
+默认声明，`execution.use_skills(...)` 提供本次运行声明，由 AgentExecution 冻结本次
+运行的精确 revisions。详见
 [SkillsExecutor 迁移](../development/skills-executor.md)。
 
 ## seal / sealed

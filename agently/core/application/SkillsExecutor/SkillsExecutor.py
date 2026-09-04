@@ -491,6 +491,7 @@ class SkillsExecutor:
         include_examples: Any,
         include_references: Any,
         include_assets: Any,
+        include_script_candidates: bool,
     ) -> tuple[str, ...]:
         included_kinds: set[str] = set()
         if include_examples is True:
@@ -499,6 +500,8 @@ class SkillsExecutor:
             included_kinds.add("reference")
         if include_assets is True:
             included_kinds.add("asset")
+        if include_script_candidates:
+            included_kinds.add("script")
         return tuple(
             f"{package.revision_ref}/{resource.path}"
             for package in packages
@@ -541,6 +544,23 @@ class SkillsExecutor:
                 continue
             if path == "resource-index" or not path:
                 continue
+            if (
+                block.role == "capability"
+                and block.metadata.get("resource_kind") == "script"
+            ):
+                target["action_candidates"].append(
+                    {
+                        "candidate_key": block.block_key,
+                        "skill_binding_id": block.metadata.get(
+                            "skill_binding_id"
+                        ),
+                        "resource_path": path,
+                        "source_ref": block.source_ref,
+                        "sha256": block.metadata.get("sha256"),
+                        "status": "binding_required",
+                    }
+                )
+                continue
             target["selected_resources"].append(
                 {
                     "path": path,
@@ -554,9 +574,17 @@ class SkillsExecutor:
         if actionize_scripts:
             diagnostics.append(
                 {
-                    "code": "skills.compat.actionize_scripts_ignored",
-                    "message": "Skill scripts remain capability descriptors; this facade cannot execute them.",
-                    "details": {},
+                    "code": "skills.compat.action_binding_required",
+                    "message": (
+                        "Skill script candidates are inert descriptors. Bind an exact "
+                        "candidate through AgentExecution and SkillActionBinder before use."
+                    ),
+                    "details": {
+                        "candidate_count": sum(
+                            len(item["action_candidates"])
+                            for item in projected.values()
+                        )
+                    },
                 }
             )
         if include_public_lookup:
@@ -624,6 +652,7 @@ class SkillsExecutor:
             include_examples=include_examples,
             include_references=include_references,
             include_assets=include_assets,
+            include_script_candidates=actionize_scripts,
         )
         reader = task_context.reader(
             consumer="skills_executor.compatibility",

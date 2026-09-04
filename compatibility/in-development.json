@@ -99,9 +99,12 @@
       "runtime_contract": {
         "installed_truth_owner": "SkillLibrary immutable content-addressed revisions",
         "selection_and_binding_owner": "AgentExecution structured semantic selection with host-issued keys and fail-closed validation",
+        "composition_contract": "Skills use the same agent.use_*(..., always=True) default plus execution.use_*(...) one-run composition grammar as Actions; no second public Skill collection manager is introduced",
+        "execution_scope_contract": "Agent defaults plus current AgentExecution declarations resolve to one frozen exact-revision scope; empty declarations do not expose the global SkillLibrary; unchanged preparation is idempotent",
         "disclosure_owner": "TaskContext plus SkillContextSource plus consumer-bound ContextReader",
+        "root_disclosure_contract": "A complete SKILL.md root suppresses duplicate selection and delivery of its indexed child sections; child sections remain eligible only for lossy-parent or later bounded reads",
         "compatibility_facade": "Agently.skills_executor supports local configure/install/list/inspect/read/context-pack/TaskDAG helpers only",
-        "execution_policy": "No Skills route, Skill-local strategy, stage engine, implicit script actionization, capability inference, or capability mounting; trusted exact-revision scripts require explicit host authorization and bind as ordinary Workspace-backed code_execution Actions",
+        "execution_policy": "No Skills route, Skill-local strategy, stage engine, implicit script actionization, capability inference, or capability mounting; actionize_scripts compatibility projection returns inert binding_required candidates only; trusted exact-revision scripts require explicit host authorization and bind as ordinary Workspace-backed code_execution Actions",
         "revision_binding_event": "skills.revisions.bound records exact revision availability without claiming activation",
         "context_consumption_event": "skills.context.bound records concrete ModelRequest response-bound context consumption; availability alone is not consumption or Action evidence",
         "remote_source_policy": "Registered SkillSourceProvider plugins materialize authorized local or Git sources to immutable local snapshots; SkillLibrary installs exact snapshots and records redacted provenance; remote compatibility installs default to untrusted and selected subpaths reject symlink escape"
@@ -286,7 +289,7 @@
         "Agent.run_skills_task",
         "Agently.skills_executor"
       ],
-      "contract": "Direct AgentExecution binding is canonical; async_read_task_context binds consumer/phase and accepts an optional string or ContextReadIntent override; run_skills_task is a result-shaped adapter and Agently.skills_executor is management/context compatibility only."
+      "contract": "Skills mirror Actions composition: agent.use_skills(..., always=True) declares defaults and AgentExecution.use_skills(...) declares one-run additions. AgentExecution freezes only that exact-revision scope, with empty declarations exposing no global catalog. async_read_task_context binds consumer/phase and accepts an optional string or ContextReadIntent override; run_skills_task is a result-shaped adapter and Agently.skills_executor is management/context compatibility only."
     }
   },
   "public_typing": {

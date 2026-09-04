@@ -107,15 +107,21 @@ def test_in_development_skill_contract_reconnects_to_agent_execution() -> None:
 
     assert contract["installed_truth_owner"].startswith("SkillLibrary")
     assert contract["selection_and_binding_owner"].startswith("AgentExecution")
+    assert "same agent.use_*" in contract["composition_contract"]
+    assert "no second public Skill collection manager" in contract["composition_contract"]
+    assert "empty declarations do not expose" in contract["execution_scope_contract"]
     assert "TaskContext" in contract["disclosure_owner"]
+    assert "complete SKILL.md root" in contract["root_disclosure_contract"]
     assert "Agently.skills_executor" in contract["compatibility_facade"]
     assert "No Skills route" in contract["execution_policy"]
+    assert "inert binding_required candidates" in contract["execution_policy"]
     assert "SkillSourceProvider" in contract["remote_source_policy"]
     assert "immutable local snapshots" in contract["remote_source_policy"]
     request_contract = manifest["request_input"]["skills"]
     assert "AgentExecution.use_skills" in request_contract["surface"]
     assert "Agent.run_skills_task" in request_contract["surface"]
     assert "result-shaped adapter" in request_contract["contract"]
+    assert "agent.use_skills(..., always=True)" in request_contract["contract"]
 
     stage_guidance = skills["runtime_dependency_guidance"]["agently_stage"]
     assert stage_guidance["skill"] == "agently-stage"

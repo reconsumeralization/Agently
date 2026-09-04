@@ -223,7 +223,9 @@ async def test_context_pack_is_projection_of_generic_context_package(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_context_pack_never_actionizes_scripts_or_grants_permissions(tmp_path: Path) -> None:
+async def test_context_pack_returns_binding_required_script_candidates_without_granting_permissions(
+    tmp_path: Path,
+) -> None:
     library = SkillLibrary(tmp_path / "library")
     facade = SkillsExecutor(library=library)
     installed = facade.install_skills(_write_skill(tmp_path / "skill"))
@@ -235,9 +237,15 @@ async def test_context_pack_never_actionizes_scripts_or_grants_permissions(tmp_p
         actionize_scripts=True,
     )
 
-    assert compatibility["skills"][0]["action_candidates"] == []
+    candidates = compatibility["skills"][0]["action_candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["resource_path"] == "scripts/check.py"
+    assert candidates[0]["status"] == "binding_required"
+    assert candidates[0]["sha256"]
+    assert "installed_path" not in candidates[0]
+    assert "callable" not in candidates[0]
     assert any(
-        item["code"] == "skills.compat.actionize_scripts_ignored"
+        item["code"] == "skills.compat.action_binding_required"
         for item in compatibility["diagnostics"]
     )
     assert not hasattr(facade, "register_effort_strategy")

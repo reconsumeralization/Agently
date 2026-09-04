@@ -1362,8 +1362,11 @@ itself mean the broader business goal is complete.
 ## Skills Semantics
 
 `agent.use_skills(...)` and `agent.use_skills_packs(...)` register binding
-intent on an AgentExecution. `mode="model_decision"` uses a structured semantic
-selector over installed revisions; `mode="required"` binds the selected
+intent on an Agent or AgentExecution using the same composition grammar as
+`use_actions(...)`; there is no separate public Skill collection API. Each execution
+resolves only those declarations into an exact-revision scope. It does not scan
+the global SkillLibrary. `mode="model_decision"` uses a structured semantic
+selector over that execution scope; `mode="required"` binds the selected
 SKILL.md guidance fail-closed. The ordinary `model_request` or explicit
 AgentTask strategy then consumes that guidance through TaskContext.
 
