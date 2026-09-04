@@ -18,6 +18,7 @@ from typing import Any, Literal, TypeAlias
 from typing_extensions import NotRequired, TypedDict
 
 from .record_store import RecordRef
+from .agent_review import AgentReviewResult
 
 
 AgentExecutionStatus: TypeAlias = Literal["created", "running", "success", "blocked", "error", "cancelled"] | str
@@ -60,6 +61,7 @@ class AgentExecutionDiagnostics(TypedDict):
     task_workspace_retention: NotRequired[dict[str, Any]]
     action_artifact_release: NotRequired["ActionArtifactReleaseDiagnostics"]
     long_output: NotRequired[dict[str, Any]]
+    review: NotRequired[dict[str, Any]]
 
 
 class ActionArtifactReleaseDiagnostic(TypedDict):
@@ -115,6 +117,7 @@ class AgentExecutionMeta(TypedDict):
     diagnostics: AgentExecutionDiagnostics
     record_refs: AgentExecutionRecordRefs
     long_output: NotRequired[dict[str, Any]]
+    reviews: NotRequired[list[AgentReviewResult]]
 
 
 CapabilityKind: TypeAlias = Literal["action"]

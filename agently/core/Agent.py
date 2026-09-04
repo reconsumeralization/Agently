@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from agently.types.data import (
         AgentExecutionLineage,
         AgentExecutionLimits,
+        AgentReviewHandler,
         AgentlyModelResultMessage,
         AgentlyOriginalResultPayload,
         AgentlySpecificResultMessage,
@@ -1780,6 +1781,12 @@ class BaseAgent:
         return self.create_execution().goal(goal, success_criteria=success_criteria)
 
     goals = goal
+
+    def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
+        return self.create_execution().review(handler)
+
+    def verify(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
+        return self.create_execution().verify(handler)
 
     def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
         return self.create_execution().effort(value, **strategy)

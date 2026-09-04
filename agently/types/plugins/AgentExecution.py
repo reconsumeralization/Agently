@@ -25,6 +25,7 @@ from agently.types.data import (
     AgentExecutionStreamData,
     AgentExecutionRecordPurpose,
     AgentExecutionRecordWrite,
+    AgentReviewHandler,
     ContextBudget,
     ContextPackage,
     ContextReadIntent,
@@ -81,6 +82,10 @@ class AgentExecution(Protocol):
     def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
 
     def goals(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
+
+    def review(self, handler: AgentReviewHandler | None = None) -> "AgentExecution": ...
+
+    def verify(self, handler: AgentReviewHandler | None = None) -> "AgentExecution": ...
 
     def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution": ...
 

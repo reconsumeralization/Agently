@@ -80,6 +80,7 @@ from .result_views import (
     get_async_generator as get_async_generator_entry,
     sync_generator as sync_generator_entry,
 )
+from .review import declare_review
 from .route_execution import async_execute_route, start_execution
 from .runtime_guidance import add_guidance as add_guidance_entry
 from .routing import HybridRoutePlanner
@@ -118,6 +119,8 @@ if TYPE_CHECKING:
         AgentExecutionLimits,
         AgentExecutionRecordPurpose,
         AgentExecutionRecordWrite,
+        AgentReviewHandler,
+        AgentReviewResult,
         OutputValidateHandler,
         RunContext,
     )
@@ -259,6 +262,8 @@ class AgentExecution:
         self._ensure_long_output_enabled = False
         self._long_output_result_object: Any = None
         self._long_output_meta: dict[str, Any] = {}
+        self.review_declarations: list[dict[str, Any]] = []
+        self.review_results: list["AgentReviewResult"] = []
         self.status = "created"
         self._started = False
         self._completed = False
@@ -359,6 +364,7 @@ class AgentExecution:
         fork.local_skills_pack_selectors = [dict(item) for item in self.local_skills_pack_selectors]
         fork.task_options = dict(self.task_options)
         fork.strategy_name = self.strategy_name
+        fork.review_declarations = [dict(item) for item in self.review_declarations]
         fork._sync_action_scope(source="AgentExecution.compatibility_fork")
         fork.effective_options = fork._build_effective_options()
         fork._selected_route = None
@@ -1063,6 +1069,12 @@ class AgentExecution:
         return target
 
     goals = goal
+
+    def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
+        return declare_review(self, required=False, handler=handler)
+
+    def verify(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
+        return declare_review(self, required=True, handler=handler)
 
     def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
         return configure_effort(self._reconfiguration_target(), value, **strategy)

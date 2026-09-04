@@ -66,6 +66,36 @@ AgentExecution 交付。只有 legacy/custom fallback 或 `ensure_long_output` �
 Skill Context、DAG substrate 和后续 route 实现都可以替换，而不需要 core 知道内置
 plugin 的内部实现。
 
+## Review 与 Verification
+
+业务结果生成后，使用 `.review(handler=None)` 做一次 advisory 质量判断；如果同一种
+判断必须成为终态硬门槛，则使用 `.verify(handler=None)`：
+
+```python
+result = agent.input(task).output(contract).review().start()
+
+def release_check(result, context):
+    return {
+        "passed": result["risk_level"] != "unknown",
+        "summary": "发布决策必须给出明确的风险等级。",
+        "issues": [],
+        "suggestions": [],
+    }
+
+result = agent.input(task).output(contract).verify(release_check).start()
+```
+
+handler 接收 `(result, context)`，可以同步或异步执行，返回 Boolean，或返回包含 Boolean
+`passed` 的 mapping。review 未通过时只记录到 execution metadata，不改变已接受的业务
+结果和成功状态；verification 未通过时记录同样的结构化 verdict，阻止终态成功，并抛出
+`AgentVerificationError`。不传 handler 时，Agently 会追加一次结构化模型请求。
+
+这两个方法只判断一次，不会隐式改写、重试或 replan。模型单次输出的 schema/value
+硬校验及其声明式 repair retry 仍使用 ModelRequest `.validate(...)`；如果判断需要驱动
+多轮 reflection 或 repair loop，应使用 goal pursuit 或显式 TriggerFlow。review 结果可从
+`(await execution.async_get_meta())["reviews"]` 读取，也会通过 `review.started`、
+`review.completed` 和 `verification.failed` stream event 暴露。
+
 ## Goal Pursuit
 
 当业务目标需要有边界的 planning、execution、evidence、verification 和 replan

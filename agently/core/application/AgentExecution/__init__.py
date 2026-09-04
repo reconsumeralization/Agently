@@ -22,6 +22,7 @@ from .Context import (
 )
 from .PromptDraft import AgentExecutionPromptDraft
 from .Result import AgentExecutionResult
+from .Review import AgentVerificationError
 from .Stream import AgentExecutionStream
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "AgentExecutionPromptDraft",
     "AgentExecutionResult",
     "AgentExecutionStream",
+    "AgentVerificationError",
     "RuntimeStageStallError",
     "merge_stream_meta",
     "normalize_execution_limits",

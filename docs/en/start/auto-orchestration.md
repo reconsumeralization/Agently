@@ -76,6 +76,40 @@ protocol. This keeps Skill context, the DAG substrate, and future route
 implementations replaceable without teaching core about builtin plugin
 internals.
 
+## Review And Verification
+
+Use `.review(handler=None)` for an advisory quality judgment after the business
+result has been produced. Use `.verify(handler=None)` when the same judgment is
+a required terminal gate:
+
+```python
+result = agent.input(task).output(contract).review().start()
+
+def release_check(result, context):
+    return {
+        "passed": result["risk_level"] != "unknown",
+        "summary": "A release decision requires a known risk level.",
+        "issues": [],
+        "suggestions": [],
+    }
+
+result = agent.input(task).output(contract).verify(release_check).start()
+```
+
+A handler receives `(result, context)`, may be synchronous or asynchronous, and
+returns either a Boolean or a mapping with Boolean `passed`. A failed review is
+recorded in execution metadata but leaves the accepted business result and run
+status unchanged. A failed verification records the same structured verdict,
+blocks terminal success, and raises `AgentVerificationError`. With no handler,
+Agently performs one additional structured model request.
+
+These methods judge once; they do not revise, retry, or replan. Use
+ModelRequest `.validate(...)` for hard schema/value acceptance and its declared
+repair retries. Use goal pursuit or an explicit TriggerFlow when judgment must
+drive a multi-round reflection or repair loop. Review results are available in
+`(await execution.async_get_meta())["reviews"]` and through
+`review.started`, `review.completed`, and `verification.failed` stream events.
+
 ## Goal Pursuit
 
 Use `agent.goal(goal_or_goals, success_criteria=None)` when the business goal

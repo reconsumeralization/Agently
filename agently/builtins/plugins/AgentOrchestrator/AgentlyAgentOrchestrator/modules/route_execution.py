@@ -17,13 +17,18 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Literal, TYPE_CHECKING
 
-from agently.core.application.AgentExecution import AgentExecutionLimitExceeded, RuntimeStageStallError
+from agently.core.application.AgentExecution import (
+    AgentExecutionLimitExceeded,
+    AgentVerificationError,
+    RuntimeStageStallError,
+)
 from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import DataFormatter
 
 from .long_output import LongOutputError
 from .routes import run_model_request_route
 from .runtime_guidance import mark_pending_guidance_not_applied
+from .review import run_declared_reviews
 from .task_strategy import run_agent_task_route
 from .terminal_retention import (
     apply_agent_execution_terminal_retention,
@@ -106,6 +111,9 @@ async def async_execute_route(
             )
         if route != "agent_task":
             await mark_pending_guidance_not_applied(owner, reason=f"route:{route}:not_agent_task")
+        owner.result = result
+        if owner.status in {"running", "success", "completed"} and owner.review_declarations:
+            await run_declared_reviews(owner, result)
         return route, result
 
 
@@ -204,6 +212,17 @@ async def start_execution(
             await _finalize_terminal_execution(owner, terminal_status="failed")
             raise timeout_error from error
         except AgentExecutionLimitExceeded as error:
+            owner.status = "blocked"
+            owner._error = error
+            error_projection = owner._record_error_diagnostic(error)
+            await owner.emit_stream(
+                "error",
+                error_projection,
+                source="agent_execution",
+            )
+            await _finalize_terminal_execution(owner, terminal_status="failed")
+            raise
+        except AgentVerificationError as error:
             owner.status = "blocked"
             owner._error = error
             error_projection = owner._record_error_diagnostic(error)

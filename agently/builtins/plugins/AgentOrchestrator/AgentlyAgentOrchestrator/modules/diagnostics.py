@@ -195,6 +195,7 @@ def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
         "logs": DataFormatter.sanitize(owner.logs),
         "diagnostics": DataFormatter.sanitize(owner.diagnostics),
         "record_refs": DataFormatter.sanitize(owner.record_refs),
+        "reviews": DataFormatter.sanitize(getattr(owner, "review_results", [])),
         "guidance_items": DataFormatter.sanitize(getattr(owner, "guidance_items", [])),
     }
     if getattr(owner, "_ensure_long_output_enabled", False):
