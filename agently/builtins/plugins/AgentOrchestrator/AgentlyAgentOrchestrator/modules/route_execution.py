@@ -25,6 +25,7 @@ from agently.core.application.AgentExecution import (
 from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.utils import DataFormatter
 
+from .artifact import run_declared_artifacts
 from .long_output import LongOutputError
 from .routes import run_model_request_route
 from .runtime_guidance import mark_pending_guidance_not_applied
@@ -112,6 +113,8 @@ async def async_execute_route(
         if route != "agent_task":
             await mark_pending_guidance_not_applied(owner, reason=f"route:{route}:not_agent_task")
         owner.result = result
+        if owner.status in {"running", "success", "completed"} and owner.artifact_declarations:
+            await run_declared_artifacts(owner, result)
         if owner.status in {"running", "success", "completed"} and owner.review_declarations:
             await run_declared_reviews(owner, result)
         return route, result

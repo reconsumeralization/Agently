@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from agently.types.data import (
         AgentExecutionLineage,
         AgentExecutionLimits,
+        AgentArtifactHandler,
         AgentReviewHandler,
         AgentlyModelResultMessage,
         AgentlyOriginalResultPayload,
@@ -1787,6 +1788,13 @@ class BaseAgent:
 
     def verify(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
         return self.create_execution().verify(handler)
+
+    def artifact(
+        self,
+        path: str | os.PathLike[str],
+        handler: "AgentArtifactHandler | None" = None,
+    ) -> "AgentExecution":
+        return self.create_execution().artifact(path, handler)
 
     def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
         return self.create_execution().effort(value, **strategy)

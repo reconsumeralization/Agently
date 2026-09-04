@@ -110,6 +110,47 @@ drive a multi-round reflection or repair loop. Review results are available in
 `(await execution.async_get_meta())["reviews"]` and through
 `review.started`, `review.completed`, and `verification.failed` stream events.
 
+## Artifact Delivery
+
+Use `.artifact(path, handler=None)` when the accepted business result must also
+be delivered as a verified file:
+
+```python
+result = (
+    agent
+    .input("Prepare the launch report.")
+    .output(report_contract)
+    .artifact("reports/launch.json")
+    .review()
+    .start()
+)
+```
+
+The method remains useful for ordinary text or structured requests; it is not
+limited to workspace-oriented AgentTask runs. Its trust boundary is always the
+Agent's TaskWorkspace. Strings are written unchanged, while mappings, lists,
+tuples, and JSON primitives use readable JSON. A custom synchronous or
+asynchronous handler receives `(result, context)` and returns `str` or `bytes`:
+
+```python
+agent.input(task).artifact(
+    "exports/result.bin",
+    lambda result, context: encode_result(result),
+).start()
+```
+
+The handler only renders content. TaskWorkspace owns path containment, write
+permission, physical digest readback, trusted file identity, and terminal
+retention. In a read-only workspace, a new requested path is written to the
+execution's private fallback area; inspect the trusted ref's `path` for the
+actual location. In a read-write workspace, the requested path is used.
+
+Artifact delivery does not replace or wrap the business result. Trusted refs
+are exposed in `meta["logs"]["artifact_refs"]` and through
+`artifact.started` / `artifact.completed` stream events. Multiple calls create
+multiple independently verified files. Any declared delivery failure fails the
+run; artifact materialization completes before review and verification.
+
 ## Goal Pursuit
 
 Use `agent.goal(goal_or_goals, success_criteria=None)` when the business goal

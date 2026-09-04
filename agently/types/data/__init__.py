@@ -361,6 +361,12 @@ from .agent_review import (
     AgentReviewResult,
 )
 
+from .agent_artifact import (
+    AgentArtifactContext,
+    AgentArtifactHandler,
+    AgentArtifactHandlerResult,
+)
+
 from .attempt import (
     AttemptDecision,
     AttemptDecisionAction,

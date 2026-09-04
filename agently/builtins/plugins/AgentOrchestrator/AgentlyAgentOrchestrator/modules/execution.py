@@ -18,6 +18,7 @@ from agently_stage import default_stage_call_bridge
 
 import asyncio
 import inspect
+import os
 import uuid
 from pathlib import Path
 from collections.abc import AsyncGenerator, Generator, Mapping
@@ -60,6 +61,7 @@ from .bridges import (
     record_action_log as record_action_log_entry,
     record_model_response_id as record_model_response_id_entry,
 )
+from .artifact import declare_artifact
 from .diagnostics import (
     initial_diagnostics,
     initial_record_refs,
@@ -119,10 +121,12 @@ if TYPE_CHECKING:
         AgentExecutionLimits,
         AgentExecutionRecordPurpose,
         AgentExecutionRecordWrite,
+        AgentArtifactHandler,
         AgentReviewHandler,
         AgentReviewResult,
         OutputValidateHandler,
         RunContext,
+        TaskWorkspaceFileRef,
     )
     from agently.core.application import DynamicTask
 
@@ -262,6 +266,8 @@ class AgentExecution:
         self._ensure_long_output_enabled = False
         self._long_output_result_object: Any = None
         self._long_output_meta: dict[str, Any] = {}
+        self.artifact_declarations: list[dict[str, Any]] = []
+        self.artifact_results: list["TaskWorkspaceFileRef"] = []
         self.review_declarations: list[dict[str, Any]] = []
         self.review_results: list["AgentReviewResult"] = []
         self.status = "created"
@@ -364,6 +370,7 @@ class AgentExecution:
         fork.local_skills_pack_selectors = [dict(item) for item in self.local_skills_pack_selectors]
         fork.task_options = dict(self.task_options)
         fork.strategy_name = self.strategy_name
+        fork.artifact_declarations = [dict(item) for item in self.artifact_declarations]
         fork.review_declarations = [dict(item) for item in self.review_declarations]
         fork._sync_action_scope(source="AgentExecution.compatibility_fork")
         fork.effective_options = fork._build_effective_options()
@@ -1075,6 +1082,13 @@ class AgentExecution:
 
     def verify(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
         return declare_review(self, required=True, handler=handler)
+
+    def artifact(
+        self,
+        path: str | os.PathLike[str],
+        handler: "AgentArtifactHandler | None" = None,
+    ) -> "AgentExecution":
+        return declare_artifact(self, path, handler)
 
     def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
         return configure_effort(self._reconfiguration_target(), value, **strategy)

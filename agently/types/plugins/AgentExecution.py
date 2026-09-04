@@ -14,11 +14,13 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from typing import Any, Literal, Protocol, TYPE_CHECKING, overload, runtime_checkable
 
 from agently.types.data import (
     AgentlySpecificResultMessage,
+    AgentArtifactHandler,
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
@@ -86,6 +88,12 @@ class AgentExecution(Protocol):
     def review(self, handler: AgentReviewHandler | None = None) -> "AgentExecution": ...
 
     def verify(self, handler: AgentReviewHandler | None = None) -> "AgentExecution": ...
+
+    def artifact(
+        self,
+        path: str | os.PathLike[str],
+        handler: AgentArtifactHandler | None = None,
+    ) -> "AgentExecution": ...
 
     def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution": ...
 

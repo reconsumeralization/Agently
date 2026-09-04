@@ -96,6 +96,44 @@ handler 接收 `(result, context)`，可以同步或异步执行，返回 Boolea
 `(await execution.async_get_meta())["reviews"]` 读取，也会通过 `review.started`、
 `review.completed` 和 `verification.failed` stream event 暴露。
 
+## Artifact 交付
+
+当已接受的业务结果还必须交付为经过验证的文件时，使用
+`.artifact(path, handler=None)`：
+
+```python
+result = (
+    agent
+    .input("准备上线报告。")
+    .output(report_contract)
+    .artifact("reports/launch.json")
+    .review()
+    .start()
+)
+```
+
+它适用于普通文本和结构化请求，并不局限于 workspace-oriented AgentTask；但它的可信
+边界始终是 Agent 绑定的 TaskWorkspace。字符串会原样写入；mapping、list、tuple 和
+JSON primitive 会序列化为易读 JSON。自定义同步或异步 handler 接收
+`(result, context)`，返回 `str` 或 `bytes`：
+
+```python
+agent.input(task).artifact(
+    "exports/result.bin",
+    lambda result, context: encode_result(result),
+).start()
+```
+
+handler 只负责渲染内容。路径 containment、写权限、物理 digest 回读、可信文件身份和
+终态保留仍由 TaskWorkspace 负责。只读 workspace 中，新请求路径会写入当前 execution
+的私有 fallback area，应从可信 ref 的 `path` 读取实际位置；读写 workspace 则使用请求
+路径。
+
+artifact 交付不会替换或包装业务结果。可信 refs 位于
+`meta["logs"]["artifact_refs"]`，并通过 `artifact.started` / `artifact.completed`
+stream event 暴露。连续调用可创建多个分别校验的文件；任一已声明交付失败都会使本次
+run 失败。artifact 物化总是在 review 和 verification 之前完成。
+
 ## Goal Pursuit
 
 当业务目标需要有边界的 planning、execution、evidence、verification 和 replan

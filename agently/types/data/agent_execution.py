@@ -60,6 +60,7 @@ class AgentExecutionDiagnostics(TypedDict):
     required_capabilities: list[dict[str, Any]]
     task_workspace_retention: NotRequired[dict[str, Any]]
     action_artifact_release: NotRequired["ActionArtifactReleaseDiagnostics"]
+    artifact: NotRequired[dict[str, Any]]
     long_output: NotRequired[dict[str, Any]]
     review: NotRequired[dict[str, Any]]
 
