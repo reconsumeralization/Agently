@@ -19,8 +19,8 @@ import os
 import uuid
 
 from collections.abc import Mapping
-from typing import Any, AsyncGenerator, Generator, Sequence, TYPE_CHECKING, Literal, cast, overload
-from typing_extensions import Self
+from typing import Any, AsyncGenerator, Generator, Sequence, TYPE_CHECKING, Literal, cast
+from typing_extensions import Self, overload
 
 from agently.core.extension import ExtensionHandlers
 from agently.core.application import AgentTask, DynamicTask

@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
-from typing import Any, Literal, Protocol, TYPE_CHECKING, overload, runtime_checkable
+from typing import Any, Literal, Protocol, TYPE_CHECKING, runtime_checkable
+from typing_extensions import overload
 
 from agently.types.data import (
     AgentlySpecificResultMessage,
