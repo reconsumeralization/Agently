@@ -17,13 +17,16 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Mapping
-from typing import Any, cast
+from typing import Any, TYPE_CHECKING, cast
 
 from agently.types.data import (
     AgentExecutionLineage,
     AgentExecutionLimits,
 )
 from agently.utils import DataFormatter
+
+if TYPE_CHECKING:
+    from agently.types.plugins import ExecutionExchangeProvider
 
 
 class AgentExecutionLimitExceeded(RuntimeError):
@@ -219,6 +222,7 @@ class AgentExecutionContext:
         effective_task_execution_strategy: str | None = None,
         strategy_context_source: str | None = None,
         task_workspace: Any | None = None,
+        execution_exchange_provider: "ExecutionExchangeProvider | None" = None,
         parent_model_request_budget: _ModelRequestBudget | None = None,
     ):
         self.execution_id = execution_id
@@ -250,6 +254,7 @@ class AgentExecutionContext:
         self.effective_task_execution_strategy = _optional_str(effective_task_execution_strategy)
         self.strategy_context_source = _optional_str(strategy_context_source)
         self.task_workspace = task_workspace
+        self.execution_exchange_provider = execution_exchange_provider
 
     @property
     def model_request_budget(self) -> _ModelRequestBudget:

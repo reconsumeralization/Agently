@@ -283,6 +283,7 @@ from .blocks import (
 )
 
 from .execution_exchange import (
+    AgentInteractionHandler,
     ExchangeRoutingHandler,
     ExecutionExchangeDispatchState,
     ExecutionExchangeKind,

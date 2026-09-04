@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         AgentExecutionEffort,
         AgentExecutionStrategy,
         AgentArtifactHandler,
+        AgentInteractionHandler,
         AgentReviewHandler,
         AgentlyModelResultMessage,
         AgentlyOriginalResultPayload,
@@ -1827,6 +1828,10 @@ class BaseAgent:
     def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution":
         """Select one beta whole-request Pattern for a fresh execution draft."""
         return self.create_execution().pattern(pattern)
+
+    def interact(self, handler: "AgentInteractionHandler") -> "AgentExecution":
+        """Bind a connected human-interaction handler to a fresh execution."""
+        return self.create_execution().interact(handler)
 
     def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
         return self.create_execution().review(handler)

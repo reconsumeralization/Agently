@@ -34,10 +34,12 @@ from agently.types.data import (
     AgentArtifactHandler,
     AgentArtifactResult,
     AgentExecutionEffort,
+    AgentInteractionHandler,
     AgentReviewContext,
     AgentReviewHandler,
     AgentExecutionStreamData,
     AgentExecutionStrategy,
+    ExecutionExchangeView,
     AgentlyModelResultEvent,
     AgentlyModelResultMessage,
     AgentlyResultGenerator,
@@ -87,6 +89,8 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(agent.pattern("plan"), AgentExecution)
         assert_type(execution.pattern("long_content"), AgentExecution)
         assert_type(execution.pattern("custom"), AgentExecution)
+        assert_type(agent.interact(lambda _exchange: "answer"), AgentExecution)
+        assert_type(execution.interact(lambda _exchange: {"answer": "value"}), AgentExecution)
         assert_type(execution.review(), AgentExecution)
         assert_type(execution.verify(), AgentExecution)
         assert_type(execution.effort("high"), AgentExecution)
@@ -149,6 +153,10 @@ def test_public_handler_type_aliases():
         def artifact_handler(_result: object, _context: AgentArtifactContext) -> str:
             return "artifact"
 
+        async def interaction_handler(exchange: ExecutionExchangeView) -> object:
+            assert_type(exchange, ExecutionExchangeView)
+            return {"answer": "provided"}
+
         async def model_stream_handler(item: StreamingData) -> None:
             assert_type(item, StreamingData)
 
@@ -159,6 +167,7 @@ def test_public_handler_type_aliases():
         skills_handler: SkillRuntimeStreamHandler = skills_stream_handler
         agent_review_handler: AgentReviewHandler = review_handler
         agent_artifact_handler: AgentArtifactHandler = artifact_handler
+        agent_interaction_handler: AgentInteractionHandler = interaction_handler
         agent_pattern_handler: AgentPatternHandler = pattern_handler
         agent: BaseAgent = Agently.create_agent("typing-handler-contract")
         assert_type(agent.pattern(NamedPattern()), AgentExecution)
@@ -167,6 +176,7 @@ def test_public_handler_type_aliases():
         assert callable(skills_handler)
         assert callable(agent_review_handler)
         assert callable(agent_artifact_handler)
+        assert callable(agent_interaction_handler)
         assert callable(agent_pattern_handler)
 
 
@@ -331,6 +341,7 @@ def test_advanced_agent_execution_types_do_not_expand_the_package_root():
     assert not hasattr(agently_package, "AgentExecutionStrategy")
     assert not hasattr(agently_package, "AgentExecutionEffort")
     assert not hasattr(agently_package, "AgentArtifactResult")
+    assert not hasattr(agently_package, "AgentInteractionHandler")
 
 
 def test_task_board_public_update_methods_accept_dict_payloads():

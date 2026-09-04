@@ -263,13 +263,11 @@ class TriggerFlowExecutionInterrupts:
     async def _publish_external_wait_request(self, interrupt: dict[str, Any]) -> dict[str, Any]:
         execution = self._execution
         request = interrupt.get("external_wait_request")
-        provider = execution._get_runtime_resource("execution_exchange_provider", None)
-        if provider is None and isinstance(request, dict) and request.get("provider_id"):
-            # Fall back to the global provider registry so routed interrupts
-            # reach their channel without a per-execution resource binding.
-            from agently.base import execution_exchange
+        from agently.base import execution_exchange
 
-            provider = execution_exchange.get_provider(str(request.get("provider_id")))
+        # Keep publication and connected waiting on one provider-resolution
+        # path: inner-flow resource, owning AgentExecution, then registry.
+        provider = execution_exchange._resolve_interrupt_provider(execution, interrupt)
         if provider is None:
             return interrupt
         publish_request = getattr(provider, "publish_request", None)

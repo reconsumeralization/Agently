@@ -172,6 +172,34 @@ async def test_default_request_pattern_preserves_simple_request_lifecycle(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_standard_interaction_handler_is_idle_without_an_exchange(tmp_path):
+    agent = create_pattern_agent(tmp_path, "idle-interaction")
+    agent.settings.set("interaction.mode", "durable")
+    calls: list[object] = []
+
+    execution = (
+        agent.interact(lambda exchange: calls.append(exchange))
+        .input("hello")
+        .create_execution(limits={"max_model_requests": 1})
+    )
+
+    assert await execution.async_get_data() == "base-result"
+    assert calls == []
+    assert execution.request.settings.get("interaction.mode") == "hot"
+    assert agent.settings.get("interaction.mode") == "durable"
+    assert not any(item.path.startswith("exchange.") for item in execution.stream.items)
+
+
+def test_standard_interaction_handler_rejects_non_callable(tmp_path):
+    agent = create_pattern_agent(tmp_path, "invalid-interaction")
+
+    with pytest.raises(TypeError, match="must be callable"):
+        agent.interact("console")  # type: ignore[arg-type]
+
+    assert PatternRequester.requests == []
+
+
+@pytest.mark.asyncio
 async def test_explicit_request_pattern_emits_pattern_lifecycle(tmp_path):
     agent = create_pattern_agent(tmp_path, "explicit-request-pattern")
     execution = agent.input("hello").pattern("request")

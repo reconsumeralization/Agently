@@ -7,7 +7,7 @@ import pytest
 
 from agently import Agently
 from agently.core import PluginManager
-from agently.types.data import AgentlyRequestData
+from agently.types.data import AgentlyRequestData, ExecutionExchangeView
 from agently.utils import Settings
 
 
@@ -279,6 +279,51 @@ async def test_plan_pattern_uses_execution_exchange_for_clarification(tmp_path):
         assert "exchange.resolved" in paths
     finally:
         execution_exchange.unregister_provider(provider_id)
+
+
+@pytest.mark.asyncio
+async def test_plan_pattern_uses_standard_agent_interaction_handler(tmp_path):
+    from agently.base import execution_exchange
+
+    seen: list[ExecutionExchangeView] = []
+    registered_before = execution_exchange.list_providers()
+    agent = create_pattern_agent(
+        tmp_path,
+        "agent-interaction-plan",
+        [
+            not_ready_payload(),
+            ready_payload(),
+            "# Staging release plan\n\n1. Validate staging.\n2. Ship.",
+        ],
+        settings_values={"interaction.mode": "durable"},
+    )
+
+    def handle_exchange(exchange: ExecutionExchangeView) -> dict[str, str]:
+        seen.append(exchange)
+        return {"environment": "staging"}
+
+    execution = (
+        agent.input("Plan the release.")
+        .interact(handle_exchange)
+        .pattern("plan")
+    )
+
+    result = await execution.async_get_data()
+
+    assert result.startswith("# Staging release plan")
+    assert agent.settings.get("interaction.mode") == "durable"
+    assert execution.request.settings.get("interaction.mode") == "hot"
+    assert execution_exchange.list_providers() == registered_before
+    assert len(seen) == 1
+    assert seen[0]["kind"] == "clarification"
+    assert seen[0]["status"] == "pending"
+    assert seen[0]["subject"] == "Plan clarification"
+    assert seen[0]["payload"]["questions"][0]["question"].startswith("Which environment")
+    assert seen[0]["request"].get("provider_metadata", {}).get("provider") == "agent_interaction"
+    second_input = ScriptedPatternRequester.requests[1]["input"]
+    assert second_input["pattern_stage_input"]["clarifications"][0]["response"] == {
+        "environment": "staging"
+    }
 
 
 @pytest.mark.asyncio

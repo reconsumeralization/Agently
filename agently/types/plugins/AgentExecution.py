@@ -32,6 +32,7 @@ from agently.types.data import (
     AgentExecutionRecordWrite,
     AgentExecutionStatus,
     AgentExecutionStrategy,
+    AgentInteractionHandler,
     AgentReviewHandler,
     AgentReviewResult,
     ContextBudget,
@@ -121,6 +122,8 @@ class AgentExecution(Protocol):
     def pattern(self, pattern: AgentPatternInput) -> "AgentExecution": ...
 
     def pattern(self, pattern: AgentPatternInput) -> "AgentExecution": ...
+
+    def interact(self, handler: AgentInteractionHandler) -> "AgentExecution": ...
 
     def review(self, handler: AgentReviewHandler | None = None) -> "AgentExecution": ...
 

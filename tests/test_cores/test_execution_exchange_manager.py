@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from agently import TriggerFlow, TriggerFlowRuntimeData
+from agently import Agently, TriggerFlow, TriggerFlowRuntimeData
 from agently.base import execution_exchange, policy_approval, settings
 from agently.types.data import ExecutionExchangeProviderResult, ExecutionExchangeRequest
 
@@ -152,6 +152,50 @@ async def test_hot_wait_resolves_through_provider_await_response():
         assert outcome["decision"]["approved"] is True
     finally:
         execution_exchange.unregister_provider("hot-provider")
+
+
+@pytest.mark.asyncio
+async def test_agent_interaction_handler_drives_generic_exchange_without_global_registration():
+    from agently.core.runtime.RuntimeContext import bind_runtime_context
+    from agently.types.data import ExecutionExchangeView
+
+    first_calls: list[ExecutionExchangeView] = []
+    second_calls: list[ExecutionExchangeView] = []
+
+    def first_handler(exchange: ExecutionExchangeView):
+        first_calls.append(exchange)
+        return False
+
+    async def second_handler(exchange: ExecutionExchangeView):
+        second_calls.append(exchange)
+        await asyncio.sleep(0)
+        return {"status": "approved", "approved": True, "reason": "approved in Agent handler"}
+
+    registered_before = execution_exchange.list_providers()
+    owner = (
+        Agently.create_agent()
+        .interact(first_handler)
+        .interact(second_handler)
+        .create_execution(limits={})
+    )
+    flow, outcome = _approval_flow(wait_mode="connected", hot_wait_timeout=1)
+
+    with bind_runtime_context(agent_execution_context=owner.execution_context):
+        execution = flow.create_execution(auto_close=False)
+        await execution.async_start("go")
+        assert first_calls == []
+        assert second_calls == []
+
+        resolved = await execution_exchange.async_hot_wait_pending(execution, timeout=1)
+        assert resolved is True
+        await execution.async_close()
+
+    assert first_calls == []
+    assert len(second_calls) == 1
+    assert second_calls[0]["kind"] == "approval"
+    assert second_calls[0]["subject"] == "delete ./report.md"
+    assert outcome["decision"]["approved"] is True
+    assert execution_exchange.list_providers() == registered_before
 
 
 @pytest.mark.asyncio

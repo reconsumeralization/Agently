@@ -65,6 +65,7 @@ from .bridges import (
     record_model_response_id as record_model_response_id_entry,
 )
 from .artifact import declare_artifact
+from .interaction import _AgentInteractionProvider, declare_interaction
 from .diagnostics import (
     initial_diagnostics,
     initial_record_refs,
@@ -127,6 +128,7 @@ if TYPE_CHECKING:
         AgentExecutionRecordWrite,
         AgentArtifactHandler,
         AgentArtifactResult,
+        AgentInteractionHandler,
         AgentReviewHandler,
         AgentReviewResult,
         OutputValidateHandler,
@@ -233,6 +235,8 @@ class AgentExecution:
         self._nesting_depth, self._nesting_budget = self._resolve_nesting_state()
         self._parent_model_request_budget = self._resolve_parent_model_request_budget()
         self._load_inherited_strategy_context()
+        self._interaction_handler: "AgentInteractionHandler | None" = None
+        self._interaction_provider: _AgentInteractionProvider | None = None
         self.execution_context = AgentExecutionContext(
             execution_id=self.id,
             lineage=self.lineage,
@@ -243,6 +247,7 @@ class AgentExecution:
             effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
             strategy_context_source=self.inherited_strategy_context_source,
             task_workspace=self.task_workspace,
+            execution_exchange_provider=self._interaction_provider,
             parent_model_request_budget=self._parent_model_request_budget,
         )
         self.parent_run_context = parent_run_context
@@ -381,6 +386,8 @@ class AgentExecution:
         fork.strategy_name = self.strategy_name
         fork.pattern_selection = self.pattern_selection
         fork.pattern_info = dict(self.pattern_info)
+        if self._interaction_handler is not None:
+            declare_interaction(fork, self._interaction_handler)
         fork.artifact_declarations = [
             cast("_AgentArtifactDeclaration", dict(item))
             for item in self.artifact_declarations
@@ -482,6 +489,7 @@ class AgentExecution:
             effective_task_execution_strategy=self.inherited_effective_task_execution_strategy,
             strategy_context_source=self.inherited_strategy_context_source,
             task_workspace=self.task_workspace,
+            execution_exchange_provider=self._interaction_provider,
             parent_model_request_budget=self._parent_model_request_budget,
         )
         self.stream = AgentExecutionStream(
@@ -1111,6 +1119,10 @@ class AgentExecution:
     def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution":
         """Select one beta whole-request Pattern for this execution draft."""
         return declare_pattern(self, pattern)
+
+    def interact(self, handler: "AgentInteractionHandler") -> "AgentExecution":
+        """Bind one execution-local connected human-interaction handler."""
+        return declare_interaction(self, handler)
 
     def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
         return declare_review(self, required=False, handler=handler)
