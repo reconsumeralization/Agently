@@ -289,6 +289,31 @@ selected Patterns also emit `pattern.started` / `pattern.completed` /
 `request` behavior adds no stream noise. Pattern selection belongs before
 `.start()`; `start(mode=...)` is not a Pattern API.
 
+### Typing And IDE Completion
+
+Ordinary fluent use requires no Agently type imports. Editors can suggest the
+built-in values for `.pattern(...)`, `.effort(...)`, and `.strategy(...)`
+directly at the call site, and every configuration method keeps the chain typed
+as the same `AgentExecution`:
+
+```python
+result = agent.input(task).pattern("long_content").artifact("report.md").review().start()
+```
+
+Pattern names remain open for registered `AgentPattern` plugins. Strategy names
+also remain open for alternate `AgentOrchestrator` implementations, although
+the bundled orchestrator assigns behavior only to its documented built-in
+strategies. By contrast, `create_task(execution=...)` is a host-validated finite
+choice, so type checkers reject unknown values before runtime.
+
+Type imports are optional at extension boundaries. Import only
+`AgentReviewContext` or `AgentArtifactContext` from `agently.types.data` when a
+named handler needs completion for its context. A Pattern author can optionally
+import `AgentExecution` and `AgentPatternContinuation` from
+`agently.types.plugins`. Inline handlers and ordinary calls need none of these,
+and the advanced types are intentionally not copied into the `agently` package
+root.
+
 ## Goal Pursuit
 
 Use `agent.goal(goal_or_goals, success_criteria=None)` when the business goal

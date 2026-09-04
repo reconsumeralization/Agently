@@ -252,6 +252,27 @@ model-backed built-in 还会发出有界的 `pattern.stage.started`、
 `pattern.stage.completed` 事实。隐式 `request` 不增加 stream 噪声。Pattern 应在
 `.start()` 前选择；`start(mode=...)` 不是 Pattern API。
 
+### 类型与 IDE 提示
+
+普通 fluent 用法不需要导入任何 Agently 类型。IDE 会在调用位置直接提示
+`.pattern(...)`、`.effort(...)` 和 `.strategy(...)` 的内置值；所有配置方法也会把整条链
+持续标注为同一个 `AgentExecution`：
+
+```python
+result = agent.input(task).pattern("long_content").artifact("report.md").review().start()
+```
+
+Pattern 名称对已注册的 `AgentPattern` 插件保持开放。strategy 名称也允许替代
+`AgentOrchestrator` 实现扩展，但随包 orchestrator 只为文档列出的内置 strategy 赋予行为。
+与此不同，`create_task(execution=...)` 是 host 校验的有限选项，type checker 会在运行前拒绝
+未知值。
+
+只有扩展边界才可能需要类型导入。具名 handler 需要 context 内部的 IDE 提示时，只导入
+实际使用的 `AgentReviewContext` 或 `AgentArtifactContext`（位于 `agently.types.data`）；
+Pattern 作者可按需从 `agently.types.plugins` 导入 `AgentExecution` 和
+`AgentPatternContinuation`。inline handler 和普通调用不需要这些类型；高级类型也不会被
+重复暴露到 `agently` package root。
+
 ## Goal Pursuit
 
 当业务目标需要有边界的 planning、execution、evidence、verification 和 replan
