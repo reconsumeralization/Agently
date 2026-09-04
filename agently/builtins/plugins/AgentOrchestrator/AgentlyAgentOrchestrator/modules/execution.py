@@ -1109,6 +1109,7 @@ class AgentExecution:
     def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution": ...
 
     def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution":
+        """Select one beta whole-request Pattern for this execution draft."""
         return declare_pattern(self, pattern)
 
     def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":

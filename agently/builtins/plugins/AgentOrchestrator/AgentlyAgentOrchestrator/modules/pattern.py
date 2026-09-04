@@ -99,14 +99,24 @@ async def run_selected_pattern(
     execution: "AgentExecution",
     run_default_route: _DefaultRouteRunner,
 ) -> tuple[str, object]:
-    execution._refresh_prompt_snapshot()
     selection = execution.pattern_selection
     if selection is None:
         return await _run_builtin_default(execution, "request", run_default_route, emit=False)
     if isinstance(selection, str) and selection == "request":
         return await _run_builtin_default(execution, "request", run_default_route, emit=True)
     if isinstance(selection, str) and selection == "goal":
-        return await _run_builtin_default(execution, "goal", run_default_route, emit=True)
+        return await _run_builtin_default(
+            execution,
+            "goal",
+            run_default_route,
+            emit=execution.pattern_info["selected_by"] == "pattern",
+        )
+
+    # Only an explicitly selected extension Pattern needs a prompt snapshot
+    # before it decides whether to invoke the ordinary route. The default and
+    # goal paths refresh through normal route selection, preserving their
+    # existing request behavior without an additional Pattern-owned refresh.
+    execution._refresh_prompt_snapshot()
 
     try:
         name, source, runner = _resolve_pattern(execution, selection)

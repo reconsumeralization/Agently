@@ -39,7 +39,12 @@ AgentPatternHandler: TypeAlias = Callable[
 
 @runtime_checkable
 class AgentPattern(Protocol):
-    """Minimal behavior accepted as one whole AgentExecution Pattern."""
+    """Beta protocol for one whole-request behavior on an AgentExecution.
+
+    Pattern is an explicit opt-in extension boundary. Its pre-stable protocol
+    and Pattern-specific lifecycle projections may evolve without changing the
+    behavior of Agent executions that do not select a Pattern.
+    """
 
     @property
     def name(self) -> AgentPatternName: ...

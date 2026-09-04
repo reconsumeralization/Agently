@@ -191,7 +191,6 @@ def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
         "consumed_options": DataFormatter.sanitize(owner.consumed_options),
         "route_plan": DataFormatter.sanitize(owner.route_plan),
         "route": DataFormatter.sanitize(owner.route_info),
-        "pattern": DataFormatter.sanitize(owner.pattern_info),
         "close_snapshot": DataFormatter.sanitize(owner.close_snapshot),
         "logs": DataFormatter.sanitize(owner.logs),
         "diagnostics": DataFormatter.sanitize(owner.diagnostics),
@@ -199,6 +198,8 @@ def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
         "reviews": DataFormatter.sanitize(getattr(owner, "review_results", [])),
         "guidance_items": DataFormatter.sanitize(getattr(owner, "guidance_items", [])),
     }
+    if owner.pattern_info.get("selected_by") == "pattern":
+        meta["pattern"] = DataFormatter.sanitize(owner.pattern_info)
     if getattr(owner, "_ensure_long_output_enabled", False):
         meta["long_output"] = DataFormatter.sanitize(
             getattr(owner, "_long_output_meta", {})

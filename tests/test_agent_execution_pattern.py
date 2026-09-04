@@ -94,6 +94,51 @@ class ConstantPattern:
         return {"input": execution.prompt_snapshot.get("input"), "source": "instance"}
 
 
+class InputNamedPattern:
+    """A Pattern name must stay isolated from Agent.input(...)."""
+
+    name = "input"
+    DEFAULT_SETTINGS: dict[str, Any] = {}
+    init_count = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.init_count = 0
+
+    @staticmethod
+    def _on_register() -> None:
+        pass
+
+    @staticmethod
+    def _on_unregister() -> None:
+        pass
+
+    def __init__(self, *, plugin_manager, settings):
+        type(self).init_count += 1
+        self.plugin_manager = plugin_manager
+        self.settings = settings
+
+    async def run(self, execution, _run_default: AgentPatternContinuation):
+        return f"pattern:{execution.prompt_snapshot.get('input')}"
+
+
+class MissingRunPattern:
+    name = "missing_run"
+    DEFAULT_SETTINGS: dict[str, Any] = {}
+
+    @staticmethod
+    def _on_register() -> None:
+        pass
+
+    @staticmethod
+    def _on_unregister() -> None:
+        pass
+
+    def __init__(self, *, plugin_manager, settings):
+        self.plugin_manager = plugin_manager
+        self.settings = settings
+
+
 def create_pattern_agent(tmp_path: Path, name: str, *, register_pattern: bool = False):
     PatternRequester.reset()
     settings = Settings(name=f"{name}-Settings", parent=Agently.settings)
@@ -123,7 +168,7 @@ async def test_default_request_pattern_preserves_simple_request_lifecycle(tmp_pa
         "used_default": True,
     }
     assert not any(item.path.startswith("pattern.") for item in execution.stream.items)
-    assert (await execution.async_get_meta())["pattern"] == execution.pattern_info
+    assert "pattern" not in await execution.async_get_meta()
 
 
 @pytest.mark.asyncio
@@ -133,6 +178,7 @@ async def test_explicit_request_pattern_emits_pattern_lifecycle(tmp_path):
 
     assert await execution.async_get_data() == "base-result"
     assert execution.pattern_info["selected_by"] == "pattern"
+    assert (await execution.async_get_meta())["pattern"] == execution.pattern_info
     paths = [item.path for item in execution.stream.items]
     assert paths.index("pattern.started") < paths.index("route.selected") < paths.index("pattern.completed")
 
@@ -159,7 +205,44 @@ async def test_goal_selects_builtin_goal_pattern_without_a_pass_through_plugin(t
         "used_default": True,
     }
     paths = [item.path for item in execution.stream.items]
-    assert paths.index("pattern.started") < paths.index("route.selected") < paths.index("pattern.completed")
+    assert not any(path.startswith("pattern.") for path in paths)
+    assert "pattern" not in await execution.async_get_meta()
+
+
+@pytest.mark.asyncio
+async def test_registered_pattern_is_opt_in_and_method_name_is_isolated(tmp_path):
+    agent = create_pattern_agent(tmp_path, "opt-in-pattern")
+    InputNamedPattern.reset()
+    agent.plugin_manager.register("AgentPattern", InputNamedPattern)
+
+    ordinary = agent.input("ordinary")
+
+    assert await ordinary.async_get_data() == "base-result"
+    assert PatternRequester.requests == ["ordinary"]
+    assert InputNamedPattern.init_count == 0
+    assert callable(agent.input)
+    assert callable(ordinary.input)
+    assert not any(item.path.startswith("pattern.") for item in ordinary.stream.items)
+    assert "pattern" not in await ordinary.async_get_meta()
+
+    selected = agent.input("selected").pattern("input")
+
+    assert await selected.async_get_data() == "pattern:selected"
+    assert InputNamedPattern.init_count == 1
+    assert PatternRequester.requests == ["ordinary"]
+    assert selected.pattern_info["source"] == "plugin"
+
+
+@pytest.mark.asyncio
+async def test_invalid_registered_pattern_fails_before_model_dispatch(tmp_path):
+    agent = create_pattern_agent(tmp_path, "invalid-plugin-pattern")
+    agent.plugin_manager.register("AgentPattern", MissingRunPattern, activate=False)
+    execution = agent.input("must-not-dispatch").pattern("missing_run")
+
+    with pytest.raises(TypeError, match="must define callable run"):
+        await execution.async_get_data()
+
+    assert PatternRequester.requests == []
 
 
 @pytest.mark.asyncio
