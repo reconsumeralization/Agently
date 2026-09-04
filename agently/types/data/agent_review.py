@@ -16,8 +16,14 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
-from typing_extensions import NotRequired, TypedDict
+from typing import Literal, TYPE_CHECKING, TypeAlias
+from typing_extensions import TypedDict
+
+from .agent_artifact import AgentArtifactResult
+
+if TYPE_CHECKING:
+    from agently.core.TaskWorkspace import TaskWorkspace
+    from agently.types.plugins import AgentExecution
 
 
 class AgentReviewResult(TypedDict):
@@ -29,22 +35,22 @@ class AgentReviewResult(TypedDict):
     source: Literal["handler", "model"]
     handler: str | None
     passed: bool
-    score: NotRequired[float | None]
-    summary: NotRequired[str]
-    issues: NotRequired[list[str]]
-    suggestions: NotRequired[list[str]]
+    score: float | None
+    summary: str
+    issues: list[str]
+    suggestions: list[str]
 
 
 @dataclass(frozen=True, slots=True)
 class AgentReviewContext:
     """Read-only execution context exposed to review and verification handlers."""
 
-    execution: object
+    execution: "AgentExecution"
     prompt: Mapping[str, object]
     goals: tuple[str, ...]
     success_criteria: tuple[str, ...]
-    artifact_refs: tuple[Mapping[str, object], ...]
-    task_workspace: object
+    artifact_refs: tuple[AgentArtifactResult, ...]
+    task_workspace: "TaskWorkspace"
     required: bool
     index: int
 

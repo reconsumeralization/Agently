@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal, TYPE_CHECKING, cast
+from typing import Literal, TYPE_CHECKING, cast
 
 from agently.types.data import AgentExecutionPatternInfo
-from agently.types.plugins import AgentPatternHandler, AgentPatternInput
+from agently.types.plugins import AgentPattern, AgentPatternHandler, AgentPatternInput
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 _BUILTIN_PATTERNS = frozenset({"request", "goal", "plan", "long_content"})
 _BUNDLED_PLUGIN_MODULE = "agently.builtins.plugins.AgentPattern"
 _PatternSource = Literal["builtin", "plugin", "instance", "handler"]
-_DefaultRouteRunner = Callable[[], Awaitable[tuple[str, Any]]]
+_DefaultRouteRunner = Callable[[], Awaitable[tuple[str, object]]]
 
 
 def default_pattern_info() -> AgentExecutionPatternInfo:
@@ -52,7 +52,7 @@ def declare_pattern(
         if not name:
             raise ValueError("Agent pattern name must be a non-empty string.")
         source: _PatternSource = "builtin" if name in _BUILTIN_PATTERNS else "plugin"
-        selection: Any = name
+        selection: AgentPatternInput = name
     else:
         run = getattr(pattern, "run", None)
         if callable(run):
@@ -98,7 +98,7 @@ def select_goal_pattern(execution: "AgentExecution") -> None:
 async def run_selected_pattern(
     execution: "AgentExecution",
     run_default_route: _DefaultRouteRunner,
-) -> tuple[str, Any]:
+) -> tuple[str, object]:
     execution._refresh_prompt_snapshot()
     selection = execution.pattern_selection
     if selection is None:
@@ -177,7 +177,7 @@ async def _run_builtin_default(
     run_default_route: _DefaultRouteRunner,
     *,
     emit: bool,
-) -> tuple[str, Any]:
+) -> tuple[str, object]:
     execution.pattern_info["name"] = name
     execution.pattern_info["source"] = "builtin"
     execution.pattern_info["status"] = "running"
@@ -206,14 +206,15 @@ async def _run_builtin_default(
 
 def _resolve_pattern(
     execution: "AgentExecution",
-    selection: Any,
+    selection: AgentPatternInput,
 ) -> tuple[str, _PatternSource, AgentPatternHandler]:
     if isinstance(selection, str):
         try:
             plugin_class = execution.agent.plugin_manager.get_plugin("AgentPattern", selection)
         except (KeyError, TypeError) as error:
             raise ValueError(f"AgentPattern {selection!r} is not registered.") from error
-        plugin = cast(Any, plugin_class)(
+        plugin_factory = cast(Callable[..., AgentPattern], plugin_class)
+        plugin = plugin_factory(
             plugin_manager=execution.agent.plugin_manager,
             settings=execution.agent.settings,
         )
@@ -241,7 +242,7 @@ def _resolve_pattern(
 
 
 class _RunDefaultOnce:
-    def __init__(self, runner: _DefaultRouteRunner):
+    def __init__(self, runner: _DefaultRouteRunner) -> None:
         self._runner = runner
         self.called = False
         self.duplicate_attempted = False
@@ -276,7 +277,7 @@ async def _emit_pattern(
     )
 
 
-def _pattern_name(pattern: Any) -> str:
+def _pattern_name(pattern: object) -> str:
     return str(
         getattr(pattern, "name", None)
         or getattr(pattern, "__name__", None)

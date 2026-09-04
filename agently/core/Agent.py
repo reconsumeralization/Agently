@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from agently.types.data import (
         AgentExecutionLineage,
         AgentExecutionLimits,
+        AgentExecutionEffort,
+        AgentExecutionStrategy,
         AgentArtifactHandler,
         AgentReviewHandler,
         AgentlyModelResultMessage,
@@ -1055,7 +1057,20 @@ class BaseAgent:
         *,
         goal: str,
         success_criteria: list[str] | None = None,
-        execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
+        execution: Literal[
+            "auto",
+            "flat",
+            "taskboard",
+            "default",
+            "automatic",
+            "linear",
+            "react",
+            "flat_react",
+            "task_board",
+            "board",
+            "taskboard_evidenceview",
+        ]
+        | None = "auto",
         task_workspace: str | os.PathLike[str] | None = None,
         max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
@@ -1249,7 +1264,20 @@ class BaseAgent:
         *,
         goal: str,
         success_criteria: list[str] | None = None,
-        execution: Literal["auto", "flat", "taskboard"] | str | None = "auto",
+        execution: Literal[
+            "auto",
+            "flat",
+            "taskboard",
+            "default",
+            "automatic",
+            "linear",
+            "react",
+            "flat_react",
+            "task_board",
+            "board",
+            "taskboard_evidenceview",
+        ]
+        | None = "auto",
         task_workspace: str | os.PathLike[str] | None = None,
         max_iterations: int | None = None,
         verify: Literal["before_done"] = "before_done",
@@ -1778,10 +1806,23 @@ class BaseAgent:
             return self
         return self.create_execution().set_prompt_options(options)
 
-    def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution":
+    def goal(
+        self,
+        goal: str | list[str] | tuple[str, ...] | set[str],
+        success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> "AgentExecution":
         return self.create_execution().goal(goal, success_criteria=success_criteria)
 
     goals = goal
+
+    @overload
+    def pattern(
+        self,
+        pattern: Literal["request", "goal", "plan", "long_content"],
+    ) -> "AgentExecution": ...
+
+    @overload
+    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution": ...
 
     def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution":
         return self.create_execution().pattern(pattern)
@@ -1799,13 +1840,49 @@ class BaseAgent:
     ) -> "AgentExecution":
         return self.create_execution().artifact(path, handler)
 
-    def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
+    @overload
+    def effort(
+        self,
+        value: Literal["minimal", "low", "fast", "medium", "normal", "high", "max"] = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def effort(
+        self,
+        value: "AgentExecutionEffort" = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    def effort(
+        self,
+        value: "AgentExecutionEffort" = "medium",
+        **strategy: object,
+    ) -> "AgentExecution":
         return self.create_execution().effort(value, **strategy)
 
     def route_policy(self, value: Any) -> "AgentExecution":
         return self.create_execution().route_policy(value)
 
-    def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution":
+    @overload
+    def strategy(
+        self,
+        value: Literal["auto", "direct", "task", "task_loop", "long_task", "flat", "taskboard"] | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def strategy(
+        self,
+        value: "AgentExecutionStrategy | None" = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    def strategy(
+        self,
+        value: "AgentExecutionStrategy | None" = None,
+        **options: object,
+    ) -> "AgentExecution":
         return self.create_execution().strategy(value, **options)
 
     # Prompt

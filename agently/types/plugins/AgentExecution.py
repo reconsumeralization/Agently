@@ -21,13 +21,19 @@ from typing import Any, Literal, Protocol, TYPE_CHECKING, overload, runtime_chec
 from agently.types.data import (
     AgentlySpecificResultMessage,
     AgentArtifactHandler,
+    AgentArtifactResult,
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
+    AgentExecutionEffort,
+    AgentExecutionPatternInfo,
     AgentExecutionStreamData,
     AgentExecutionRecordPurpose,
     AgentExecutionRecordWrite,
+    AgentExecutionStatus,
+    AgentExecutionStrategy,
     AgentReviewHandler,
+    AgentReviewResult,
     ContextBudget,
     ContextPackage,
     ContextReadIntent,
@@ -35,13 +41,20 @@ from agently.types.data import (
     RunContext,
     SkillMode,
 )
+from .AgentPattern import AgentPatternInput
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
+    from agently.core.application import AgentTask
+    from agently.core.application.AgentExecution import (
+        AgentExecutionContext,
+        AgentExecutionResult,
+        AgentExecutionStream,
+    )
     from agently.core.context import TaskContext
-    from agently.core.application.AgentExecution import AgentExecutionResult
-    from .AgentPattern import AgentPatternInput
+    from agently.core.model import ModelRequest, Prompt
+    from agently.core.TaskWorkspace import TaskWorkspace
 
 
 @runtime_checkable
@@ -54,17 +67,21 @@ class AgentExecution(Protocol):
     options: Any
     effective_options: dict[str, Any]
     consumed_options: dict[str, Any]
-    status: str
-    request: Any
-    request_prompt: Any
-    prompt: Any
-    stream: Any
-    execution_context: Any
-    task_context: Any
-    task_workspace: Any
+    status: AgentExecutionStatus
+    request: "ModelRequest"
+    request_prompt: "Prompt"
+    prompt: "Prompt"
+    stream: "AgentExecutionStream"
+    execution_context: "AgentExecutionContext"
+    task_context: "TaskContext"
+    task_workspace: "TaskWorkspace"
     record_store: Any
     task_refs: dict[str, Any]
-    task_record: Any
+    task_record: "AgentTask | None"
+    pattern_info: AgentExecutionPatternInfo
+    artifact_results: list[AgentArtifactResult]
+    review_results: list[AgentReviewResult]
+    result: object | None
 
     def __getattr__(self, name: str) -> Any: ...
 
@@ -82,11 +99,28 @@ class AgentExecution(Protocol):
 
     def remove_execution_prompt(self, key: Any) -> "AgentExecution": ...
 
-    def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
+    def goal(
+        self,
+        goal: str | list[str] | tuple[str, ...] | set[str],
+        success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> "AgentExecution": ...
 
-    def goals(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
+    def goals(
+        self,
+        goal: str | list[str] | tuple[str, ...] | set[str],
+        success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> "AgentExecution": ...
 
-    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution": ...
+    @overload
+    def pattern(
+        self,
+        pattern: Literal["request", "goal", "plan", "long_content"],
+    ) -> "AgentExecution": ...
+
+    @overload
+    def pattern(self, pattern: AgentPatternInput) -> "AgentExecution": ...
+
+    def pattern(self, pattern: AgentPatternInput) -> "AgentExecution": ...
 
     def review(self, handler: AgentReviewHandler | None = None) -> "AgentExecution": ...
 
@@ -98,9 +132,45 @@ class AgentExecution(Protocol):
         handler: AgentArtifactHandler | None = None,
     ) -> "AgentExecution": ...
 
-    def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution": ...
+    @overload
+    def effort(
+        self,
+        value: Literal["minimal", "low", "fast", "medium", "normal", "high", "max"] = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
 
-    def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution": ...
+    @overload
+    def effort(
+        self,
+        value: AgentExecutionEffort = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    def effort(
+        self,
+        value: AgentExecutionEffort = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def strategy(
+        self,
+        value: Literal["auto", "direct", "task", "task_loop", "long_task", "flat", "taskboard"] | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def strategy(
+        self,
+        value: AgentExecutionStrategy | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    def strategy(
+        self,
+        value: AgentExecutionStrategy | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
 
     def create_execution(self, **kwargs: Any) -> "AgentExecution": ...
 

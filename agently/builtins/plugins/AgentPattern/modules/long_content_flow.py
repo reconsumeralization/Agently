@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, TypedDict, cast
 
 from pydantic import BaseModel, Field
 
@@ -31,6 +31,33 @@ if TYPE_CHECKING:
 
 
 _RUNTIME_RESOURCE = "agent_pattern_long_content_runtime"
+
+
+class _DocumentSectionData(TypedDict):
+    section_id: str
+    title: str
+    brief: str
+
+
+class _DocumentPlanData(TypedDict):
+    document_title: str
+    sections: list[_DocumentSectionData]
+
+
+class _SectionDraftData(TypedDict):
+    body: str
+    continuity_note: str
+
+
+class _ContinuityData(TypedDict):
+    section_id: str
+    title: str
+    note: str
+
+
+class _WrittenSectionData(_DocumentSectionData):
+    body: str
+    continuity_note: str
 
 
 class _DocumentSection(BaseModel):
@@ -64,7 +91,7 @@ class _LongContentPatternRuntime:
         self.execution = execution
         self.config = config
 
-    async def plan_document(self) -> dict[str, Any]:
+    async def plan_document(self) -> _DocumentPlanData:
         value = await run_model_stage(
             self.execution,
             pattern="long_content",
@@ -91,11 +118,11 @@ class _LongContentPatternRuntime:
     async def write_section(
         self,
         *,
-        section: dict[str, str],
-        plan: dict[str, Any],
-        continuity: list[dict[str, str]],
+        section: _DocumentSectionData,
+        plan: _DocumentPlanData,
+        continuity: list[_ContinuityData],
         index: int,
-    ) -> dict[str, str]:
+    ) -> _SectionDraftData:
         value = await run_model_stage(
             self.execution,
             pattern="long_content",
@@ -137,7 +164,7 @@ def _require_runtime(data: TriggerFlowRuntimeData) -> _LongContentPatternRuntime
     return runtime
 
 
-async def _plan_document(data: TriggerFlowRuntimeData) -> list[dict[str, str]]:
+async def _plan_document(data: TriggerFlowRuntimeData) -> list[_DocumentSectionData]:
     runtime = _require_runtime(data)
     plan = await runtime.plan_document()
     await data.async_set_state("document_plan", plan, emit=False)
@@ -145,18 +172,19 @@ async def _plan_document(data: TriggerFlowRuntimeData) -> list[dict[str, str]]:
     return list(plan["sections"])
 
 
-async def _write_section(data: TriggerFlowRuntimeData) -> dict[str, str]:
+async def _write_section(data: TriggerFlowRuntimeData) -> _WrittenSectionData:
     runtime = _require_runtime(data)
     if not isinstance(data.value, Mapping):
         raise TypeError("Long Content Pattern section input must be a mapping.")
-    section = {
+    section: _DocumentSectionData = {
         "section_id": str(data.value.get("section_id") or ""),
         "title": str(data.value.get("title") or ""),
         "brief": str(data.value.get("brief") or ""),
     }
-    plan = data.get_state("document_plan", {})
-    if not isinstance(plan, Mapping):
+    raw_plan = data.get_state("document_plan", {})
+    if not isinstance(raw_plan, Mapping):
         raise RuntimeError("Long Content Pattern document plan is unavailable.")
+    plan = cast(_DocumentPlanData, dict(raw_plan))
     sections = plan.get("sections", [])
     if not isinstance(sections, list):
         raise RuntimeError("Long Content Pattern document sections are unavailable.")
@@ -174,10 +202,11 @@ async def _write_section(data: TriggerFlowRuntimeData) -> dict[str, str]:
             f"Long Content Pattern section {section['section_id']!r} is not in the validated plan."
         )
     raw_notes = data.get_state("continuity_notes", [])
-    notes = (
+    notes = cast(
+        list[_ContinuityData],
         [dict(item) for item in raw_notes if isinstance(item, Mapping)]
         if isinstance(raw_notes, list)
-        else []
+        else [],
     )
     continuity = _bounded_continuity(
         notes,
@@ -185,7 +214,7 @@ async def _write_section(data: TriggerFlowRuntimeData) -> dict[str, str]:
     )
     draft = await runtime.write_section(
         section=section,
-        plan=dict(plan),
+        plan=plan,
         continuity=continuity,
         index=index,
     )
@@ -213,7 +242,7 @@ async def _assemble_document(data: TriggerFlowRuntimeData) -> None:
     drafts = data.value
     if not isinstance(drafts, list):
         raise TypeError("Long Content Pattern section writers must return an ordered list.")
-    result = _assemble_markdown(dict(plan), drafts)
+    result = _assemble_markdown(cast(_DocumentPlanData, dict(plan)), drafts)
     await data.async_set_state("pattern_result", result, emit=False)
 
 
@@ -295,10 +324,10 @@ async def run_long_content_pattern(
 
 
 def _normalize_document_plan(
-    value: Any,
+    value: object,
     *,
     max_sections: int,
-) -> dict[str, Any]:
+) -> _DocumentPlanData:
     if not isinstance(value, Mapping):
         raise TypeError("Long Content Pattern document plan must be a mapping.")
     document_title = str(value.get("document_title") or "").strip()
@@ -311,7 +340,7 @@ def _normalize_document_plan(
         raise ValueError(
             f"Long Content Pattern plan exceeds max_sections={max_sections}."
         )
-    sections: list[dict[str, str]] = []
+    sections: list[_DocumentSectionData] = []
     section_ids: set[str] = set()
     for index, item in enumerate(raw_sections, start=1):
         if not isinstance(item, Mapping):
@@ -337,10 +366,10 @@ def _normalize_document_plan(
 
 
 def _normalize_section_draft(
-    value: Any,
+    value: object,
     *,
     continuity_chars: int,
-) -> dict[str, str]:
+) -> _SectionDraftData:
     if not isinstance(value, Mapping):
         raise TypeError("Long Content Pattern section writer must return a mapping.")
     body = str(value.get("body") or "").strip()
@@ -353,11 +382,11 @@ def _normalize_section_draft(
 
 
 def _bounded_continuity(
-    notes: list[dict[str, Any]],
+    notes: list[_ContinuityData],
     *,
     max_chars: int,
-) -> list[dict[str, str]]:
-    selected: list[dict[str, str]] = []
+) -> list[_ContinuityData]:
+    selected: list[_ContinuityData] = []
     remaining = max_chars
     for item in reversed(notes):
         note = str(item.get("note") or "").strip()
@@ -377,15 +406,15 @@ def _bounded_continuity(
 
 
 def _assemble_markdown(
-    plan: dict[str, Any],
-    drafts: list[Any],
+    plan: _DocumentPlanData,
+    drafts: list[object],
 ) -> str:
     sections = plan.get("sections")
     if not isinstance(sections, list) or len(drafts) != len(sections):
         raise RuntimeError(
             "Long Content Pattern cannot assemble an incomplete section set."
         )
-    drafted_by_id: dict[str, Mapping[str, Any]] = {}
+    drafted_by_id: dict[str, Mapping[str, object]] = {}
     for item in drafts:
         if not isinstance(item, Mapping):
             raise TypeError("Long Content Pattern section draft must be a mapping.")

@@ -5492,7 +5492,7 @@ def test_create_task_execution_parameter_normalizes_and_rejects(tmp_path):
         agent.create_task(
             goal="Do the task.",
             success_criteria=["The task is done."],
-            execution="unknown",
+            execution="unknown",  # pyright: ignore[reportArgumentType] - runtime rejection probe
         )
 
 

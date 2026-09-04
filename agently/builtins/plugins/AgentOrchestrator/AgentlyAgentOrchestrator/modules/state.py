@@ -21,6 +21,8 @@ from agently.types.options import normalize_execution_options
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
+    from agently.types.data import AgentExecutionEffort
+
     from .execution import AgentExecution
 
 _TASK_ROUTE_STRATEGIES = {"task", "task_loop", "long_task"}
@@ -185,9 +187,9 @@ def apply_strategy_selection(owner: "AgentExecution", value: Any, *, source: str
 
 def configure_effort(
     owner: "AgentExecution",
-    value: Any = "medium",
-    **strategy: Any,
-):
+    value: "AgentExecutionEffort" = "medium",
+    **strategy: object,
+) -> "AgentExecution":
     name, detail = normalize_effort_configuration(value, strategy)
     owner.options["effort"] = name
     if detail:

@@ -46,6 +46,7 @@ from .AgentPattern import (
     AgentPatternContinuation,
     AgentPatternHandler,
     AgentPatternInput,
+    AgentPatternName,
 )
 from .AgentExecution import AgentExecution, AgentStepExecutor
 from .RecordStore import (

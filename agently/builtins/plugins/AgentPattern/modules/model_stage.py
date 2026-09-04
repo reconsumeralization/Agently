@@ -15,11 +15,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
+    from agently.core.model import ModelRequestResult
     from agently.types.plugins import AgentExecution
 
 
@@ -29,14 +30,14 @@ _OUTPUT_PROMPT_KEYS = frozenset({"output", "output_format", "ensure_all_keys"})
 async def run_model_stage(
     execution: "AgentExecution",
     *,
-    pattern: str,
+    pattern: Literal["plan", "long_content"],
     stage: str,
-    stage_input: Any,
-    stage_info: Any,
+    stage_input: object,
+    stage_info: object,
     stage_instructions: list[str],
-    output: Any = None,
+    output: object | None = None,
     preserve_external_output: bool = False,
-) -> Any:
+) -> object:
     """Run one explicit ModelRequest under the owning AgentExecution.
 
     Pattern stages reuse the root request's model/settings/capability contract,
@@ -89,7 +90,7 @@ async def run_model_stage(
         consumer_id=f"agent_pattern:{pattern}:{stage}:{execution.id}",
         phase=stage,
     )
-    context_lanes: dict[str, list[dict[str, Any]]] = {
+    context_lanes: dict[str, list[dict[str, object]]] = {
         "instruct": [],
         "info": [],
         "examples": [],
@@ -163,7 +164,10 @@ async def run_model_stage(
     return value
 
 
-async def _record_action_logs(execution: "AgentExecution", result: Any) -> None:
+async def _record_action_logs(
+    execution: "AgentExecution",
+    result: "ModelRequestResult",
+) -> None:
     full_result_data = result.full_result_data
     extra = (
         full_result_data.get("extra", {})

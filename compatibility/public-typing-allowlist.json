@@ -143,49 +143,6 @@
       "expires": "review-before-4.2"
     },
     {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.goal",
-      "positions": [
-        "param:goal",
-        "param:success_criteria"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.goals",
-      "positions": [
-        "param:goal",
-        "param:success_criteria"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.effort",
-      "positions": [
-        "param:value",
-        "param:strategy"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.types.plugins.AgentExecution.AgentExecution.strategy",
-      "positions": [
-        "param:options"
-      ],
-      "owner": "AgentExecution",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
       "symbol": "agently.types.plugins.AgentExecution.AgentExecution.create_execution",
       "positions": [
         "param:kwargs"
@@ -668,52 +625,9 @@
       "expires": "review-before-4.2"
     },
     {
-      "symbol": "agently.core.Agent.BaseAgent.goal",
-      "positions": [
-        "param:goal",
-        "param:success_criteria"
-      ],
-      "owner": "BaseAgent",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.core.Agent.BaseAgent.goals",
-      "positions": [
-        "param:goal",
-        "param:success_criteria"
-      ],
-      "owner": "BaseAgent",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.core.Agent.BaseAgent.effort",
-      "positions": [
-        "param:value",
-        "param:strategy"
-      ],
-      "owner": "BaseAgent",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
       "symbol": "agently.core.Agent.BaseAgent.route_policy",
       "positions": [
         "param:value"
-      ],
-      "owner": "BaseAgent",
-      "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",
-      "narrowing_plan": "Replace with a named TypedDict, Protocol, TypeAlias, or generic result type when this boundary is next changed; do not add new Any positions without a separate entry.",
-      "expires": "review-before-4.2"
-    },
-    {
-      "symbol": "agently.core.Agent.BaseAgent.strategy",
-      "positions": [
-        "param:options"
       ],
       "owner": "BaseAgent",
       "reason": "Existing public compatibility boundary accepts provider-, prompt-, output-, or host-defined payload shapes that are not yet represented by a narrower public type.",

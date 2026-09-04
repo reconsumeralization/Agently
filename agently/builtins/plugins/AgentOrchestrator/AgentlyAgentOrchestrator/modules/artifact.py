@@ -19,17 +19,22 @@ import inspect
 import json
 import os
 from collections.abc import Mapping
-from typing import Any, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from agently.types.data import (
     AgentArtifactContext,
     AgentArtifactHandler,
-    TaskWorkspaceFileRef,
+    AgentArtifactResult,
 )
 from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
+
+
+class _AgentArtifactDeclaration(TypedDict):
+    path: str
+    handler: AgentArtifactHandler | None
 
 
 def declare_artifact(
@@ -52,11 +57,11 @@ def declare_artifact(
     return target
 
 
-async def run_declared_artifacts(execution: "AgentExecution", result: Any) -> None:
+async def run_declared_artifacts(execution: "AgentExecution", result: object) -> None:
     declarations = list(execution.artifact_declarations)
     for index, declaration in enumerate(declarations, start=1):
         path = str(declaration["path"])
-        handler = cast("AgentArtifactHandler | None", declaration.get("handler"))
+        handler = declaration["handler"]
         artifact_id = f"{execution.id}:artifact:{index}"
         context = AgentArtifactContext(
             execution=execution,
@@ -102,7 +107,7 @@ async def run_declared_artifacts(execution: "AgentExecution", result: Any) -> No
 
 async def _run_handler(
     handler: "AgentArtifactHandler",
-    result: Any,
+    result: object,
     context: AgentArtifactContext,
 ) -> str | bytes:
     value = handler(result, context)
@@ -113,7 +118,7 @@ async def _run_handler(
     return value
 
 
-def _default_render(result: Any) -> str:
+def _default_render(result: object) -> str:
     if isinstance(result, str):
         return result
     if result is None or isinstance(result, (Mapping, list, tuple, bool, int, float)):
@@ -134,7 +139,7 @@ async def _materialize_and_verify(
     execution: "AgentExecution",
     path: str,
     content: str | bytes,
-) -> TaskWorkspaceFileRef:
+) -> AgentArtifactResult:
     expected = content.encode("utf-8") if isinstance(content, str) else content
     expected_sha256 = hashlib.sha256(expected).hexdigest()
     if isinstance(content, str):
@@ -164,12 +169,12 @@ async def _materialize_and_verify(
         write.path,
         role="artifact",
     )
-    ref = cast(TaskWorkspaceFileRef, dict(promoted))
+    ref = cast(AgentArtifactResult, dict(promoted))
     ref["complete_readback_verified"] = True
     return ref
 
 
-def _handler_name(handler: Any) -> str | None:
+def _handler_name(handler: AgentArtifactHandler | None) -> str | None:
     if handler is None:
         return None
     return str(getattr(handler, "__name__", None) or handler.__class__.__name__)

@@ -15,13 +15,18 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Protocol, TYPE_CHECKING, TypeAlias, runtime_checkable
-
-from .base import AgentlyPlugin
+from typing import Literal, Protocol, TYPE_CHECKING, TypeAlias, runtime_checkable
 
 if TYPE_CHECKING:
     from .AgentExecution import AgentExecution
 
+
+AgentPatternName: TypeAlias = Literal[
+    "request",
+    "goal",
+    "plan",
+    "long_content",
+] | str
 
 AgentPatternContinuation: TypeAlias = Callable[[], Awaitable[object]]
 
@@ -33,8 +38,11 @@ AgentPatternHandler: TypeAlias = Callable[
 
 
 @runtime_checkable
-class AgentPattern(AgentlyPlugin, Protocol):
-    """Reusable plugin form of one whole AgentExecution behavior."""
+class AgentPattern(Protocol):
+    """Minimal behavior accepted as one whole AgentExecution Pattern."""
+
+    @property
+    def name(self) -> AgentPatternName: ...
 
     def run(
         self,
@@ -44,7 +52,7 @@ class AgentPattern(AgentlyPlugin, Protocol):
     ) -> object | Awaitable[object]: ...
 
 
-AgentPatternInput: TypeAlias = str | AgentPattern | AgentPatternHandler
+AgentPatternInput: TypeAlias = AgentPatternName | AgentPattern | AgentPatternHandler
 
 
 __all__ = [
@@ -52,4 +60,5 @@ __all__ = [
     "AgentPatternContinuation",
     "AgentPatternHandler",
     "AgentPatternInput",
+    "AgentPatternName",
 ]

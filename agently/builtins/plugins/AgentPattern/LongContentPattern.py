@@ -21,18 +21,19 @@ from agently.utils import SettingsNamespace
 from .modules import LongContentPatternConfig, run_long_content_pattern
 
 if TYPE_CHECKING:
+    from agently.core import PluginManager
     from agently.types.plugins import AgentExecution, AgentPatternContinuation
     from agently.utils import Settings
 
 
 class LongContentPattern:
-    name = "long_content"
-    DEFAULT_SETTINGS = {
+    name: str = "long_content"
+    DEFAULT_SETTINGS: dict[str, object] = {
         "max_sections": 12,
         "continuity_chars": 4_000,
     }
 
-    def __init__(self, *, plugin_manager, settings: "Settings") -> None:
+    def __init__(self, *, plugin_manager: "PluginManager", settings: "Settings") -> None:
         self.plugin_manager = plugin_manager
         self.settings = settings
         plugin_settings = SettingsNamespace(
@@ -63,7 +64,7 @@ class LongContentPattern:
         execution: "AgentExecution",
         _run_default: "AgentPatternContinuation",
         /,
-    ):
+    ) -> str:
         return await run_long_content_pattern(execution, self.config)
 
 

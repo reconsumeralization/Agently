@@ -54,9 +54,9 @@ async def async_execute_route(
     key_style: Literal["dot", "slash"],
     max_retries: int,
     raise_ensure_failure: bool,
-) -> tuple[str, Any]:
+) -> tuple[str, object]:
     with bind_runtime_context(agent_execution_context=owner.execution_context):
-        async def run_default_route() -> tuple[str, Any]:
+        async def run_default_route() -> tuple[str, object]:
             return await _execute_default_route(
                 owner,
                 type=type,
@@ -87,7 +87,7 @@ async def _execute_default_route(
     key_style: Literal["dot", "slash"],
     max_retries: int,
     raise_ensure_failure: bool,
-) -> tuple[str, Any]:
+) -> tuple[str, object]:
     owner.execution_context.record_progress(stage="route_selection", status="started")
     route, route_meta = await owner.select_route()
     owner.execution_context.record_progress(stage="route_selection", status="completed")

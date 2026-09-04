@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping
-from typing import Any, TYPE_CHECKING, cast
+from typing import Literal, TYPE_CHECKING, TypedDict, cast
 
 from agently.core.application.AgentExecution import AgentVerificationError
 from agently.types.data import AgentReviewContext, AgentReviewHandler, AgentReviewResult
@@ -24,6 +24,11 @@ from agently.utils import DataFormatter
 
 if TYPE_CHECKING:
     from .execution import AgentExecution
+
+
+class _AgentReviewDeclaration(TypedDict):
+    required: bool
+    handler: AgentReviewHandler | None
 
 
 _MAX_SUMMARY_CHARS = 2_000
@@ -49,24 +54,20 @@ def declare_review(
     return target
 
 
-async def run_declared_reviews(execution: "AgentExecution", result: Any) -> None:
+async def run_declared_reviews(execution: "AgentExecution", result: object) -> None:
     declarations = list(execution.review_declarations)
     for index, declaration in enumerate(declarations, start=1):
         required = bool(declaration.get("required"))
-        handler = cast("AgentReviewHandler | None", declaration.get("handler"))
+        handler = declaration["handler"]
         review_id = f"{execution.id}:review:{index}"
-        source = "handler" if handler is not None else "model"
+        source: Literal["handler", "model"] = "handler" if handler is not None else "model"
         handler_name = _handler_name(handler)
         context = AgentReviewContext(
             execution=execution,
             prompt=dict(execution.prompt_snapshot),
             goals=tuple(execution.goal_items),
             success_criteria=tuple(execution.success_criteria_items),
-            artifact_refs=tuple(
-                dict(item)
-                for item in execution.logs.get("artifact_refs", [])
-                if isinstance(item, Mapping)
-            ),
+            artifact_refs=tuple(execution.artifact_results),
             task_workspace=execution.task_workspace,
             required=required,
             index=index,
@@ -126,14 +127,14 @@ async def run_declared_reviews(execution: "AgentExecution", result: Any) -> None
                 source="agent_review",
                 meta={"review_id": review_id, "required": True, "passed": False},
             )
-            raise AgentVerificationError(dict(normalized))
+            raise AgentVerificationError(normalized)
 
 
 async def _run_handler(
     handler: "AgentReviewHandler",
-    result: Any,
+    result: object,
     context: AgentReviewContext,
-) -> Any:
+) -> object:
     value = handler(result, context)
     if inspect.isawaitable(value):
         return await value
@@ -142,9 +143,9 @@ async def _run_handler(
 
 async def _run_model_review(
     execution: "AgentExecution",
-    result: Any,
+    result: object,
     context: AgentReviewContext,
-) -> Any:
+) -> object:
     request = execution.agent.create_request()
     request.input(
         {
@@ -185,18 +186,18 @@ async def _run_model_review(
 
 
 def _normalize_review(
-    value: Any,
+    value: object,
     *,
     review_id: str,
     index: int,
     required: bool,
-    source: str,
+    source: Literal["handler", "model"],
     handler_name: str | None,
 ) -> AgentReviewResult:
     if isinstance(value, bool):
-        payload: Mapping[str, Any] = {"passed": value}
+        payload: Mapping[str, object] = {"passed": value}
     elif isinstance(value, Mapping):
-        payload = value
+        payload = cast(Mapping[str, object], value)
     else:
         raise TypeError("Agent review handler must return bool or a mapping with Boolean `passed`.")
 
@@ -216,7 +217,7 @@ def _normalize_review(
         "review_id": review_id,
         "index": index,
         "required": required,
-        "source": cast(Any, source),
+        "source": source,
         "handler": handler_name,
         "passed": passed,
         "score": score,
@@ -227,13 +228,13 @@ def _normalize_review(
     return normalized
 
 
-def _bounded_text(value: Any, limit: int) -> str:
+def _bounded_text(value: object, limit: int) -> str:
     if value is None:
         return ""
     return str(value).strip()[:limit]
 
 
-def _bounded_text_list(value: Any) -> list[str]:
+def _bounded_text_list(value: object) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, (list, tuple)):
@@ -248,7 +249,7 @@ def _bounded_text_list(value: Any) -> list[str]:
     return result
 
 
-def _handler_name(handler: Any) -> str | None:
+def _handler_name(handler: AgentReviewHandler | None) -> str | None:
     if handler is None:
         return None
     return str(getattr(handler, "__name__", None) or handler.__class__.__name__)

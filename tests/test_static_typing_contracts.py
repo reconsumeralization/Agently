@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 from collections.abc import AsyncGenerator, Generator
-from typing import TYPE_CHECKING, Any, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args, get_origin, get_type_hints
 
-from typing_extensions import assert_type
+import pytest
+from typing_extensions import assert_type, get_overloads
 
 import agently as agently_package
 from agently import (
@@ -23,13 +28,16 @@ from agently import (
     SkillRuntimeStreamItem as RootSkillRuntimeStreamItem,
     StreamingData as RootStreamingData,
 )
-from agently.core import AgentExecutionResult, BaseAgent, ModelRequestResult
+from agently.core import AgentExecutionResult, BaseAgent, ModelRequestResult, TaskWorkspace
 from agently.types.data import (
     AgentArtifactContext,
     AgentArtifactHandler,
+    AgentArtifactResult,
+    AgentExecutionEffort,
     AgentReviewContext,
     AgentReviewHandler,
     AgentExecutionStreamData,
+    AgentExecutionStrategy,
     AgentlyModelResultEvent,
     AgentlyModelResultMessage,
     AgentlyResultGenerator,
@@ -52,6 +60,7 @@ from agently.types.plugins import (
     AgentExecution,
     AgentPatternContinuation,
     AgentPatternHandler,
+    AgentPatternName,
     ExecutionResourceProvider,
 )
 
@@ -72,9 +81,19 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(execution.input("reuse draft").output({"reply": (str,)}), AgentExecution)
         assert_type(execution.ensure_long_output(), AgentExecution)
         assert_type(execution.artifact("result.txt"), AgentExecution)
+        assert_type(agent.goal("ship", ["tests pass"]), AgentExecution)
+        assert_type(agent.goals(["ship", "document"], ("tests pass",)), AgentExecution)
+        assert_type(execution.goal(["ship", "document"], ("tests pass",)), AgentExecution)
+        assert_type(agent.pattern("plan"), AgentExecution)
+        assert_type(execution.pattern("long_content"), AgentExecution)
         assert_type(execution.pattern("custom"), AgentExecution)
         assert_type(execution.review(), AgentExecution)
         assert_type(execution.verify(), AgentExecution)
+        assert_type(execution.effort("high"), AgentExecution)
+        assert_type(execution.effort({"name": "high", "planning": {"depth": "deep"}}), AgentExecution)
+        assert_type(execution.effort("team_profile"), AgentExecution)
+        assert_type(execution.strategy("taskboard"), AgentExecution)
+        assert_type(execution.strategy("custom_strategy"), AgentExecution)
         assert_type(execution.get_generator(), Generator[str, None, None])
         assert_type(execution.get_generator(type="delta"), Generator[str, None, None])
         assert_type(execution.get_generator(type="instant"), Generator[AgentExecutionStreamData, None, None])
@@ -108,6 +127,16 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
 
 def test_public_handler_type_aliases():
     if TYPE_CHECKING:
+        class NamedPattern:
+            name: Literal["named_pattern"] = "named_pattern"
+
+            async def run(
+                self,
+                _execution: AgentExecution,
+                run_default: AgentPatternContinuation,
+            ) -> object:
+                return await run_default()
+
         async def pattern_handler(
             _execution: AgentExecution,
             run_default: AgentPatternContinuation,
@@ -131,11 +160,119 @@ def test_public_handler_type_aliases():
         agent_review_handler: AgentReviewHandler = review_handler
         agent_artifact_handler: AgentArtifactHandler = artifact_handler
         agent_pattern_handler: AgentPatternHandler = pattern_handler
+        agent: BaseAgent = Agently.create_agent("typing-handler-contract")
+        assert_type(agent.pattern(NamedPattern()), AgentExecution)
+        assert_type(agent.pattern(pattern_handler), AgentExecution)
         assert callable(model_handler)
         assert callable(skills_handler)
         assert callable(agent_review_handler)
         assert callable(agent_artifact_handler)
         assert callable(agent_pattern_handler)
+
+
+def test_handler_context_members_are_concretely_typed():
+    if TYPE_CHECKING:
+        review_context = cast(AgentReviewContext, object())
+        artifact_context = cast(AgentArtifactContext, object())
+
+        assert_type(review_context.execution, AgentExecution)
+        assert_type(review_context.task_workspace, TaskWorkspace)
+        assert_type(review_context.artifact_refs, tuple[AgentArtifactResult, ...])
+        assert_type(artifact_context.execution, AgentExecution)
+        assert_type(artifact_context.task_workspace, TaskWorkspace)
+
+
+def _literal_values(annotation: object) -> set[object]:
+    values: set[object] = set()
+    if get_origin(annotation) is Literal:
+        values.update(get_args(annotation))
+    for item in get_args(annotation):
+        if get_origin(item) is Literal:
+            values.update(get_args(item))
+    return values
+
+
+def test_agent_execution_choice_aliases_keep_builtin_editor_candidates():
+    assert _literal_values(AgentPatternName) == {
+        "request",
+        "goal",
+        "plan",
+        "long_content",
+    }
+    assert _literal_values(AgentExecutionStrategy) == {
+        "auto",
+        "direct",
+        "task",
+        "task_loop",
+        "long_task",
+        "flat",
+        "taskboard",
+    }
+    assert _literal_values(AgentExecutionEffort) == {
+        "minimal",
+        "low",
+        "fast",
+        "medium",
+        "normal",
+        "high",
+        "max",
+    }
+
+    expected_builtin_hints = {
+        "pattern": {"request", "goal", "plan", "long_content"},
+        "effort": {"minimal", "low", "fast", "medium", "normal", "high", "max"},
+        "strategy": {"auto", "direct", "task", "task_loop", "long_task", "flat", "taskboard"},
+    }
+    for owner in (BaseAgent, AgentExecution):
+        for method_name, expected in expected_builtin_hints.items():
+            overloads = get_overloads(getattr(owner, method_name))
+            assert len(overloads) == 2
+            parameter_name = "pattern" if method_name == "pattern" else "value"
+            builtin_hint = get_type_hints(
+                overloads[0],
+                localns={"AgentExecution": AgentExecution},
+            )[parameter_name]
+            assert _literal_values(builtin_hint) == expected
+
+
+def test_agent_task_execution_hint_is_a_closed_host_choice():
+    execution_hint = get_type_hints(
+        BaseAgent.create_task,
+        localns={"AgentExecution": AgentExecution},
+    )["execution"]
+    assert _literal_values(execution_hint) == {
+        "auto",
+        "flat",
+        "taskboard",
+        "default",
+        "automatic",
+        "linear",
+        "react",
+        "flat_react",
+        "task_board",
+        "board",
+        "taskboard_evidenceview",
+    }
+    assert str not in get_args(execution_hint)
+
+
+def test_agent_task_unknown_execution_choice_is_rejected_by_pyright():
+    pyright = shutil.which("pyright")
+    if pyright is None:
+        pytest.skip("pyright executable is not installed in this test environment")
+    fixture_dir = Path(__file__).parent / "typing_fixtures"
+    completed = subprocess.run(
+        [pyright, "--pythonpath", sys.executable, "--project", str(fixture_dir / "pyrightconfig.json")],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = f"{completed.stdout}\n{completed.stderr}"
+    assert completed.returncode != 0
+    assert "agent_execution_finite_invalid.py:5" in output
+    assert "reportArgumentType" in output
+    assert "parallel" in output
 
 
 def test_changed_runtime_protocols_are_publicly_typed():
@@ -187,6 +324,13 @@ def test_response_named_aliases_stay_in_typed_data_namespace_only():
         assert_type(cast(AgentlyOriginalResponsePayload, object()), AgentlyOriginalResultPayload)
         assert_type(cast(AgentlyResponseGenerator, object()), AgentlyResultGenerator)
         assert_type(cast(ResponseContentType, "all"), ResultContentType)
+
+
+def test_advanced_agent_execution_types_do_not_expand_the_package_root():
+    assert not hasattr(agently_package, "AgentPatternName")
+    assert not hasattr(agently_package, "AgentExecutionStrategy")
+    assert not hasattr(agently_package, "AgentExecutionEffort")
+    assert not hasattr(agently_package, "AgentArtifactResult")
 
 
 def test_task_board_public_update_methods_accept_dict_payloads():

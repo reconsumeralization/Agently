@@ -18,7 +18,7 @@ import asyncio
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, TypedDict, cast
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +29,7 @@ from agently.utils import DataFormatter
 from .model_stage import run_model_stage
 
 if TYPE_CHECKING:
+    from agently.core.orchestration import TriggerFlowExecution
     from agently.types.plugins import AgentExecution
 
 
@@ -36,6 +37,24 @@ _ANALYZE_EVENT = "agent_pattern.plan.analyze"
 _CLARIFY_EVENT = "agent_pattern.plan.clarify"
 _FINALIZE_EVENT = "agent_pattern.plan.finalize"
 _RUNTIME_RESOURCE = "agent_pattern_plan_runtime"
+
+
+class _PlanQuestionData(TypedDict):
+    question: str
+    why_needed: str
+
+
+class _PlanReadinessData(TypedDict):
+    plan_ready: bool
+    planning_goal: str
+    final_deliverable: str
+    readiness_summary: str
+    questions: list[_PlanQuestionData]
+
+
+class _PlanClarificationData(TypedDict):
+    questions: list[_PlanQuestionData]
+    response: object
 
 
 class _PlanQuestion(BaseModel):
@@ -70,8 +89,8 @@ class _PlanPatternRuntime:
         self,
         *,
         clarification_round: int,
-        clarifications: list[dict[str, Any]],
-    ) -> dict[str, Any]:
+        clarifications: list[_PlanClarificationData],
+    ) -> _PlanReadinessData:
         value = await run_model_stage(
             self.execution,
             pattern="plan",
@@ -105,9 +124,9 @@ class _PlanPatternRuntime:
     async def finalize(
         self,
         *,
-        readiness: dict[str, Any],
-        clarifications: list[dict[str, Any]],
-    ) -> Any:
+        readiness: _PlanReadinessData,
+        clarifications: list[_PlanClarificationData],
+    ) -> object:
         return await run_model_stage(
             self.execution,
             pattern="plan",
@@ -148,15 +167,16 @@ async def _initialize_plan(data: TriggerFlowRuntimeData) -> None:
     await data.async_emit(_ANALYZE_EVENT, None)
 
 
-async def _analyze_plan(data: TriggerFlowRuntimeData) -> dict[str, Any]:
+async def _analyze_plan(data: TriggerFlowRuntimeData) -> _PlanReadinessData:
     runtime = _require_runtime(data)
     raw_round = data.get_state("clarification_round", 0)
     clarification_round = raw_round if isinstance(raw_round, int) else 0
     raw_clarifications = data.get_state("clarifications", [])
-    clarifications = (
+    clarifications = cast(
+        list[_PlanClarificationData],
         [dict(item) for item in raw_clarifications if isinstance(item, Mapping)]
         if isinstance(raw_clarifications, list)
-        else []
+        else [],
     )
     readiness = await runtime.analyze(
         clarification_round=clarification_round,
@@ -168,7 +188,10 @@ async def _analyze_plan(data: TriggerFlowRuntimeData) -> dict[str, Any]:
 
 async def _route_readiness(data: TriggerFlowRuntimeData) -> None:
     runtime = _require_runtime(data)
-    readiness = dict(data.value) if isinstance(data.value, Mapping) else {}
+    readiness = cast(
+        _PlanReadinessData,
+        dict(data.value) if isinstance(data.value, Mapping) else {},
+    )
     if readiness.get("plan_ready") is True:
         await data.async_emit(_FINALIZE_EVENT, readiness)
         return
@@ -181,11 +204,14 @@ async def _route_readiness(data: TriggerFlowRuntimeData) -> None:
     await data.async_emit(_CLARIFY_EVENT, readiness)
 
 
-async def _request_clarification(data: TriggerFlowRuntimeData) -> Any:
+async def _request_clarification(data: TriggerFlowRuntimeData) -> object:
     from agently.base import execution_exchange
 
     runtime = _require_runtime(data)
-    readiness = dict(data.value) if isinstance(data.value, Mapping) else {}
+    readiness = cast(
+        _PlanReadinessData,
+        dict(data.value) if isinstance(data.value, Mapping) else {},
+    )
     questions = readiness.get("questions")
     if not isinstance(questions, list) or not questions:
         raise ValueError("Plan Pattern can pause only with at least one validated clarification question.")
@@ -259,7 +285,10 @@ async def _accept_clarification(data: TriggerFlowRuntimeData) -> None:
     readiness = data.get_state("readiness", {})
     questions = readiness.get("questions", []) if isinstance(readiness, Mapping) else []
     raw_clarifications = data.get_state("clarifications", [])
-    clarifications = list(raw_clarifications) if isinstance(raw_clarifications, list) else []
+    clarifications = cast(
+        list[_PlanClarificationData],
+        list(raw_clarifications) if isinstance(raw_clarifications, list) else [],
+    )
     clarifications.append(
         {
             "questions": DataFormatter.sanitize(questions),
@@ -282,11 +311,15 @@ async def _finalize_plan(data: TriggerFlowRuntimeData) -> None:
     readiness = data.get_state("readiness", {})
     clarifications = data.get_state("clarifications", [])
     result = await runtime.finalize(
-        readiness=dict(readiness) if isinstance(readiness, Mapping) else {},
-        clarifications=(
+        readiness=cast(
+            _PlanReadinessData,
+            dict(readiness) if isinstance(readiness, Mapping) else {},
+        ),
+        clarifications=cast(
+            list[_PlanClarificationData],
             [dict(item) for item in clarifications if isinstance(item, Mapping)]
             if isinstance(clarifications, list)
-            else []
+            else [],
         ),
     )
     await data.async_set_state("pattern_result", result, emit=False)
@@ -306,7 +339,7 @@ _PLAN_FLOW = _build_plan_flow()
 
 async def _drive_connected_exchanges(
     parent_execution: "AgentExecution",
-    flow_execution: Any,
+    flow_execution: "TriggerFlowExecution[Any, Any, Any]",
 ) -> None:
     from agently.base import execution_exchange
 
@@ -371,7 +404,7 @@ async def _drive_connected_exchanges(
 async def run_plan_pattern(
     execution: "AgentExecution",
     config: PlanPatternConfig,
-) -> Any:
+) -> object:
     if bool(getattr(execution, "_ensure_long_output_enabled", False)):
         raise ValueError(
             "Plan Pattern cannot be combined with ensure_long_output(); the Pattern's "
@@ -408,21 +441,21 @@ async def run_plan_pattern(
 
 
 def _normalize_readiness(
-    value: Any,
+    value: object,
     *,
     max_questions: int,
-) -> dict[str, Any]:
+) -> _PlanReadinessData:
     if not isinstance(value, Mapping):
         raise TypeError("Plan Pattern readiness stage must return a mapping.")
     plan_ready = value.get("plan_ready")
     if not isinstance(plan_ready, bool):
         raise TypeError("Plan Pattern readiness field `plan_ready` must be Boolean.")
-    normalized: dict[str, Any] = {"plan_ready": plan_ready}
+    normalized_text: dict[str, str] = {}
     for key in ("planning_goal", "final_deliverable", "readiness_summary"):
         item = str(value.get(key) or "").strip()
         if not item:
             raise ValueError(f"Plan Pattern readiness field `{key}` cannot be empty.")
-        normalized[key] = item
+        normalized_text[key] = item
     raw_questions = value.get("questions", [])
     if not isinstance(raw_questions, list):
         raise TypeError("Plan Pattern readiness field `questions` must be a list.")
@@ -430,7 +463,7 @@ def _normalize_readiness(
         raise ValueError(
             f"Plan Pattern readiness returned more than {max_questions} questions."
         )
-    questions: list[dict[str, str]] = []
+    questions: list[_PlanQuestionData] = []
     for index, item in enumerate(raw_questions, start=1):
         if not isinstance(item, Mapping):
             raise TypeError(
@@ -447,8 +480,13 @@ def _normalize_readiness(
         raise ValueError("Plan-ready output must not contain clarification questions.")
     if not plan_ready and not questions:
         raise ValueError("Non-ready plan output must contain a clarification question.")
-    normalized["questions"] = questions
-    return normalized
+    return {
+        "plan_ready": plan_ready,
+        "planning_goal": normalized_text["planning_goal"],
+        "final_deliverable": normalized_text["final_deliverable"],
+        "readiness_summary": normalized_text["readiness_summary"],
+        "questions": questions,
+    }
 
 
 __all__ = ["PlanPatternConfig", "run_plan_pattern"]

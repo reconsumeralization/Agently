@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal, TypeAlias
 from typing_extensions import NotRequired, TypedDict
 
@@ -21,8 +22,34 @@ from .record_store import RecordRef
 from .agent_review import AgentReviewResult
 
 
-AgentExecutionStatus: TypeAlias = Literal["created", "running", "success", "blocked", "error", "cancelled"] | str
+AgentExecutionStatus: TypeAlias = Literal[
+    "created",
+    "running",
+    "success",
+    "completed",
+    "blocked",
+    "failed",
+    "error",
+    "stalled",
+    "timed_out",
+    "cancelled",
+] | str
 AgentExecutionRecordPurpose: TypeAlias = Literal["process", "deliverable", "recovery", "audit"]
+AgentExecutionStrategy: TypeAlias = Literal[
+    "auto",
+    "direct",
+    "task",
+    "task_loop",
+    "long_task",
+    "flat",
+    "taskboard",
+] | str
+AgentExecutionEffort: TypeAlias = (
+    Literal["minimal", "low", "fast", "medium", "normal", "high", "max"]
+    | str
+    | Mapping[str, object]
+    | None
+)
 
 
 class AgentExecutionLineage(TypedDict):
@@ -63,6 +90,7 @@ class AgentExecutionDiagnostics(TypedDict):
     artifact: NotRequired[dict[str, Any]]
     long_output: NotRequired[dict[str, Any]]
     review: NotRequired[dict[str, Any]]
+    pattern_run: NotRequired[dict[str, object]]
 
 
 class ActionArtifactReleaseDiagnostic(TypedDict):
@@ -79,16 +107,21 @@ class ActionArtifactReleaseDiagnostics(TypedDict, total=False):
 
 
 class AgentExecutionRouteInfo(TypedDict):
-    selected_route: str
+    selected_route: Literal[
+        "model_request",
+        "agent_task",
+        "route_policy_blocked",
+        "agent_pattern",
+    ] | str
     selected_by: str | None
     options: dict[str, Any]
     reusable: bool
 
 
 class AgentExecutionPatternInfo(TypedDict):
-    name: str
+    name: Literal["request", "goal", "plan", "long_content"] | str
     source: Literal["builtin", "plugin", "instance", "handler"]
-    selected_by: str
+    selected_by: Literal["default", "pattern", "goal"]
     status: Literal["selected", "running", "completed", "failed"]
     used_default: bool
 
@@ -108,7 +141,7 @@ class AgentExecutionActionLog(TypedDict, total=False):
 class AgentExecutionMeta(TypedDict):
     execution_id: str
     status: AgentExecutionStatus
-    strategy: str | None
+    strategy: AgentExecutionStrategy | None
     goals: list[str]
     success_criteria: list[str]
     generated_success_criteria: list[str]

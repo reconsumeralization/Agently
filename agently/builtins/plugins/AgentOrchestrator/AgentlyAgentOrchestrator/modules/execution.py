@@ -22,7 +22,7 @@ import os
 import uuid
 from pathlib import Path
 from collections.abc import AsyncGenerator, Generator, Mapping
-from typing import Any, Literal, TYPE_CHECKING, cast
+from typing import Any, Literal, TYPE_CHECKING, cast, overload
 
 import json5
 import yaml
@@ -46,6 +46,9 @@ from agently.core.runtime.RuntimeContext import bind_runtime_context
 from agently.core.TaskWorkspace import TaskWorkspace, TaskWorkspaceContextSource
 from agently.types.data import (
     AgentExecutionStreamData,
+    AgentExecutionEffort,
+    AgentExecutionStatus,
+    AgentExecutionStrategy,
     ContextBudget,
     ContextConsumption,
     ContextReadIntent,
@@ -123,14 +126,16 @@ if TYPE_CHECKING:
         AgentExecutionRecordPurpose,
         AgentExecutionRecordWrite,
         AgentArtifactHandler,
+        AgentArtifactResult,
         AgentReviewHandler,
         AgentReviewResult,
         OutputValidateHandler,
         RunContext,
-        TaskWorkspaceFileRef,
     )
     from agently.types.plugins import AgentPatternInput
     from agently.core.application import DynamicTask
+    from .artifact import _AgentArtifactDeclaration
+    from .review import _AgentReviewDeclaration
 
 
 class AgentExecution:
@@ -270,11 +275,11 @@ class AgentExecution:
         self._long_output_meta: dict[str, Any] = {}
         self.pattern_selection: "AgentPatternInput | None" = None
         self.pattern_info = default_pattern_info()
-        self.artifact_declarations: list[dict[str, Any]] = []
-        self.artifact_results: list["TaskWorkspaceFileRef"] = []
-        self.review_declarations: list[dict[str, Any]] = []
+        self.artifact_declarations: list["_AgentArtifactDeclaration"] = []
+        self.artifact_results: list["AgentArtifactResult"] = []
+        self.review_declarations: list["_AgentReviewDeclaration"] = []
         self.review_results: list["AgentReviewResult"] = []
-        self.status = "created"
+        self.status: AgentExecutionStatus = "created"
         self._started = False
         self._completed = False
         self._error: BaseException | None = None
@@ -376,8 +381,14 @@ class AgentExecution:
         fork.strategy_name = self.strategy_name
         fork.pattern_selection = self.pattern_selection
         fork.pattern_info = dict(self.pattern_info)
-        fork.artifact_declarations = [dict(item) for item in self.artifact_declarations]
-        fork.review_declarations = [dict(item) for item in self.review_declarations]
+        fork.artifact_declarations = [
+            cast("_AgentArtifactDeclaration", dict(item))
+            for item in self.artifact_declarations
+        ]
+        fork.review_declarations = [
+            cast("_AgentReviewDeclaration", dict(item))
+            for item in self.review_declarations
+        ]
         fork._sync_action_scope(source="AgentExecution.compatibility_fork")
         fork.effective_options = fork._build_effective_options()
         fork._selected_route = None
@@ -1069,7 +1080,11 @@ class AgentExecution:
         stream_kind = str(meta_map.get("stream_kind") or "")
         return stream_kind != "text_projection"
 
-    def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution":
+    def goal(
+        self,
+        goal: str | list[str] | tuple[str, ...] | set[str],
+        success_criteria: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> "AgentExecution":
         target = self._reconfiguration_target()
         select_goal_pattern(target)
         if isinstance(goal, (list, tuple, set)):
@@ -1083,6 +1098,15 @@ class AgentExecution:
         return target
 
     goals = goal
+
+    @overload
+    def pattern(
+        self,
+        pattern: Literal["request", "goal", "plan", "long_content"],
+    ) -> "AgentExecution": ...
+
+    @overload
+    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution": ...
 
     def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution":
         return declare_pattern(self, pattern)
@@ -1100,7 +1124,25 @@ class AgentExecution:
     ) -> "AgentExecution":
         return declare_artifact(self, path, handler)
 
-    def effort(self, value: Any = "medium", **strategy: Any) -> "AgentExecution":
+    @overload
+    def effort(
+        self,
+        value: Literal["minimal", "low", "fast", "medium", "normal", "high", "max"] = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def effort(
+        self,
+        value: AgentExecutionEffort = "medium",
+        **strategy: object,
+    ) -> "AgentExecution": ...
+
+    def effort(
+        self,
+        value: AgentExecutionEffort = "medium",
+        **strategy: object,
+    ) -> "AgentExecution":
         return configure_effort(self._reconfiguration_target(), value, **strategy)
 
     def use_actions(self, *args: Any, **kwargs: Any) -> "AgentExecution":
@@ -1414,7 +1456,25 @@ class AgentExecution:
         target.effective_options = target._build_effective_options()
         return target
 
-    def strategy(self, value: str | None = None, **options: Any) -> "AgentExecution":
+    @overload
+    def strategy(
+        self,
+        value: Literal["auto", "direct", "task", "task_loop", "long_task", "flat", "taskboard"] | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    @overload
+    def strategy(
+        self,
+        value: AgentExecutionStrategy | None = None,
+        **options: object,
+    ) -> "AgentExecution": ...
+
+    def strategy(
+        self,
+        value: AgentExecutionStrategy | None = None,
+        **options: object,
+    ) -> "AgentExecution":
         target = self._reconfiguration_target()
         if value is not None:
             apply_strategy_selection(target, value, source="explicit_strategy")

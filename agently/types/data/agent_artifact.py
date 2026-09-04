@@ -16,17 +16,31 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Literal, TYPE_CHECKING, TypeAlias
+from typing_extensions import TypedDict
+
+if TYPE_CHECKING:
+    from agently.core.TaskWorkspace import TaskWorkspace
+    from agently.types.plugins import AgentExecution
+
+
+class AgentArtifactResult(TypedDict):
+    """Guaranteed fields of one materialized and readback-verified artifact."""
+
+    path: str
+    sha256: str
+    role: Literal["artifact"]
+    complete_readback_verified: Literal[True]
 
 
 @dataclass(frozen=True, slots=True)
 class AgentArtifactContext:
     """Read-only context exposed to an AgentExecution artifact renderer."""
 
-    execution: object
+    execution: "AgentExecution"
     path: str
     index: int
-    task_workspace: object
+    task_workspace: "TaskWorkspace"
 
 
 AgentArtifactHandlerResult: TypeAlias = str | bytes
@@ -40,4 +54,5 @@ __all__ = [
     "AgentArtifactContext",
     "AgentArtifactHandler",
     "AgentArtifactHandlerResult",
+    "AgentArtifactResult",
 ]
