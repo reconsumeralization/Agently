@@ -337,7 +337,7 @@ from .agent_execution import (
     ActionArtifactReleaseDiagnostic,
     ActionArtifactReleaseDiagnostics,
     AgentExecutionDiagnostics,
-    AgentExecutionEffort,
+    AgentExecutionEffort as AgentExecutionEffort,
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
@@ -347,7 +347,7 @@ from .agent_execution import (
     AgentExecutionRecordPurpose,
     AgentExecutionRecordWrite,
     AgentExecutionRecordRefs,
-    AgentExecutionStrategy,
+    AgentExecutionStrategy as AgentExecutionStrategy,
     CapabilityKind,
     CapabilityRoute,
     EvidenceRequirement,
@@ -358,17 +358,17 @@ from .agent_execution import (
 )
 
 from .agent_review import (
-    AgentReviewContext,
-    AgentReviewHandler,
-    AgentReviewHandlerResult,
-    AgentReviewResult,
+    AgentReviewContext as AgentReviewContext,
+    AgentReviewHandler as AgentReviewHandler,
+    AgentReviewHandlerResult as AgentReviewHandlerResult,
+    AgentReviewResult as AgentReviewResult,
 )
 
 from .agent_artifact import (
-    AgentArtifactContext,
-    AgentArtifactHandler,
-    AgentArtifactHandlerResult,
-    AgentArtifactResult,
+    AgentArtifactContext as AgentArtifactContext,
+    AgentArtifactHandler as AgentArtifactHandler,
+    AgentArtifactHandlerResult as AgentArtifactHandlerResult,
+    AgentArtifactResult as AgentArtifactResult,
 )
 
 from .attempt import (

@@ -42,13 +42,13 @@ from .SessionMemory import SessionMemory
 from .Blocks import Blocks
 from .AgentOrchestrator import AgentOrchestrator
 from .AgentPattern import (
-    AgentPattern,
-    AgentPatternContinuation,
-    AgentPatternHandler,
-    AgentPatternInput,
-    AgentPatternName,
+    AgentPattern as AgentPattern,
+    AgentPatternContinuation as AgentPatternContinuation,
+    AgentPatternHandler as AgentPatternHandler,
+    AgentPatternInput as AgentPatternInput,
+    AgentPatternName as AgentPatternName,
 )
-from .AgentExecution import AgentExecution, AgentStepExecutor
+from .AgentExecution import AgentExecution as AgentExecution, AgentStepExecutor as AgentStepExecutor
 from .RecordStore import (
     CheckpointStore,
     DBStoreProvider,
