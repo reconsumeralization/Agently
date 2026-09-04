@@ -249,6 +249,20 @@
     }
   },
   "request_input": {
+    "agent_execution_terminal_policies_and_patterns": {
+      "surface": [
+        "Agent.review",
+        "Agent.verify",
+        "Agent.artifact",
+        "Agent.pattern",
+        "AgentExecution.review",
+        "AgentExecution.verify",
+        "AgentExecution.artifact",
+        "AgentExecution.pattern",
+        "AgentPattern"
+      ],
+      "contract": "The additive AgentExecution draft declarations keep one business-result and lifecycle owner. review is one advisory handler or structured ModelRequest judgment; verify uses the same handler boundary as a hard terminal gate without hiding a repair loop. artifact renders the accepted result to text or bytes while TaskWorkspace retains containment, write, physical digest readback, trusted identity, and terminal-retention authority. pattern selects one whole-request behavior that consumes the existing AgentExecution input/output/capability/policy draft and returns its business value; the registered AgentPattern seam receives execution plus one-use run_default, while complex branching, loops, HITL wait/resume, and recovery remain TriggerFlow and ExecutionExchange concerns. Ordinary requests implicitly use request, and Agent.goal explicitly selects the built-in goal Pattern while preserving the existing AgentTask implementation."
+    },
     "structured_output": {
       "surface": [
         "ModelRequest.output",

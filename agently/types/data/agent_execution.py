@@ -85,6 +85,14 @@ class AgentExecutionRouteInfo(TypedDict):
     reusable: bool
 
 
+class AgentExecutionPatternInfo(TypedDict):
+    name: str
+    source: Literal["builtin", "plugin", "instance", "handler"]
+    selected_by: str
+    status: Literal["selected", "running", "completed", "failed"]
+    used_default: bool
+
+
 class AgentExecutionActionLog(TypedDict, total=False):
     action_call_id: str | None
     action_id: str
@@ -113,6 +121,7 @@ class AgentExecutionMeta(TypedDict):
     consumed_options: dict[str, Any]
     route_plan: dict[str, Any]
     route: AgentExecutionRouteInfo
+    pattern: AgentExecutionPatternInfo
     close_snapshot: dict[str, Any]
     logs: dict[str, Any]
     diagnostics: AgentExecutionDiagnostics

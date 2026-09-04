@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from agently.core.context import TaskContext
     from agently.core.application.AgentExecution import AgentExecutionResult
+    from .AgentPattern import AgentPatternInput
 
 
 @runtime_checkable
@@ -84,6 +85,8 @@ class AgentExecution(Protocol):
     def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
 
     def goals(self, goal: Any, success_criteria: Any = None) -> "AgentExecution": ...
+
+    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution": ...
 
     def review(self, handler: AgentReviewHandler | None = None) -> "AgentExecution": ...
 

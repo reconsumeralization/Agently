@@ -41,6 +41,12 @@ from .TaskDAGPlanner import TaskDAGPlanner
 from .SessionMemory import SessionMemory
 from .Blocks import Blocks
 from .AgentOrchestrator import AgentOrchestrator
+from .AgentPattern import (
+    AgentPattern,
+    AgentPatternContinuation,
+    AgentPatternHandler,
+    AgentPatternInput,
+)
 from .AgentExecution import AgentExecution, AgentStepExecutor
 from .RecordStore import (
     CheckpointStore,

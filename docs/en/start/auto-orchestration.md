@@ -151,10 +151,87 @@ are exposed in `meta["logs"]["artifact_refs"]` and through
 multiple independently verified files. Any declared delivery failure fails the
 run; artifact materialization completes before review and verification.
 
+## Request Patterns
+
+A Pattern is one reusable whole-request behavior with the same caller-facing
+shape as an ordinary Agent request: it consumes the existing AgentExecution
+draft and returns its business result. Select one with `.pattern(pattern)`:
+
+```python
+async def annotate(execution, run_default):
+    result = await run_default()
+    return {"result": result, "review_state": "pending"}
+
+result = agent.input(task).output(contract).pattern(annotate).start()
+```
+
+`pattern` accepts one registered `AgentPattern` name, one Pattern instance, or
+one callable. `run_default()` invokes the existing route at most once. A
+Pattern may instead own its explicit model requests and return their assembled
+value. It does not get another input bag, output schema, settings tree, result
+wrapper, or lifecycle: it reads the same execution prompt, capabilities,
+TaskWorkspace, and policy already configured on AgentExecution. Artifact and
+review declarations run afterward on the Pattern result.
+
+The existing `.output(...)` remains the external result contract. The ordinary
+route honors it when the Pattern calls `run_default()`; a Pattern that owns all
+of its stages must consume and honor that same declaration itself. There is no
+separate `pattern.input(...)` or `pattern.output(...)` API.
+
+Reusable Patterns use the `AgentPattern` plugin family:
+
+```python
+class AnnotatePattern:
+    name = "annotate"
+    DEFAULT_SETTINGS = {}
+
+    def __init__(self, *, plugin_manager, settings):
+        self.plugin_manager = plugin_manager
+        self.settings = settings
+
+    async def run(self, execution, run_default, /):
+        result = await run_default()
+        return {"result": result, "review_state": "pending"}
+
+agent.plugin_manager.register("AgentPattern", AnnotatePattern, activate=False)
+result = agent.input(task).pattern("annotate").start()
+```
+
+Only one Pattern is selected; a later `.pattern(...)` replaces the earlier
+selection rather than forming an implicit chain. Put Pattern-specific tuning in
+the plugin instance or plugin settings instead of adding keyword options to the
+fluent method.
+
+Pattern is not another name for a DAG. It is the behavior contract; its internal
+implementation may be linear, branching, concurrent, or cyclic. Use
+TriggerFlow inside a complex Pattern for branches, joins, retries, loops,
+pause/resume, and recovery. HITL clarification uses the existing
+ExecutionExchange routing/provider seam with TriggerFlow wait/resume; it does
+not require an additional Agent interaction-handler API.
+
+When plan -> TaskBoard -> task loop is one request whose terminal result is task
+completion, one Pattern owns that topology and its explicit handoffs. If the
+plan or board is itself an independently consumed deliverable, start separate
+AgentExecutions and pass the result explicitly. The lesson `plan` and
+multi-request `long_form` demos are suitable Pattern topology references, but
+those names are not registered as default built-ins until their quality,
+context growth, HITL, request accounting, and artifact readback have real-model
+evidence. `ensure_long_output()` remains a transport-truncation policy, not the
+long-form composition Pattern.
+
+The implicit simple behavior is `request`. `.goal(...)` selects the built-in
+`goal` Pattern. `.strategy(...)` remains the lower-level execution mechanism
+override. Pattern identity is exposed in execution metadata. Explicitly
+selected Patterns also emit `pattern.started` / `pattern.completed` /
+`pattern.failed`; the implicit `request` behavior adds no stream noise. Pattern
+selection belongs before `.start()`; `start(mode=...)` is not a Pattern API.
+
 ## Goal Pursuit
 
 Use `agent.goal(goal_or_goals, success_criteria=None)` when the business goal
-needs a bounded plan, execution, evidence, verification, and replan loop.
+needs a bounded plan, execution, evidence, verification, and replan loop. This
+selects the built-in `goal` Pattern while retaining the existing AgentTask
+implementation.
 `agent.goals(...)` is only a plural alias for the same entrypoint.
 
 When task-specific options are assembled separately, attach them through the

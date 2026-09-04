@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from agently.types.config import AgentlyConfigModel
     from agently.core.model import ModelRequestResult
     from agently.types.options import ExecutionOptions
-    from agently.types.plugins import AgentExecution
+    from agently.types.plugins import AgentExecution, AgentPatternInput
 
 
 class _AgentDefinitionBuilder:
@@ -1782,6 +1782,9 @@ class BaseAgent:
         return self.create_execution().goal(goal, success_criteria=success_criteria)
 
     goals = goal
+
+    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution":
+        return self.create_execution().pattern(pattern)
 
     def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
         return self.create_execution().review(handler)

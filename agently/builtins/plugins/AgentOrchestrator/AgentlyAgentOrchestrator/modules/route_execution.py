@@ -27,6 +27,7 @@ from agently.utils import DataFormatter
 
 from .artifact import run_declared_artifacts
 from .long_output import LongOutputError
+from .pattern import run_selected_pattern
 from .routes import run_model_request_route
 from .runtime_guidance import mark_pending_guidance_not_applied
 from .review import run_declared_reviews
@@ -55,52 +56,8 @@ async def async_execute_route(
     raise_ensure_failure: bool,
 ) -> tuple[str, Any]:
     with bind_runtime_context(agent_execution_context=owner.execution_context):
-        owner.execution_context.record_progress(stage="route_selection", status="started")
-        route, route_meta = await owner.select_route()
-        owner.execution_context.record_progress(stage="route_selection", status="completed")
-        owner.route_plan = owner.route_planner.build_route_plan(
-            execution_id=owner.id,
-            route=route,
-            route_meta=route_meta,
-        )
-        owner.route_info.setdefault("selected_route", route)
-        owner.route_info.setdefault("options", DataFormatter.sanitize(route_meta))
-        owner.route_info.setdefault("reusable", True)
-        await owner.emit_stream("route.selected", owner.route_plan, route=route)
-        if route == "route_policy_blocked":
-            reason = str(route_meta.get("route_policy_warning") or "Route policy could not be satisfied.")
-            owner.status = "blocked"
-            owner.close_snapshot = {"status": "blocked", "route": "route_policy_blocked", "route_meta": DataFormatter.sanitize(route_meta)}
-            owner.diagnostics.setdefault("route_policy_violations", []).append(DataFormatter.sanitize(route_meta))
-            await owner.emit_stream(
-                "route.policy.blocked",
-                DataFormatter.sanitize(route_meta),
-                route="route_policy_blocked",
-                source="agent_execution",
-                meta={"status": "blocked"},
-            )
-            return route, {
-                "status": "blocked",
-                "accepted": False,
-                "artifact_status": "blocked",
-                "reason": reason,
-                "final_response": (
-                    "Task encountered a blocking condition. "
-                    f"No complete final deliverable was accepted. Reason: {reason}"
-                ),
-                "route_policy": route_meta.get("route_policy"),
-            }
-        if route == "agent_task" and owner._ensure_long_output_enabled:
-            raise LongOutputError(
-                "ensure_long_output is a direct ModelRequest delivery policy and cannot be "
-                "mixed with an explicitly selected AgentTask execution. Keep the long deliverable "
-                "as a direct execution, or let AgentTask produce bounded planning results and start "
-                "a separate direct delivery execution."
-            )
-        if route == "agent_task":
-            result = await run_agent_task_route(owner, route_meta)
-        else:
-            result = await run_model_request_route(
+        async def run_default_route() -> tuple[str, Any]:
+            return await _execute_default_route(
                 owner,
                 type=type,
                 ensure_keys=ensure_keys,
@@ -110,14 +67,89 @@ async def async_execute_route(
                 max_retries=max_retries,
                 raise_ensure_failure=raise_ensure_failure,
             )
-        if route != "agent_task":
-            await mark_pending_guidance_not_applied(owner, reason=f"route:{route}:not_agent_task")
+
+        route, result = await run_selected_pattern(owner, run_default_route)
         owner.result = result
         if owner.status in {"running", "success", "completed"} and owner.artifact_declarations:
             await run_declared_artifacts(owner, result)
         if owner.status in {"running", "success", "completed"} and owner.review_declarations:
             await run_declared_reviews(owner, result)
         return route, result
+
+
+async def _execute_default_route(
+    owner: "AgentExecution",
+    *,
+    type: Literal["original", "parsed", "all"],
+    ensure_keys: list[str] | None,
+    ensure_all_keys: bool | None,
+    validate_handler: "OutputValidateHandler | list[OutputValidateHandler] | None",
+    key_style: Literal["dot", "slash"],
+    max_retries: int,
+    raise_ensure_failure: bool,
+) -> tuple[str, Any]:
+    owner.execution_context.record_progress(stage="route_selection", status="started")
+    route, route_meta = await owner.select_route()
+    owner.execution_context.record_progress(stage="route_selection", status="completed")
+    owner.route_plan = owner.route_planner.build_route_plan(
+        execution_id=owner.id,
+        route=route,
+        route_meta=route_meta,
+    )
+    owner.route_info.setdefault("selected_route", route)
+    owner.route_info.setdefault("options", DataFormatter.sanitize(route_meta))
+    owner.route_info.setdefault("reusable", True)
+    await owner.emit_stream("route.selected", owner.route_plan, route=route)
+    if route == "route_policy_blocked":
+        reason = str(route_meta.get("route_policy_warning") or "Route policy could not be satisfied.")
+        owner.status = "blocked"
+        owner.close_snapshot = {
+            "status": "blocked",
+            "route": "route_policy_blocked",
+            "route_meta": DataFormatter.sanitize(route_meta),
+        }
+        owner.diagnostics.setdefault("route_policy_violations", []).append(DataFormatter.sanitize(route_meta))
+        await owner.emit_stream(
+            "route.policy.blocked",
+            DataFormatter.sanitize(route_meta),
+            route="route_policy_blocked",
+            source="agent_execution",
+            meta={"status": "blocked"},
+        )
+        return route, {
+            "status": "blocked",
+            "accepted": False,
+            "artifact_status": "blocked",
+            "reason": reason,
+            "final_response": (
+                "Task encountered a blocking condition. "
+                f"No complete final deliverable was accepted. Reason: {reason}"
+            ),
+            "route_policy": route_meta.get("route_policy"),
+        }
+    if route == "agent_task" and owner._ensure_long_output_enabled:
+        raise LongOutputError(
+            "ensure_long_output is a direct ModelRequest delivery policy and cannot be "
+            "mixed with an explicitly selected AgentTask execution. Keep the long deliverable "
+            "as a direct execution, or let AgentTask produce bounded planning results and start "
+            "a separate direct delivery execution."
+        )
+    if route == "agent_task":
+        result = await run_agent_task_route(owner, route_meta)
+    else:
+        result = await run_model_request_route(
+            owner,
+            type=type,
+            ensure_keys=ensure_keys,
+            ensure_all_keys=ensure_all_keys,
+            validate_handler=validate_handler,
+            key_style=key_style,
+            max_retries=max_retries,
+            raise_ensure_failure=raise_ensure_failure,
+        )
+    if route != "agent_task":
+        await mark_pending_guidance_not_applied(owner, reason=f"route:{route}:not_agent_task")
+    return route, result
 
 
 async def start_execution(

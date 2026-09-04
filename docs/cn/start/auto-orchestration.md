@@ -134,10 +134,74 @@ artifact 交付不会替换或包装业务结果。可信 refs 位于
 stream event 暴露。连续调用可创建多个分别校验的文件；任一已声明交付失败都会使本次
 run 失败。artifact 物化总是在 review 和 verification 之前完成。
 
+## 请求 Pattern
+
+Pattern 是一个可复用的完整请求行为，对调用者保持与普通 Agent 请求相同的形态：消费
+现有 AgentExecution draft，返回业务结果。使用 `.pattern(pattern)` 选择一个：
+
+```python
+async def annotate(execution, run_default):
+    result = await run_default()
+    return {"result": result, "review_state": "pending"}
+
+result = agent.input(task).output(contract).pattern(annotate).start()
+```
+
+`pattern` 只接收一个已注册 `AgentPattern` 名称、一个 Pattern instance 或一个 callable。
+`run_default()` 最多调用一次现有 route；Pattern 也可以自行拥有明确的模型请求，并返回
+组装后的值。它不会得到第二套 input bag、output schema、settings tree、result wrapper 或
+lifecycle，而是读取 AgentExecution 上已经配置的 prompt、capabilities、TaskWorkspace 和
+policy。artifact 与 review declarations 随后作用于 Pattern 的业务结果。
+
+现有 `.output(...)` 仍是对外的结果契约。Pattern 调用 `run_default()` 时由普通 route
+落实；完全自行组织 stages 的 Pattern 必须消费并遵守同一声明，不存在额外的
+`pattern.input(...)` 或 `pattern.output(...)` API。
+
+可复用 Pattern 使用 `AgentPattern` plugin family：
+
+```python
+class AnnotatePattern:
+    name = "annotate"
+    DEFAULT_SETTINGS = {}
+
+    def __init__(self, *, plugin_manager, settings):
+        self.plugin_manager = plugin_manager
+        self.settings = settings
+
+    async def run(self, execution, run_default, /):
+        result = await run_default()
+        return {"result": result, "review_state": "pending"}
+
+agent.plugin_manager.register("AgentPattern", AnnotatePattern, activate=False)
+result = agent.input(task).pattern("annotate").start()
+```
+
+一次只选择一个 Pattern；后续 `.pattern(...)` 会替换之前的选择，不会形成隐式链。Pattern
+特有调优应放进 plugin instance 或 plugin settings，不通过 fluent method 增长 kwargs。
+
+Pattern 不是 DAG 的别名：Pattern 是行为契约，其内部实现可以是线性、分支、并发或循环。
+复杂 Pattern 的 branches、joins、retry、loop、pause/resume 和 recovery 使用内部
+TriggerFlow。HITL clarification 复用 ExecutionExchange routing/provider seam 与
+TriggerFlow wait/resume，不需要再增加 Agent interaction-handler API。
+
+当 plan -> TaskBoard -> task loop 是一个以任务完成为终态结果的请求时，由一个 Pattern
+拥有这套 topology 和明确 handoff；如果 plan 或 board 本身是独立消费的 deliverable，则
+启动不同 AgentExecution 并显式传递结果。课程里的 `plan` 和多轮请求 `long_form` demo
+适合作为 Pattern topology 参考，但在质量、上下文增长、HITL、请求计数和 artifact 回读
+取得真实模型证据前，这两个名称不会注册为默认 built-in。`ensure_long_output()` 仍是
+transport truncation policy，不是长文拼装 Pattern。
+
+隐式简单行为是 `request`；`.goal(...)` 选择 built-in `goal` Pattern；`.strategy(...)`
+仍是更低层的执行机制 override。Pattern identity 会出现在 execution metadata 中；显式
+选择的 Pattern 还会发出 `pattern.started`、`pattern.completed`、`pattern.failed`，隐式
+`request` 不增加 stream 噪声。Pattern 应在 `.start()` 前选择；`start(mode=...)` 不是
+Pattern API。
+
 ## Goal Pursuit
 
 当业务目标需要有边界的 planning、execution、evidence、verification 和 replan
-闭环时，使用 `agent.goal(goal_or_goals, success_criteria=None)`。
+闭环时，使用 `agent.goal(goal_or_goals, success_criteria=None)`。这会选择 built-in
+`goal` Pattern，同时保留现有 AgentTask 实现。
 `agent.goals(...)` 只是同一个入口的复数 alias。
 
 task-specific options 单独组装时，应通过 task strategy 传入：

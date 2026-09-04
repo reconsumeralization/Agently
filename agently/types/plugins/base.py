@@ -30,6 +30,7 @@ AgentlyPluginType = Literal[
     "TaskDAGPlanner",
     "Blocks",
     "AgentOrchestrator",
+    "AgentPattern",
     "RecordStoreBackend",
     "DBStoreProvider",
     "ContentStore",

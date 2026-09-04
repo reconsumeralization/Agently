@@ -16,6 +16,15 @@ Agently 三层 Action 栈的中间层：`TriggerFlow`（顶，编排）→ `Acti
 
 `ActionRuntime`、`ActionFlow`、`ActionExecutor` 是当前的公开 plugin type。旧的 `ToolManager` plugin type 仅作为遗留兼容保留并发出 deprecation 警告。详见 [Action Runtime](../actions/action-runtime.md)。
 
+## Agent Pattern
+
+通过 `AgentExecution.pattern(...)` 选择的可复用完整请求行为。它消费现有
+AgentExecution draft，并返回同一个 execution 的业务结果，不创建第二套 input、result
+或 lifecycle facade。其内部可以使用一次或多次 ModelRequest，也可以为 branching、loop、
+HITL wait/resume 或 recovery 编译 TriggerFlow。因此 Pattern 是 application behavior
+contract，不是 TriggerFlow、TaskDAG、strategy 或 route 的同义词。`.goal(...)` 选择
+built-in `goal` Pattern，普通请求隐式使用 `request`。
+
 ## auto_close / auto_close_timeout
 
 TriggerFlow execution 的设置。`auto_close=True`（默认）时，execution 在空闲超过 `auto_close_timeout` 秒后自动关闭。隐式 execution 语法糖（`flow.start()` / `flow.async_start()`）默认 `auto_close_timeout=0.0`。`flow.start(auto_close=False)` 是非法用法，会直接报错。

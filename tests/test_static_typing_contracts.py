@@ -50,6 +50,8 @@ from agently.types.data import (
 from agently.types.plugins import (
     ActionExecutor,
     AgentExecution,
+    AgentPatternContinuation,
+    AgentPatternHandler,
     ExecutionResourceProvider,
 )
 
@@ -70,6 +72,7 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
         assert_type(execution.input("reuse draft").output({"reply": (str,)}), AgentExecution)
         assert_type(execution.ensure_long_output(), AgentExecution)
         assert_type(execution.artifact("result.txt"), AgentExecution)
+        assert_type(execution.pattern("custom"), AgentExecution)
         assert_type(execution.review(), AgentExecution)
         assert_type(execution.verify(), AgentExecution)
         assert_type(execution.get_generator(), Generator[str, None, None])
@@ -105,6 +108,12 @@ def test_agent_execution_and_model_response_streaming_type_contracts():
 
 def test_public_handler_type_aliases():
     if TYPE_CHECKING:
+        async def pattern_handler(
+            _execution: AgentExecution,
+            run_default: AgentPatternContinuation,
+        ) -> object:
+            return await run_default()
+
         def review_handler(_result: Any, _context: AgentReviewContext) -> bool:
             return True
 
@@ -121,10 +130,12 @@ def test_public_handler_type_aliases():
         skills_handler: SkillRuntimeStreamHandler = skills_stream_handler
         agent_review_handler: AgentReviewHandler = review_handler
         agent_artifact_handler: AgentArtifactHandler = artifact_handler
+        agent_pattern_handler: AgentPatternHandler = pattern_handler
         assert callable(model_handler)
         assert callable(skills_handler)
         assert callable(agent_review_handler)
         assert callable(agent_artifact_handler)
+        assert callable(agent_pattern_handler)
 
 
 def test_changed_runtime_protocols_are_publicly_typed():

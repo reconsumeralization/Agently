@@ -340,6 +340,7 @@ from .agent_execution import (
     AgentExecutionLineage,
     AgentExecutionLimits,
     AgentExecutionMeta,
+    AgentExecutionPatternInfo,
     AgentExecutionStatus,
     AgentExecutionStreamMeta,
     AgentExecutionRecordPurpose,

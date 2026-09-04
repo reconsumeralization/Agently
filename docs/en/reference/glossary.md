@@ -14,6 +14,17 @@ The middle layer of Agently's three-layer action stack: `TriggerFlow` (top, orch
 
 `ActionRuntime`, `ActionFlow`, and `ActionExecutor` are now the public plugin types. The older `ToolManager` plugin type is kept for legacy use only and emits deprecation warnings. See [Action Runtime](../actions/action-runtime.md).
 
+## Agent Pattern
+
+A reusable whole-request behavior selected with `AgentExecution.pattern(...)`.
+It consumes the existing AgentExecution draft and returns the same execution's
+business result; it does not create another input, result, or lifecycle facade.
+Its implementation may use one or many ModelRequests and may compile a
+TriggerFlow for branching, loops, HITL wait/resume, or recovery. Pattern is
+therefore an application behavior contract, not a synonym for TriggerFlow,
+TaskDAG, strategy, or route. `.goal(...)` selects the built-in `goal` Pattern;
+an ordinary request implicitly uses `request`.
+
 ## auto_close / auto_close_timeout
 
 Settings on a TriggerFlow execution. With `auto_close=True` (the default), the execution closes itself after `auto_close_timeout` seconds of idle. Hidden execution sugar (`flow.start()` / `flow.async_start()`) defaults to `auto_close_timeout=0.0`. `flow.start(auto_close=False)` is illegal and raises.

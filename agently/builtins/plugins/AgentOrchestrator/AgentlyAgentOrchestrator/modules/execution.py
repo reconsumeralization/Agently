@@ -83,6 +83,7 @@ from .result_views import (
     sync_generator as sync_generator_entry,
 )
 from .review import declare_review
+from .pattern import declare_pattern, default_pattern_info, select_goal_pattern
 from .route_execution import async_execute_route, start_execution
 from .runtime_guidance import add_guidance as add_guidance_entry
 from .routing import HybridRoutePlanner
@@ -128,6 +129,7 @@ if TYPE_CHECKING:
         RunContext,
         TaskWorkspaceFileRef,
     )
+    from agently.types.plugins import AgentPatternInput
     from agently.core.application import DynamicTask
 
 
@@ -266,6 +268,8 @@ class AgentExecution:
         self._ensure_long_output_enabled = False
         self._long_output_result_object: Any = None
         self._long_output_meta: dict[str, Any] = {}
+        self.pattern_selection: "AgentPatternInput | None" = None
+        self.pattern_info = default_pattern_info()
         self.artifact_declarations: list[dict[str, Any]] = []
         self.artifact_results: list["TaskWorkspaceFileRef"] = []
         self.review_declarations: list[dict[str, Any]] = []
@@ -370,6 +374,8 @@ class AgentExecution:
         fork.local_skills_pack_selectors = [dict(item) for item in self.local_skills_pack_selectors]
         fork.task_options = dict(self.task_options)
         fork.strategy_name = self.strategy_name
+        fork.pattern_selection = self.pattern_selection
+        fork.pattern_info = dict(self.pattern_info)
         fork.artifact_declarations = [dict(item) for item in self.artifact_declarations]
         fork.review_declarations = [dict(item) for item in self.review_declarations]
         fork._sync_action_scope(source="AgentExecution.compatibility_fork")
@@ -1065,6 +1071,7 @@ class AgentExecution:
 
     def goal(self, goal: Any, success_criteria: Any = None) -> "AgentExecution":
         target = self._reconfiguration_target()
+        select_goal_pattern(target)
         if isinstance(goal, (list, tuple, set)):
             set_execution_goals(target, tuple(goal))
         else:
@@ -1076,6 +1083,9 @@ class AgentExecution:
         return target
 
     goals = goal
+
+    def pattern(self, pattern: "AgentPatternInput") -> "AgentExecution":
+        return declare_pattern(self, pattern)
 
     def review(self, handler: "AgentReviewHandler | None" = None) -> "AgentExecution":
         return declare_review(self, required=False, handler=handler)

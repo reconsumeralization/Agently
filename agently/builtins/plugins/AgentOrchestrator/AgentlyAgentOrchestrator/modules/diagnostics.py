@@ -191,6 +191,7 @@ def build_execution_meta(owner: "AgentExecution") -> dict[str, Any]:
         "consumed_options": DataFormatter.sanitize(owner.consumed_options),
         "route_plan": DataFormatter.sanitize(owner.route_plan),
         "route": DataFormatter.sanitize(owner.route_info),
+        "pattern": DataFormatter.sanitize(owner.pattern_info),
         "close_snapshot": DataFormatter.sanitize(owner.close_snapshot),
         "logs": DataFormatter.sanitize(owner.logs),
         "diagnostics": DataFormatter.sanitize(owner.diagnostics),
