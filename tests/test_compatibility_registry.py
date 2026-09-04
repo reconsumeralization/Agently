@@ -230,3 +230,18 @@ def test_public_typing_contract_remains_explicit() -> None:
     assert "compatibility/public-typing-allowlist.json" in public_typing["surface"]
     assert "typed parameters and returns" in public_typing["contract"]
     assert "not a public-method allowlist" in public_typing["compatibility_policy"]
+
+
+def test_agent_execution_standard_methods_are_separate_from_beta_patterns() -> None:
+    contract = _development_manifest()["request_input"][
+        "agent_execution_terminal_policies_and_patterns"
+    ]
+
+    assert "Agent.interact" in contract["surface"]
+    assert "AgentExecution.interact" in contract["surface"]
+    assert "stable AgentExecution methods" in contract["standard_methods_stability"]
+    assert contract["pattern_stability"] == "beta"
+    assert "normalized ExecutionExchangeView" in contract["interaction_contract"]
+    assert "TriggerFlow remains the only pause/resume owner" in contract[
+        "interaction_contract"
+    ]

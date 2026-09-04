@@ -66,6 +66,41 @@ AgentExecution 交付。只有 legacy/custom fallback 或 `ensure_long_output` �
 Skill Context、DAG substrate 和后续 route 实现都可以替换，而不需要 core 知道内置
 plugin 的内部实现。
 
+## 人机交互
+
+当本次 AgentExecution 需要通过请求级回调响应 connected HITL exchange 时，使用标准
+方法 `.interact(handler)`：
+
+```python
+def handle_exchange(exchange):
+    if exchange["kind"] == "approval":
+        return {"status": "approved", "approved": True}
+    return {"audience": "framework developers"}
+
+result = (
+    agent
+    .input("规划这次发布。")
+    .interact(handle_exchange)
+    .pattern("plan")
+    .start()
+)
+```
+
+handler 接收一个标准化 `ExecutionExchangeView`，其中稳定提供 `kind`、`subject`、
+`payload`、`request` 等字段；handler 可以同步或异步执行，返回该 exchange consumer
+所需的响应 payload。approval 通常返回 Boolean 或 decision mapping，clarification
+可以返回文本、list 或 mapping。
+
+`.interact(...)` 声明响应机制，不会强制产生交互。普通请求没有打开 exchange 时，
+handler 不会被调用。声明仅属于当前 AgentExecution，会为其 request 选择 connected
+interaction，且在启动前重新配置 execution 时仍保留；它不会注册或替换全局 provider。
+启动前再次调用 `.interact(...)` 会替换前一个 handler。
+
+既有 owner 边界保持不变：ExecutionExchange 负责标准化 request/provider envelope，
+TriggerFlow 负责 pause/resume。durable queue、webhook、跨进程 host 或应用级 routing
+继续使用已注册的 ExecutionExchange provider、routing handler 和 `interaction.*`
+settings；这些高级 transport 选择不会变成 `.interact(...)` 的 kwargs。
+
 ## Review 与 Verification
 
 业务结果生成后，使用 `.review(handler=None)` 做一次 advisory 质量判断；如果同一种
@@ -141,6 +176,9 @@ run 失败。artifact 物化总是在 review 和 verification 之前完成。
 > 才会启用；仅注册 Pattern 不会改变普通 Agent 请求。即使 Pattern plugin 使用了相同名称，
 > 既有 Agent 方法仍然是原方法。
 
+这里的 beta 标签只属于 Pattern；`.interact(...)`、`.artifact(...)`、`.review(...)` 和
+`.verify(...)` 都是 AgentExecution 标准方法。
+
 Pattern 是一个可复用的完整请求行为，对调用者保持与普通 Agent 请求相同的形态：消费
 现有 AgentExecution draft，返回业务结果。使用 `.pattern(pattern)` 选择一个：
 
@@ -191,7 +229,8 @@ Pattern 只能由 `.pattern(...)` 选择；Pattern 名称只存在于 `AgentPatt
 Pattern 不是 DAG 的别名：Pattern 是行为契约，其内部实现可以是线性、分支、并发或循环。
 复杂 Pattern 的 branches、joins、retry、loop、pause/resume 和 recovery 使用内部
 TriggerFlow。HITL clarification 复用 ExecutionExchange routing/provider seam 与
-TriggerFlow wait/resume，不需要再增加 Agent interaction-handler API。
+TriggerFlow wait/resume；调用者可以通过标准 `.interact(handler)` 提供 connected
+响应机制。
 
 当 plan -> TaskBoard -> task loop 是一个以任务完成为终态结果的请求时，由一个 Pattern
 拥有这套 topology 和明确 handoff；如果 plan 或 board 本身是独立消费的 deliverable，则
@@ -204,13 +243,13 @@ Agently 在 `agently.builtins.plugins.AgentPattern` 下随包提供两个具体�
 ### 内置 `plan`
 
 ```python
-plan = agent.input(task).pattern("plan").start()
+plan = agent.input(task).interact(handle_exchange).pattern("plan").start()
 ```
 
 `plan` 先进行结构化 readiness 判断。如果缺少会实质改变计划的信息，内部 TriggerFlow
-会发出 `clarification` ExecutionExchange，通过已配置的 connected interaction provider
-等待回复，然后带着回复再次判断；ready 后由最终 ModelRequest 返回计划，而不是执行目标
-交付物。因此调用者的 `.output(...)` 描述的是计划结果：
+会发出 `clarification` ExecutionExchange，通过 `.interact(handler)` 或其他已配置的
+connected provider 等待回复，然后带着回复再次判断；ready 后由最终 ModelRequest 返回
+计划，而不是执行目标交付物。因此调用者的 `.output(...)` 描述的是计划结果：
 
 ```python
 plan = (
@@ -279,11 +318,11 @@ Pattern 名称对已注册的 `AgentPattern` 插件保持开放。strategy 名�
 与此不同，`create_task(execution=...)` 是 host 校验的有限选项，type checker 会在运行前拒绝
 未知值。
 
-只有扩展边界才可能需要类型导入。具名 handler 需要 context 内部的 IDE 提示时，只导入
-实际使用的 `AgentReviewContext` 或 `AgentArtifactContext`（位于 `agently.types.data`）；
-Pattern 作者可按需从 `agently.types.plugins` 导入 `AgentExecution` 和
-`AgentPatternContinuation`。inline handler 和普通调用不需要这些类型；高级类型也不会被
-重复暴露到 `agently` package root。
+只有扩展边界才可能需要类型导入。具名 handler 需要输入或 context 的 IDE 提示时，只从
+`agently.types.data` 导入实际使用的 `ExecutionExchangeView`、`AgentReviewContext` 或
+`AgentArtifactContext`；Pattern 作者可按需从 `agently.types.plugins` 导入
+`AgentExecution` 和 `AgentPatternContinuation`。inline handler 和普通调用不需要这些
+类型；高级类型也不会被重复暴露到 `agently` package root。
 
 ## Goal Pursuit
 

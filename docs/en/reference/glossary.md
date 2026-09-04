@@ -14,6 +14,17 @@ The middle layer of Agently's three-layer action stack: `TriggerFlow` (top, orch
 
 `ActionRuntime`, `ActionFlow`, and `ActionExecutor` are now the public plugin types. The older `ToolManager` plugin type is kept for legacy use only and emits deprecation warnings. See [Action Runtime](../actions/action-runtime.md).
 
+## Agent Interaction Handler
+
+The standard request-local callback bound with
+`AgentExecution.interact(handler)`. It receives a normalized
+`ExecutionExchangeView` only when an existing behavior or Action opens a
+connected human-in-the-loop exchange, and returns that exchange's response
+payload. It neither decides when interaction is required nor creates another
+wait/resume lifecycle. ExecutionExchange remains the provider/envelope owner,
+TriggerFlow remains the pause/resume owner, and durable integrations continue
+to use registered ExecutionExchange providers and routing settings.
+
 ## Agent Pattern
 
 A beta reusable whole-request behavior selected with

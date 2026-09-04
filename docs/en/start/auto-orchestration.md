@@ -76,6 +76,46 @@ protocol. This keeps Skill context, the DAG substrate, and future route
 implementations replaceable without teaching core about builtin plugin
 internals.
 
+## Human Interaction
+
+Use the standard `.interact(handler)` method when this AgentExecution should
+answer connected human-in-the-loop exchanges through a request-local callback:
+
+```python
+def handle_exchange(exchange):
+    if exchange["kind"] == "approval":
+        return {"status": "approved", "approved": True}
+    return {"audience": "framework developers"}
+
+result = (
+    agent
+    .input("Plan the release.")
+    .interact(handle_exchange)
+    .pattern("plan")
+    .start()
+)
+```
+
+The handler receives one normalized `ExecutionExchangeView` with stable fields
+such as `kind`, `subject`, `payload`, and `request`. It may be synchronous or
+asynchronous and returns the response payload expected by the exchange:
+approval handlers commonly return a Boolean or decision mapping, while
+clarification handlers may return text, a list, or a mapping.
+
+`.interact(...)` declares the response mechanism; it does not force an
+interaction. An ordinary request that opens no exchange never calls the
+handler. The declaration is isolated to that AgentExecution, selects connected
+interaction for its request, survives pre-start execution configuration, and
+does not register or replace a global provider. Calling it again before start
+replaces the previous handler.
+
+The existing owners remain unchanged. ExecutionExchange owns the normalized
+request/provider envelope, and TriggerFlow owns pause/resume. Use registered
+ExecutionExchange providers, routing handlers, and `interaction.*` settings for
+durable queues, webhooks, cross-process hosts, or application-wide routing;
+these advanced transport choices are intentionally not keyword arguments on
+`.interact(...)`.
+
 ## Review And Verification
 
 Use `.review(handler=None)` for an advisory quality judgment after the business
@@ -160,6 +200,9 @@ run; artifact materialization completes before review and verification.
 > Existing Agent methods remain methods even when a Pattern plugin uses the
 > same name.
 
+The beta label applies only to Pattern here. `.interact(...)`, `.artifact(...)`,
+`.review(...)`, and `.verify(...)` are standard AgentExecution methods.
+
 A Pattern is one reusable whole-request behavior with the same caller-facing
 shape as an ordinary Agent request: it consumes the existing AgentExecution
 draft and returns its business result. Select one with `.pattern(pattern)`:
@@ -218,8 +261,9 @@ Pattern is not another name for a DAG. It is the behavior contract; its internal
 implementation may be linear, branching, concurrent, or cyclic. Use
 TriggerFlow inside a complex Pattern for branches, joins, retries, loops,
 pause/resume, and recovery. HITL clarification uses the existing
-ExecutionExchange routing/provider seam with TriggerFlow wait/resume; it does
-not require an additional Agent interaction-handler API.
+ExecutionExchange routing/provider seam with TriggerFlow wait/resume. A caller
+may supply the connected response mechanism through the standard
+`.interact(handler)` method.
 
 When plan -> TaskBoard -> task loop is one request whose terminal result is task
 completion, one Pattern owns that topology and its explicit handoffs. If the
@@ -234,15 +278,15 @@ and invokes them.
 ### Built-in `plan`
 
 ```python
-plan = agent.input(task).pattern("plan").start()
+plan = agent.input(task).interact(handle_exchange).pattern("plan").start()
 ```
 
 `plan` first makes a structured readiness decision. If required facts are
 missing, its internal TriggerFlow raises a `clarification` ExecutionExchange,
-waits through the configured connected interaction provider, and analyzes the
-request again after the reply. Once ready, a final ModelRequest returns the
-plan, not the requested end deliverable. A caller-provided `.output(...)`
-therefore describes the plan result:
+waits through `.interact(handler)` or another configured connected provider,
+and analyzes the request again after the reply. Once ready, a final
+ModelRequest returns the plan, not the requested end deliverable. A
+caller-provided `.output(...)` therefore describes the plan result:
 
 ```python
 plan = (
@@ -324,12 +368,12 @@ strategies. By contrast, `create_task(execution=...)` is a host-validated finite
 choice, so type checkers reject unknown values before runtime.
 
 Type imports are optional at extension boundaries. Import only
-`AgentReviewContext` or `AgentArtifactContext` from `agently.types.data` when a
-named handler needs completion for its context. A Pattern author can optionally
-import `AgentExecution` and `AgentPatternContinuation` from
-`agently.types.plugins`. Inline handlers and ordinary calls need none of these,
-and the advanced types are intentionally not copied into the `agently` package
-root.
+`ExecutionExchangeView`, `AgentReviewContext`, or `AgentArtifactContext` from
+`agently.types.data` when a named handler needs completion for its input or
+context. A Pattern author can optionally import `AgentExecution` and
+`AgentPatternContinuation` from `agently.types.plugins`. Inline handlers and
+ordinary calls need none of these, and the advanced types are intentionally not
+copied into the `agently` package root.
 
 ## Goal Pursuit
 

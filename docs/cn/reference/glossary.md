@@ -16,6 +16,15 @@ Agently 三层 Action 栈的中间层：`TriggerFlow`（顶，编排）→ `Acti
 
 `ActionRuntime`、`ActionFlow`、`ActionExecutor` 是当前的公开 plugin type。旧的 `ToolManager` plugin type 仅作为遗留兼容保留并发出 deprecation 警告。详见 [Action Runtime](../actions/action-runtime.md)。
 
+## Agent Interaction Handler
+
+通过 `AgentExecution.interact(handler)` 绑定的标准请求级 callback。只有现有行为或
+Action 打开 connected HITL exchange 时，它才接收标准化 `ExecutionExchangeView`，并
+返回该 exchange 的响应 payload。它不决定何时需要交互，也不创建另一套 wait/resume
+lifecycle。provider/envelope 仍由 ExecutionExchange 负责，pause/resume 仍由 TriggerFlow
+负责；durable integration 继续使用已注册的 ExecutionExchange provider 与 routing
+settings。
+
 ## Agent Pattern
 
 通过 `AgentExecution.pattern(...)` 选择的 beta 可复用完整请求行为。它消费现有
